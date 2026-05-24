@@ -247,17 +247,24 @@ export class ChannelSupervisor {
 
     // Start channels that should be running but aren't (either added or
     // just stopped above due to credential rotation).
+    const startedBots: Bot[] = [];
     for (const channel of desired) {
       if (this.running.has(channel)) continue;
       try {
-        await this.startChannel(channel, config);
+        startedBots.push(await this.startChannel(channel, config));
       } catch (err) {
         this.log(`channel ${channel}: failed to start — ${describeError(err)}`);
       }
     }
+
+    // Restore durable queued work once per reconcile pass. With multiple IM
+    // channels configured, restoring from every Bot instance would replay the
+    // same persisted tasks more than once.
+    const restoreBot = startedBots[startedBots.length - 1];
+    restoreBot?.restorePersistedQueuedTasks();
   }
 
-  private async startChannel(channel: ChannelName, config: Partial<UserConfig>): Promise<void> {
+  private async startChannel(channel: ChannelName, config: Partial<UserConfig>): Promise<Bot> {
     this.log(`channel ${channel}: starting`);
     const bot = await createBotForChannel(channel);
     if (this.dashboard) this.dashboard.attachBot(bot);
@@ -269,6 +276,7 @@ export class ChannelSupervisor {
       credSnapshot: snapshotCredsForChannel(channel, config),
       runPromise,
     });
+    return bot;
   }
 
   private async stopChannel(channel: ChannelName): Promise<void> {

@@ -1363,6 +1363,26 @@ function isSystemInjectedUserEvent(text: string): boolean {
   return markers.some(m => lower.includes(m));
 }
 
+function claudeEventCreatedAt(ev: any): string | null {
+  for (const value of [ev?.timestamp, ev?.createdAt, ev?.created_at, ev?.message?.timestamp, ev?.message?.createdAt]) {
+    const iso = normalizeMessageTimestamp(value);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+function normalizeMessageTimestamp(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value > 1_000_000_000_000 ? value : value * 1000;
+    return new Date(ms).toISOString();
+  }
+  return null;
+}
+
 function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesResult {
   const projectDir = path.join(getHome(), '.claude', 'projects', claudeProjectDirName(opts.workdir));
   const filePath = path.join(projectDir, `${opts.sessionId}.jsonl`);
@@ -1386,6 +1406,7 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
     let pendingRole: 'user' | 'assistant' | null = null;
     let pendingTextParts: string[] = [];
     let pendingBlocks: MessageBlock[] = [];
+    let pendingCreatedAt: string | null = null;
     /** Latest assistant-event usage snapshot — overwritten on each LLM call within a
      *  turn so the flushed RichMessage carries the final call's context state, matching
      *  the live `StreamPreviewMeta` semantics. */
@@ -1415,11 +1436,12 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
         const usage = pendingRole === 'assistant' && pendingUsage
           ? buildClaudeTurnUsage(pendingUsage)
           : null;
-        richMsgs.push({ role: pendingRole, text, blocks: [...pendingBlocks], usage });
+        richMsgs.push({ role: pendingRole, text, blocks: [...pendingBlocks], createdAt: pendingCreatedAt, usage });
       }
       pendingRole = null;
       pendingTextParts = [];
       pendingBlocks = [];
+      pendingCreatedAt = null;
       pendingUsage = null;
       subAgentBlocksById.clear();
       subAgentToolIds.clear();
@@ -1430,6 +1452,7 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
       if (!raw || raw[0] !== '{') continue;
       try {
         const ev = JSON.parse(raw);
+        const createdAt = claudeEventCreatedAt(ev);
         const parentToolUseId: string | null = (typeof ev.parent_tool_use_id === 'string' && ev.parent_tool_use_id) ? ev.parent_tool_use_id : null;
 
         if (parentToolUseId) {
@@ -1578,6 +1601,7 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
           const text = displayText.replace(SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE, '').replace(/\s+/g, ' ').trim();
           if (text || imageBlocks.length) {
             pendingRole = 'user';
+            pendingCreatedAt = createdAt;
             pendingTextParts = text ? [text] : [];
             pendingBlocks = text ? [{ type: 'text', content: text }, ...imageBlocks] : [...imageBlocks];
           }
@@ -1600,11 +1624,13 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
             if (isClaudeSyntheticResumeNoise(noticeText)) continue;
             if (pendingRole === 'user') flush();
             pendingRole = 'assistant';
+            if (!pendingCreatedAt) pendingCreatedAt = createdAt;
             if (noticeText) pendingBlocks.push({ type: 'system_notice', content: noticeText });
             continue;
           }
           if (pendingRole === 'user') flush();
           pendingRole = 'assistant';
+          if (!pendingCreatedAt) pendingCreatedAt = createdAt;
           const u = ev.message?.usage;
           if (u && typeof u === 'object') {
             const numOrNull = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v : null;

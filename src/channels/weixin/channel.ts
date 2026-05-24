@@ -233,11 +233,21 @@ export class WeixinChannel extends Channel {
   }
 
   private async dispatchInboundMessage(message: WeixinMessage): Promise<void> {
-    if ((message.message_type ?? WeixinMessageType.USER) !== WeixinMessageType.USER) return;
+    const messageType = message.message_type ?? WeixinMessageType.USER;
+    if (messageType !== WeixinMessageType.USER) {
+      this.emitLog(`[recv] skipped: message_type=${messageType}`, 'info');
+      return;
+    }
     const userId = String(message.from_user_id || '').trim();
-    if (!userId) return;
+    if (!userId) {
+      this.emitLog('[recv] skipped: missing from_user_id', 'info');
+      return;
+    }
     const chatId = this.composeChatId(userId);
-    if (!this.isAllowed(chatId, userId)) return;
+    if (!this.isAllowed(chatId, userId)) {
+      this.emitLog(`[recv] blocked: chat=${chatId} user=${userId}`, 'info');
+      return;
+    }
 
     const existing = this.chatMeta.get(chatId);
     const contextToken = String(message.context_token || existing?.contextToken || '').trim();
@@ -263,6 +273,7 @@ export class WeixinChannel extends Channel {
       text: extractWeixinTextBody(message),
       files: [],
     };
+    this.emitLog(`[recv] message chat=${chatId} msg=${ctx.messageId} text="${payload.text.slice(0, 100)}"`, 'info');
     for (const handler of this.messageHandlers) {
       try {
         await handler(payload, ctx);

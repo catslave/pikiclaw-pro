@@ -7,6 +7,7 @@ import type { Agent } from './index.js';
 const AGENT_PACKAGES: Record<Agent, string> = {
   claude: '@anthropic-ai/claude-code',
   codex: '@openai/codex',
+  copilot: '@github/copilot',
   gemini: '@google/gemini-cli',
 };
 
@@ -19,7 +20,10 @@ const AGENT_BREW_CASKS: Partial<Record<Agent, string>> = {
 const AGENT_LABELS: Record<Agent, string> = {
   claude: 'Claude Code',
   codex: 'Codex',
+  copilot: 'GitHub Copilot',
+  cursor: 'Cursor Agent',
   gemini: 'Gemini CLI',
+  hermes: 'Hermes',
 };
 
 export function getAgentPackage(agent: string): string | null {

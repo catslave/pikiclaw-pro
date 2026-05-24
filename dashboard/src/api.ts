@@ -5,9 +5,11 @@ import type {
   BrowserStatusResponse,
   CliCatalogItem,
   CliStatus,
+  FileContentResult,
   InteractionSnapshot,
   OpenTarget,
   GitChangesResult,
+  GitDiffContentResult,
   HostInfo,
   LocalModelsProbeResponse,
   LsDirResult,
@@ -192,6 +194,14 @@ export const api = {
   },
   gitChanges: (dir: string) =>
     json<GitChangesResult>(`/api/git-changes?path=${encodeURIComponent(dir)}`),
+  fileContent: (workdir: string, filePath: string) => {
+    const params = new URLSearchParams({ workdir, path: filePath });
+    return json<FileContentResult>(`/api/file-content?${params.toString()}`);
+  },
+  gitDiffContent: (workdir: string, filePath: string) => {
+    const params = new URLSearchParams({ workdir, path: filePath });
+    return json<GitDiffContentResult>(`/api/git-diff-content?${params.toString()}`);
+  },
   openDiff: (filePath: string, target?: OpenTarget) =>
     post<{ ok: boolean; error?: string }>('/api/open-diff', { filePath, target }),
   getBrowser: () => json<BrowserStatusResponse>('/api/browser'),
@@ -361,6 +371,18 @@ export const api = {
       { workdir, agent, sessionId, note },
       opts,
     ),
+  updateSessionTitle: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    title: string | null,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>(
+      '/api/session-hub/session/title',
+      { workdir, agent, sessionId, title },
+      opts,
+    ),
   deleteSession: (
     workdir: string,
     agent: string,
@@ -381,6 +403,10 @@ export const api = {
     ),
   addWorkspace: (wsPath: string, name?: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; workspace?: WorkspaceEntry; error?: string }>('/api/workspaces', { path: wsPath, name }, opts),
+  updateWorkspace: (wsPath: string, patch: { name?: string; preferredAgent?: string | null; order?: number }, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; workspace?: WorkspaceEntry | null; error?: string }>('/api/workspaces', { ...opts, method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: wsPath, ...patch }) }),
+  reorderWorkspaces: (paths: string[], opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; workspaces?: WorkspaceEntry[]; error?: string }>('/api/workspaces/reorder', { paths }, opts),
   removeWorkspace: (wsPath: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; removed?: boolean; error?: string }>('/api/workspaces', { ...opts, method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: wsPath }) }),
 
@@ -543,6 +569,10 @@ export const api = {
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
+  /** Wall-clock timestamp when the active task started streaming. */
+  startedAt?: number;
+  /** Wall-clock timestamp when the active task finished. */
+  completedAt?: number;
   /** Task IDs queued behind the currently displayed one, in enqueue order. */
   queuedTaskIds?: string[];
   /** Per-queued-task prompt previews (same order as queuedTaskIds). */

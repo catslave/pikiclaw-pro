@@ -12,6 +12,7 @@ import { TurnView, UserBubble, TurnDivider } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
 import { InputComposer } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
+import type { OpenFileLinkHandler } from './markdown';
 import {
   normalizeTurnHistory,
   mergeOlderHistory,
@@ -40,16 +41,18 @@ function saveHistorySnapshot(key: string, h: TurnHistoryWindow) {
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange, initialPendingPrompt, initialPendingImageUrls, onPendingPromptConsumed,
+  session, workdir, active = true, onSessionChange, onOpenFileLink, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
+  onOpenFileLink?: OpenFileLinkHandler;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
    *  Ownership transfers to this panel: we revoke them once the turn completes. */
   initialPendingImageUrls?: string[];
+  initialPendingCreatedAt?: string | null;
   onPendingPromptConsumed?: () => void;
 }) {
   const locale = useStore(s => s.locale);
@@ -76,6 +79,9 @@ export const SessionPanel = memo(function SessionPanel({
     thinking: string;
     activity?: string;
     plan?: StreamPlan | null;
+    startedAt?: number | null;
+    completedAt?: number | null;
+    updatedAt?: number | null;
     model?: string | null;
     effort?: string | null;
     previewMeta?: StreamPreviewMeta | null;
@@ -99,6 +105,7 @@ export const SessionPanel = memo(function SessionPanel({
   // new follow-up while a task was still streaming would overwrite the
   // running task's bubble. Queued sends now live in `pendingQueuedSends`.
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
+  const [pendingCreatedAt, setPendingCreatedAt] = useState<string | null>(hasInitialPending ? (initialPendingCreatedAt || new Date().toISOString()) : null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const pendingTaskIdRef = useRef<string | null>(null);
@@ -108,7 +115,7 @@ export const SessionPanel = memo(function SessionPanel({
   // match the API-assigned taskId back to the right entry even if responses
   // arrive out of order. InputComposer reads this array to fill its queued-row
   // prompts before the server snapshot's `queuedTasks` catches up.
-  type PendingQueuedSend = { localId: string; taskId: string | null; prompt: string; imageUrls: string[] };
+  type PendingQueuedSend = { localId: string; taskId: string | null; prompt: string; imageUrls: string[]; createdAt: string };
   const [pendingQueuedSends, setPendingQueuedSends] = useState<PendingQueuedSend[]>([]);
   const pendingQueuedSendsRef = useRef<PendingQueuedSend[]>([]);
   pendingQueuedSendsRef.current = pendingQueuedSends;
@@ -121,7 +128,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [forkRequest, setForkRequest] = useState<{ atTurn: number } | null>(null);
   const [forkPrompt, setForkPrompt] = useState('');
   const [forkSubmitting, setForkSubmitting] = useState(false);
-  const canFork = !!agentRuntime?.capabilities?.fork;
+  const canFork = !!session.agent && !!session.sessionId;
   const submitForkRef = useRef<(() => Promise<void>) | null>(null);
   const pendingImageUrlsRef = useRef<string[]>(initialPendingImageUrls || []);
   const liveStreamRef = useRef(liveStream);
@@ -165,6 +172,7 @@ export const SessionPanel = memo(function SessionPanel({
 
   const clearPending = useCallback(() => {
     setPendingPrompt(null);
+    setPendingCreatedAt(null);
     setPendingImageUrls(prev => { for (const u of prev) URL.revokeObjectURL(u); return []; });
     pendingImageUrlsRef.current = [];
     setPendingTaskId(null);
@@ -182,13 +190,14 @@ export const SessionPanel = memo(function SessionPanel({
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
     const willBeQueued = !!liveStreamRef.current || streamingRef.current;
     const urls = imageUrls || [];
+    const createdAt = new Date().toISOString();
     if (willBeQueued) {
       // Don't disturb the running task's optimistic bubble — append to the
       // queued-sends list so the InputComposer queue row gets its prompt and
       // the conversation history keeps showing the in-flight running turn.
       const localId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       lastSendQueuedLocalIdRef.current = localId;
-      setPendingQueuedSends(prev => [...prev, { localId, taskId: null, prompt: prompt || '', imageUrls: urls }]);
+      setPendingQueuedSends(prev => [...prev, { localId, taskId: null, prompt: prompt || '', imageUrls: urls, createdAt }]);
       return;
     }
     // No active stream — this send is the (about-to-be) running task. Replace
@@ -196,6 +205,7 @@ export const SessionPanel = memo(function SessionPanel({
     for (const u of pendingImageUrlsRef.current) URL.revokeObjectURL(u);
     lastSendQueuedLocalIdRef.current = null;
     setPendingPrompt(prompt || null);
+    setPendingCreatedAt(createdAt);
     setPendingImageUrls(urls);
     pendingImageUrlsRef.current = urls;
     setPendingTaskId(null);
@@ -410,6 +420,9 @@ export const SessionPanel = memo(function SessionPanel({
           thinking: state.thinking || '',
           activity: state.activity,
           plan: state.plan ?? null,
+          startedAt: state.startedAt ?? null,
+          completedAt: state.completedAt ?? null,
+          updatedAt: state.updatedAt ?? null,
           model: state.model ?? null,
           effort: state.effort ?? null,
           previewMeta: state.previewMeta ?? null,
@@ -431,6 +444,7 @@ export const SessionPanel = memo(function SessionPanel({
           // Revoke the previous running slot's images before overwriting.
           for (const url of pendingImageUrlsRef.current) URL.revokeObjectURL(url);
           setPendingPrompt(promoted.prompt || null);
+          setPendingCreatedAt(promoted.createdAt || new Date().toISOString());
           setPendingImageUrls(promoted.imageUrls);
           pendingImageUrlsRef.current = promoted.imageUrls;
           setPendingTaskId(state.taskId);
@@ -449,7 +463,14 @@ export const SessionPanel = memo(function SessionPanel({
       setStreaming(false);
       // Mark the live preview as finished and forward any error from the
       // snapshot so a content-less failure surfaces a reason instead of a phantom.
-      setLiveStream(prev => prev ? { ...prev, phase: 'done', error: state.error ?? null } : prev);
+      setLiveStream(prev => prev ? {
+        ...prev,
+        phase: 'done',
+        error: state.error ?? null,
+        completedAt: state.completedAt ?? state.updatedAt ?? prev.completedAt ?? null,
+        updatedAt: state.updatedAt ?? prev.updatedAt ?? null,
+        previewMeta: state.previewMeta ?? prev.previewMeta ?? null,
+      } : prev);
       const hasMoreQueued = !!state.queuedTaskIds?.length;
       if (prevPhaseRef.current !== 'done') {
         if (!hasMoreQueued) clearPendingOnLoadRef.current = true;
@@ -730,7 +751,7 @@ export const SessionPanel = memo(function SessionPanel({
   }, [rawTurns, liveStream, pendingPrompt, optimisticBridgesImages]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden bg-[var(--th-session-bg)]">
       {/* ── Messages ── */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overscroll-contain">
         {loading ? (
@@ -738,7 +759,7 @@ export const SessionPanel = memo(function SessionPanel({
         ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !liveStream ? (
           <div className="py-20 text-center text-[13px] text-fg-5">{t('hub.noMessages')}</div>
         ) : (
-          <div className="max-w-[900px] mx-auto px-6 py-6 space-y-0">
+          <div className="max-w-[860px] mx-auto px-6 py-6 space-y-0">
             {(history?.hasOlder || loadingOlder) && (
               <div className="mb-4 flex items-center justify-center gap-2 text-[11px] text-fg-5">
                 {loadingOlder ? <Spinner className="h-3 w-3 text-fg-5" /> : <span className="h-1.5 w-1.5 rounded-full bg-fg-5/35" />}
@@ -769,6 +790,13 @@ export const SessionPanel = memo(function SessionPanel({
             )}
             {turns.map((turn, i) => {
               const absoluteTurnIndex = (history?.startTurn || 0) + i;
+              const isLatestVisibleTurn = i === turns.length - 1;
+              const retryProminent = isLatestVisibleTurn
+                && displayState === 'incomplete'
+                && !streaming
+                && !liveStream
+                && !streamPhase
+                && !!turn.user?.text;
               return (
                 <TurnView key={`${history?.startTurn || 0}:${i}`}
                   turn={turn}
@@ -783,6 +811,8 @@ export const SessionPanel = memo(function SessionPanel({
                   }}
                   onEdit={(txt) => setEditDraft(txt)}
                   onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
+                  onOpenFileLink={onOpenFileLink}
+                  retryProminent={retryProminent}
                 />
               );
             })}
@@ -805,7 +835,7 @@ export const SessionPanel = memo(function SessionPanel({
                   || !(pendingPrompt && rawTurns.length > 0
                        && rawTurns[rawTurns.length - 1]?.user?.text?.trim() === pendingPrompt.trim())) && (
               <div className="session-turn">
-                <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} t={t} />
+                <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} createdAt={pendingCreatedAt} t={t} />
                 {!liveStream && (
                   <div className="mt-3 mb-5 animate-in">
                     <ThinkingDots className="text-fg-5" />
@@ -818,7 +848,7 @@ export const SessionPanel = memo(function SessionPanel({
             {liveStream && liveStreamShouldRender(liveStream) && (
               <div className="mb-6">
                 <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta} />
-                <LivePreview stream={liveStream} t={t} />
+                <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} />
               </div>
             )}
             <div className="h-4" />

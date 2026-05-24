@@ -344,6 +344,36 @@ interface CodexActiveToolCall { kind: string; summary: string; }
 interface PendingCodexAssistantMessage {
   blocks: MessageBlock[];
   toolNamesByCallId: Map<string, string>;
+  createdAt: string | null;
+}
+
+function codexMessageCreatedAt(message: any, container?: any): string | null {
+  for (const value of [
+    message?.createdAt,
+    message?.created_at,
+    message?.timestamp,
+    message?.time,
+    container?.createdAt,
+    container?.created_at,
+    container?.timestamp,
+    container?.time,
+  ]) {
+    const iso = normalizeMessageTimestamp(value);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+function normalizeMessageTimestamp(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value > 1_000_000_000_000 ? value : value * 1000;
+    return new Date(ms).toISOString();
+  }
+  return null;
 }
 
 function isCodexToolCallItem(item: any): boolean {
@@ -1493,6 +1523,96 @@ function loadCodexSessionIndex(): Map<string, { threadName: string; updatedAt: s
   return map;
 }
 
+const CODEX_TITLE_SCAN_MAX_BYTES = 8 * 1024 * 1024;
+const CODEX_TITLE_SCAN_CHUNK_BYTES = 64 * 1024;
+const CODEX_TITLE_SCAN_MAX_LINE_CHARS = 1024 * 1024;
+
+function readCodexHeadLines(filePath: string, maxLines = 80): string[] {
+  const lines: string[] = [];
+  try {
+    const stat = fs.statSync(filePath);
+    const maxBytes = Math.min(CODEX_TITLE_SCAN_MAX_BYTES, stat.size);
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(CODEX_TITLE_SCAN_CHUNK_BYTES);
+    let offset = 0;
+    let carry = '';
+    let discardingLongLine = false;
+
+    try {
+      while (offset < maxBytes && lines.length < maxLines) {
+        const readSize = Math.min(buf.length, maxBytes - offset);
+        const bytesRead = fs.readSync(fd, buf, 0, readSize, offset);
+        if (bytesRead <= 0) break;
+        offset += bytesRead;
+
+        const parts = buf.toString('utf8', 0, bytesRead).split('\n');
+        for (let i = 0; i < parts.length; i++) {
+          const segment = parts[i];
+          const ended = i < parts.length - 1;
+
+          if (discardingLongLine) {
+            if (ended) {
+              discardingLongLine = false;
+              carry = '';
+            }
+            continue;
+          }
+
+          if (carry.length + segment.length > CODEX_TITLE_SCAN_MAX_LINE_CHARS) {
+            carry = '';
+            discardingLongLine = !ended;
+            continue;
+          }
+
+          carry += segment;
+          if (ended) {
+            const line = carry.trim();
+            if (line) lines.push(line);
+            carry = '';
+            if (lines.length >= maxLines) break;
+          }
+        }
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch { /* skip */ }
+  return lines;
+}
+
+function isCodexContextOnlyUserMessage(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith('# AGENTS.md instructions')
+    || trimmed.startsWith('<environment_context>')
+    || trimmed.startsWith('<permissions instructions>');
+}
+
+function readCodexInitialQuestion(filePath: string): string | null {
+  let responseItemFallback: string | null = null;
+  for (const raw of readCodexHeadLines(filePath)) {
+    if (!raw || raw[0] !== '{') continue;
+    let ev: any;
+    try { ev = JSON.parse(raw); } catch { continue; }
+
+    if (ev?.type === 'event_msg' && ev.payload?.type === 'user_message' && typeof ev.payload.message === 'string') {
+      const text = sanitizeSessionUserPreviewText(ev.payload.message);
+      if (text) return shortValue(text, 120);
+      continue;
+    }
+
+    if (!responseItemFallback
+      && ev?.type === 'response_item'
+      && ev.payload?.type === 'message'
+      && ev.payload?.role === 'user') {
+      const rawText = extractCodexMessageText(ev.payload.content);
+      if (isCodexContextOnlyUserMessage(rawText)) continue;
+      const text = sanitizeSessionUserPreviewText(rawText);
+      if (text) responseItemFallback = shortValue(text, 120);
+    }
+  }
+  return responseItemFallback;
+}
+
 /** Scan ~/.codex/sessions/ rollout files to find sessions matching the given workdir. */
 function extractCodexTailQA(filePath: string): { lastQuestion: string | null; lastAnswer: string | null; lastMessageText: string | null } {
   const lines = readTailLines(filePath, 128 * 1024);
@@ -1581,7 +1701,7 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
 
         const stat = fs.statSync(fullPath);
         const idx = titleIndex.get(metaId);
-        const title = idx?.threadName || null;
+        const title = idx?.threadName || readCodexInitialQuestion(fullPath);
         const updatedAt = idx?.updatedAt || stat.mtime.toISOString();
         const tailQA = extractCodexTailQA(fullPath);
 
@@ -1770,6 +1890,7 @@ async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<Sessi
         const richMsgs: RichMessage[] = [];
         for (const turn of (thread.turns ?? [])) {
           for (const item of (turn.items ?? [])) {
+            const createdAt = codexMessageCreatedAt(item, turn);
             if (item.type === 'userMessage') {
               const parts: string[] = [];
               const blocks: MessageBlock[] = [];
@@ -1790,7 +1911,7 @@ async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<Sessi
                 const text = stripInjectedPrompts(parts.join('\n'));
                 if (text) blocks.unshift({ type: 'text', content: text });
                 allMsgs.push({ role: 'user', text });
-                richMsgs.push({ role: 'user', text, blocks });
+                richMsgs.push({ role: 'user', text, blocks, createdAt });
               }
             } else if (item.type === 'agentMessage') {
               if (item.text) {
@@ -1798,6 +1919,7 @@ async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<Sessi
                 richMsgs.push({
                   role: 'assistant',
                   text: item.text,
+                  createdAt,
                   blocks: [{
                     type: 'text',
                     content: item.text,
@@ -1829,11 +1951,13 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
     const allMsgs: TailMessage[] = [];
     const richMsgs: RichMessage[] = [];
     const fallbackMsgs: TailMessage[] = [];
+    const fallbackRichMsgs: RichMessage[] = [];
     let pendingAssistant: PendingCodexAssistantMessage | null = null;
     let sawAssistantResponseItems = false;
 
-    const ensureAssistant = (): PendingCodexAssistantMessage => {
-      if (!pendingAssistant) pendingAssistant = { blocks: [], toolNamesByCallId: new Map() };
+    const ensureAssistant = (createdAt?: string | null): PendingCodexAssistantMessage => {
+      if (!pendingAssistant) pendingAssistant = { blocks: [], toolNamesByCallId: new Map(), createdAt: createdAt || null };
+      else if (!pendingAssistant.createdAt && createdAt) pendingAssistant.createdAt = createdAt;
       return pendingAssistant;
     };
 
@@ -1846,11 +1970,12 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
         || block.type === 'tool_result'
         || !!block.content.trim(),
       );
+      const createdAt = pendingAssistant.createdAt;
       pendingAssistant = null;
       if (!blocks.length) return;
       const text = buildCodexAssistantText(blocks);
       allMsgs.push({ role: 'assistant', text });
-      richMsgs.push({ role: 'assistant', text, blocks });
+      richMsgs.push({ role: 'assistant', text, blocks, createdAt });
     };
 
     for (const raw of lines) {
@@ -1858,6 +1983,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
       let ev: any;
       try { ev = JSON.parse(raw); } catch { continue; }
       if (!ev?.payload || typeof ev.payload !== 'object') continue;
+      const createdAt = codexMessageCreatedAt(ev.payload, ev);
 
       if (ev.type === 'event_msg') {
         if (ev.payload.type === 'user_message' && typeof ev.payload.message === 'string') {
@@ -1866,11 +1992,20 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
           if (!text) continue;
           const userMessage: TailMessage = { role: 'user', text };
           fallbackMsgs.push(userMessage);
+          fallbackRichMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }], createdAt });
           allMsgs.push(userMessage);
-          richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }] });
+          richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }], createdAt });
         } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
           const text = ev.payload.message.trim();
-          if (text) fallbackMsgs.push({ role: 'assistant', text });
+          if (text) {
+            fallbackMsgs.push({ role: 'assistant', text });
+            fallbackRichMsgs.push({
+              role: 'assistant',
+              text,
+              blocks: [{ type: 'text', content: text, phase: 'final_answer' }],
+              createdAt,
+            });
+          }
         }
         continue;
       }
@@ -1882,7 +2017,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
         if (payload.role !== 'assistant') continue;
         const text = extractCodexMessageText(payload.content);
         if (!text) continue;
-        ensureAssistant().blocks.push({
+        ensureAssistant(createdAt).blocks.push({
           type: 'text',
           content: text,
           phase: payload.phase === 'commentary' ? 'commentary' : 'final_answer',
@@ -1894,7 +2029,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
       if (payload.type === 'reasoning') {
         const text = extractCodexReasoningText(payload);
         if (!text) continue;
-        ensureAssistant().blocks.push({ type: 'thinking', content: text });
+        ensureAssistant(createdAt).blocks.push({ type: 'thinking', content: text });
         sawAssistantResponseItems = true;
         continue;
       }
@@ -1902,7 +2037,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
       if (payload.type === 'function_call') {
         const name = typeof payload.name === 'string' ? payload.name.trim() : '';
         if (!name) continue;
-        const assistant = ensureAssistant();
+        const assistant = ensureAssistant(createdAt);
         const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
         if (callId) assistant.toolNamesByCallId.set(callId, name);
         if (name === 'update_plan') {
@@ -1928,7 +2063,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
       }
 
       if (payload.type === 'function_call_output') {
-        const assistant = ensureAssistant();
+        const assistant = ensureAssistant(createdAt);
         const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
         const toolName = assistant.toolNamesByCallId.get(callId) || '';
         const output = formatCodexArguments(payload.output);
@@ -1949,7 +2084,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
       if (payload.type === 'image_generation_call' || payload.type === 'imageGenerationCall') {
         const block = buildCodexImageBlock(opts.sessionId, payload);
         if (block) {
-          ensureAssistant().blocks.push(block);
+          ensureAssistant(createdAt).blocks.push(block);
           sawAssistantResponseItems = true;
         }
         continue;
@@ -1957,7 +2092,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
 
       const fallbackSummary = summarizeCodexRawResponseItem(payload);
       if (fallbackSummary) {
-        ensureAssistant().blocks.push({
+        ensureAssistant(createdAt).blocks.push({
           type: 'tool_use',
           content: formatCodexArguments(payload),
           toolName: fallbackSummary,
@@ -1968,7 +2103,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
     flushAssistant();
 
     if (!sawAssistantResponseItems && fallbackMsgs.some(message => message.role === 'assistant')) {
-      return applyTurnWindow(fallbackMsgs, opts);
+      return applyTurnWindow(fallbackMsgs, opts, opts.rich ? fallbackRichMsgs : undefined);
     }
 
     const richWithOverlay = overlayCodexManagedPreview(opts.workdir, opts.sessionId, richMsgs);

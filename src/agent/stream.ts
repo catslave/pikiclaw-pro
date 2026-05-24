@@ -487,6 +487,8 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       if (injection.modelOverride) {
         if (prepared.agent === 'claude') prepared.claudeModel = injection.modelOverride;
         else if (prepared.agent === 'codex') prepared.codexModel = injection.modelOverride;
+        else if (prepared.agent === 'copilot') prepared.copilotModel = injection.modelOverride;
+        else if (prepared.agent === 'cursor') prepared.cursorModel = injection.modelOverride;
         else if (prepared.agent === 'gemini') prepared.geminiModel = injection.modelOverride;
         else if (prepared.agent === 'hermes') prepared.hermesModel = injection.modelOverride;
         prepared.model = injection.modelOverride;

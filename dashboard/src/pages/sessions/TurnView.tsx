@@ -2,15 +2,15 @@ import { useState, memo, type ReactNode } from 'react';
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
-import { cn, getAgentMeta } from '../../utils';
+import { cn, fmtTime, getAgentMeta } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
-import { mdComponents, mdPlugins } from './markdown';
+import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { isContinuationSummary } from './utils';
 import { AssistantMsg, hasRenderableAssistant } from './AssistantContent';
-import type { MessageBlock, StreamPreviewMeta } from '../../types';
+import type { MessageBlock, RichMessage, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, t, onResend, onEdit, onFork }: {
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, t, onResend, onEdit, onFork, onOpenFileLink, retryProminent }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
    *  agent is currently bound to a Profile. Saved turns lack this in their
@@ -20,6 +20,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   onEdit?: (text: string) => void;
   /** When defined, the user-bubble shows a fork action that opens a fork composer scoped to this turn. */
   onFork?: (atTurn: number) => void;
+  onOpenFileLink?: OpenFileLinkHandler;
+  retryProminent?: boolean;
 }) {
   // Detect system continuation messages stored as user role (context compression summaries,
   // interruption markers). These should not render as user bubbles regardless of whether
@@ -29,11 +31,12 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   // Skip the assistant header entirely when there's nothing to put under it —
   // a phantom header reads as "Claude said something invisible" to users.
   const showAssistant = !!turn.assistant && hasRenderableAssistant(turn.assistant);
+  const mdComponents = createMdComponents({ onOpenFileLink });
 
   return (
     <div className="session-turn">
       {turn.user && !isSystemMsg && (
-        <UserBubble text={turn.user.text} blocks={turn.user.blocks} t={t} onResend={onResend} onEdit={onEdit} onFork={handleFork} />
+        <UserBubble text={turn.user.text} blocks={turn.user.blocks} createdAt={turn.user.createdAt} t={t} onResend={onResend} onEdit={onEdit} onFork={handleFork} retryProminent={retryProminent} />
       )}
       {isSystemMsg && turn.user && !turn.assistant && (
         <div className="mb-4 px-4 py-3 rounded-lg bg-[rgba(255,255,255,0.02)] border border-edge/20 text-[12.5px] leading-[1.7] text-fg-4">
@@ -45,9 +48,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
       {showAssistant && (
         <>
           <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={turn.assistant!.usage ?? null} />
-          <div className="mb-6">
-            <AssistantMsg message={turn.assistant!} t={t} />
-          </div>
+          <AssistantMessageFrame message={turn.assistant!} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} />
         </>
       )}
     </div>
@@ -92,14 +93,16 @@ function previewFromText(text: string): string {
 }
 
 /** User message bubble with actions */
-export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
+export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFork, retryProminent }: {
   text: string;
   blocks?: MessageBlock[];
+  createdAt?: string | null;
   t: (k: string) => string;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
   /** When provided, hover action bar shows a fork button that branches off this turn. */
   onFork?: () => void;
+  retryProminent?: boolean;
 }) {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -108,10 +111,11 @@ export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
   const isLong = !!text && (text.length > LONG_USER_TEXT_CHAR_THRESHOLD || totalLines > LONG_USER_TEXT_LINE_THRESHOLD);
   const [expanded, setExpanded] = useState(false);
   const displayText = !text ? '' : (isLong && !expanded ? previewFromText(text) : text);
-  const hasActions = !!(onResend || onEdit || onFork);
+  const hasActions = !!(createdAt || text || onResend || onEdit || onFork);
   const imageBlocks = blocks?.filter(b => b.type === 'image') || [];
 
   const handleCopy = () => {
+    if (!text) return;
     navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
   };
 
@@ -157,52 +161,161 @@ export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
       {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
       {/* Action bar — appears below the bubble on hover */}
       {hasActions && (
-        <div className={cn(
-          'flex items-center gap-1 mt-1.5 mr-1 transition-all duration-200',
-          showActions ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-1 pointer-events-none',
-        )}>
-          <BubbleAction label={copied ? t('hub.copied') : t('hub.copy')} onClick={handleCopy}>
-            {copied
-              ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
-              : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
-            }
-          </BubbleAction>
-          {onResend && (
-            <BubbleAction label={t('hub.rerun')} onClick={() => onResend(text)}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-              </svg>
-            </BubbleAction>
-          )}
-          {onEdit && (
-            <BubbleAction label={t('hub.edit')} onClick={() => onEdit(text)}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-              </svg>
-            </BubbleAction>
-          )}
-          {onFork && (
-            <BubbleAction label={t('hub.fork')} onClick={onFork}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
-                <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
-              </svg>
-            </BubbleAction>
-          )}
-        </div>
+        <HoverMessageActions
+          align="right"
+          visible={showActions || !!retryProminent}
+          createdAt={createdAt}
+          canCopy={!!text}
+          copied={copied}
+          t={t}
+          onCopy={handleCopy}
+          onResend={onResend ? () => onResend(text) : undefined}
+          resendLabel={retryProminent ? t('hub.retry') : undefined}
+          resendEmphasis={retryProminent}
+          onEdit={onEdit ? () => onEdit(text) : undefined}
+          onFork={onFork}
+        />
       )}
     </div>
   );
 }
 
-export function BubbleAction({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+function AssistantMessageFrame({
+  message,
+  t,
+  startedAt,
+  onFork,
+  onOpenFileLink,
+}: {
+  message: RichMessage;
+  t: (k: string) => string;
+  startedAt?: string | null;
+  onFork?: () => void;
+  onOpenFileLink?: OpenFileLinkHandler;
+}) {
+  const [showActions, setShowActions] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyText = message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n');
+
+  const handleCopy = () => {
+    if (!copyText) return;
+    navigator.clipboard.writeText(copyText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
+  };
+
+  return (
+    <div
+      className="mb-6 group/assistant"
+      onMouseEnter={() => setShowActions(true)}
+      onMouseLeave={() => setShowActions(false)}
+    >
+      <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} onOpenFileLink={onOpenFileLink} />
+      <HoverMessageActions
+        align="left"
+        visible={showActions}
+        createdAt={message.createdAt}
+        canCopy={!!copyText}
+        copied={copied}
+        t={t}
+        onCopy={handleCopy}
+        onFork={onFork}
+      />
+    </div>
+  );
+}
+
+function HoverMessageActions({ align, visible, createdAt, canCopy, copied, t, onCopy, onResend, resendLabel, resendEmphasis, onEdit, onFork }: {
+  align: 'left' | 'right';
+  visible: boolean;
+  createdAt?: string | null;
+  canCopy: boolean;
+  copied: boolean;
+  t: (k: string) => string;
+  onCopy: () => void;
+  onResend?: () => void;
+  resendLabel?: string;
+  resendEmphasis?: boolean;
+  onEdit?: () => void;
+  onFork?: () => void;
+}) {
+  if (!createdAt && !canCopy && !onResend && !onEdit && !onFork) return null;
+  return (
+    <div className={cn(
+      'flex items-center gap-1 mt-1.5 transition-all duration-200',
+      align === 'right' ? 'mr-1 justify-end' : 'ml-1 justify-start',
+      visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-1 pointer-events-none',
+    )}>
+      {createdAt && (
+        <span className="px-1.5 text-[10.5px] tabular-nums text-fg-5/70" title={formatFullMessageTime(createdAt)}>
+          {formatCompactMessageTime(createdAt)}
+        </span>
+      )}
+      {canCopy && (
+        <BubbleAction label={copied ? t('hub.copied') : t('hub.copy')} onClick={onCopy}>
+          {copied
+            ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
+            : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+          }
+        </BubbleAction>
+      )}
+      {onResend && (
+        <BubbleAction label={resendLabel || t('hub.rerun')} onClick={onResend} tone={resendEmphasis ? 'warn' : 'default'}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </BubbleAction>
+      )}
+      {onEdit && (
+        <BubbleAction label={t('hub.edit')} onClick={onEdit}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+          </svg>
+        </BubbleAction>
+      )}
+      {onFork && (
+        <BubbleAction label={t('hub.fork')} onClick={onFork}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
+            <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
+          </svg>
+        </BubbleAction>
+      )}
+    </div>
+  );
+}
+
+function formatCompactMessageTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return fmtTime(iso);
+}
+
+function formatFullMessageTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString();
+}
+
+export function BubbleAction({ label, onClick, children, tone = 'default' }: { label: string; onClick: () => void; children: ReactNode; tone?: 'default' | 'warn' }) {
   return (
     <button
       onClick={onClick}
       title={label}
-      className="flex items-center justify-center w-7 h-7 rounded border border-fg-6 bg-panel text-fg-4 shadow-sm hover:text-fg-2 hover:border-edge-h hover:bg-panel-h transition-colors"
+      aria-label={label}
+      className={cn(
+        'group/action inline-flex h-7 max-w-7 items-center justify-center overflow-hidden rounded border bg-panel px-[7px] text-[11px] leading-none shadow-sm transition-all duration-150',
+        'hover:max-w-[132px] hover:justify-start hover:gap-1.5 hover:px-2 focus-visible:max-w-[132px] focus-visible:justify-start focus-visible:gap-1.5 focus-visible:px-2',
+        tone === 'warn'
+          ? 'border-warn/35 text-warn hover:border-warn/60 hover:bg-warn/10'
+          : 'border-fg-6 text-fg-4 hover:text-fg-2 hover:border-edge-h hover:bg-panel-h',
+      )}
     >
-      {children}
+      <span className="shrink-0">{children}</span>
+      <span
+        aria-hidden="true"
+        className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-150 group-hover/action:max-w-[104px] group-hover/action:opacity-100 group-focus-visible/action:max-w-[104px] group-focus-visible/action:opacity-100"
+      >
+        {label}
+      </span>
     </button>
   );
 }

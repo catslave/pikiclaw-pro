@@ -17,9 +17,81 @@ import type { SessionInfo, AgentRuntimeStatus, SkillInfo } from '../../types';
 
 type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 
+type BuiltinComposerCommand = {
+  command: string;
+  insert: string;
+  labelKey: string;
+  descriptionKey: string;
+  aliases?: string[];
+};
+
+type ComposerCommandOption =
+  | ({ kind: 'builtin' } & BuiltinComposerCommand)
+  | { kind: 'skill'; command: string; skill: SkillInfo };
+
+const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
+  {
+    command: 'goal',
+    insert: '/goal ',
+    labelKey: 'hub.commandGoal',
+    descriptionKey: 'hub.commandGoalDesc',
+    aliases: ['objective', 'persistent goal', '目标'],
+  },
+  {
+    command: 'goal pause',
+    insert: '/goal pause',
+    labelKey: 'hub.commandGoalPause',
+    descriptionKey: 'hub.commandGoalPauseDesc',
+    aliases: ['pause goal', '暂停'],
+  },
+  {
+    command: 'goal resume',
+    insert: '/goal resume',
+    labelKey: 'hub.commandGoalResume',
+    descriptionKey: 'hub.commandGoalResumeDesc',
+    aliases: ['resume goal', '恢复'],
+  },
+  {
+    command: 'goal clear',
+    insert: '/goal clear',
+    labelKey: 'hub.commandGoalClear',
+    descriptionKey: 'hub.commandGoalClearDesc',
+    aliases: ['clear goal', 'cancel goal', '清除'],
+  },
+  {
+    command: 'plan',
+    insert: '/plan ',
+    labelKey: 'hub.commandPlan',
+    descriptionKey: 'hub.commandPlanDesc',
+    aliases: ['planning', 'todo', '计划'],
+  },
+];
+
 /* ── Draft persistence across session switches ── */
 const draftStore = new Map<string, { text: string; files: File[] }>();
-function draftKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
+function draftKey(workdir: string, agent: string, sessionId: string) {
+  return `${workdir || 'unknown'}:${agent || 'new'}:${sessionId || 'new'}`;
+}
+function draftStorageKey(key: string) { return `pikiclaw-draft:${key}`; }
+function readDraftText(key: string): string | null {
+  const storageKey = draftStorageKey(key);
+  try {
+    const persisted = localStorage.getItem(storageKey);
+    if (persisted != null) return persisted;
+  } catch {}
+  try { return sessionStorage.getItem(storageKey); } catch { return null; }
+}
+function writeDraftText(key: string, text: string) {
+  const storageKey = draftStorageKey(key);
+  try {
+    if (text) localStorage.setItem(storageKey, text);
+    else localStorage.removeItem(storageKey);
+  } catch {}
+  try {
+    if (text) sessionStorage.setItem(storageKey, text);
+    else sessionStorage.removeItem(storageKey);
+  } catch {}
+}
 
 /**
  * Pick a BrandIcon id for a configured Provider based on its base URL / kind.
@@ -92,6 +164,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [queuedPreviewUrl, setQueuedPreviewUrl] = useState<string | null>(null);
+  const [expandedQueuedTaskIds, setExpandedQueuedTaskIds] = useState<Set<string>>(() => new Set());
   const [pendingAgent, setPendingAgent] = useState<string | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [pendingEffort, setPendingEffort] = useState<string | null>(null);
@@ -148,15 +221,26 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   useEffect(() => { attachmentsRef.current = imageAttachments; }, [imageAttachments]);
 
   // Restore draft on mount, save on unmount
-  const dk = draftKey(session.agent || '', session.sessionId);
+  const dk = draftKey(workdir, session.agent || '', session.sessionId);
   const dkRef = useRef(dk);
   dkRef.current = dk;
+  const persistDraft = useCallback((text: string, files?: File[]) => {
+    const snapshotFiles = files ?? attachmentsRef.current.map(a => a.file);
+    if (text || snapshotFiles.length) draftStore.set(dkRef.current, { text, files: snapshotFiles });
+    else draftStore.delete(dkRef.current);
+    writeDraftText(dkRef.current, text);
+  }, []);
+
   useEffect(() => {
     const saved = draftStore.get(dk);
+    const storedText = readDraftText(dk);
     if (saved) {
       draftStore.delete(dk);
-      if (saved.text) setInput(saved.text);
-      if (saved.files.length) setImageAttachments(saved.files.map(makeComposerImageAttachment));
+      setInput(saved.text || storedText || '');
+      setImageAttachments(saved.files.length ? saved.files.map(makeComposerImageAttachment) : []);
+    } else {
+      setInput(storedText || '');
+      setImageAttachments([]);
     }
     return () => {
       const text = inputRef.current?.value || '';
@@ -165,6 +249,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       for (const a of attachmentsRef.current) URL.revokeObjectURL(a.previewUrl);
       if (text || files.length) draftStore.set(dkRef.current, { text, files });
       else draftStore.delete(dkRef.current);
+      writeDraftText(dkRef.current, text);
     };
   }, [dk]);
 
@@ -183,13 +268,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   useEffect(() => {
     if (editDraft != null) {
       setInput(editDraft);
+      persistDraft(editDraft);
       onEditDraftConsumed?.();
       requestAnimationFrame(() => {
         const el = inputRef.current;
         if (el) { el.focus(); el.setSelectionRange(editDraft.length, editDraft.length); }
       });
     }
-  }, [editDraft, onEditDraftConsumed]);
+  }, [editDraft, onEditDraftConsumed, persistDraft]);
 
   // Fetch available skills when workdir changes
   useEffect(() => {
@@ -201,14 +287,26 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     return () => { cancelled = true; };
   }, [workdir]);
 
-  // Compute filtered skills for the autocomplete menu
-  const skillQuery = skillMenuOpen ? (() => {
-    const match = input.match(/^\/(\S*)$/);
-    return match ? match[1].toLowerCase() : null;
+  // Compute slash command suggestions. Built-ins are dashboard/runtime commands;
+  // skills come from the active workspace plus the user's global skill dir.
+  const commandQuery = skillMenuOpen ? (() => {
+    const match = input.match(/^\/([^\n]*)$/);
+    return match ? match[1].trimStart().toLowerCase() : null;
   })() : null;
-  const filteredSkills = skillQuery !== null
-    ? skills.filter(s => s.name.toLowerCase().includes(skillQuery) || (s.label && s.label.toLowerCase().includes(skillQuery)))
-    : [];
+  const commandOptions = useMemo<ComposerCommandOption[]>(() => {
+    if (commandQuery === null) return [];
+    const matches = (values: Array<string | null | undefined>) => {
+      if (!commandQuery) return true;
+      return values.filter(Boolean).join(' ').toLowerCase().includes(commandQuery);
+    };
+    const builtins: ComposerCommandOption[] = BUILTIN_COMPOSER_COMMANDS
+      .filter(cmd => matches([cmd.command, cmd.insert, ...(cmd.aliases || [])]))
+      .map(cmd => ({ kind: 'builtin', ...cmd }));
+    const skillOptions: ComposerCommandOption[] = skills
+      .filter(skill => matches([skill.name, skill.label, skill.description]))
+      .map(skill => ({ kind: 'skill', command: skill.name, skill }));
+    return [...builtins, ...skillOptions].slice(0, 12);
+  }, [commandQuery, skills]);
 
   // Reset selected index when filtered list changes
   useEffect(() => { setSkillMenuIndex(0); }, [skillMenuOpen, input]);
@@ -216,7 +314,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   // Scroll skill menu to keep selected item visible
   useEffect(() => {
     if (!skillMenuOpen || !skillMenuRef.current) return;
-    const item = skillMenuRef.current.querySelector(`[data-skill-idx="${skillMenuIndex}"]`);
+    const item = skillMenuRef.current.querySelector(`[data-command-idx="${skillMenuIndex}"]`);
     if (item) (item as HTMLElement).scrollIntoView({ block: 'nearest' });
   }, [skillMenuIndex, skillMenuOpen]);
 
@@ -325,6 +423,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     lastSentRef.current = { prompt, files: attachments };
     setInput('');
     draftStore.delete(dkRef.current);
+    writeDraftText(dkRef.current, '');
     // Create fresh preview URLs before clearing (clearing revokes the originals)
     const previewUrls = attachments.length ? attachments.map(f => URL.createObjectURL(f)) : undefined;
     clearImageAttachments();
@@ -390,9 +489,33 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     }
     return ids;
   })();
+  const effectiveQueuedKey = effectiveQueuedIds.join('\0');
   const effectiveQueuedId = effectiveQueuedIds[effectiveQueuedIds.length - 1] || null;
   const hasQueuedTask = effectiveQueuedIds.length > 0;
   const showTaskBar = hasQueuedTask || isActiveStream;
+
+  const toggleQueuedExpanded = useCallback((taskId: string) => {
+    setExpandedQueuedTaskIds(prev => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    setExpandedQueuedTaskIds(prev => {
+      if (!prev.size) return prev;
+      const liveIds = new Set(effectiveQueuedIds);
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (liveIds.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [effectiveQueuedKey]);
 
   // Clear per-task pending flags as their target tasks resolve.
   // A target is "resolved" once it's no longer in the queued list and is no
@@ -411,7 +534,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       for (const id of prev) { if (isLive(id)) next.add(id); else changed = true; }
       return changed ? next : prev;
     });
-  }, [effectiveQueuedIds, streamTaskId]);
+  }, [effectiveQueuedKey, streamTaskId]);
   // Clear stashed files once queued task starts streaming (no longer recallable)
   useEffect(() => {
     if (!hasQueuedTask && lastSentRef.current.files.length) {
@@ -429,11 +552,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       const stash = lastSentRef.current;
       if (stash.prompt) setInput(stash.prompt);
       if (stash.files.length) setImageAttachments(stash.files.map(makeComposerImageAttachment));
+      persistDraft(stash.prompt, stash.files);
       lastSentRef.current = { prompt: '', files: [] };
     }
     onRecall?.(taskId);
     if (taskId === localTaskId) setLocalTaskId(null);
-  }, [recallingIds, effectiveQueuedId, localTaskId, onRecall]);
+  }, [recallingIds, effectiveQueuedId, localTaskId, onRecall, persistDraft]);
 
   const [stoppingAll, setStoppingAll] = useState(false);
   // "Stop" means halt the conversation, not "recall this one taskId". We call
@@ -456,29 +580,35 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     if (taskId === localTaskId) setLocalTaskId(null);
   }, [steeringIds, localTaskId, onSteer]);
 
-  const selectSkill = useCallback((skill: SkillInfo) => {
-    setInput(`/${skill.name} `);
+  const selectCommandOption = useCallback((option: ComposerCommandOption) => {
+    const next = option.kind === 'builtin'
+      ? option.insert
+      : `/${option.skill.name} `;
+    setInput(next);
+    persistDraft(next);
     setSkillMenuOpen(false);
     requestAnimationFrame(() => {
       const el = inputRef.current;
       if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
     });
-  }, []);
+  }, [persistDraft]);
 
   const handleInputChange = useCallback((value: string) => {
     setInput(value);
-    // Open skill menu when input is a single slash-command token (no spaces yet)
-    const isSlashCmd = /^\/\S*$/.test(value) && skills.length > 0;
+    persistDraft(value);
+    // Open command menu while the entire composer is a single slash command.
+    const isSlashCmd = /^\/[^\n]*$/.test(value);
     setSkillMenuOpen(isSlashCmd);
-  }, [skills.length]);
+  }, [persistDraft]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (skillMenuOpen && filteredSkills.length > 0) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSkillMenuIndex(i => (i + 1) % filteredSkills.length); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setSkillMenuIndex(i => (i - 1 + filteredSkills.length) % filteredSkills.length); return; }
+    if (skillMenuOpen && commandOptions.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSkillMenuIndex(i => (i + 1) % commandOptions.length); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSkillMenuIndex(i => (i - 1 + commandOptions.length) % commandOptions.length); return; }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !composingRef.current)) {
         e.preventDefault();
-        selectSkill(filteredSkills[skillMenuIndex]);
+        const option = commandOptions[Math.min(skillMenuIndex, commandOptions.length - 1)];
+        if (option) selectCommandOption(option);
         return;
       }
       if (e.key === 'Escape') { e.preventDefault(); setSkillMenuOpen(false); return; }
@@ -656,7 +786,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   return (
     <div className="shrink-0" ref={composerRef}>
       {/* Floating centered input area */}
-      <div className="max-w-[680px] mx-auto px-5 pb-4 pt-2">
+      <div className="w-full max-w-[860px] mx-auto px-4 pb-4 pt-2 sm:px-3">
         {/* Task control bar — stacked rows when streaming + queued coexist */}
         {showTaskBar && (
           <div className="mb-2 space-y-1.5">
@@ -692,14 +822,38 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 || optimistic?.prompt
                 || null;
               const taskImages = optimistic?.imageUrls?.length ? optimistic.imageUrls : [];
+              const isExpanded = expandedQueuedTaskIds.has(taskId);
               return (
                 <div
                   key={taskId}
-                  className="flex items-center gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors"
+                  className={cn(
+                    'flex gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors',
+                    isExpanded ? 'items-start' : 'items-center'
+                  )}
                 >
-                  <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
-                  <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <span className="text-[12px] font-medium text-warn shrink-0">{positionLabel}</span>
+                  <span className={cn('h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0', isExpanded && 'mt-2')} />
+                  <div className={cn('flex-1 min-w-0 flex gap-2', isExpanded ? 'items-start flex-wrap' : 'items-center')}>
+                    <button
+                      type="button"
+                      onClick={() => toggleQueuedExpanded(taskId)}
+                      title={taskPrompt || positionLabel}
+                      className="inline-flex items-center gap-1 rounded px-1 py-0.5 -ml-1 text-[12px] font-medium text-warn transition-colors hover:bg-warn/10 shrink-0"
+                    >
+                      <svg
+                        width="10"
+                        height="10"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className={cn('transition-transform', isExpanded && 'rotate-90')}
+                      >
+                        <polyline points="9 6 15 12 9 18" />
+                      </svg>
+                      {positionLabel}
+                    </button>
                     {taskImages.length > 0 && (
                       <div className="flex items-center gap-1 shrink-0">
                         {taskImages.slice(0, 3).map((url, i) => (
@@ -719,7 +873,19 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                       </div>
                     )}
                     {taskPrompt && (
-                      <span className="text-[11px] text-fg-5/60 truncate">{taskPrompt}</span>
+                      <button
+                        type="button"
+                        onClick={() => toggleQueuedExpanded(taskId)}
+                        title={taskPrompt}
+                        className={cn(
+                          'min-w-0 text-left text-[11px] text-fg-5/60 transition-colors hover:text-fg-4',
+                          isExpanded
+                            ? 'basis-full max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded bg-warn/[0.035] px-2 py-1.5'
+                            : 'flex-1 truncate'
+                        )}
+                      >
+                        {taskPrompt}
+                      </button>
                     )}
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
@@ -751,7 +917,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             })}
           </div>
         )}
-        <div className="relative rounded-xl border border-edge/40 bg-panel shadow-sm transition-[border-color,box-shadow] duration-200 focus-within:border-fg-5/40 focus-within:shadow-md">
+        <div className="relative rounded-xl border border-control-border bg-control shadow-[var(--th-composer-shadow)] transition-[border-color,box-shadow,background-color] duration-200 focus-within:border-control-border-h focus-within:shadow-[var(--th-composer-shadow-focus)]">
           <input
             ref={fileInputRef}
             type="file"
@@ -800,35 +966,50 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             </div>
           )}
 
-          {/* Skill autocomplete popup */}
-          {skillMenuOpen && filteredSkills.length > 0 && (
+          {/* Slash command autocomplete popup */}
+          {skillMenuOpen && commandOptions.length > 0 && (
             <div
               ref={skillMenuRef}
               className="absolute bottom-full left-0 right-0 mb-1.5 z-50 max-h-[200px] overflow-y-auto rounded-xl border border-edge/40 bg-[var(--th-dropdown)] backdrop-blur-xl shadow-lg animate-in"
             >
               <div className="px-3 pt-2 pb-1 border-b border-edge/20">
-                <span className="text-[10px] font-semibold text-fg-5 uppercase tracking-wider">{t('hub.skills')}</span>
+                <span className="text-[10px] font-semibold text-fg-5 uppercase tracking-wider">{t('hub.commands')}</span>
               </div>
               <div className="py-1">
-                {filteredSkills.map((skill, idx) => (
-                  <button
-                    key={skill.name}
-                    data-skill-idx={idx}
-                    onMouseDown={e => { e.preventDefault(); selectSkill(skill); }}
-                    onMouseEnter={() => setSkillMenuIndex(idx)}
-                    className={cn(
-                      'flex flex-col w-full px-3 py-1.5 text-left transition-colors',
-                      idx === skillMenuIndex
-                        ? 'bg-panel-h text-fg'
-                        : 'text-fg-3 hover:bg-panel-alt/50',
-                    )}
-                  >
-                    <span className="text-[12.5px] font-medium">/{skill.name}</span>
-                    {(skill.label || skill.description) && (
-                      <span className="text-[11px] text-fg-5 truncate">{skill.label || skill.description}</span>
-                    )}
-                  </button>
-                ))}
+                {commandOptions.map((option, idx) => {
+                  const isBuiltin = option.kind === 'builtin';
+                  const title = isBuiltin
+                    ? t(option.labelKey)
+                    : (option.skill.label || option.skill.name);
+                  const description = isBuiltin
+                    ? t(option.descriptionKey)
+                    : option.skill.description;
+                  return (
+                    <button
+                      key={`${option.kind}:${option.command}`}
+                      data-command-idx={idx}
+                      onMouseDown={e => { e.preventDefault(); selectCommandOption(option); }}
+                      onMouseEnter={() => setSkillMenuIndex(idx)}
+                      className={cn(
+                        'flex flex-col w-full px-3 py-1.5 text-left transition-colors',
+                        idx === skillMenuIndex
+                          ? 'bg-panel-h text-fg'
+                          : 'text-fg-3 hover:bg-panel-alt/50',
+                      )}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="font-mono text-[12.5px] font-medium">/{option.command}</span>
+                        <span className="rounded bg-panel-alt px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-fg-5">
+                          {isBuiltin ? t('hub.commandBuiltIn') : t('hub.commandSkill')}
+                        </span>
+                        {title && <span className="min-w-0 truncate text-[11px] text-fg-5">{title}</span>}
+                      </span>
+                      {description && (
+                        <span className="mt-0.5 text-[11px] text-fg-5 truncate">{description}</span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -844,7 +1025,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             onCompositionEnd={() => { composingRef.current = false; }}
             placeholder={t('hub.inputPlaceholder')}
             rows={1}
-            className="w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[13.5px] text-fg outline-none placeholder:text-fg-5/25 leading-[1.6]"
+            className="w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[13.5px] text-fg outline-none placeholder:text-fg-5/45 leading-[1.6]"
             style={{ maxHeight: 200, overflow: input.split('\n').length > 6 ? 'auto' : 'hidden' }}
           />
 
@@ -854,12 +1035,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               type="button"
               onClick={() => fileInputRef.current?.click()}
               title={t('hub.addImages')}
-              className="flex h-7 w-7 items-center justify-center rounded-lg text-fg-5/50 transition-colors hover:bg-panel-h/60 hover:text-fg-3"
+              aria-label={t('hub.addImages')}
+              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] leading-none text-fg-5/50 transition-colors hover:bg-panel-h/60 hover:text-fg-3"
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" className="shrink-0">
                 <path d="M12 5v14" />
                 <path d="M5 12h14" />
               </svg>
+              <span className="whitespace-nowrap">{t('hub.addImages')}</span>
             </button>
 
             {/* Cascade config trigger */}
@@ -1059,8 +1242,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             <button
               onClick={handleSend}
               disabled={!canSend}
+              title={canSend ? t('hub.sendHint') : t('hub.send')}
+              aria-label={sending ? t('hub.sending') : t('hub.send')}
               className={cn(
-                'flex items-center justify-center w-[30px] h-[30px] rounded-lg transition-all duration-200',
+                'inline-flex h-[30px] shrink-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] font-medium leading-none transition-all duration-200',
                 canSend
                   ? 'bg-primary text-primary-fg hover:brightness-110 shadow-sm'
                   : 'bg-fg/6 text-fg-5/20',
@@ -1068,8 +1253,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             >
               {sending
                 ? <Spinner className="h-3.5 w-3.5" />
-                : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
+                : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
               }
+              <span className="whitespace-nowrap">{sending ? t('hub.sending') : t('hub.send')}</span>
             </button>
           </div>
         </div>

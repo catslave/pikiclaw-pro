@@ -3,7 +3,7 @@
  */
 
 import path from 'node:path';
-import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, getDriverCapabilities, isPendingSessionId, type Agent, type HandoverRef } from '../agent/index.js';
+import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, getDriverCapabilities, isPendingSessionId, recordFork, type Agent, type HandoverRef } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { runtime } from './runtime.js';
 
@@ -235,9 +235,7 @@ export function forkDashboardSessionTask(request: ForkSessionTaskRequest) {
     return { ok: false as const, error: `Unknown agent: ${request.agent}` };
   }
   const agent = request.agent as Agent;
-  if (!getDriverCapabilities(agent).fork) {
-    return { ok: false as const, error: `Agent ${agent} does not support fork` };
-  }
+  const supportsNativeFork = getDriverCapabilities(agent).fork;
 
   const modelId = typeof request.model === 'string' ? request.model.trim() : '';
   const thinkingEffort = agent === 'gemini'
@@ -273,13 +271,26 @@ export function forkDashboardSessionTask(request: ForkSessionTaskRequest) {
     ? staged.importedFiles.map(f => path.join(staged.workspacePath, f))
     : [];
 
+  if (!supportsNativeFork) {
+    try {
+      recordFork(request.workdir, {
+        parent: { agent, sessionId: request.parentSessionId },
+        child: { agent, sessionId: staged.sessionId },
+        atTurn: request.atTurn,
+      });
+    } catch {
+      // Best-effort metadata only; the child task can still run with handover context.
+    }
+  }
+
   return bot.submitSessionTask({
     workdir: request.workdir,
     agent,
     sessionId: staged.sessionId,
     prompt: prompt || 'Please inspect the attached file(s).',
     attachments,
-    forkOf: { parentSessionId: request.parentSessionId, atTurn: request.atTurn },
+    ...(supportsNativeFork ? {} : { handoverFrom: { agent, sessionId: request.parentSessionId } }),
+    ...(supportsNativeFork ? { forkOf: { parentSessionId: request.parentSessionId, atTurn: request.atTurn } } : {}),
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
   });

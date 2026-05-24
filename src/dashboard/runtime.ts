@@ -11,7 +11,11 @@ import type { Bot } from '../bot/bot.js';
 import type { Agent, AgentDetectOptions } from '../agent/index.js';
 import type { UserConfig } from '../core/config/user-config.js';
 import type { SetupState } from '../cli/onboarding.js';
-import { applyChannelEnvFallback, loadUserConfig, resolveUserWorkdir } from '../core/config/user-config.js';
+import {
+  applyChannelEnvFallback,
+  loadUserConfig,
+  resolveUserWorkdir,
+} from '../core/config/user-config.js';
 import { listAgents } from '../agent/index.js';
 import { collectSetupState } from '../cli/onboarding.js';
 import {
@@ -215,7 +219,7 @@ class Runtime {
     state: NonNullable<SetupState['channels']>[number];
   }>();
 
-  readonly knownAgents = new Set<Agent>(['claude', 'codex', 'gemini', 'hermes']);
+  readonly knownAgents = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes']);
 
   readonly defaultModels: Record<Agent, string> = DEFAULT_AGENT_MODELS;
 

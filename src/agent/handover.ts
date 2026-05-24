@@ -31,6 +31,8 @@ import { getSessionMessages } from './session.js';
 const DEFAULT_AGENT_WINDOW_TOKENS: Record<string, number> = {
   claude: 200_000,
   codex: 256_000,
+  copilot: 200_000,
+  cursor: 200_000,
   gemini: 1_000_000,
   hermes: 128_000,
 };

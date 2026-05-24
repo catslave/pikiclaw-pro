@@ -5,15 +5,16 @@
   --th-surface: #080a0d;
   --th-fg: rgba(248,250,252,0.94);
   --th-fg-2: rgba(248,250,252,0.80);
-  --th-fg-3: rgba(226,232,240,0.66);
-  --th-fg-4: rgba(203,213,225,0.52);
-  --th-fg-5: rgba(148,163,184,0.50);
-  --th-fg-6: rgba(148,163,184,0.22);
+  --th-fg-3: rgba(226,232,240,0.76);
+  --th-fg-4: rgba(203,213,225,0.66);
+  --th-fg-5: rgba(148,163,184,0.68);
+  --th-fg-6: rgba(148,163,184,0.38);
 
   --th-panel: rgba(15,23,42,0.52);
   --th-panel-h: rgba(15,23,42,0.70);
   --th-panel-alt: rgba(15,23,42,0.34);
   --th-inset: rgba(255,255,255,0.05);
+  --th-session-bg: rgba(8,13,24,0.42);
 
   /* Form controls — distinct from --th-inset so inputs/selects read as
      interactive instead of as a subtle inline highlight surface. */
@@ -52,6 +53,8 @@
   --th-orb3: rgba(59,130,246,0.05);
   --th-noise: 0.02;
   --th-card-shadow: 0 8px 30px rgba(2,6,23,0.14);
+  --th-composer-shadow: 0 10px 28px rgba(0,0,0,0.20);
+  --th-composer-shadow-focus: 0 0 0 3px rgba(148,163,184,0.12), 0 14px 36px rgba(0,0,0,0.26);
 
   /* Status colors (shared) */
   --th-ok: #34d399;
@@ -75,6 +78,14 @@
   --th-badge-muted-text: rgba(226,232,240,0.74);
   --th-badge-muted-bg: rgba(15,23,42,0.34);
   --th-badge-muted-border: rgba(148,163,184,0.2);
+
+  --th-code-keyword: #93c5fd;
+  --th-code-string: #86efac;
+  --th-code-number: #fbbf24;
+  --th-code-comment: rgba(148,163,184,0.82);
+  --th-code-symbol: rgba(226,232,240,0.82);
+  --th-code-property: #c4b5fd;
+  --th-code-type: #67e8f9;
 }
 
 /* ── Light theme overrides ── */
@@ -82,15 +93,16 @@
   --th-surface: #eef2f6;
   --th-fg: rgba(15,23,42,0.98);
   --th-fg-2: rgba(15,23,42,0.88);
-  --th-fg-3: rgba(30,41,59,0.78);
-  --th-fg-4: rgba(51,65,85,0.68);
-  --th-fg-5: rgba(71,85,105,0.58);
-  --th-fg-6: rgba(71,85,105,0.22);
+  --th-fg-3: rgba(30,41,59,0.86);
+  --th-fg-4: rgba(51,65,85,0.78);
+  --th-fg-5: rgba(71,85,105,0.74);
+  --th-fg-6: rgba(71,85,105,0.38);
 
   --th-panel: rgba(255,255,255,0.94);
   --th-panel-h: rgba(255,255,255,0.96);
   --th-panel-alt: rgba(255,255,255,0.88);
   --th-inset: rgba(15,23,42,0.05);
+  --th-session-bg: #f7f9fc;
 
   --th-edge: rgba(15,23,42,0.10);
   --th-edge-h: rgba(15,23,42,0.16);
@@ -124,6 +136,8 @@
   --th-orb3: rgba(14,165,233,0.05);
   --th-noise: 0.012;
   --th-card-shadow: 0 16px 40px rgba(15,23,42,0.1);
+  --th-composer-shadow: 0 10px 30px rgba(15,23,42,0.10), 0 1px 0 rgba(255,255,255,0.90);
+  --th-composer-shadow-focus: 0 0 0 3px rgba(15,23,42,0.07), 0 14px 34px rgba(15,23,42,0.14);
 
   --th-ok: #22c55e;
   --th-ok-glow: rgba(34,197,94,0.35);
@@ -146,6 +160,14 @@
   --th-badge-muted-text: rgba(51,65,85,0.82);
   --th-badge-muted-bg: rgba(255,255,255,0.76);
   --th-badge-muted-border: rgba(15,23,42,0.12);
+
+  --th-code-keyword: #1d4ed8;
+  --th-code-string: #047857;
+  --th-code-number: #b45309;
+  --th-code-comment: rgba(71,85,105,0.82);
+  --th-code-symbol: rgba(30,41,59,0.76);
+  --th-code-property: #7c3aed;
+  --th-code-type: #0e7490;
 
   --th-inset-hl: rgba(255,255,255,0.72);
   --th-selected-bg: rgba(15,23,42,0.06);

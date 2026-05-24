@@ -61,6 +61,7 @@ export function mergeRichMessages(lhs: RichMessage, rhs: RichMessage): RichMessa
     role: lhs.role,
     text: parts.join('\n\n'),
     blocks: [...lhs.blocks, ...rhs.blocks],
+    createdAt: lhs.createdAt ?? rhs.createdAt ?? null,
     usage: rhs.usage ?? lhs.usage ?? null,
   };
 }

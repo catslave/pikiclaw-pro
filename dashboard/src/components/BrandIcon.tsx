@@ -59,6 +59,7 @@ const brandIcons: Record<string, string> = {
 
 const letterFallbacks: Record<string, { letter: string; color: string; bg: string }> = {
   custom: { letter: '+', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' },
+  copilot: { letter: 'GH', color: '#f0f6fc', bg: 'rgba(36,41,47,0.9)' },
 };
 
 export function BrandIcon({ brand, size = 18, className }: {
@@ -96,7 +97,7 @@ export function BrandIcon({ brand, size = 18, className }: {
         color: fallback.color,
         fontSize: Math.round(size * (isMulti ? 0.42 : 0.55)),
         lineHeight: 1,
-        letterSpacing: isMulti ? '-0.02em' : 'normal',
+        letterSpacing: 0,
       }}
     >
       {fallback.letter}

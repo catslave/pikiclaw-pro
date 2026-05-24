@@ -377,6 +377,8 @@ export interface AgentsListData {
 const AGENT_LABEL_OVERRIDES: Record<string, string> = {
   claude: 'Claude Code',
   codex: 'Codex',
+  copilot: 'GitHub Copilot',
+  cursor: 'Cursor Agent',
   gemini: 'Gemini CLI',
   hermes: 'Hermes',
 };
@@ -531,6 +533,16 @@ const EFFORT_LEVELS: Record<string, { id: string; label: string }[]> = {
     { id: 'medium', label: 'Medium' },
     { id: 'high', label: 'High' },
     { id: 'xhigh', label: 'Very High' },
+  ],
+  copilot: [
+    { id: 'low', label: 'Low' },
+    { id: 'medium', label: 'Medium' },
+    { id: 'high', label: 'High' },
+  ],
+  cursor: [
+    { id: 'low', label: 'Low' },
+    { id: 'medium', label: 'Medium' },
+    { id: 'high', label: 'High' },
   ],
   hermes: [
     { id: 'minimal', label: 'Minimal' },

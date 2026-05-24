@@ -16,6 +16,8 @@
 // ── Load all drivers (side-effect: each calls registerDriver) ───────────────
 import './drivers/claude.js';
 import './drivers/codex.js';
+import './drivers/copilot.js';
+import './drivers/cursor.js';
 import './drivers/gemini.js';
 import './drivers/hermes.js';
 
@@ -182,5 +184,7 @@ export {
 // ── Re-export: driver-specific functions ────────────────────────────────────
 export { doClaudeStream } from './drivers/claude.js';
 export { doCodexStream, buildCodexTurnInput, shutdownCodexServer, getCodexUsageLive } from './drivers/codex.js';
+export { doCopilotStream } from './drivers/copilot.js';
+export { doCursorStream } from './drivers/cursor.js';
 export { doGeminiStream } from './drivers/gemini.js';
 export { doHermesStream } from './drivers/hermes.js';

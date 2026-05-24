@@ -34,7 +34,7 @@ import {
   buildMigrationContext,
   exportSession, importSession,
   deleteSession,
-  loadWorkspaces, addWorkspace, removeWorkspace, updateWorkspace,
+  loadWorkspaces, addWorkspace, removeWorkspace, updateWorkspace, reorderWorkspaces,
   resolveUserStatus,
   type UserStatus, type SessionQueryResult,
 } from '../../bot/session-hub.js';
@@ -354,6 +354,20 @@ app.patch('/api/workspaces', async (c) => {
   }
 });
 
+app.post('/api/workspaces/reorder', async (c) => {
+  try {
+    const body = await c.req.json();
+    const paths = Array.isArray(body?.paths)
+      ? body.paths.filter((p: unknown): p is string => typeof p === 'string' && p.trim().length > 0)
+      : [];
+    if (paths.length === 0) return c.json({ ok: false, error: 'paths is required' }, 400);
+    const workspaces = reorderWorkspaces(paths);
+    return c.json({ ok: true, workspaces });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
 // ==========================================================================
 // Workspace overviews
 // ==========================================================================
@@ -414,6 +428,21 @@ app.post('/api/session-hub/session/note', async (c) => {
       return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
     }
     const updated = updateSession(workdir, agent, sessionId, { userNote: note ?? null });
+    return c.json({ ok: true, updated });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/title', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId } = body || {};
+    const title = typeof body?.title === 'string' ? body.title.trim() : null;
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const updated = updateSession(workdir, agent, sessionId, { title: title || null });
     return c.json({ ok: true, updated });
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);

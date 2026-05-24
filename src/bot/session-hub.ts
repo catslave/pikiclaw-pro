@@ -83,6 +83,7 @@ export interface WorkspaceOverview {
 
 /** Patch object for session metadata updates. */
 export interface SessionPatch {
+  title?: string | null;
   userStatus?: UserStatus | null;
   userNote?: string | null;
   classification?: SessionClassification;

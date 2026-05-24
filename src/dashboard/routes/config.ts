@@ -146,6 +146,41 @@ function openPathWithTarget(filePath: string, target: OpenTarget, isDirectory: b
   }
 }
 
+const INLINE_FILE_MAX_BYTES = 512 * 1024;
+const INLINE_DIFF_MAX_BYTES = 1024 * 1024;
+
+function isPathInside(root: string, target: string): boolean {
+  return target === root || target.startsWith(root + path.sep);
+}
+
+function resolveWorkspacePreviewPath(workdir: string, requestedPath: string) {
+  const logicalRoot = path.resolve(workdir);
+  const root = fs.realpathSync(logicalRoot);
+  const logicalTarget = path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : path.resolve(logicalRoot, requestedPath);
+
+  if (!isPathInside(logicalRoot, logicalTarget)) {
+    throw new Error('Path is outside the workspace');
+  }
+
+  const abs = fs.existsSync(logicalTarget) ? fs.realpathSync(logicalTarget) : logicalTarget;
+  if (fs.existsSync(logicalTarget) && !isPathInside(root, abs)) {
+    throw new Error('Path is outside the workspace');
+  }
+
+  return {
+    root: logicalRoot,
+    abs,
+    logicalTarget,
+    relativePath: path.relative(logicalRoot, logicalTarget),
+  };
+}
+
+function looksBinary(buffer: Buffer): boolean {
+  return buffer.subarray(0, Math.min(buffer.length, 4096)).includes(0);
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -434,29 +469,136 @@ app.get('/api/git-changes', (c) => {
   const dir = c.req.query('path');
   if (!dir) return c.json({ ok: false, error: 'path is required' }, 400);
   try {
-    if (!fs.existsSync(path.join(dir, '.git'))) {
+    const workspaceDir = path.resolve(dir);
+    const gitRoot = findGitRootOrNull(workspaceDir);
+    const gitRoots = gitRoot ? [gitRoot] : findImmediateGitRoots(workspaceDir);
+    if (gitRoots.length === 0) {
       return c.json({ ok: true, changes: [], isGit: false });
     }
-    // --no-optional-locks avoids contention with other git processes
-    const result = spawnSync('git', ['diff', '--name-status', 'HEAD', '--no-renames'], {
-      cwd: dir,
+    const changes = gitRoots.flatMap(root => readGitChanges(root, workspaceDir));
+    return c.json({ ok: true, changes, isGit: true });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+// Read a text file for in-dashboard preview.
+app.get('/api/file-content', (c) => {
+  const workdir = c.req.query('workdir');
+  const requestedPath = c.req.query('path');
+  if (!workdir || !requestedPath) return c.json({ ok: false, error: 'workdir and path are required' }, 400);
+
+  try {
+    const target = resolveWorkspacePreviewPath(workdir, requestedPath);
+    if (!fs.existsSync(target.abs)) return c.json({ ok: false, error: 'File not found' }, 404);
+    const stat = fs.statSync(target.abs);
+    if (stat.isDirectory()) return c.json({ ok: false, error: 'Path is a directory' }, 400);
+    if (stat.size > INLINE_FILE_MAX_BYTES) {
+      return c.json({
+        ok: false,
+        error: `File is too large to preview (${Math.round(stat.size / 1024)} KB)`,
+        path: target.abs,
+        relativePath: target.relativePath,
+        size: stat.size,
+        tooLarge: true,
+      }, 413);
+    }
+
+    const buffer = fs.readFileSync(target.abs);
+    if (looksBinary(buffer)) {
+      return c.json({
+        ok: false,
+        error: 'Binary file cannot be previewed',
+        path: target.abs,
+        relativePath: target.relativePath,
+        size: stat.size,
+        binary: true,
+      }, 415);
+    }
+
+    return c.json({
+      ok: true,
+      path: target.abs,
+      relativePath: target.relativePath,
+      size: stat.size,
+      content: buffer.toString('utf8'),
+    });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// Read a git diff for in-dashboard preview.
+app.get('/api/git-diff-content', (c) => {
+  const workdir = c.req.query('workdir');
+  const requestedPath = c.req.query('path');
+  if (!workdir || !requestedPath) return c.json({ ok: false, error: 'workdir and path are required' }, 400);
+
+  try {
+    const target = resolveWorkspacePreviewPath(workdir, requestedPath);
+    const gitSearchDir = fs.existsSync(target.logicalTarget) && fs.statSync(target.logicalTarget).isDirectory()
+      ? target.logicalTarget
+      : path.dirname(target.logicalTarget);
+    const gitRoot = findGitRoot(gitSearchDir);
+    if (!fs.existsSync(path.join(gitRoot, '.git'))) {
+      return c.json({ ok: false, error: 'Not a git repository', isGit: false }, 400);
+    }
+    if (!isPathInside(target.root, gitRoot) && !isPathInside(gitRoot, target.root)) {
+      return c.json({ ok: false, error: 'Git repository is outside the workspace' }, 400);
+    }
+    const relFromGitRoot = path.relative(gitRoot, target.logicalTarget);
+    if (!relFromGitRoot || relFromGitRoot.startsWith('..')) {
+      return c.json({ ok: false, error: 'Path is outside the git repository' }, 400);
+    }
+
+    const statusCode = readGitPathStatus(gitRoot, relFromGitRoot);
+    if ((!gitHasHead(gitRoot) || statusCode === '??') && fs.existsSync(target.abs)) {
+      const synthetic = buildAddedFileDiff(target.abs, relFromGitRoot);
+      return c.json({
+        ok: true,
+        path: target.logicalTarget,
+        relativePath: path.relative(target.root, target.logicalTarget),
+        content: synthetic.content,
+        truncated: synthetic.truncated,
+        isGit: true,
+      });
+    }
+
+    const result = spawnSync('git', ['diff', '--no-ext-diff', '--color=never', 'HEAD', '--', relFromGitRoot], {
+      cwd: gitRoot,
       timeout: 5_000,
       encoding: 'utf-8',
+      maxBuffer: INLINE_DIFF_MAX_BYTES + 64 * 1024,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
     });
-    const lines = (result.stdout || '').trim().split('\n').filter(Boolean);
-    const changes = lines.map(line => {
-      const [status, ...rest] = line.split('\t');
-      const file = rest.join('\t');
-      return {
-        status: status === 'A' ? 'added' as const
-          : status === 'D' ? 'deleted' as const
-          : 'modified' as const,
-        file,
-        path: path.join(dir, file),
-      };
+    if (result.error) throw result.error;
+    if ((result.status ?? 0) !== 0) {
+      const detail = String(result.stderr || result.stdout || '').trim();
+      if (fs.existsSync(target.abs) && detail.includes('bad revision')) {
+        const synthetic = buildAddedFileDiff(target.abs, relFromGitRoot);
+        return c.json({
+          ok: true,
+          path: target.logicalTarget,
+          relativePath: path.relative(target.root, target.logicalTarget),
+          content: synthetic.content,
+          truncated: synthetic.truncated,
+          isGit: true,
+        });
+      }
+      throw new Error(detail || 'Failed to read git diff');
+    }
+
+    const raw = String(result.stdout || '');
+    const truncated = Buffer.byteLength(raw, 'utf8') > INLINE_DIFF_MAX_BYTES;
+    const content = truncated ? raw.slice(0, INLINE_DIFF_MAX_BYTES) : raw;
+    return c.json({
+      ok: true,
+      path: target.logicalTarget,
+      relativePath: path.relative(target.root, target.logicalTarget),
+      content,
+      truncated,
+      isGit: true,
     });
-    return c.json({ ok: true, changes, isGit: true });
   } catch (err) {
     return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -528,13 +670,132 @@ app.post('/api/open-diff', async (c) => {
   }
 });
 
-function findGitRoot(dir: string): string {
-  let current = dir;
+function normalizeGitChangeStatus(statusCode: string): 'added' | 'modified' | 'deleted' {
+  if (statusCode.includes('D') && !statusCode.includes('A')) return 'deleted';
+  if (statusCode.includes('A') || statusCode.includes('?')) return 'added';
+  return 'modified';
+}
+
+function readGitChanges(gitRoot: string, workspaceDir: string) {
+  // --no-optional-locks avoids contention with other git processes.
+  const result = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: gitRoot,
+    timeout: 5_000,
+    encoding: 'utf-8',
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  if (result.error) throw result.error;
+  if ((result.status ?? 0) !== 0) {
+    const detail = String(result.stderr || result.stdout || '').trim();
+    throw new Error(detail || 'Failed to read git status');
+  }
+
+  const lines = String(result.stdout || '').split('\n').filter(line => line.trim().length > 0);
+  return lines.map(line => {
+    const statusCode = line.slice(0, 2);
+    const relFromGitRoot = parseGitStatusPath(line.slice(3));
+    const absPath = path.resolve(gitRoot, relFromGitRoot);
+    if (!isPathInside(workspaceDir, absPath)) return null;
+    return {
+      status: normalizeGitChangeStatus(statusCode),
+      file: path.relative(workspaceDir, absPath),
+      path: absPath,
+    };
+  }).filter(Boolean);
+}
+
+function parseGitStatusPath(pathSpec: string): string {
+  const renamedSeparator = ' -> ';
+  const renamedIndex = pathSpec.lastIndexOf(renamedSeparator);
+  const rawPath = renamedIndex >= 0 ? pathSpec.slice(renamedIndex + renamedSeparator.length) : pathSpec;
+  return unquoteGitPath(rawPath.trim());
+}
+
+function unquoteGitPath(value: string): string {
+  if (!value.startsWith('"') || !value.endsWith('"')) return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+}
+
+function gitHasHead(gitRoot: string): boolean {
+  const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: gitRoot,
+    timeout: 5_000,
+    encoding: 'utf-8',
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  return (result.status ?? 1) === 0;
+}
+
+function readGitPathStatus(gitRoot: string, relFromGitRoot: string): string {
+  const result = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all', '--', relFromGitRoot], {
+    cwd: gitRoot,
+    timeout: 5_000,
+    encoding: 'utf-8',
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  if ((result.status ?? 0) !== 0) return '';
+  return String(result.stdout || '').split('\n').find(Boolean)?.slice(0, 2) || '';
+}
+
+function buildAddedFileDiff(absPath: string, relFromGitRoot: string): { content: string; truncated: boolean } {
+  const stat = fs.statSync(absPath);
+  if (stat.isDirectory()) return { content: '', truncated: false };
+  if (stat.size > INLINE_DIFF_MAX_BYTES) {
+    return {
+      content: `diff --git a/${relFromGitRoot} b/${relFromGitRoot}\nnew file mode 100644\n--- /dev/null\n+++ b/${relFromGitRoot}\n@@ -0,0 +1 @@\n+File is too large to preview (${Math.round(stat.size / 1024)} KB)\n`,
+      truncated: true,
+    };
+  }
+
+  const buffer = fs.readFileSync(absPath);
+  if (looksBinary(buffer)) {
+    return {
+      content: `diff --git a/${relFromGitRoot} b/${relFromGitRoot}\nnew file mode 100644\n--- /dev/null\n+++ b/${relFromGitRoot}\n@@ -0,0 +1 @@\n+Binary file cannot be previewed\n`,
+      truncated: false,
+    };
+  }
+
+  const text = buffer.toString('utf8');
+  const lines = text.length > 0 ? text.replace(/\n$/, '').split('\n') : [];
+  const body = lines.map(line => `+${line}`).join('\n');
+  const content = [
+    `diff --git a/${relFromGitRoot} b/${relFromGitRoot}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${relFromGitRoot}`,
+    `@@ -0,0 +1,${Math.max(lines.length, 1)} @@`,
+    body || '+',
+  ].join('\n');
+  return { content: `${content}\n`, truncated: false };
+}
+
+function findGitRootOrNull(dir: string): string | null {
+  let current = path.resolve(dir);
   while (current !== path.dirname(current)) {
     if (fs.existsSync(path.join(current, '.git'))) return current;
     current = path.dirname(current);
   }
-  return dir;
+  return null;
+}
+
+function findImmediateGitRoots(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => path.join(dir, entry.name))
+      .filter(child => fs.existsSync(path.join(child, '.git')))
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+function findGitRoot(dir: string): string {
+  return findGitRootOrNull(dir) ?? dir;
 }
 
 export default app;

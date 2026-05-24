@@ -197,6 +197,14 @@ export interface StreamOpts {
   geminiSandbox?: boolean;
   geminiSystemInstruction?: string;
   geminiExtraArgs?: string[];
+  // copilot
+  copilotModel?: string;
+  copilotSystemPrompt?: string;
+  copilotExtraArgs?: string[];
+  // cursor
+  cursorModel?: string;
+  cursorSystemPrompt?: string;
+  cursorExtraArgs?: string[];
   // hermes — `hermes acp` ignores -m / --provider on the CLI, so the model
   // is bound per-session via the ACP `session/set_model` request after
   // `session/new`. The expected format is the ACP wire encoding
@@ -472,6 +480,8 @@ export interface RichMessage {
   role: 'user' | 'assistant';
   text: string;
   blocks: MessageBlock[];
+  /** Best-effort wall-clock timestamp for this message, when the agent transcript exposes one. */
+  createdAt?: string | null;
   /**
    * Per-turn token usage snapshot for assistant messages. Mirrors the live
    * `StreamPreviewMeta` shape so the dashboard can render the same chip on

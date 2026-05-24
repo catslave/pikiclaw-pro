@@ -30,7 +30,7 @@ import LocalModelsSection, { useLocalBackends } from '../local-models/LocalModel
 import ProfilesSection from '../profiles/ProfilesSection';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
-const AGENT_ORDER: Agent[] = ['claude', 'codex', 'gemini', 'hermes'];
+const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'];
 
 // Mirrors the backend type in src/model/validation.ts. Pricing fields are USD
 // per 1M tokens; `created` is unix epoch (seconds).

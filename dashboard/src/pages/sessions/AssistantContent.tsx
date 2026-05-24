@@ -1,31 +1,78 @@
-import { useState, useRef, useLayoutEffect } from 'react';
+import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { cn } from '../../utils';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
-import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
-import { mdComponents, mdPlugins } from './markdown';
+import { hasPlan } from '../../components/PlanProgressCard';
+import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
-import { SubAgentCard } from './LivePreview';
+import { WorkingCard, WorkingPlanList, WorkingSection, WorkingSubAgentList, WorkingThinkingBlock } from './WorkingCard';
 import type { RichMessage, MessageBlock } from '../../types';
 
 /* ═══════════════════════════════════════════════════════════════
    Assistant message — separated activity, thinking, output
    ═══════════════════════════════════════════════════════════════ */
-export function AssistantMsg({ message, t }: { message: RichMessage; t: (k: string) => string }) {
+export function AssistantMsg({
+  message,
+  t,
+  startedAt,
+  completedAt,
+  onOpenFileLink,
+}: {
+  message: RichMessage;
+  t: (k: string) => string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  onOpenFileLink?: OpenFileLinkHandler;
+}) {
   const { activityBlocks, thinkingBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
+  const thinkingText = thinkingBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
+  const subAgents = subAgentBlocks.map(block => block.subAgent).filter(Boolean) as NonNullable<MessageBlock['subAgent']>[];
+  const toolUseBlocks = activityBlocks.filter(block => block.type === 'tool_use');
+  const planSteps = latestPlan?.plan?.steps || [];
+  const currentPlanStep = planSteps.find(step => step.status === 'inProgress')
+    || [...planSteps].reverse().find(step => step.status === 'completed')
+    || planSteps[0]
+    || null;
+  const workingPreview = toolUseBlocks.length
+    ? summarizeToolUse(toolUseBlocks[toolUseBlocks.length - 1])
+    : currentPlanStep?.step || (thinkingText ? lastNLines(thinkingText, 1) : '');
+  const workingStepCount = toolUseBlocks.length
+    || planSteps.length
+    || subAgents.length
+    || thinkingBlocks.length;
+  const hasWorking = activityBlocks.length > 0 || subAgents.length > 0 || !!latestPlan?.plan || !!thinkingText;
   const hasContent = activityBlocks.length > 0 || subAgentBlocks.length > 0 || !!latestPlan?.plan || thinkingBlocks.length > 0 || outputBlocks.length > 0 || noticeBlocks.length > 0;
   if (!hasContent) return null;
   return (
     <div className="space-y-3">
-      {activityBlocks.length > 0 && <ActivitySection blocks={activityBlocks} t={t} />}
-      {subAgentBlocks.map(block => block.subAgent ? (
-        <SubAgentCard key={block.toolId || block.subAgent.id} sub={block.subAgent} t={t} />
-      ) : null)}
-      {latestPlan?.plan && <PlanProgressCard plan={latestPlan.plan} t={t} className="max-w-[760px]" />}
-      {thinkingBlocks.length > 0 && <ThinkingSection blocks={thinkingBlocks} t={t} />}
-      {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} t={t} />}
+      {hasWorking && (
+        <WorkingCard
+          phase="done"
+          t={t}
+          defaultOpen={false}
+          startedAt={startedAt ?? null}
+          completedAt={completedAt ?? message.createdAt ?? null}
+          previewMeta={message.usage ?? null}
+          previewText={workingPreview}
+          stepCount={workingStepCount}
+        >
+          <div className="space-y-3 px-3.5 py-3">
+            <WorkingPlanList plan={latestPlan?.plan} t={t} />
+            <WorkingSubAgentList subAgents={subAgents} t={t} />
+            {activityBlocks.length > 0 && (
+              <WorkingSection label={t('hub.activity')}>
+                <div className="max-h-[260px] space-y-0.5 overflow-y-auto">
+                  {activityBlocks.map((block, i) => <ActivityLine key={i} block={block} />)}
+                </div>
+              </WorkingSection>
+            )}
+            <WorkingThinkingBlock text={thinkingText} t={t} />
+          </div>
+        </WorkingCard>
+      )}
+      {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} t={t} onOpenFileLink={onOpenFileLink} />}
       {noticeBlocks.length > 0 && <SystemNoticeSection blocks={noticeBlocks} t={t} />}
     </div>
   );
@@ -236,11 +283,12 @@ function ImageFigure({
   );
 }
 
-export function OutputBlock({ blocks, t }: { blocks: MessageBlock[]; t: (k: string) => string }) {
+export function OutputBlock({ blocks, t, onOpenFileLink }: { blocks: MessageBlock[]; t: (k: string) => string; onOpenFileLink?: OpenFileLinkHandler }) {
   const textBlocks = blocks.filter(b => b.type === 'text');
   const imageBlocks = blocks.filter(b => b.type === 'image');
   const text = textBlocks.map(b => b.content).filter(Boolean).join('\n\n');
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink }), [onOpenFileLink]);
   if (!text.trim() && imageBlocks.length === 0) return null;
   return (
     <>

@@ -508,6 +508,7 @@ class FeishuChannel extends Channel {
     const msgType = msg.message_type as string;
 
     if (!chatId || !messageId) return;
+    this._debug(`[recv] event chat=${chatId} msg=${messageId} type=${msgType} chatType=${chatType}`);
 
     // Dedup: Feishu server may retry events when the ack is slow
     if (this._seenMessageIds.has(messageId)) {
@@ -525,7 +526,10 @@ class FeishuChannel extends Channel {
 
     const sender = event.sender;
     // Skip messages from the bot itself
-    if (sender?.sender_type === 'app') return;
+    if (sender?.sender_type === 'app') {
+      this._debug(`[recv] skipped: self message=${messageId}`);
+      return;
+    }
 
     const from: FeishuFrom = {
       openId: sender?.sender_id?.open_id || '',
@@ -596,6 +600,7 @@ class FeishuChannel extends Channel {
       // Message dispatch
       if (!this._hMessage) return;
       if (!trimmedText && !files.length) return;
+      this._debug(`[recv] dispatch chat=${chatId} msg=${messageId} files=${files.length} text="${trimmedText.slice(0, 100)}"`);
       await this._hMessage({ text: trimmedText, files }, ctx);
     });
     const settled = current.catch(e => {

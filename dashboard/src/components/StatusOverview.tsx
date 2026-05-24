@@ -7,6 +7,8 @@ import type { Agent, AppState, UserConfig } from '../types';
 const MODEL_FIELD_BY_AGENT: Record<Agent, keyof UserConfig> = {
   claude: 'claudeModel',
   codex: 'codexModel',
+  copilot: 'copilotModel',
+  cursor: 'cursorModel',
   gemini: 'geminiModel',
   // Hermes' default model lives on the Profile binding, not on UserConfig.
   // No top-level claudeModel-style field — use a harmless config field as

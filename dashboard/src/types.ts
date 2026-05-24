@@ -1,4 +1,4 @@
-export type Agent = 'claude' | 'codex' | 'gemini' | 'hermes';
+export type Agent = 'claude' | 'codex' | 'copilot' | 'cursor' | 'gemini' | 'hermes';
 export type OpenTarget = 'vscode' | 'cursor' | 'windsurf' | 'finder' | 'default';
 
 export interface AgentInfo {
@@ -139,7 +139,14 @@ export interface UserConfig {
   claudeReasoningEffort?: string;
   codexModel?: string;
   codexReasoningEffort?: string;
+  copilotModel?: string;
+  copilotReasoningEffort?: string;
+  cursorModel?: string;
+  cursorReasoningEffort?: string;
   geminiModel?: string;
+  geminiReasoningEffort?: string;
+  hermesModel?: string;
+  hermesReasoningEffort?: string;
   workdir?: string;
   telegramBotToken?: string;
   telegramAllowedChatIds?: string;
@@ -338,6 +345,7 @@ export interface SessionInfo {
   runState: 'running' | 'completed' | 'incomplete';
   runDetail?: string | null;
   runUpdatedAt?: string | null;
+  runStartedAt?: string | null;
   agent?: string;
   lastQuestion?: string | null;
   lastAnswer?: string | null;
@@ -423,6 +431,8 @@ export interface RichMessage {
   role: 'user' | 'assistant';
   text: string;
   blocks: MessageBlock[];
+  /** Best-effort wall-clock timestamp for this message, when available. */
+  createdAt?: string | null;
   /** Per-turn token usage snapshot for assistant messages. Null when the
    *  driver does not surface per-message usage (Codex, Gemini). */
   usage?: StreamPreviewMeta | null;
@@ -648,6 +658,28 @@ export interface GitChangesResult {
   ok: boolean;
   changes: GitChange[];
   isGit: boolean;
+  error?: string;
+}
+
+export interface FileContentResult {
+  ok: boolean;
+  path?: string;
+  relativePath?: string;
+  content?: string;
+  size?: number;
+  tooLarge?: boolean;
+  binary?: boolean;
+  error?: string;
+}
+
+export interface GitDiffContentResult {
+  ok: boolean;
+  path?: string;
+  relativePath?: string;
+  content?: string;
+  size?: number;
+  truncated?: boolean;
+  isGit?: boolean;
   error?: string;
 }
 

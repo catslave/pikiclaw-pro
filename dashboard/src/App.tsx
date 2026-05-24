@@ -1,5 +1,5 @@
-import { Suspense, lazy, useState, useEffect, useCallback, useMemo } from 'react';
-import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
+import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Routes, Route, useLocation, Navigate, useNavigate } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
 import { Sidebar, type RestartPhase } from './components/Sidebar';
@@ -35,9 +35,12 @@ type ModalState =
   | { type: 'workdir' }
   | { type: 'browser-setup' };
 
+const LAST_DASHBOARD_PATH_KEY = 'pikiclaw:last-dashboard-path:v1';
+
 function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
+    '/dashboard': 'dashboard',
     '/im': 'im',
     '/agents': 'agents',
     '/extensions': 'extensions',
@@ -45,6 +48,26 @@ function locationToTab(pathname: string): DashboardTab {
     '/system': 'system',
   };
   return map[pathname] || 'sessions';
+}
+
+function normalizeDashboardPath(pathname: string): string | null {
+  if (pathname === '/') return '/';
+  if (pathname === '/permissions') return '/system';
+  if (['/dashboard', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  return null;
+}
+
+function readLastDashboardPath(): string | null {
+  try {
+    const stored = localStorage.getItem(LAST_DASHBOARD_PATH_KEY);
+    return stored ? normalizeDashboardPath(stored) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastDashboardPath(pathname: string) {
+  try { localStorage.setItem(LAST_DASHBOARD_PATH_KEY, pathname); } catch {}
 }
 
 function PageWrapper({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -84,8 +107,11 @@ export function App() {
   const reload = useStore(s => s.reload);
 
   const location = useLocation();
+  const navigate = useNavigate();
   const tab = locationToTab(location.pathname);
-  const [sessionsTabReady, setSessionsTabReady] = useState(tab === 'sessions');
+  const sessionShellActive = tab === 'sessions' || tab === 'dashboard';
+  const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
+  const initialPathRestoreCheckedRef = useRef(false);
 
   const t = useMemo(() => createT(locale), [locale]);
   const [modal, setModal] = useState<ModalState>(null);
@@ -95,8 +121,27 @@ export function App() {
 
   const [prompted, setPrompted] = useState(false);
   useEffect(() => {
-    if (tab === 'sessions') setSessionsTabReady(true);
-  }, [tab]);
+    if (sessionShellActive) setSessionsTabReady(true);
+  }, [sessionShellActive]);
+
+  useEffect(() => {
+    const normalized = normalizeDashboardPath(location.pathname);
+    if (!normalized) return;
+    if (normalized === '/') {
+      if (!initialPathRestoreCheckedRef.current) {
+        initialPathRestoreCheckedRef.current = true;
+        const lastPath = readLastDashboardPath();
+        if (lastPath && lastPath !== '/') {
+          navigate(lastPath, { replace: true });
+          return;
+        }
+      }
+      writeLastDashboardPath('/');
+      return;
+    }
+    initialPathRestoreCheckedRef.current = true;
+    writeLastDashboardPath(normalized);
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     if (
@@ -176,15 +221,15 @@ export function App() {
           {sessionsTabReady && (
             <Suspense fallback={<RouteFallback />}>
               <div
-                className={cn('h-full', tab !== 'sessions' && 'hidden')}
-                aria-hidden={tab !== 'sessions'}
+                className={cn('h-full', !sessionShellActive && 'hidden')}
+                aria-hidden={!sessionShellActive}
               >
-                <SessionsTab active={tab === 'sessions'} />
+                <SessionsTab active={sessionShellActive} mode={tab === 'dashboard' ? 'dashboard' : 'workspace'} />
               </div>
             </Suspense>
           )}
 
-          {tab !== 'sessions' && (
+          {!sessionShellActive && (
             <Suspense fallback={<RouteFallback />}>
               <Routes>
                 <Route path="/im" element={

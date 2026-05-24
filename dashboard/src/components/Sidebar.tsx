@@ -12,6 +12,7 @@ const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
 
 const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
+  dashboard: '/dashboard',
   im: '/im',
   agents: '/agents',
   extensions: '/extensions',
@@ -41,6 +42,7 @@ export function Sidebar({
 
   const busy = restartPhase === 'restarting' || restartPhase === 'reconnecting';
   const confirming = restartPhase === 'confirm';
+  const themeToggleLabel = theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode');
 
   return (
     <header className="sticky top-0 z-40 bg-[var(--th-sidebar)] border-b border-edge backdrop-blur-[20px] [backdrop-filter:blur(20px)_saturate(1.2)]">
@@ -112,11 +114,13 @@ export function Sidebar({
           </Button>
           <Button
             variant="ghost"
-            size="icon"
+            size="sm"
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+            title={themeToggleLabel}
+            aria-label={themeToggleLabel}
           >
             {theme === 'dark' ? IconSun : IconMoon}
+            <span>{themeToggleLabel}</span>
           </Button>
           <Button
             variant="ghost"

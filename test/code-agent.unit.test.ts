@@ -103,7 +103,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(sanitizeSessionUserPreviewText('@user mentions are not paths')).toBe('@user mentions are not paths');
   });
 
-  it('prefers native session metadata while keeping pikiclaw workspace and run state', () => {
+  it('merges native session metadata while keeping pikiclaw title, workspace, and run state', () => {
     const merged = mergeManagedAndNativeSessions([
       {
         sessionId: 'sess-1',
@@ -143,7 +143,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
       sessionId: 'sess-1',
-      title: 'native title',
+      title: 'local title',
       model: 'native-model',
       createdAt: '2026-03-16T00:01:00.000Z',
       workspacePath: '/tmp/pikiclaw/workspace',

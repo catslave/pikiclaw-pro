@@ -1,19 +1,25 @@
-import { useState, useRef, useLayoutEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
-import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
-import { mdComponents, mdPlugins } from './markdown';
+import { hasPlan } from '../../components/PlanProgressCard';
+import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
-import type { StreamPlan, StreamSubAgent } from '../../types';
+import { WorkingCard, WorkingPlanList, WorkingSection, WorkingSubAgentList, WorkingThinkingBlock } from './WorkingCard';
+import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
 export interface LiveStreamView {
+  taskId?: string | null;
   phase: 'streaming' | 'done';
   text: string;
   thinking: string;
   activity?: string;
   plan?: StreamPlan | null;
   subAgents?: StreamSubAgent[] | null;
+  previewMeta?: StreamPreviewMeta | null;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  updatedAt?: number | null;
   error?: string | null;
   /** Number of image-generation calls in flight — drives the
    *  "Generating image…" chip while bytes have yet to land. */
@@ -43,16 +49,14 @@ export function liveStreamShouldRender(stream: LiveStreamView): boolean {
 export function LivePreview({
   stream,
   t,
+  onOpenFileLink,
 }: {
   stream: LiveStreamView;
   t: (k: string) => string;
+  onOpenFileLink?: OpenFileLinkHandler;
 }) {
   const showPlan = hasPlan(stream.plan);
   const hasAnyBody = liveStreamHasBody(stream);
-  const [activityOpen, setActivityOpen] = useState(false);
-  const [thinkingOpen, setThinkingOpen] = useState(false);
-  const activityScrollRef = useRef<HTMLDivElement>(null);
-  const thinkingScrollRef = useRef<HTMLDivElement>(null);
   // Stream finished with no body — surface the error inline so the user sees
   // *why* the assistant turn is empty instead of a silent phantom.
   const renderEmptyFailure = stream.phase === 'done' && !hasAnyBody;
@@ -61,73 +65,60 @@ export function LivePreview({
     (stream.activity || '').split('\n').filter(Boolean),
     [stream.activity],
   );
+  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink }), [onOpenFileLink]);
   const lastActivity = activityLines[activityLines.length - 1] || '';
-
-  // Auto-scroll activity detail to bottom when content updates
-  useLayoutEffect(() => {
-    const el = activityScrollRef.current;
-    if (el && activityOpen) el.scrollTop = el.scrollHeight;
-  }, [activityOpen, stream.activity]);
-
-  // Auto-scroll thinking detail to bottom when content updates
-  useLayoutEffect(() => {
-    const el = thinkingScrollRef.current;
-    if (el && thinkingOpen) el.scrollTop = el.scrollHeight;
-  }, [thinkingOpen, stream.thinking]);
-
   const subAgents = stream.subAgents ?? null;
+  const currentPlanStep = showPlan
+    ? (stream.plan.steps.find(step => step.status === 'inProgress') || [...stream.plan.steps].reverse().find(step => step.status === 'completed') || stream.plan.steps[0])?.step
+    : '';
+  const thinkingPreview = stream.thinking ? lastNLines(stream.thinking, 1) : '';
+  const workingPreview = lastActivity || currentPlanStep || thinkingPreview || '';
+  const workingStepCount = activityLines.length
+    || (showPlan ? stream.plan.steps.length : 0)
+    || (subAgents?.length ?? 0)
+    || (stream.thinking ? 1 : 0);
+  const showWorking = stream.phase === 'streaming'
+    || activityLines.length > 0
+    || !!stream.thinking
+    || showPlan
+    || !!(subAgents && subAgents.length)
+    || !!stream.previewMeta;
 
   return (
     <div className="space-y-3 animate-in">
-      {/* Plan — prominent card at top */}
-      {showPlan && (
-        <PlanProgressCard plan={stream.plan!} t={t} className="mb-1 max-w-[760px]" />
-      )}
-
-      {/* Sub-agent invocations — each Task tool gets its own discrete card so
-          its model and tool stream stay isolated from the parent's activity. */}
-      {subAgents && subAgents.length > 0 && subAgents.map(sub => (
-        <SubAgentCard key={sub.id} sub={sub} t={t} />
-      ))}
-
-      {/* Activity — expandable, shows latest line as preview */}
-      {activityLines.length > 0 && (
-        <CollapsibleCard
-          open={activityOpen}
-          onToggle={() => setActivityOpen(v => !v)}
-          dot={{ color: 'bg-cyan-400/60', pulse: true }}
-          label={t('hub.activity')}
-          preview={<span className="text-[12px] text-fg-4 truncate">{lastActivity}</span>}
-          badge={activityLines.length > 1 ? <CountBadge>{activityLines.length}</CountBadge> : undefined}
+      {showWorking && (
+        <WorkingCard
+          phase={stream.phase}
+          t={t}
+          resetKey={stream.taskId || null}
+          startedAt={stream.startedAt ?? null}
+          completedAt={stream.completedAt ?? null}
+          updatedAt={stream.updatedAt ?? null}
+          previewMeta={stream.previewMeta ?? null}
+          previewText={workingPreview}
+          stepCount={workingStepCount}
         >
-          <div ref={activityScrollRef} className="px-3.5 py-2.5 space-y-0.5 max-h-[240px] overflow-y-auto">
-            {activityLines.map((line, i) => (
-              <div key={i} className="flex items-center gap-1.5 py-[2px]">
-                <span className="w-1 h-1 rounded-full shrink-0 bg-fg-5/30" />
-                <span className="text-[11px] font-mono text-fg-5/60 truncate">{line}</span>
-              </div>
-            ))}
+          <div className="space-y-3 px-3.5 py-3">
+            <WorkingPlanList plan={stream.plan} t={t} />
+            <WorkingSubAgentList subAgents={subAgents} t={t} />
+            {activityLines.length > 0 && (
+              <WorkingSection label={t('hub.activity')}>
+                <div className="max-h-[220px] space-y-0.5 overflow-y-auto">
+                  {activityLines.map((line, i) => (
+                    <div key={i} className="flex items-center gap-1.5 py-[2px]">
+                      <span className="h-1 w-1 shrink-0 rounded-full bg-fg-5/30" />
+                      <span className="truncate text-[11px] font-mono text-fg-5/65">{line}</span>
+                    </div>
+                  ))}
+                </div>
+              </WorkingSection>
+            )}
+            <WorkingThinkingBlock text={stream.thinking || ''} t={t} />
+            {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && (
+              <div className="text-[12px] text-fg-5">{t('hub.workingIdle')}</div>
+            )}
           </div>
-        </CollapsibleCard>
-      )}
-
-      {/* Thinking — 3-line preview, expandable */}
-      {stream.thinking && (
-        <CollapsibleCard
-          open={thinkingOpen}
-          onToggle={() => setThinkingOpen(v => !v)}
-          dot={{ color: 'bg-violet-400/50', pulse: true }}
-          label={t('hub.thinking')}
-          collapsedContent={
-            <div className="px-3.5 pb-2.5 -mt-0.5 text-[12px] text-fg-4 leading-[1.65] whitespace-pre-wrap break-words line-clamp-3">
-              {lastNLines(stream.thinking, 3)}
-            </div>
-          }
-        >
-          <div ref={thinkingScrollRef} className="px-3.5 py-3 text-[12px] text-fg-4 leading-[1.7] whitespace-pre-wrap break-words max-h-[280px] overflow-y-auto">
-            {stream.thinking}
-          </div>
-        </CollapsibleCard>
+        </WorkingCard>
       )}
 
       {/* Response text with thinking dots */}
@@ -144,7 +135,7 @@ export function LivePreview({
           rendered yet. Inline dots (above) only appear once stream.text exists,
           so this fills the gap when activity / thinking / plan are shown alone
           or when no content has arrived at all. */}
-      {!stream.text && stream.phase === 'streaming' && (
+      {!stream.text && stream.phase === 'streaming' && !showWorking && (
         <div className="py-1">
           <ThinkingDots className="text-fg-5" />
         </div>

@@ -805,6 +805,7 @@ function getGeminiSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
       const type = typeof msg?.type === 'string' ? msg.type.trim().toLowerCase() : '';
       const role = type === 'user' ? 'user' : (type === 'gemini' || type === 'model' || type === 'assistant') ? 'assistant' : null;
       if (!role) continue;
+      const createdAt = geminiMessageCreatedAt(msg);
       const rawText = extractGeminiText(msg?.content);
       if (role === 'user') {
         const { text, blocks: imageBlocks } = buildGeminiUserMessageContent(rawText, opts.workdir);
@@ -813,17 +814,37 @@ function getGeminiSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
         const blocks: MessageBlock[] = [];
         if (text) blocks.push({ type: 'text', content: text });
         blocks.push(...imageBlocks);
-        richMsgs.push({ role, text, blocks });
+        richMsgs.push({ role, text, blocks, createdAt });
       } else {
         if (!rawText) continue;
         allMsgs.push({ role, text: rawText });
-        richMsgs.push({ role, text: rawText, blocks: [{ type: 'text', content: rawText }] });
+        richMsgs.push({ role, text: rawText, blocks: [{ type: 'text', content: rawText }], createdAt });
       }
     }
     return applyTurnWindow(allMsgs, opts, opts.rich ? richMsgs : undefined);
   } catch (e: any) {
     return { ok: false, messages: [], totalTurns: 0, error: e.message };
   }
+}
+
+function geminiMessageCreatedAt(msg: any): string | null {
+  for (const value of [msg?.createdAt, msg?.created_at, msg?.timestamp, msg?.time]) {
+    const iso = normalizeMessageTimestamp(value);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+function normalizeMessageTimestamp(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value > 1_000_000_000_000 ? value : value * 1000;
+    return new Date(ms).toISOString();
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

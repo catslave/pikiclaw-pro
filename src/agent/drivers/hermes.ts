@@ -485,6 +485,7 @@ function buildHermesAssistantText(blocks: MessageBlock[]): string {
 interface PendingHermesAssistant {
   blocks: MessageBlock[];
   toolNamesByCallId: Map<string, string>;
+  createdAt: string | null;
 }
 
 function getHermesSessionMessagesFromJson(opts: SessionMessagesOpts): SessionMessagesResult | null {
@@ -505,8 +506,9 @@ function getHermesSessionMessagesFromJson(opts: SessionMessagesOpts): SessionMes
   const richMsgs: RichMessage[] = [];
   let pending: PendingHermesAssistant | null = null;
 
-  const ensureAssistant = (): PendingHermesAssistant => {
-    if (!pending) pending = { blocks: [], toolNamesByCallId: new Map() };
+  const ensureAssistant = (createdAt?: string | null): PendingHermesAssistant => {
+    if (!pending) pending = { blocks: [], toolNamesByCallId: new Map(), createdAt: createdAt || null };
+    else if (!pending.createdAt && createdAt) pending.createdAt = createdAt;
     return pending;
   };
 
@@ -515,16 +517,18 @@ function getHermesSessionMessagesFromJson(opts: SessionMessagesOpts): SessionMes
     const blocks = pending.blocks.filter(b =>
       b.type === 'tool_use' || b.type === 'tool_result' || !!b.content.trim(),
     );
+    const createdAt = pending.createdAt;
     pending = null;
     if (!blocks.length) return;
     const text = buildHermesAssistantText(blocks);
     allMsgs.push({ role: 'assistant', text });
-    richMsgs.push({ role: 'assistant', text, blocks });
+    richMsgs.push({ role: 'assistant', text, blocks, createdAt });
   };
 
   for (const msg of rawMessages) {
     if (!msg || typeof msg !== 'object') continue;
     const role = msg.role;
+    const createdAt = hermesMessageCreatedAt(msg);
 
     if (role === 'system') continue;
 
@@ -533,12 +537,12 @@ function getHermesSessionMessagesFromJson(opts: SessionMessagesOpts): SessionMes
       const text = extractHermesContentText(msg.content).trim();
       if (!text) continue;
       allMsgs.push({ role: 'user', text });
-      richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }] });
+      richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }], createdAt });
       continue;
     }
 
     if (role === 'assistant') {
-      const a = ensureAssistant();
+      const a = ensureAssistant(createdAt);
       const reasoning = typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()
         ? msg.reasoning_content
         : (typeof msg.reasoning === 'string' ? msg.reasoning : '');
@@ -570,7 +574,7 @@ function getHermesSessionMessagesFromJson(opts: SessionMessagesOpts): SessionMes
     }
 
     if (role === 'tool') {
-      const a = ensureAssistant();
+      const a = ensureAssistant(createdAt);
       const callId = typeof msg.tool_call_id === 'string' ? msg.tool_call_id : '';
       const toolName = (callId && a.toolNamesByCallId.get(callId))
         || (typeof msg.tool_name === 'string' && msg.tool_name) || '';
@@ -590,6 +594,26 @@ function getHermesSessionMessagesFromJson(opts: SessionMessagesOpts): SessionMes
   return applyTurnWindow(allMsgs, opts, opts.rich !== false ? richMsgs : undefined);
 }
 
+function hermesMessageCreatedAt(msg: any): string | null {
+  for (const value of [msg?.createdAt, msg?.created_at, msg?.timestamp, msg?.time]) {
+    const iso = normalizeMessageTimestamp(value);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+function normalizeMessageTimestamp(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value > 1_000_000_000_000 ? value : value * 1000;
+    return new Date(ms).toISOString();
+  }
+  return null;
+}
+
 function getHermesSessionMessagesFromRecord(opts: SessionMessagesOpts): SessionMessagesResult {
   // Fallback for sessions that pre-date the JSON store (or that Hermes wrote
   // somewhere we can't see). Synthesizes the most recent turn from the
@@ -607,6 +631,7 @@ function getHermesSessionMessagesFromRecord(opts: SessionMessagesOpts): SessionM
       role: 'user',
       text: record.lastQuestion,
       blocks: [{ type: 'text', content: record.lastQuestion }],
+      createdAt: record.updatedAt || record.createdAt || null,
     });
   }
   if (record.lastAnswer || record.lastThinking) {
@@ -615,7 +640,7 @@ function getHermesSessionMessagesFromRecord(opts: SessionMessagesOpts): SessionM
     const blocks: MessageBlock[] = [];
     if (record.lastThinking) blocks.push({ type: 'thinking', content: record.lastThinking });
     if (answerText) blocks.push({ type: 'text', content: answerText });
-    richMessages.push({ role: 'assistant', text: answerText, blocks });
+    richMessages.push({ role: 'assistant', text: answerText, blocks, createdAt: record.updatedAt || record.createdAt || null });
   }
   const totalTurns = record.numTurns ?? (richMessages.length ? 1 : 0);
   return {

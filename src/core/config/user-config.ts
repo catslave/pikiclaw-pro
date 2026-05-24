@@ -77,6 +77,10 @@ export interface UserConfig {
   claudeReasoningEffort?: string;
   codexModel?: string;
   codexReasoningEffort?: string;
+  copilotModel?: string;
+  copilotReasoningEffort?: string;
+  cursorModel?: string;
+  cursorReasoningEffort?: string;
   geminiModel?: string;
   geminiReasoningEffort?: string;
   hermesModel?: string;

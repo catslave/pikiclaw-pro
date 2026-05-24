@@ -57,6 +57,12 @@ import {
   getHostBatteryData, getHostCpuUsageData, getHostDisplayName, getHostMemoryUsageData,
   type HostBatteryData, type HostCpuUsageData, type HostMemoryUsageData,
 } from './host.js';
+import {
+  loadPersistedQueuedTasks,
+  removePersistedQueuedTask,
+  upsertPersistedQueuedTask,
+  type PersistedQueuedTask,
+} from './persistent-task-queue.js';
 
 export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult, type AgentInteraction, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
 export { envBool, envString, envInt, shellSplit, whichSync, fmtTokens, fmtUptime, fmtBytes, parseAllowedChatIds, listSubdirs, extractThinkingTail, formatThinkingForDisplay, buildPrompt, ensureGitignore, type ChatId } from '../core/utils.js';
@@ -199,6 +205,10 @@ export type StreamEvent =
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
+  /** Wall-clock timestamp when the active task started streaming. */
+  startedAt?: number;
+  /** Wall-clock timestamp when the active task finished. */
+  completedAt?: number;
   /**
    * Task IDs that are queued behind the currently displayed task, in the
    * order they were enqueued. Multiple tasks can pile up while a long-running
@@ -333,6 +343,8 @@ export interface ActiveHumanLoopPrompt {
 }
 
 export interface SubmitSessionTaskOpts {
+  taskId?: string;
+  queuedAt?: number;
   agent: Agent;
   sessionId: string;
   workdir: string;
@@ -589,6 +601,7 @@ export class Bot {
         this.streamSnapshots.set(sessionKey, {
           phase: 'streaming', taskId: event.taskId,
           text: '', thinking: '', activity: '', plan: null, sessionId: event.sessionId, updatedAt: now,
+          startedAt: now,
           model: event.model, effort: event.effort, previewMeta: null,
           queuedTaskIds: remainingQueued && remainingQueued.length ? remainingQueued : undefined,
         });
@@ -613,6 +626,8 @@ export class Bot {
           taskId: event.taskId,
           sessionId: event.sessionId,
           incomplete: !!event.incomplete,
+          startedAt: prev?.startedAt ?? now,
+          completedAt: now,
           text: prev?.text || '',
           thinking: prev?.thinking || '',
           activity: prev?.activity || '',
@@ -750,6 +765,7 @@ export class Bot {
   private humanLoopPrompts = new Map<string, HumanLoopPromptState<ChatId>>();
   private humanLoopPromptIdsByChat = new Map<string, string[]>();
   private nextHumanLoopPromptId = 1;
+  private restoredPersistedQueue = false;
 
   constructor() {
     this.workdir = resolveUserWorkdir();
@@ -770,6 +786,16 @@ export class Bot {
         reasoningEffort: resolveAgentEffort(config, 'claude') || 'high',
         permissionMode: (process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions').trim(),
         extraArgs: shellSplit(process.env.CLAUDE_EXTRA_ARGS || ''),
+      },
+      copilot: {
+        model: resolveAgentModel(config, 'copilot'),
+        reasoningEffort: resolveAgentEffort(config, 'copilot') || 'medium',
+        extraArgs: shellSplit(process.env.COPILOT_EXTRA_ARGS || ''),
+      },
+      cursor: {
+        model: resolveAgentModel(config, 'cursor'),
+        reasoningEffort: resolveAgentEffort(config, 'cursor') || 'medium',
+        extraArgs: shellSplit(process.env.CURSOR_EXTRA_ARGS || ''),
       },
       gemini: {
         model: resolveAgentModel(config, 'gemini'),
@@ -795,6 +821,40 @@ export class Bot {
     this.allowedChatIds = parseAllowedChatIds(process.env.PIKICLAW_ALLOWED_IDS || '');
     this.refreshManagedConfig(getActiveUserConfig(), { initial: true });
     this.userConfigUnsubscribe = onUserConfigChange(config => this.refreshManagedConfig(config));
+  }
+
+  restorePersistedQueuedTasks(): number {
+    if (this.restoredPersistedQueue) return 0;
+    this.restoredPersistedQueue = true;
+    const tasks = loadPersistedQueuedTasks();
+    if (!tasks.length) return 0;
+    this.log(`restoring ${tasks.length} queued task(s) from disk`);
+    let restored = 0;
+    for (const task of tasks) {
+      try {
+        this.submitSessionTask({
+          taskId: task.taskId,
+          queuedAt: task.createdAt,
+          agent: normalizeAgent(task.agent),
+          sessionId: task.sessionId,
+          workdir: task.workdir,
+          prompt: task.prompt,
+          attachments: task.attachments || [],
+          chatId: task.chatId,
+          sourceMessageId: task.sourceMessageId,
+          modelId: task.modelId ?? undefined,
+          thinkingEffort: task.thinkingEffort ?? undefined,
+          handoverFrom: task.handoverFrom ?? undefined,
+          goalContinuation: task.goalContinuation,
+          forkOf: task.forkOf,
+        });
+        restored++;
+      } catch (err: any) {
+        removePersistedQueuedTask(task.taskId);
+        this.warn(`dropped persisted queued task ${task.taskId}: ${err?.message || err}`);
+      }
+    }
+    return restored;
   }
 
   log(msg: string, level: LogLevel = 'info') {
@@ -1161,6 +1221,52 @@ export class Bot {
     return runtime;
   }
 
+  private persistQueuedTask(
+    taskId: string,
+    session: SessionRuntime,
+    opts: SubmitSessionTaskOpts,
+    prompt: string,
+    attachments: string[],
+    sourceMessageId: number | string,
+    createdAt: number,
+  ) {
+    const record: PersistedQueuedTask = {
+      version: 1,
+      taskId,
+      createdAt,
+      chatId: opts.chatId ?? 'dashboard',
+      sourceMessageId,
+      workdir: session.workdir,
+      agent: session.agent,
+      sessionId: session.sessionId || opts.sessionId,
+      prompt,
+      attachments,
+      modelId: opts.modelId ?? null,
+      thinkingEffort: opts.thinkingEffort ?? null,
+      handoverFrom: opts.handoverFrom ?? session.handoverFrom ?? null,
+      ...(opts.goalContinuation ? { goalContinuation: opts.goalContinuation } : {}),
+      ...(opts.forkOf ? { forkOf: opts.forkOf } : {}),
+    };
+    this.persistQueuedTaskRecord(record);
+  }
+
+  private persistQueuedTaskRecord(record: PersistedQueuedTask) {
+    if (!record.sessionId) return;
+    try {
+      upsertPersistedQueuedTask(record);
+    } catch (err: any) {
+      this.warn(`failed to persist queued task ${record.taskId}: ${err?.message || err}`);
+    }
+  }
+
+  private forgetPersistedQueuedTask(taskId: string) {
+    try {
+      removePersistedQueuedTask(taskId);
+    } catch (err: any) {
+      this.warn(`failed to remove persisted queued task ${taskId}: ${err?.message || err}`);
+    }
+  }
+
   protected beginTask(task: RunningTask) {
     const nextTask: RunningTask = {
       ...task,
@@ -1175,6 +1281,23 @@ export class Bot {
     this.taskKeysByActionId.set(String(nextTask.actionId), nextTask.taskId);
     const session = this.getSessionRuntimeByKey(task.sessionKey, { allowAnyWorkdir: true });
     session?.runningTaskIds.add(nextTask.taskId);
+    if (session) {
+      this.persistQueuedTaskRecord({
+        version: 1,
+        taskId: nextTask.taskId,
+        createdAt: nextTask.startedAt,
+        chatId: nextTask.chatId,
+        sourceMessageId: nextTask.sourceMessageId,
+        workdir: session.workdir,
+        agent: session.agent,
+        sessionId: session.sessionId || '',
+        prompt: nextTask.prompt,
+        attachments: nextTask.attachments || [],
+        modelId: session.modelId ?? null,
+        thinkingEffort: session.thinkingEffort ?? null,
+        handoverFrom: session.handoverFrom ?? null,
+      });
+    }
   }
 
   protected finishTask(taskId: string) {
@@ -1184,6 +1307,7 @@ export class Bot {
     }
     const task = this.activeTasks.get(taskId);
     if (!task) return;
+    this.forgetPersistedQueuedTask(taskId);
     this.activeTasks.delete(taskId);
     this.taskKeysBySourceMessage.delete(this.sourceMessageKey(task.chatId, task.sourceMessageId));
     if (task.actionId) this.taskKeysByActionId.delete(String(task.actionId));
@@ -1210,6 +1334,7 @@ export class Bot {
     const task = this.activeTasks.get(taskId);
     if (!task) return null;
     if (task.cancelled) return task;
+    this.forgetPersistedQueuedTask(taskId);
     task.status = 'running';
     task.abort = abort || null;
     task.steer = null;
@@ -1243,6 +1368,7 @@ export class Bot {
     const task = this.activeTasks.get(taskId);
     if (!task || task.status !== 'queued') return null;
     task.cancelled = true;
+    this.forgetPersistedQueuedTask(taskId);
     return task;
   }
 
@@ -1257,6 +1383,7 @@ export class Bot {
       if (task.status === 'queued') {
         if (!task.cancelled) {
           task.cancelled = true;
+          this.forgetPersistedQueuedTask(taskId);
           cancelledQueued++;
           // Tell the dashboard right away so the queued chip disappears
           // instead of waiting for the chain wrapper to reach this task.
@@ -1280,6 +1407,7 @@ export class Bot {
     if (!task) return { task: null, interrupted: false, cancelled: false };
     if (task.status === 'queued') {
       task.cancelled = true;
+      this.forgetPersistedQueuedTask(taskId);
       return { task, interrupted: false, cancelled: true };
     }
     if (task.status === 'running') {
@@ -1664,10 +1792,12 @@ export class Bot {
       ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
       ...(opts.handoverFrom !== undefined ? { handoverFrom: opts.handoverFrom } : {}),
     });
-    const taskId = `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const taskId = opts.taskId?.trim() || `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const prompt = opts.prompt.trim();
     const attachments = opts.attachments || [];
     const chatId = opts.chatId ?? 'dashboard';
+    const sourceMessageId = opts.sourceMessageId ?? taskId;
+    const queuedAt = opts.queuedAt && Number.isFinite(opts.queuedAt) ? opts.queuedAt : Date.now();
 
     this.beginTask({
       taskId,
@@ -1676,9 +1806,10 @@ export class Bot {
       sessionKey: session.key,
       prompt,
       attachments,
-      startedAt: Date.now(),
-      sourceMessageId: opts.sourceMessageId ?? taskId,
+      startedAt: queuedAt,
+      sourceMessageId,
     });
+    this.persistQueuedTask(taskId, session, opts, prompt, attachments, sourceMessageId, queuedAt);
     this.emitStreamQueued(session.key, taskId);
 
     void this.queueSessionTask(session, async () => {
@@ -2036,6 +2167,7 @@ export class Bot {
     if (!task) return { task: null, interrupted: false, cancelled: false };
     if (task.status === 'queued') {
       task.cancelled = true;
+      this.forgetPersistedQueuedTask(taskId);
       this.emitStream(task.sessionKey, { type: 'cancelled', taskId });
       return { task, interrupted: false, cancelled: true };
     }
@@ -2288,11 +2420,15 @@ export class Bot {
       if (kind === 'model') {
         if (agent === 'claude') patch.claudeModel = value;
         else if (agent === 'codex') patch.codexModel = value;
+        else if (agent === 'copilot') patch.copilotModel = value;
+        else if (agent === 'cursor') patch.cursorModel = value;
         else if (agent === 'gemini') patch.geminiModel = value;
         else if (agent === 'hermes') patch.hermesModel = value;
       } else {
         if (agent === 'claude') patch.claudeReasoningEffort = value;
         else if (agent === 'codex') patch.codexReasoningEffort = value;
+        else if (agent === 'copilot') patch.copilotReasoningEffort = value;
+        else if (agent === 'cursor') patch.cursorReasoningEffort = value;
         else if (agent === 'gemini') patch.geminiReasoningEffort = value;
         else if (agent === 'hermes') patch.hermesReasoningEffort = value;
       }
@@ -2454,7 +2590,7 @@ export class Bot {
     if (opts.initial) this.defaultAgent = nextDefaultAgent;
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
 
-    for (const agent of ['claude', 'codex', 'gemini', 'hermes'] as Agent[]) {
+    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'] as Agent[]) {
       const nextModel = resolveAgentModel(config, agent);
       if (nextModel && this.modelForAgent(agent) !== nextModel) {
         if (opts.initial) this.agentConfigs[agent].model = nextModel;
@@ -2585,6 +2721,14 @@ export class Bot {
       geminiSandbox: this.geminiSandbox,
       geminiSystemInstruction: effectiveSystemPrompt || undefined,
       geminiExtraArgs: this.geminiExtraArgs.length ? this.geminiExtraArgs : undefined,
+      // copilot-specific
+      copilotModel: cs.agent === 'copilot' ? resolvedModel : (this.agentConfigs.copilot?.model || ''),
+      copilotSystemPrompt: effectiveSystemPrompt || undefined,
+      copilotExtraArgs: (this.agentConfigs.copilot?.extraArgs || []).length ? this.agentConfigs.copilot.extraArgs : undefined,
+      // cursor-specific
+      cursorModel: cs.agent === 'cursor' ? resolvedModel : (this.agentConfigs.cursor?.model || ''),
+      cursorSystemPrompt: effectiveSystemPrompt || undefined,
+      cursorExtraArgs: (this.agentConfigs.cursor?.extraArgs || []).length ? this.agentConfigs.cursor.extraArgs : undefined,
       // hermes-specific. Wire the chat's current model so /models switching in
       // IM takes effect even without a BYOK Profile (the BYOK injector in
       // stream.ts overrides this with the ACP-encoded `provider:model` when

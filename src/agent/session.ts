@@ -419,7 +419,7 @@ export function updateSessionMeta(
   workdir: string,
   agent: Agent,
   sessionId: string,
-  patch: Partial<Pick<ManagedSessionRecord, 'userStatus' | 'userNote' | 'classification' | 'migratedFrom' | 'migratedTo'>> & {
+  patch: Partial<Pick<ManagedSessionRecord, 'title' | 'userStatus' | 'userNote' | 'classification' | 'migratedFrom' | 'migratedTo'>> & {
     addLink?: { agent: Agent; sessionId: string };
   },
 ): boolean {
@@ -428,6 +428,7 @@ export function updateSessionMeta(
   const record = index.sessions.find(s => s.sessionId === sessionId && s.agent === agent);
   if (!record) return false;
 
+  if (patch.title !== undefined) record.title = patch.title;
   if (patch.userStatus !== undefined) record.userStatus = patch.userStatus;
   if (patch.userNote !== undefined) record.userNote = patch.userNote;
   if (patch.classification !== undefined) record.classification = patch.classification;
@@ -892,7 +893,9 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
         : (useNativeTimeline ? native.runState : managed.runState),
       runDetail: useNativeTimeline ? (native.runDetail ?? managed.runDetail) : (managed.runDetail ?? native.runDetail),
       runUpdatedAt: useNativeTimeline ? (native.runUpdatedAt ?? managed.runUpdatedAt) : (managed.runUpdatedAt ?? native.runUpdatedAt),
-      title: native.title || managed.title,
+      // Dashboard rename writes managed.title; native titles are derived from
+      // agent history and must not overwrite an explicit pikiclaw title.
+      title: managed.title || native.title,
       model: native.model || managed.model,
       createdAt: native.createdAt || managed.createdAt,
       classification: managed.classification ?? native.classification ?? null,

@@ -14,6 +14,8 @@ import type { SessionInfo } from './types';
 export const AGENT_ACCEPTED_PROVIDER_KINDS: Record<Agent, readonly string[]> = {
   claude: ['anthropic', 'openai-compatible'],
   codex: ['openai', 'openai-compatible'],
+  copilot: [],
+  cursor: [],
   gemini: ['google'],
   hermes: ['anthropic', 'openai', 'openai-compatible', 'google'],
 };
@@ -101,6 +103,26 @@ export const agentMeta: Record<string, AgentMeta> = {
     border: 'rgba(125,211,252,0.2)',
     advantageKey: 'config.agentAdvantageCodex',
   },
+  copilot: {
+    label: 'GitHub Copilot',
+    shortLabel: 'Copilot',
+    color: '#f0f6fc',
+    bg: 'rgba(240,246,252,0.10)',
+    letter: 'G',
+    glow: 'rgba(240,246,252,0.18)',
+    border: 'rgba(240,246,252,0.16)',
+    advantageKey: 'config.agentAdvantageCopilot',
+  },
+  cursor: {
+    label: 'Cursor Agent',
+    shortLabel: 'Cursor',
+    color: '#a7f3d0',
+    bg: 'rgba(167,243,208,0.12)',
+    letter: 'R',
+    glow: 'rgba(167,243,208,0.18)',
+    border: 'rgba(167,243,208,0.18)',
+    advantageKey: 'config.agentAdvantageCursor',
+  },
   gemini: {
     label: 'Gemini CLI',
     shortLabel: 'Gemini',
@@ -130,6 +152,8 @@ export function getAgentMeta(agent: string): AgentMeta {
 export const EFFORT_OPTIONS: Record<Agent, string[]> = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   codex: ['low', 'medium', 'high', 'xhigh'],
+  copilot: ['low', 'medium', 'high'],
+  cursor: ['low', 'medium', 'high'],
   gemini: ['low', 'high'],
   // The Hermes driver forwards the chosen value via ACP `session/set_mode`;
   // upstream may or may not act on it depending on the bound model, but we
@@ -168,6 +192,7 @@ export interface LiveSessionState {
   resolvedKey: string;
   phase: 'queued' | 'streaming' | 'done';
   sessionId: string | null;
+  startedAt: number | null;
   updatedAt: number;
   incomplete: boolean;
   error: string | null;
@@ -196,6 +221,9 @@ export function normalizeLiveSessionState(sessionKey: string, snapshot: unknown)
   const updatedAt = typeof (snapshot as any).updatedAt === 'number' && Number.isFinite((snapshot as any).updatedAt)
     ? (snapshot as any).updatedAt
     : Date.now();
+  const startedAt = typeof (snapshot as any).startedAt === 'number' && Number.isFinite((snapshot as any).startedAt)
+    ? (snapshot as any).startedAt
+    : null;
   const error = typeof (snapshot as any).error === 'string' && (snapshot as any).error.trim()
     ? (snapshot as any).error.trim()
     : null;
@@ -206,6 +234,7 @@ export function normalizeLiveSessionState(sessionKey: string, snapshot: unknown)
     resolvedKey,
     phase: rawPhase,
     sessionId,
+    startedAt,
     updatedAt,
     incomplete: !!(snapshot as any).incomplete || !!error,
     error,
@@ -223,6 +252,7 @@ export function applyLiveSessionState(session: SessionInfo, liveState?: LiveSess
     ...session,
     running: nextRunState === 'running',
     runState: nextRunState,
+    runStartedAt: liveState.startedAt ? new Date(liveState.startedAt).toISOString() : session.runStartedAt ?? null,
     runUpdatedAt: new Date(liveState.updatedAt).toISOString(),
     runDetail: nextRunState === 'running'
       ? null

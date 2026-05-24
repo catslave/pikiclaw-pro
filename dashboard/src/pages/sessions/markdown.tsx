@@ -7,7 +7,53 @@ import { api } from '../../api';
 export const mdPlugins = [remarkGfm, remarkBreaks];
 
 const isWebUrl = (href: string) => /^https?:\/\//.test(href);
-const isFilePath = (href: string) => /^(\/|~\/|\.\.?\/)/.test(href);
+const isFilePath = (href: string) => /^(file:\/\/|\/|~\/|\.\.?\/|[A-Za-z]:[\\/]|[^:#?]+[\\/])/.test(href);
+
+export type FileLinkTarget = { path: string; line?: number };
+export type OpenFileLinkHandler = (target: FileLinkTarget) => void;
+
+function safeDecodeHref(href: string): string {
+  try { return decodeURI(href); } catch { return href; }
+}
+
+export function parseFileLinkTarget(rawHref: string): FileLinkTarget | null {
+  let href = safeDecodeHref(String(rawHref || '').trim());
+  if (!href || isWebUrl(href)) return null;
+  if (href.startsWith('file://')) {
+    try {
+      const url = new URL(href);
+      href = decodeURIComponent(url.pathname);
+    } catch {
+      href = href.replace(/^file:\/\//, '');
+    }
+  }
+
+  let line: number | undefined;
+  const hashLine = href.match(/^(.*)#L?(\d+)(?:[-:]\d+)?$/i);
+  if (hashLine) {
+    href = hashLine[1];
+    line = Number(hashLine[2]);
+  } else {
+    const suffixLine = href.match(/^(.*):(\d+)(?::\d+)?$/);
+    if (suffixLine && isFilePath(suffixLine[1])) {
+      href = suffixLine[1];
+      line = Number(suffixLine[2]);
+    }
+  }
+
+  if (!isFilePath(href)) return null;
+  return Number.isFinite(line) && line && line > 0
+    ? { path: href, line }
+    : { path: href };
+}
+
+function defaultOpenFileLink(target: FileLinkTarget) {
+  void api.openInEditor(target.path);
+}
+
+function fileLinkTitle(target: FileLinkTarget): string {
+  return target.line ? `${target.path}:${target.line}` : target.path;
+}
 
 /* ── Copy button for fenced code blocks ── */
 export function CopyButton({ text }: { text: string }) {
@@ -31,7 +77,9 @@ export function classifyCode(text: string): string {
   return 'bg-[rgba(255,255,255,0.06)] border-edge/20 text-fg-3';
 }
 
-export const mdComponents: Record<string, React.ComponentType<any>> = {
+export function createMdComponents({ onOpenFileLink }: { onOpenFileLink?: OpenFileLinkHandler } = {}): Record<string, React.ComponentType<any>> {
+  const openFileLink = onOpenFileLink || defaultOpenFileLink;
+  return {
   h1: ({ children }: any) => <h2 className="text-[16px] font-bold text-fg mt-4 mb-2">{children}</h2>,
   h2: ({ children }: any) => <h3 className="text-[14.5px] font-semibold text-fg mt-4 mb-1.5">{children}</h3>,
   h3: ({ children }: any) => <h4 className="text-[13.5px] font-semibold text-fg mt-3 mb-1">{children}</h4>,
@@ -42,8 +90,18 @@ export const mdComponents: Record<string, React.ComponentType<any>> = {
     if (href && isWebUrl(href)) {
       return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors">{children}</a>;
     }
-    if (href && isFilePath(href)) {
-      return <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors" onClick={() => api.openInEditor(href)}>{children}</span>;
+    const fileTarget = href ? parseFileLinkTarget(href) : null;
+    if (fileTarget) {
+      return (
+        <button
+          type="button"
+          className="inline cursor-pointer rounded-sm bg-transparent p-0 text-left text-blue-400 underline decoration-blue-400/30 underline-offset-2 transition-colors hover:text-blue-300"
+          title={fileLinkTitle(fileTarget)}
+          onClick={() => openFileLink(fileTarget)}
+        >
+          {children}
+        </button>
+      );
     }
     return <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30">{children}</span>;
   },
@@ -63,8 +121,9 @@ export const mdComponents: Record<string, React.ComponentType<any>> = {
 
     // Inline code (no language class, no embedded newlines)
     if (!langMatch && !className && !text.includes('\n')) {
-      if (isFilePath(text)) {
-        return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border cursor-pointer hover:brightness-125 transition-all', classifyCode(text))} onClick={() => api.openInEditor(text)}>{text}</code>;
+      const fileTarget = parseFileLinkTarget(text);
+      if (fileTarget) {
+        return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border cursor-pointer hover:brightness-125 transition-all', classifyCode(fileTarget.path))} title={fileLinkTitle(fileTarget)} onClick={() => openFileLink(fileTarget)}>{text}</code>;
       }
       return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border', classifyCode(text))}>{text}</code>;
     }
@@ -94,3 +153,6 @@ export const mdComponents: Record<string, React.ComponentType<any>> = {
   td: ({ children }: any) => <td className="px-3 py-1.5 text-fg-4 border-t border-edge/12">{children}</td>,
   tr: ({ children }: any) => <tr className="even:bg-[rgba(255,255,255,0.015)]">{children}</tr>,
 };
+}
+
+export const mdComponents = createMdComponents();

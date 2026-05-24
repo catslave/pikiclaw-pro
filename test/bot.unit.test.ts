@@ -16,13 +16,22 @@ import { Bot } from '../src/bot/bot.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 
-const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR', 'DEFAULT_AGENT']);
+const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR', 'PIKICLAW_TASK_QUEUE_FILE', 'DEFAULT_AGENT']);
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for condition');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
 
 beforeEach(() => {
   restoreEnv(envSnapshot);
   vi.clearAllMocks();
   const tmpConfig = makeTmpDir('bot-unit-config-');
   process.env.PIKICLAW_CONFIG = `${tmpConfig}/setting.json`;
+  process.env.PIKICLAW_TASK_QUEUE_FILE = `${tmpConfig}/task-queue.json`;
   process.env.PIKICLAW_WORKDIR = makeTmpDir('bot-unit-workdir-');
   process.env.DEFAULT_AGENT = 'codex';
 });
@@ -374,6 +383,106 @@ describe('Bot thread-aware agent switching', () => {
 });
 
 describe('Bot external session control', () => {
+  it('keeps queued dashboard tasks on disk until they start running', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>(resolve => { firstStarted = resolve; });
+    const firstReleasePromise = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    doStreamMock
+      .mockImplementationOnce(async () => {
+        firstStarted();
+        await firstReleasePromise;
+        return makeStreamResult('codex', { sessionId: 'sess-queue', message: 'first done' });
+      })
+      .mockImplementationOnce(async () => makeStreamResult('codex', {
+        sessionId: 'sess-queue',
+        message: 'second done',
+      }));
+
+    const bot = new Bot();
+    bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-queue',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'first',
+    });
+    await firstStartedPromise;
+
+    const second = bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-queue',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'second',
+    });
+
+    let persisted = JSON.parse(fs.readFileSync(process.env.PIKICLAW_TASK_QUEUE_FILE!, 'utf8'));
+    expect(persisted.tasks.map((task: any) => task.taskId)).toEqual([second.taskId]);
+    expect(persisted.tasks[0]).toMatchObject({
+      prompt: 'second',
+      sessionId: 'sess-queue',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+    });
+
+    releaseFirst();
+    await waitFor(() => bot.activeTasks.size === 0);
+
+    persisted = JSON.parse(fs.readFileSync(process.env.PIKICLAW_TASK_QUEUE_FILE!, 'utf8'));
+    expect(persisted.tasks).toEqual([]);
+  });
+
+  it('restores persisted queued tasks in queue order', async () => {
+    const queueFile = process.env.PIKICLAW_TASK_QUEUE_FILE!;
+    const workdir = process.env.PIKICLAW_WORKDIR!;
+    fs.writeFileSync(queueFile, JSON.stringify({
+      version: 1,
+      tasks: [
+        {
+          version: 1,
+          taskId: 'restore-2',
+          createdAt: 2000,
+          chatId: 'dashboard',
+          sourceMessageId: 'restore-2',
+          workdir,
+          agent: 'codex',
+          sessionId: 'sess-restore',
+          prompt: 'second restored',
+          attachments: [],
+        },
+        {
+          version: 1,
+          taskId: 'restore-1',
+          createdAt: 1000,
+          chatId: 'dashboard',
+          sourceMessageId: 'restore-1',
+          workdir,
+          agent: 'codex',
+          sessionId: 'sess-restore',
+          prompt: 'first restored',
+          attachments: [],
+        },
+      ],
+    }));
+
+    const prompts: string[] = [];
+    vi.mocked(doStream).mockImplementation(async opts => {
+      prompts.push(opts.prompt);
+      return makeStreamResult('codex', {
+        sessionId: 'sess-restore',
+        message: `${opts.prompt} done`,
+      });
+    });
+
+    const bot = new Bot();
+    expect(bot.restorePersistedQueuedTasks()).toBe(2);
+    await waitFor(() => prompts.length === 2);
+
+    expect(prompts).toEqual(['first restored', 'second restored']);
+    expect(bot.activeTasks.size).toBe(0);
+    expect(JSON.parse(fs.readFileSync(queueFile, 'utf8')).tasks).toEqual([]);
+  });
+
   it('submits dashboard session tasks through the public API and publishes stream state', async () => {
     const doStreamMock = vi.mocked(doStream);
     doStreamMock.mockImplementationOnce(async opts => {
