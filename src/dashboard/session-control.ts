@@ -3,11 +3,11 @@
  */
 
 import path from 'node:path';
-import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, getDriverCapabilities, isPendingSessionId, recordFork, type Agent, type HandoverRef } from '../agent/index.js';
+import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, findPikiclawSessionInfo, getDriverCapabilities, isPendingSessionId, recordFork, recordSideChat, type Agent, type HandoverRef } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { runtime } from './runtime.js';
 
-const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'gemini', 'hermes']);
+const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes']);
 
 /**
  * Parse a `/goal[ args]` prompt typed in the dashboard chat box. Returns null
@@ -137,7 +137,10 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
   // session (sessionId blank or pending). For an existing session we never
   // replay handover — that session's own --resume history is canonical.
   const isFreshSession = !sessionId || isPendingSessionId(sessionId);
-  const handoverFrom = isFreshSession ? resolveHandoverFrom(request, resolvedAgent) : null;
+  const existingHandoverFrom = isFreshSession && sessionId
+    ? (findPikiclawSession(request.workdir, resolvedAgent, sessionId)?.handoverFrom ?? null)
+    : null;
+  const handoverFrom = isFreshSession ? (resolveHandoverFrom(request, resolvedAgent) ?? existingHandoverFrom) : null;
 
   // Stage files into the session workspace so temp uploads survive cleanup.
   // Also creates a new pending session when no sessionId is provided.
@@ -296,6 +299,56 @@ export function forkDashboardSessionTask(request: ForkSessionTaskRequest) {
   });
 }
 
+export interface CreateSideChatRequest {
+  workdir: string;
+  agent: Agent | string;
+  parentSessionId: string;
+  title?: string | null;
+}
+
+export function createDashboardSideChat(request: CreateSideChatRequest) {
+  if (!request.workdir || !request.parentSessionId || !request.agent) {
+    return { ok: false as const, error: 'workdir, agent, and parentSessionId are required' };
+  }
+  if (!KNOWN_AGENTS.has(request.agent as Agent)) {
+    return { ok: false as const, error: `Unknown agent: ${request.agent}` };
+  }
+
+  const agent = request.agent as Agent;
+  const title = typeof request.title === 'string' && request.title.trim()
+    ? request.title.trim()
+    : `Side chat from ${request.parentSessionId.slice(0, 8)}`;
+
+  ensureManagedSession({
+    agent,
+    workdir: request.workdir,
+    sessionId: request.parentSessionId,
+  });
+
+  const staged = stageSessionFiles({
+    agent,
+    workdir: request.workdir,
+    files: [],
+    sessionId: null,
+    title,
+    threadId: null,
+    handoverFrom: { agent, sessionId: request.parentSessionId },
+  });
+  const recorded = recordSideChat(request.workdir, {
+    parent: { agent, sessionId: request.parentSessionId },
+    child: { agent, sessionId: staged.sessionId },
+  });
+  const session = findPikiclawSessionInfo(request.workdir, agent, staged.sessionId);
+  const parent = findPikiclawSessionInfo(request.workdir, agent, request.parentSessionId);
+  return {
+    ok: recorded && !!session,
+    session,
+    parent,
+    sessionKey: `${agent}:${staged.sessionId}`,
+    error: recorded && session ? null : 'Failed to create side chat',
+  };
+}
+
 export function getSessionStreamState(agent: string, sessionId: string) {
   const bot = runtime.getBotRef();
   if (!bot) return { ok: true as const, state: null };
@@ -328,6 +381,18 @@ export async function steerSessionTask(taskId: string) {
   if (!bot) return { ok: false as const, error: 'Bot is not running' };
   const result = await bot.steerTask(taskId);
   return { ok: true as const, steered: result.steered };
+}
+
+export function reorderSessionQueuedTasks(agent: string, sessionId: string, taskIds: string[]) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const result = bot.reorderSessionQueuedTasks(`${agent}:${sessionId}`, taskIds);
+  return {
+    ok: !result.error,
+    reordered: result.reordered,
+    queuedTaskIds: result.queuedTaskIds,
+    ...(result.error ? { error: result.error } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

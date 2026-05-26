@@ -49,15 +49,18 @@ describe('session-control', () => {
   it('surfaces stream state, cancel, and steer through public bot methods', async () => {
     const cancelTask = vi.fn(() => ({ cancelled: true, interrupted: false, task: {} }));
     const steerTask = vi.fn(async () => ({ steered: true, interrupted: true, task: {} }));
+    const reorderSessionQueuedTasks = vi.fn(() => ({ reordered: true, queuedTaskIds: ['task-2', 'task-1'] }));
     getBotRefMock.mockReturnValue({
       getStreamSnapshot: vi.fn(() => ({ phase: 'queued', taskId: 'task-1', updatedAt: 1 })),
       cancelTask,
       steerTask,
+      reorderSessionQueuedTasks,
     });
 
     const {
       cancelSessionTask,
       getSessionStreamState,
+      reorderSessionQueuedTasks: reorderControl,
       steerSessionTask,
     } = await import('../src/dashboard/session-control.ts');
 
@@ -67,5 +70,11 @@ describe('session-control', () => {
     });
     expect(cancelSessionTask('task-1')).toEqual({ ok: true, recalled: true });
     expect(await steerSessionTask('task-1')).toEqual({ ok: true, steered: true });
+    expect(reorderControl('codex', 'sess-1', ['task-2', 'task-1'])).toEqual({
+      ok: true,
+      reordered: true,
+      queuedTaskIds: ['task-2', 'task-1'],
+    });
+    expect(reorderSessionQueuedTasks).toHaveBeenCalledWith('codex:sess-1', ['task-2', 'task-1']);
   });
 });

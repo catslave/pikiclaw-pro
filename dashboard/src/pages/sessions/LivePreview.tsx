@@ -5,7 +5,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
-import { WorkingCard, WorkingPlanList, WorkingSection, WorkingSubAgentList, WorkingThinkingBlock } from './WorkingCard';
+import { WorkingActivitySummary, WorkingCard, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
 import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
 export interface LiveStreamView {
@@ -72,8 +72,9 @@ export function LivePreview({
     ? (stream.plan.steps.find(step => step.status === 'inProgress') || [...stream.plan.steps].reverse().find(step => step.status === 'completed') || stream.plan.steps[0])?.step
     : '';
   const thinkingPreview = stream.thinking ? lastNLines(stream.thinking, 1) : '';
-  const workingPreview = lastActivity || currentPlanStep || thinkingPreview || '';
-  const workingStepCount = activityLines.length
+  const activitySummary = summarizeWorkingActivity(activityLines, t);
+  const workingPreview = currentPlanStep || thinkingPreview || activitySummary[0] || lastActivity || '';
+  const workingStepCount = (activitySummary.length || activityLines.length)
     || (showPlan ? stream.plan.steps.length : 0)
     || (subAgents?.length ?? 0)
     || (stream.thinking ? 1 : 0);
@@ -99,22 +100,14 @@ export function LivePreview({
           stepCount={workingStepCount}
         >
           <div className="space-y-3 px-3.5 py-3">
+            {stream.phase === 'streaming' && stream.text && !showPlan && !stream.thinking && (
+              <WorkingNarrativeBlock text={stream.text} t={t} />
+            )}
             <WorkingPlanList plan={stream.plan} t={t} />
             <WorkingSubAgentList subAgents={subAgents} t={t} />
-            {activityLines.length > 0 && (
-              <WorkingSection label={t('hub.activity')}>
-                <div className="max-h-[220px] space-y-0.5 overflow-y-auto">
-                  {activityLines.map((line, i) => (
-                    <div key={i} className="flex items-center gap-1.5 py-[2px]">
-                      <span className="h-1 w-1 shrink-0 rounded-full bg-fg-5/30" />
-                      <span className="truncate text-[11px] font-mono text-fg-5/65">{line}</span>
-                    </div>
-                  ))}
-                </div>
-              </WorkingSection>
-            )}
             <WorkingThinkingBlock text={stream.thinking || ''} t={t} />
-            {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && (
+            <WorkingActivitySummary lines={activityLines} t={t} />
+            {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && !stream.text && (
               <div className="text-[12px] text-fg-5">{t('hub.workingIdle')}</div>
             )}
           </div>

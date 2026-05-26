@@ -1,9 +1,8 @@
 import { useMemo } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { resolveAppStatusBadge } from '../app-status';
 import { useStore } from '../store';
 import { createT } from '../i18n';
-import { getDashboardTabs } from '../tabs';
 import { Button, Dot, TabsList } from './ui';
 import { cn } from '../utils';
 
@@ -41,6 +40,7 @@ function PikiclawLogo() {
 const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
   dashboard: '/dashboard',
+  usage: '/usage',
   im: '/im',
   agents: '/agents',
   extensions: '/extensions',
@@ -64,8 +64,16 @@ export function Sidebar({
   const locale = useStore(s => s.locale);
   const setLocale = useStore(s => s.setLocale);
   const t = useMemo(() => createT(locale), [locale]);
-
-  const tabs = getDashboardTabs(t);
+  const location = useLocation();
+  const navItems = useMemo(() => [
+    { key: 'sessions', to: TAB_ROUTES.sessions, label: t('tab.sessions'), exact: true, primary: true },
+    { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('tab.dashboard'), primary: true },
+    { key: 'usage', to: TAB_ROUTES.usage, label: t('tab.usage'), primary: true },
+    { key: 'im', to: TAB_ROUTES.im, label: t('tab.im') },
+    { key: 'agents', to: TAB_ROUTES.agents, label: t('tab.agent') },
+    { key: 'extensions', to: TAB_ROUTES.extensions, label: t('tab.extensions') },
+    { key: 'system', to: TAB_ROUTES.system, label: t('tab.system') },
+  ], [t]);
   const appStatus = resolveAppStatusBadge(state, t);
 
   const busy = restartPhase === 'restarting' || restartPhase === 'reconnecting';
@@ -74,7 +82,7 @@ export function Sidebar({
 
   return (
     <header className="sticky top-0 z-40 bg-[var(--th-sidebar)] border-b border-edge backdrop-blur-[20px] [backdrop-filter:blur(20px)_saturate(1.2)]">
-      <div className="mx-auto flex min-h-14 max-w-[1180px] flex-wrap items-center gap-2.5 px-4 py-2">
+      <div className="mx-auto flex min-h-14 max-w-none flex-wrap items-center gap-2.5 px-4 py-2 md:flex-nowrap">
         {/* Logo */}
         <div className="mr-1.5 flex items-center gap-2.5 shrink-0">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-amber-300/35 bg-[linear-gradient(145deg,rgba(250,204,21,0.28),rgba(251,146,60,0.12))] shadow-[0_8px_22px_rgba(245,158,11,0.18),inset_0_1px_0_rgba(255,255,255,0.35)]">
@@ -89,18 +97,24 @@ export function Sidebar({
         </div>
 
         {/* Tab navigation */}
-        <nav className="order-3 w-full md:order-none md:w-auto">
-          <TabsList className="w-full overflow-x-auto md:w-auto">
-            {tabs.map(item => (
+        <nav className="order-3 w-full min-w-0 md:order-none md:w-auto md:flex-1">
+          <TabsList className="w-full min-w-0 overflow-x-auto md:w-full md:justify-start">
+            {navItems.map(item => (
               <NavLink
                 key={item.key}
-                to={TAB_ROUTES[item.key]}
-                end={TAB_ROUTES[item.key] === '/'}
-                className={({ isActive }) => cn(
-                  'inline-flex h-8 items-center justify-center rounded-md px-3 text-sm font-medium transition-colors duration-200',
-                  'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
-                  isActive ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
-                )}
+                to={item.to}
+                end={item.exact}
+                className={({ isActive }) => {
+                  const active = item.key === 'system'
+                    ? location.pathname === '/system'
+                    : isActive;
+                  return cn(
+                    'inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-sm font-medium transition-colors duration-200',
+                    'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
+                    item.primary ? 'text-sm' : 'text-[13px]',
+                    active ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
+                  );
+                }}
               >
                 {item.label}
               </NavLink>
@@ -109,10 +123,10 @@ export function Sidebar({
         </nav>
 
         {/* Spacer */}
-        <div className="flex-1 min-w-0" />
+        <div className="flex-1 min-w-0 md:hidden" />
 
         {/* Right-side actions */}
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex shrink-0 items-center gap-1 whitespace-nowrap">
           <div className="hidden items-center gap-1.5 rounded-full border border-edge bg-panel-alt px-2.5 py-1 text-[11px] text-fg-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:flex">
             <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
             <span className="font-medium">{appStatus.badgeContent}</span>

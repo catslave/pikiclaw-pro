@@ -19,6 +19,7 @@ describe('dashboard live session state helpers', () => {
       phase: 'streaming',
       sessionId: 'native-456',
       updatedAt: 123,
+      startedAt: null,
       incomplete: false,
       error: null,
     });

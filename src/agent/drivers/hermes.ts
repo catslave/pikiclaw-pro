@@ -415,12 +415,17 @@ async function getHermesSessions(workdir: string, limit?: number): Promise<Sessi
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
+    pinned: record.pinned === true,
+    archived: record.archived === true,
+    archivedAt: record.archivedAt ?? null,
     lastQuestion: record.lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText: record.lastMessageText,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    sideChatOf: record.sideChatOf ?? null,
+    sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
   }));
   sessions.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));

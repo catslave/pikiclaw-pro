@@ -90,7 +90,7 @@ function pumpMessagePrefetchQueue() {
 }
 
 export function peekWorkspaceSessions(workdir: string, opts: { allowStale?: boolean } = {}): SessionHubResult | null {
-  const entry = workspaceCache.get(workdir);
+  const entry = workspaceCache.get(`${workdir}:active`) || workspaceCache.get(workdir);
   if (!entry?.value) return null;
   if (opts.allowStale || entry.expiresAt > Date.now()) return entry.value;
   return null;
@@ -98,9 +98,10 @@ export function peekWorkspaceSessions(workdir: string, opts: { allowStale?: bool
 
 export async function loadWorkspaceSessions(
   workdir: string,
-  opts: { force?: boolean; request?: ApiRequestOptions } = {},
+  opts: { force?: boolean; request?: ApiRequestOptions; archiveMode?: 'active' | 'archived' | 'all' } = {},
 ): Promise<SessionHubResult> {
-  const key = workdir;
+  const archiveMode = opts.archiveMode || 'active';
+  const key = `${workdir}:${archiveMode}`;
   if (!opts.force) {
     const cached = getFreshValue(workspaceCache, key);
     if (cached) return cached;
@@ -109,7 +110,7 @@ export async function loadWorkspaceSessions(
   const existing = workspaceCache.get(key);
   if (existing?.promise) return existing.promise;
 
-  const request = api.getWorkspaceSessions(workdir, opts.request).then(result => {
+  const request = api.getWorkspaceSessions(workdir, { archiveMode }, opts.request).then(result => {
     touchCacheEntry(workspaceCache, key, {
       value: result,
       expiresAt: result.ok ? Date.now() + WORKSPACE_CACHE_TTL_MS : 0,

@@ -344,6 +344,9 @@ export interface ManagedSessionRecord {
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote: string | null;
+  pinned: boolean;
+  archived: boolean;
+  archivedAt: string | null;
   lastQuestion: string | null;
   lastAnswer: string | null;
   lastMessageText: string | null;
@@ -352,6 +355,8 @@ export interface ManagedSessionRecord {
   migratedFrom: SessionLineageRef | null;
   migratedTo: SessionLineageRef | null;
   linkedSessions: SessionLineageRef[];
+  sideChatOf: SessionSideChatParentRef | null;
+  sideChats: SessionSideChatRef[];
   numTurns?: number | null;
   /**
    * Set when this session was created by switching agent away from a prior session.
@@ -385,6 +390,22 @@ export interface SessionLineageRef {
 export interface HandoverRef {
   agent: Agent;
   sessionId: string;
+}
+
+/** Parent pointer recorded on a side chat session. */
+export interface SessionSideChatParentRef {
+  agent: Agent;
+  sessionId: string;
+}
+
+/** Child side-chat reference recorded on the parent session. */
+export interface SessionSideChatRef {
+  agent: Agent;
+  sessionId: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+  hidden?: boolean;
 }
 
 /** The run-state of a session: running, completed, or incomplete. */
@@ -422,12 +443,17 @@ export interface SessionInfo {
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote: string | null;
+  pinned?: boolean;
+  archived?: boolean;
+  archivedAt?: string | null;
   lastQuestion: string | null;
   lastAnswer: string | null;
   lastMessageText: string | null;
   migratedFrom: SessionLineageRef | null;
   migratedTo: SessionLineageRef | null;
   linkedSessions: SessionLineageRef[];
+  sideChatOf?: SessionSideChatParentRef | null;
+  sideChats?: SessionSideChatRef[];
   numTurns: number | null;
   handoverFrom?: HandoverRef | null;
 }

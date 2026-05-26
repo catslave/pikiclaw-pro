@@ -511,6 +511,31 @@ export const SessionPanel = memo(function SessionPanel({
     setStreamPollNonce(current => current + 1);
   }, []);
 
+  const handleReorderQueuedTasks = useCallback(async (taskIds: string[]) => {
+    if (!session.agent || !session.sessionId || taskIds.length < 2) return;
+    const order = new Map(taskIds.map((taskId, idx) => [taskId, idx]));
+    setQueuedTaskIds(taskIds);
+    setQueuedTasks(prev => {
+      const byId = new Map(prev.map(task => [task.taskId, task]));
+      return taskIds.map(taskId => byId.get(taskId)).filter((task): task is { taskId: string; prompt: string } => !!task);
+    });
+    setPendingQueuedSends(prev => [...prev].sort((a, b) => {
+      const ai = a.taskId ? order.get(a.taskId) : undefined;
+      const bi = b.taskId ? order.get(b.taskId) : undefined;
+      if (ai == null && bi == null) return 0;
+      if (ai == null) return 1;
+      if (bi == null) return -1;
+      return ai - bi;
+    }));
+    try {
+      const res = await api.reorderSessionQueue(session.agent, session.sessionId, taskIds);
+      if (!res.ok) requestStreamPolling();
+      if (res.queuedTaskIds?.length) setQueuedTaskIds(res.queuedTaskIds);
+    } catch {
+      requestStreamPolling();
+    }
+  }, [requestStreamPolling, session.agent, session.sessionId]);
+
   const handleRecallTask = useCallback(async (taskId: string) => {
     try {
       await api.recallSessionMessage(taskId);
@@ -872,6 +897,7 @@ export const SessionPanel = memo(function SessionPanel({
         pendingQueuedSends={pendingQueuedSends}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}
+        onReorderQueued={handleReorderQueuedTasks}
         onStopAll={handleStopAll}
         editDraft={editDraft}
         onEditDraftConsumed={() => setEditDraft(null)}

@@ -3,7 +3,7 @@ import { categorizeAssistantBlocks } from '../dashboard/src/pages/sessions/Assis
 import type { MessageBlock } from '../dashboard/src/types.ts';
 
 describe('AssistantContent block categorization', () => {
-  it('renders explicit commentary blocks as normal output instead of activity notes', () => {
+  it('routes explicit commentary blocks into working narrative instead of final output', () => {
     const commentary: MessageBlock = {
       type: 'text',
       content: 'Tracing the Codex stream pipeline first.',
@@ -30,6 +30,7 @@ describe('AssistantContent block categorization', () => {
     const categorized = categorizeAssistantBlocks([commentary, toolUse, toolResult, finalAnswer]);
 
     expect(categorized.activityBlocks).toEqual([toolUse, toolResult]);
-    expect(categorized.outputBlocks).toEqual([commentary, finalAnswer]);
+    expect(categorized.narrativeBlocks).toEqual([commentary]);
+    expect(categorized.outputBlocks).toEqual([finalAnswer]);
   });
 });

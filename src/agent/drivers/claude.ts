@@ -1138,7 +1138,7 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
 function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
   // Merge pikiclaw-tracked sessions with native Claude sessions
-  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'claude').map(record => ({
+  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'claude', undefined, { includeSideChats: true }).map(record => ({
     sessionId: record.sessionId,
     agent: 'claude' as const,
     workdir: record.workdir,
@@ -1156,12 +1156,17 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
+    pinned: record.pinned === true,
+    archived: record.archived === true,
+    archivedAt: record.archivedAt ?? null,
     lastQuestion: record.lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText: record.lastMessageText,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    sideChatOf: record.sideChatOf ?? null,
+    sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);

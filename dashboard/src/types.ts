@@ -128,6 +128,7 @@ export interface BotStatus {
     totalTurns: number;
     totalInputTokens: number;
     totalOutputTokens: number;
+    totalCachedTokens?: number;
   };
   activeTasks: number;
   sessions: number;
@@ -359,10 +360,15 @@ export interface SessionInfo {
   } | null;
   userStatus?: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote?: string | null;
+  pinned?: boolean;
+  archived?: boolean;
+  archivedAt?: string | null;
   workspacePath?: string | null;
   migratedFrom?: SessionLineageRef | null;
   migratedTo?: SessionLineageRef | null;
   linkedSessions?: SessionLineageRef[];
+  sideChatOf?: SessionSideChatParentRef | null;
+  sideChats?: SessionSideChatRef[];
   numTurns?: number | null;
 }
 
@@ -374,6 +380,20 @@ export interface SessionLineageRef {
   kind?: 'migrate' | 'fork';
   /** 0-based turn index where the fork occurred (set on `migratedFrom` only). */
   forkedAtTurn?: number;
+}
+
+export interface SessionSideChatParentRef {
+  agent: Agent | string;
+  sessionId: string;
+}
+
+export interface SessionSideChatRef {
+  agent: Agent | string;
+  sessionId: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+  hidden?: boolean;
 }
 
 export interface WorkspaceEntry {

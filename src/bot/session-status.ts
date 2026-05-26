@@ -30,6 +30,7 @@ function getSessionRuntime(bot: SessionLookupBot, session: SessionLookupInfo): S
 function resolveIsRunning(session: SessionLookupInfo, runtime: SessionRuntime | null): { isRunning: boolean; isStale: boolean } {
   if (runtime?.runningTaskIds.size) return { isRunning: true, isStale: false };
   if (!session.running) return { isRunning: false, isStale: false };
+  if (session.runPid === process.pid) return { isRunning: false, isStale: true };
   const stale = isRunningSessionStale(
     {
       runState: session.runState ?? 'running',

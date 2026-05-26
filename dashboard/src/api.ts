@@ -333,8 +333,16 @@ export const api = {
 
   // Session hub
   getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),
-  getWorkspaceSessions: (workdir: string, opts?: ApiRequestOptions) =>
-    post<SessionHubResult>('/api/session-hub/sessions', { workdir }, opts),
+  getWorkspaceSessions: (
+    workdir: string,
+    params: { archiveMode?: 'active' | 'archived' | 'all' } = {},
+    opts?: ApiRequestOptions,
+  ) =>
+    post<SessionHubResult>(
+      '/api/session-hub/sessions',
+      { workdir, ...(params.archiveMode ? { archiveMode: params.archiveMode } : {}) },
+      opts,
+    ),
   getSessionMessages: (
     workdir: string,
     agent: string,
@@ -381,6 +389,30 @@ export const api = {
     post<{ ok: boolean; updated?: boolean; error?: string }>(
       '/api/session-hub/session/title',
       { workdir, agent, sessionId, title },
+      opts,
+    ),
+  updateSessionPinned: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    pinned: boolean,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>(
+      '/api/session-hub/session/pinned',
+      { workdir, agent, sessionId, pinned },
+      opts,
+    ),
+  updateSessionArchived: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    archived: boolean,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>(
+      '/api/session-hub/session/archive',
+      { workdir, agent, sessionId, archived },
       opts,
     ),
   deleteSession: (
@@ -497,6 +529,23 @@ export const api = {
       },
       { timeoutMs: 30_000, ...opts },
     ),
+  createSideChat: (
+    workdir: string,
+    agent: string,
+    parentSessionId: string,
+    title?: string | null,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; session?: import('./types').SessionInfo | null; parent?: import('./types').SessionInfo | null; sessionKey?: string; error?: string | null }>(
+      '/api/session-hub/session/side-chat',
+      {
+        workdir,
+        agent,
+        sessionId: parentSessionId,
+        ...(title ? { title } : {}),
+      },
+      { timeoutMs: 30_000, ...opts },
+    ),
   recallSessionMessage: (taskId: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; recalled?: boolean; error?: string }>(
       '/api/session-hub/session/recall',
@@ -519,6 +568,12 @@ export const api = {
     post<{ ok: boolean; steered?: boolean; error?: string }>(
       '/api/session-hub/session/steer',
       { taskId },
+      opts,
+    ),
+  reorderSessionQueue: (agent: string, sessionId: string, taskIds: string[], opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; reordered?: boolean; queuedTaskIds?: string[]; error?: string }>(
+      '/api/session-hub/session/reorder-queue',
+      { agent, sessionId, taskIds },
       opts,
     ),
 

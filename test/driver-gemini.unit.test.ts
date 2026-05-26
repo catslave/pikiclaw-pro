@@ -357,6 +357,7 @@ describe('Gemini session messages content cleanup', () => {
       role: 'user',
       text: 'tell me a joke',
       blocks: [{ type: 'text', content: 'tell me a joke' }],
+      createdAt: '2026-03-16T00:00:00.000Z',
     });
   });
 

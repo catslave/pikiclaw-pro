@@ -23,6 +23,7 @@ import {
   listModels,
   mergeManagedAndNativeSessions,
   promoteSessionId,
+  recordSideChat,
   sanitizeSessionUserPreviewText,
   sessionListDisplayTitle,
   shutdownCodexServer,
@@ -30,6 +31,7 @@ import {
   updateSessionMeta,
   type StreamOpts,
 } from '../src/agent/index.ts';
+import { querySessions } from '../src/bot/session-hub.ts';
 import { makeTmpDir, withTempHome } from './support/env.ts';
 
 const tmpDir = path.join(os.tmpdir(), 'pikiclaw-test-' + process.pid);
@@ -566,6 +568,100 @@ describe('stageSessionFiles', () => {
     const records = listPikiclawSessions(workdir, 'codex');
     expect(records.map(entry => entry.sessionId)).toContain('thread-native');
     expect(records.map(entry => entry.sessionId)).not.toContain(staged.sessionId);
+  });
+
+  it('records side chats on the parent while hiding them from the default session list', () => {
+    const workdir = makeTmpDir('pikiclaw-side-chat-');
+    ensureManagedSession({
+      agent: 'codex',
+      workdir,
+      sessionId: 'parent-thread',
+      title: 'Parent chat',
+    });
+    const staged = stageSessionFiles({
+      agent: 'codex',
+      workdir,
+      files: [],
+      title: 'Side note',
+      handoverFrom: { agent: 'codex', sessionId: 'parent-thread' },
+    });
+
+    expect(recordSideChat(workdir, {
+      parent: { agent: 'codex', sessionId: 'parent-thread' },
+      child: { agent: 'codex', sessionId: staged.sessionId },
+    })).toBe(true);
+
+    const visible = listPikiclawSessions(workdir, 'codex');
+    expect(visible.map(entry => entry.sessionId)).toEqual(['parent-thread']);
+
+    const all = listPikiclawSessions(workdir, 'codex', undefined, { includeSideChats: true });
+    const parent = all.find(entry => entry.sessionId === 'parent-thread');
+    const child = all.find(entry => entry.sessionId === staged.sessionId);
+    expect(parent?.sideChats).toEqual([expect.objectContaining({
+      agent: 'codex',
+      sessionId: staged.sessionId,
+      title: 'Side note',
+    })]);
+    expect(child?.sideChatOf).toEqual({ agent: 'codex', sessionId: 'parent-thread' });
+    expect(child?.handoverFrom).toEqual({ agent: 'codex', sessionId: 'parent-thread' });
+  });
+
+  it('updates parent side-chat references when a pending side chat is promoted', () => {
+    const workdir = makeTmpDir('pikiclaw-side-promote-');
+    ensureManagedSession({
+      agent: 'codex',
+      workdir,
+      sessionId: 'parent-thread',
+    });
+    const staged = stageSessionFiles({
+      agent: 'codex',
+      workdir,
+      files: [],
+      title: 'Side note',
+      handoverFrom: { agent: 'codex', sessionId: 'parent-thread' },
+    });
+    recordSideChat(workdir, {
+      parent: { agent: 'codex', sessionId: 'parent-thread' },
+      child: { agent: 'codex', sessionId: staged.sessionId },
+    });
+
+    promoteSessionId(workdir, 'codex', staged.sessionId, 'native-side-thread');
+
+    const all = listPikiclawSessions(workdir, 'codex', undefined, { includeSideChats: true });
+    const parent = all.find(entry => entry.sessionId === 'parent-thread');
+    const child = all.find(entry => entry.sessionId === 'native-side-thread');
+    expect(parent?.sideChats.map(ref => ref.sessionId)).toEqual(['native-side-thread']);
+    expect(child?.sideChatOf).toEqual({ agent: 'codex', sessionId: 'parent-thread' });
+    expect(listPikiclawSessions(workdir, 'codex').map(entry => entry.sessionId)).not.toContain('native-side-thread');
+  });
+
+  it('hides archived sessions from default hub queries and restores them on demand', async () => {
+    const workdir = makeTmpDir('pikiclaw-archive-');
+    ensureManagedSession({
+      agent: 'hermes',
+      workdir,
+      sessionId: 'active-session',
+      title: 'Active chat',
+    });
+    ensureManagedSession({
+      agent: 'hermes',
+      workdir,
+      sessionId: 'archived-session',
+      title: 'Archived chat',
+    });
+
+    expect(updateSessionMeta(workdir, 'hermes', 'archived-session', { archived: true })).toBe(true);
+
+    const activeOnly = await querySessions({ workdir, agent: 'hermes' });
+    expect(activeOnly.sessions.map(session => session.sessionId)).toEqual(['active-session']);
+
+    const archivedOnly = await querySessions({ workdir, agent: 'hermes', archiveMode: 'archived' });
+    expect(archivedOnly.sessions.map(session => session.sessionId)).toEqual(['archived-session']);
+    expect(archivedOnly.sessions[0]?.archived).toBe(true);
+
+    expect(updateSessionMeta(workdir, 'hermes', 'archived-session', { archived: false })).toBe(true);
+    const restored = await querySessions({ workdir, agent: 'hermes' });
+    expect(restored.sessions.map(session => session.sessionId).sort()).toEqual(['active-session', 'archived-session']);
   });
 
   it('keeps per-agent records distinct even when session ids match, and resolves thread bindings by agent', () => {
@@ -2149,6 +2245,23 @@ exit 1`;
     record = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === 'sess-status');
     expect(record?.runState).toBe('incomplete');
     expect(record?.runDetail).toContain('quota exceeded');
+  });
+
+  it('creates a managed metadata overlay when pinning a native-only session', () => {
+    const workdir = makeTmpDir('pikiclaw-native-pin-');
+
+    expect(updateSessionMeta(workdir, 'codex', 'native-thread', { pinned: true })).toBe(true);
+
+    let record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === 'native-thread');
+    expect(record?.pinned).toBe(true);
+    expect(record?.threadId).toBe('legacy:codex:native-thread');
+    expect(record?.workspacePath).toBe(path.join(workdir, '.pikiclaw', 'sessions', 'codex', 'native-thread', 'workspace'));
+
+    expect(updateSessionMeta(workdir, 'codex', 'native-thread', { pinned: false, title: 'Renamed native thread' })).toBe(true);
+    record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === 'native-thread');
+    expect(record?.pinned).toBe(false);
+    expect(record?.title).toBe('Renamed native thread');
+    expect(record?.titleSource).toBe('user');
   });
 
   it('routes to claude, clears stale manifests, and uses stream-json attachments only when needed', async () => {

@@ -4,6 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { registerDriver, type AgentDriver } from '../driver.js';
 import { terminateProcessTree } from '../../core/process-control.js';
@@ -260,8 +261,29 @@ export interface CodexThreadGoal {
 }
 
 const CODEX_GOAL_RPC_TIMEOUT_MS = 15_000;
+const CODEX_THREAD_GOALS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS thread_goals (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    goal_id TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'active',
+        'paused',
+        'blocked',
+        'usage_limited',
+        'budget_limited',
+        'complete'
+    )),
+    token_budget INTEGER,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);`;
+let codexGoalCompatSchemaChecked = false;
 
 async function ensureSharedServerForGoal(): Promise<CodexAppServer | null> {
+  ensureCodexGoalCompatSchema();
   const srv = getSharedServer();
   if (!(await srv.ensureRunning())) return null;
   return srv;
@@ -283,6 +305,193 @@ function unwrapGoal(raw: any): CodexThreadGoal | null {
   };
 }
 
+function isMissingThreadGoalsError(error: unknown): boolean {
+  const message = typeof error === 'string'
+    ? error
+    : typeof (error as any)?.message === 'string'
+      ? (error as any).message
+      : String(error ?? '');
+  return /no such table:\s*thread_goals/i.test(message);
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqliteExec(dbPath: string, sql: string): void {
+  execSync(`sqlite3 ${Q(dbPath)} ${Q(sql)}`, {
+    encoding: 'utf-8',
+    timeout: 3000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function sqliteJsonRows(dbPath: string, sql: string): any[] {
+  const out = execSync(`sqlite3 -json ${Q(dbPath)} ${Q(sql)}`, {
+    encoding: 'utf-8',
+    timeout: 3000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  if (!out) return [];
+  const parsed = JSON.parse(out);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function latestCodexSqlite(root: string, pattern: RegExp): string | null {
+  if (!fs.existsSync(root)) return null;
+  try {
+    const files = fs.readdirSync(root)
+      .filter(name => pattern.test(name))
+      .map(name => ({ name, full: path.join(root, name), mtime: fs.statSync(path.join(root, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return files[0]?.full || null;
+  } catch { return null; }
+}
+
+function codexGoalStateDbPath(): string | null {
+  return latestCodexSqlite(codexHome(), /^state.*\.sqlite$/i);
+}
+
+function codexGoalDbPath(): string {
+  const root = codexHome();
+  return latestCodexSqlite(root, /^goals.*\.sqlite$/i) || path.join(root, 'goals_1.sqlite');
+}
+
+function ensureCodexGoalCompatSchema(): void {
+  if (codexGoalCompatSchemaChecked) return;
+  codexGoalCompatSchemaChecked = true;
+  const dbPath = codexGoalStateDbPath();
+  if (!dbPath) return;
+  try {
+    sqliteExec(dbPath, CODEX_THREAD_GOALS_SCHEMA_SQL);
+  } catch (error) {
+    agentWarn(`[codex-rpc] failed to ensure thread_goals compatibility schema: ${(error as any)?.message || error}`);
+  }
+}
+
+function normalizeCodexGoalStatus(status: unknown): CodexGoalStatus {
+  if (status === 'paused') return 'paused';
+  if (status === 'complete') return 'complete';
+  if (status === 'budgetLimited' || status === 'budget_limited' || status === 'usage_limited') return 'budgetLimited';
+  if (status === 'blocked') return 'paused';
+  return 'active';
+}
+
+function codexStatusToDbStatus(status: CodexGoalStatus): string {
+  return status === 'budgetLimited' ? 'budget_limited' : status;
+}
+
+function dbRowToCodexGoal(row: any): CodexThreadGoal | null {
+  if (!row || typeof row.threadId !== 'string') return null;
+  return {
+    threadId: row.threadId,
+    objective: String(row.objective ?? ''),
+    status: normalizeCodexGoalStatus(row.status),
+    tokenBudget: typeof row.tokenBudget === 'number' ? row.tokenBudget : null,
+    tokensUsed: typeof row.tokensUsed === 'number' ? row.tokensUsed : 0,
+    timeUsedSeconds: typeof row.timeUsedSeconds === 'number' ? row.timeUsedSeconds : 0,
+    createdAt: typeof row.createdAt === 'number' ? row.createdAt : 0,
+    updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : 0,
+  };
+}
+
+function readCodexGoalFromDb(threadId: string): CodexThreadGoal | null {
+  const candidates = [codexGoalStateDbPath(), codexGoalDbPath()].filter((v, idx, arr): v is string => !!v && arr.indexOf(v) === idx);
+  for (const dbPath of candidates) {
+    try {
+      if (path.basename(dbPath).startsWith('goals')) sqliteExec(dbPath, CODEX_THREAD_GOALS_SCHEMA_SQL);
+      const rows = sqliteJsonRows(dbPath, `
+SELECT
+  thread_id AS threadId,
+  objective AS objective,
+  status AS status,
+  token_budget AS tokenBudget,
+  tokens_used AS tokensUsed,
+  time_used_seconds AS timeUsedSeconds,
+  created_at_ms AS createdAt,
+  updated_at_ms AS updatedAt
+FROM thread_goals
+WHERE thread_id = ${sqlString(threadId)}
+LIMIT 1;`);
+      const goal = dbRowToCodexGoal(rows[0]);
+      if (goal) return goal;
+    } catch {}
+  }
+  return null;
+}
+
+function writeCodexGoalToDb(opts: {
+  threadId: string;
+  objective?: string;
+  status?: CodexGoalStatus;
+  tokenBudget?: number | null;
+}): { ok: true; goal: CodexThreadGoal | null } | { ok: false; error: string } {
+  const dbPath = codexGoalStateDbPath() || codexGoalDbPath();
+  try {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    sqliteExec(dbPath, CODEX_THREAD_GOALS_SCHEMA_SQL);
+    const existing = readCodexGoalFromDb(opts.threadId);
+    if (!existing && typeof opts.objective !== 'string') return { ok: true, goal: null };
+
+    const now = Date.now();
+    const objective = typeof opts.objective === 'string' ? opts.objective : existing?.objective || '';
+    const status = codexStatusToDbStatus(opts.status ?? existing?.status ?? 'active');
+    const tokenBudget = opts.tokenBudget !== undefined
+      ? (typeof opts.tokenBudget === 'number' && opts.tokenBudget > 0 ? Math.floor(opts.tokenBudget) : null)
+      : existing?.tokenBudget ?? null;
+    const createdAt = existing?.createdAt || now;
+    const goalId = `piki-${crypto.randomUUID()}`;
+
+    sqliteExec(dbPath, `
+INSERT INTO thread_goals (
+  thread_id,
+  goal_id,
+  objective,
+  status,
+  token_budget,
+  tokens_used,
+  time_used_seconds,
+  created_at_ms,
+  updated_at_ms
+) VALUES (
+  ${sqlString(opts.threadId)},
+  ${sqlString(goalId)},
+  ${sqlString(objective)},
+  ${sqlString(status)},
+  ${tokenBudget == null ? 'NULL' : String(tokenBudget)},
+  ${existing?.tokensUsed ?? 0},
+  ${existing?.timeUsedSeconds ?? 0},
+  ${createdAt},
+  ${now}
+) ON CONFLICT(thread_id) DO UPDATE SET
+  goal_id = excluded.goal_id,
+  objective = excluded.objective,
+  status = excluded.status,
+  token_budget = excluded.token_budget,
+  tokens_used = excluded.tokens_used,
+  time_used_seconds = excluded.time_used_seconds,
+  created_at_ms = excluded.created_at_ms,
+  updated_at_ms = excluded.updated_at_ms;`);
+
+    return { ok: true, goal: readCodexGoalFromDb(opts.threadId) };
+  } catch (error) {
+    return { ok: false, error: String((error as any)?.message || error) };
+  }
+}
+
+function clearCodexGoalFromDb(threadId: string): { ok: boolean; error?: string } {
+  const candidates = [codexGoalStateDbPath(), codexGoalDbPath()].filter((v, idx, arr): v is string => !!v && arr.indexOf(v) === idx);
+  try {
+    for (const dbPath of candidates) {
+      if (path.basename(dbPath).startsWith('goals')) sqliteExec(dbPath, CODEX_THREAD_GOALS_SCHEMA_SQL);
+      sqliteExec(dbPath, `DELETE FROM thread_goals WHERE thread_id = ${sqlString(threadId)};`);
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: String((error as any)?.message || error) };
+  }
+}
+
 /** Set / replace the active goal on a codex thread. Codex auto-starts a continuation turn if it is idle. */
 export async function setCodexGoal(opts: {
   threadId: string;
@@ -297,7 +506,13 @@ export async function setCodexGoal(opts: {
   if (opts.status) params.status = opts.status;
   if (opts.tokenBudget !== undefined) params.tokenBudget = opts.tokenBudget;
   const resp = await srv.call('thread/goal/set', params, CODEX_GOAL_RPC_TIMEOUT_MS);
-  if (resp?.error) return { ok: false, error: String(resp.error.message || 'thread/goal/set failed') };
+  if (resp?.error) {
+    if (isMissingThreadGoalsError(resp.error)) {
+      agentWarn(`[codex-rpc] thread/goal/set hit missing thread_goals table; using sqlite fallback`);
+      return writeCodexGoalToDb(opts);
+    }
+    return { ok: false, error: String(resp.error.message || 'thread/goal/set failed') };
+  }
   return { ok: true, goal: unwrapGoal(resp?.result) };
 }
 
@@ -306,6 +521,10 @@ export async function getCodexGoal(threadId: string): Promise<CodexThreadGoal | 
   if (!srv) return null;
   const resp = await srv.call('thread/goal/get', { threadId }, CODEX_GOAL_RPC_TIMEOUT_MS);
   if (resp?.error) {
+    if (isMissingThreadGoalsError(resp.error)) {
+      agentWarn(`[codex-rpc] thread/goal/get hit missing thread_goals table; using sqlite fallback`);
+      return readCodexGoalFromDb(threadId);
+    }
     agentWarn(`[codex-rpc] thread/goal/get error: ${resp.error.message || resp.error}`);
     return null;
   }
@@ -316,7 +535,13 @@ export async function clearCodexGoal(threadId: string): Promise<{ ok: boolean; e
   const srv = await ensureSharedServerForGoal();
   if (!srv) return { ok: false, error: 'codex app-server unavailable' };
   const resp = await srv.call('thread/goal/clear', { threadId }, CODEX_GOAL_RPC_TIMEOUT_MS);
-  if (resp?.error) return { ok: false, error: String(resp.error.message || 'thread/goal/clear failed') };
+  if (resp?.error) {
+    if (isMissingThreadGoalsError(resp.error)) {
+      agentWarn(`[codex-rpc] thread/goal/clear hit missing thread_goals table; using sqlite fallback`);
+      return clearCodexGoalFromDb(threadId);
+    }
+    return { ok: false, error: String(resp.error.message || 'thread/goal/clear failed') };
+  }
   return { ok: true };
 }
 
@@ -1803,7 +2028,7 @@ function getCodexSessionTailFromRollout(opts: SessionTailOpts): SessionTailResul
 function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
   // Merge pikiclaw-tracked sessions with native Codex sessions
-  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'codex').map(record => ({
+  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'codex', undefined, { includeSideChats: true }).map(record => ({
     sessionId: record.sessionId,
     agent: 'codex' as const,
     workdir: record.workdir,
@@ -1821,12 +2046,17 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
+    pinned: record.pinned === true,
+    archived: record.archived === true,
+    archivedAt: record.archivedAt ?? null,
     lastQuestion: record.lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText: record.lastMessageText,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    sideChatOf: record.sideChatOf ?? null,
+    sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);

@@ -6,7 +6,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
-import { WorkingCard, WorkingPlanList, WorkingSection, WorkingSubAgentList, WorkingThinkingBlock } from './WorkingCard';
+import { WorkingActivitySummary, WorkingCard, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
 import type { RichMessage, MessageBlock } from '../../types';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -25,25 +25,33 @@ export function AssistantMsg({
   completedAt?: string | null;
   onOpenFileLink?: OpenFileLinkHandler;
 }) {
-  const { activityBlocks, thinkingBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
+  const { activityBlocks, thinkingBlocks, narrativeBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
+  const narrativeText = narrativeBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
   const thinkingText = thinkingBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
   const subAgents = subAgentBlocks.map(block => block.subAgent).filter(Boolean) as NonNullable<MessageBlock['subAgent']>[];
   const toolUseBlocks = activityBlocks.filter(block => block.type === 'tool_use');
+  const activitySummarySource = activityBlocks
+    .filter(block => block.type === 'tool_use')
+    .map(block => summarizeToolUse(block));
+  const activitySummary = summarizeWorkingActivity(activitySummarySource, t);
   const planSteps = latestPlan?.plan?.steps || [];
   const currentPlanStep = planSteps.find(step => step.status === 'inProgress')
     || [...planSteps].reverse().find(step => step.status === 'completed')
     || planSteps[0]
     || null;
-  const workingPreview = toolUseBlocks.length
-    ? summarizeToolUse(toolUseBlocks[toolUseBlocks.length - 1])
-    : currentPlanStep?.step || (thinkingText ? lastNLines(thinkingText, 1) : '');
+  const workingPreview = currentPlanStep?.step
+    || (narrativeText ? lastNLines(narrativeText, 1) : '')
+    || (thinkingText ? lastNLines(thinkingText, 1) : '')
+    || activitySummary[0]
+    || (toolUseBlocks.length ? summarizeToolUse(toolUseBlocks[toolUseBlocks.length - 1]) : '');
   const workingStepCount = toolUseBlocks.length
     || planSteps.length
     || subAgents.length
+    || narrativeBlocks.length
     || thinkingBlocks.length;
-  const hasWorking = activityBlocks.length > 0 || subAgents.length > 0 || !!latestPlan?.plan || !!thinkingText;
-  const hasContent = activityBlocks.length > 0 || subAgentBlocks.length > 0 || !!latestPlan?.plan || thinkingBlocks.length > 0 || outputBlocks.length > 0 || noticeBlocks.length > 0;
+  const hasWorking = activityBlocks.length > 0 || subAgents.length > 0 || !!latestPlan?.plan || !!thinkingText || !!narrativeText;
+  const hasContent = activityBlocks.length > 0 || subAgentBlocks.length > 0 || !!latestPlan?.plan || thinkingBlocks.length > 0 || narrativeBlocks.length > 0 || outputBlocks.length > 0 || noticeBlocks.length > 0;
   if (!hasContent) return null;
   return (
     <div className="space-y-3">
@@ -59,16 +67,11 @@ export function AssistantMsg({
           stepCount={workingStepCount}
         >
           <div className="space-y-3 px-3.5 py-3">
+            <WorkingNarrativeBlock text={narrativeText} t={t} />
             <WorkingPlanList plan={latestPlan?.plan} t={t} />
             <WorkingSubAgentList subAgents={subAgents} t={t} />
-            {activityBlocks.length > 0 && (
-              <WorkingSection label={t('hub.activity')}>
-                <div className="max-h-[260px] space-y-0.5 overflow-y-auto">
-                  {activityBlocks.map((block, i) => <ActivityLine key={i} block={block} />)}
-                </div>
-              </WorkingSection>
-            )}
             <WorkingThinkingBlock text={thinkingText} t={t} />
+            <WorkingActivitySummary lines={activitySummarySource} t={t} />
           </div>
         </WorkingCard>
       )}
@@ -79,11 +82,12 @@ export function AssistantMsg({
 }
 
 export function hasRenderableAssistant(message: RichMessage): boolean {
-  const { activityBlocks, thinkingBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
+  const { activityBlocks, thinkingBlocks, narrativeBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
   return outputBlocks.length > 0
     || activityBlocks.length > 0
     || subAgentBlocks.length > 0
     || thinkingBlocks.length > 0
+    || narrativeBlocks.length > 0
     || planBlocks.some(b => hasPlan(b.plan))
     || noticeBlocks.length > 0;
 }
@@ -91,6 +95,7 @@ export function hasRenderableAssistant(message: RichMessage): boolean {
 export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   activityBlocks: MessageBlock[];
   thinkingBlocks: MessageBlock[];
+  narrativeBlocks: MessageBlock[];
   planBlocks: MessageBlock[];
   subAgentBlocks: MessageBlock[];
   outputBlocks: MessageBlock[];
@@ -107,9 +112,10 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   return {
     activityBlocks: normalized.filter(b => b.type === 'tool_use' || b.type === 'tool_result'),
     thinkingBlocks: normalized.filter(b => b.type === 'thinking'),
+    narrativeBlocks: normalized.filter(b => b.type === 'text' && b.phase === 'commentary'),
     planBlocks: normalized.filter(b => b.type === 'plan' && hasPlan(b.plan)),
     subAgentBlocks: normalized.filter(b => b.type === 'sub_agent'),
-    outputBlocks: normalized.filter(b => b.type === 'text' || b.type === 'image'),
+    outputBlocks: normalized.filter(b => (b.type === 'text' && b.phase !== 'commentary') || b.type === 'image'),
     noticeBlocks: normalized.filter(b => b.type === 'system_notice'),
   };
 }

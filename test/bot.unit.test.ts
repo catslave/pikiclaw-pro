@@ -222,6 +222,42 @@ describe('Bot emitStream queue tracking', () => {
     expect(snap?.queuedTaskIds).toBeUndefined();
   });
 
+  it('reorders queued task ids and prompt previews for a session', () => {
+    const bot = new Bot() as any;
+    const sessionKey = 'codex:sess-reorder-queue';
+
+    for (const [idx, taskId] of ['q-1', 'q-2', 'q-3'].entries()) {
+      bot.beginTask({
+        taskId,
+        chatId: 'dashboard',
+        agent: 'codex',
+        sessionKey,
+        prompt: `prompt ${idx + 1}`,
+        attachments: [],
+        startedAt: idx + 1,
+        sourceMessageId: taskId,
+      });
+    }
+
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'run-1', agent: 'codex', sessionId: 'sess-reorder-queue' });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-1', position: 1 });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-2', position: 2 });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-3', position: 3 });
+
+    expect(bot.reorderSessionQueuedTasks(sessionKey, ['q-3', 'q-1', 'q-2'])).toEqual({
+      reordered: true,
+      queuedTaskIds: ['q-3', 'q-1', 'q-2'],
+    });
+
+    const snap = bot.getStreamSnapshot(sessionKey);
+    expect(snap?.queuedTaskIds).toEqual(['q-3', 'q-1', 'q-2']);
+    expect(snap?.queuedTasks).toEqual([
+      { taskId: 'q-3', prompt: 'prompt 3' },
+      { taskId: 'q-1', prompt: 'prompt 1' },
+      { taskId: 'q-2', prompt: 'prompt 2' },
+    ]);
+  });
+
   it('cancelling the active task drops the whole snapshot', () => {
     const bot = new Bot() as any;
     const sessionKey = 'claude:sess-active-cancel';
@@ -459,6 +495,61 @@ describe('Bot external session control', () => {
     expect(persisted.tasks).toEqual([]);
   });
 
+  it('runs reordered queued dashboard tasks in priority order', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    const prompts: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>(resolve => { firstStarted = resolve; });
+    const firstReleasePromise = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    doStreamMock.mockImplementation(async opts => {
+      prompts.push(opts.prompt);
+      if (opts.prompt === 'first') {
+        firstStarted();
+        await firstReleasePromise;
+      }
+      return makeStreamResult('codex', {
+        sessionId: 'sess-priority',
+        message: `${opts.prompt} done`,
+      });
+    });
+
+    const bot = new Bot();
+    bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-priority',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'first',
+    });
+    await firstStartedPromise;
+
+    const second = bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-priority',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'second',
+    });
+    const third = bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-priority',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'third',
+    });
+
+    expect(bot.reorderSessionQueuedTasks('codex:sess-priority', [third.taskId, second.taskId])).toMatchObject({
+      reordered: true,
+      queuedTaskIds: [third.taskId, second.taskId],
+    });
+    expect(JSON.parse(fs.readFileSync(process.env.PIKICLAW_TASK_QUEUE_FILE!, 'utf8')).tasks.map((task: any) => task.taskId))
+      .toEqual([third.taskId, second.taskId]);
+
+    releaseFirst();
+    await waitFor(() => prompts.length === 3 && bot.activeTasks.size === 0);
+
+    expect(prompts).toEqual(['first', 'third', 'second']);
+  });
+
   it('restores persisted queued tasks in queue order', async () => {
     const queueFile = process.env.PIKICLAW_TASK_QUEUE_FILE!;
     const workdir = process.env.PIKICLAW_WORKDIR!;
@@ -540,6 +631,22 @@ describe('Bot external session control', () => {
       text: 'partial reply',
       thinking: 'thinking...',
     });
+  });
+
+  it('drops stale live stream snapshots when the backing task is gone', () => {
+    const bot = new Bot();
+    bot.emitStream('codex:sess-stale', {
+      type: 'start',
+      taskId: 'missing-task',
+      agent: 'codex',
+      sessionId: 'sess-stale',
+      model: null,
+      effort: null,
+    });
+    const snap = (bot as any).streamSnapshots.get('codex:sess-stale');
+    snap.updatedAt = Date.now() - 31_000;
+
+    expect(bot.getStreamSnapshot('codex:sess-stale')).toBeNull();
   });
 
   it('migrates dashboard stream state and runtime tracking when codex promotes a pending session id', async () => {

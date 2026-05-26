@@ -730,7 +730,7 @@ function getNativeGeminiSessions(workdir: string): SessionInfo[] {
 function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
   // Merge pikiclaw-tracked sessions with native Gemini sessions
-  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'gemini').map(record => ({
+  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'gemini', undefined, { includeSideChats: true }).map(record => ({
     sessionId: record.sessionId,
     agent: 'gemini' as const,
     workdir: record.workdir,
@@ -748,12 +748,17 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
+    pinned: record.pinned === true,
+    archived: record.archived === true,
+    archivedAt: record.archivedAt ?? null,
     lastQuestion: record.lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText: record.lastMessageText,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    sideChatOf: record.sideChatOf ?? null,
+    sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);

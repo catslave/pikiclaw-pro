@@ -17,7 +17,7 @@ export function normalizeTurnHistory(result: SessionMessagesResult): TurnHistory
   const richMessages = result.richMessages?.length
     ? result.richMessages
     : result.messages?.map(m => ({ role: m.role, text: m.text, blocks: [{ type: 'text' as const, content: m.text }] })) || [];
-  const turns = groupIntoTurns(richMessages);
+  const turns = groupIntoTurns(stripInternalHandoverMessages(richMessages));
   const totalTurns = Math.max(result.window?.totalTurns ?? result.totalTurns ?? turns.length, turns.length);
   const endTurn = result.window?.endTurn ?? totalTurns;
   const startTurn = result.window?.startTurn ?? Math.max(0, endTurn - turns.length);
@@ -84,6 +84,42 @@ export function groupIntoTurns(msgs: RichMessage[]): Turn[] {
   return turns;
 }
 
+function stripInternalHandoverMessages(messages: RichMessage[]): RichMessage[] {
+  return messages.flatMap(message => {
+    if (message.role !== 'user') return [message];
+    const stripped = stripHandoverSeed(message.text);
+    if (!stripped.handover) return [message];
+
+    const text = stripped.text.trimStart();
+    const nonTextBlocks = message.blocks.filter(block => block.type !== 'text');
+    if (!text && nonTextBlocks.length === 0) return [];
+    return [{
+      ...message,
+      text,
+      blocks: [
+        ...(text ? [{ type: 'text' as const, content: text }] : []),
+        ...nonTextBlocks,
+      ],
+    }];
+  });
+}
+
+export function stripHandoverSeed(text: string): { handover: boolean; text: string } {
+  const leadingWhitespace = text.match(/^\s*/)?.[0] || '';
+  const trimmedStart = text.slice(leadingWhitespace.length);
+  if (!/^<handover\b/i.test(trimmedStart)) return { handover: false, text };
+
+  const close = trimmedStart.search(/<\/handover>/i);
+  if (close < 0) return { handover: false, text };
+
+  const afterClose = trimmedStart.slice(close).replace(/^<\/handover>/i, '');
+  const withoutTrailer = afterClose.replace(
+    /^\s*\[Continuing this conversation\.[^\]]*\]\s*/i,
+    '',
+  );
+  return { handover: true, text: withoutTrailer };
+}
+
 /** Top-level XML wrappers Claude Code injects into role=user events for
  *  conversation infrastructure (background tasks, system reminders, IDE state,
  *  persisted-output truncations, etc.). Never render as a user bubble. */
@@ -107,7 +143,8 @@ const CONTINUATION_MARKERS = [
 /** Detect continuation/summary messages and system-injected events that Claude
  *  stores as role=user but never originated from the human. Detection is based
  *  on explicit tag/marker signatures only — never length — so legitimately long
- *  user content (pasted logs, code, pikiclaw's `<handover>` seed) still renders. */
+ *  user content (pasted logs, code) still renders. Pikiclaw's own `<handover>`
+ *  seed is stripped before turn grouping. */
 export function isContinuationSummary(text: string): boolean {
   const trimmed = text.trim();
   const leading = trimmed.match(/^<([a-z][a-z0-9_-]*)\b/i);
@@ -121,18 +158,39 @@ export function lastNLines(text: string, n: number): string {
   return lines.slice(-n).join('\n');
 }
 
-export type ComposerImageAttachment = { id: string; file: File; previewUrl: string };
+export type ComposerAttachmentStatus = 'adding' | 'ready' | 'failed';
 
-export function makeComposerImageAttachment(file: File): ComposerImageAttachment {
+export type ComposerAttachment = {
+  id: string;
+  file: File;
+  previewUrl?: string;
+  status: ComposerAttachmentStatus;
+  error?: string;
+};
+
+export function isImageFile(file: File): boolean {
+  if (file.type.startsWith('image/')) return true;
+  return /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file.name || '');
+}
+
+export function makeComposerAttachment(file: File, status: ComposerAttachmentStatus = 'ready'): ComposerAttachment {
   return {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     file,
-    previewUrl: URL.createObjectURL(file),
+    previewUrl: isImageFile(file) ? URL.createObjectURL(file) : undefined,
+    status,
   };
 }
 
-export function revokeComposerAttachments(items: ComposerImageAttachment[]) {
-  for (const item of items) URL.revokeObjectURL(item.previewUrl);
+export async function verifyComposerAttachmentFile(file: File): Promise<void> {
+  const sample = file.size > 0 ? file.slice(0, 1) : file;
+  await sample.arrayBuffer();
+}
+
+export function revokeComposerAttachments(items: ComposerAttachment[]) {
+  for (const item of items) {
+    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+  }
 }
 
 export function formatFileSize(bytes: number): string {

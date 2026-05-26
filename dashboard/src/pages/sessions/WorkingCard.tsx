@@ -73,6 +73,57 @@ function Badge({ children, title }: { children: ReactNode; title?: string }) {
   );
 }
 
+function normalizeActivityLine(line: string): string {
+  return line.replace(/\s+/g, ' ').trim();
+}
+
+function workingActivityLabels(lines: string[], t: (key: string) => string): string[] {
+  const seen = new Set<string>();
+  let files = 0;
+  let searches = 0;
+  let commands = 0;
+  let tools = 0;
+
+  for (const raw of lines) {
+    const line = normalizeActivityLine(raw);
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    const executed = line.match(/Executed\s+(\d+)\s+command/i);
+    if (executed) {
+      commands = Math.max(commands, Number(executed[1]) || 0);
+      continue;
+    }
+    if (/^(Bash|Shell|Command)\b/i.test(line) || /\b\/bin\/(zsh|bash|sh)\b/.test(line)) {
+      commands += 1;
+      continue;
+    }
+    if (/^(Read|Open|Edit|Write|File|Diff)\b/i.test(line) || /\b[A-Za-z0-9_.-]+\.(tsx?|jsx?|css|json|md|py|go|java|kt|rs|yaml|yml)\b/.test(line)) {
+      files += 1;
+      continue;
+    }
+    if (/^(Grep|Glob|Search|WebSearch|Find)\b/i.test(line) || /\b(rg|grep|find)\b/.test(line)) {
+      searches += 1;
+      continue;
+    }
+    if (!/^(result|ok|done)$/i.test(line)) tools += 1;
+  }
+
+  const labels: string[] = [];
+  if (files > 0 && searches > 0) {
+    labels.push(replaceVars(t('hub.activityExploredFilesSearches'), { files: String(files), searches: String(searches) }));
+  } else {
+    if (files > 0) labels.push(replaceVars(t('hub.activityExploredFiles'), { files: String(files) }));
+    if (searches > 0) labels.push(replaceVars(t('hub.activitySearches'), { searches: String(searches) }));
+  }
+  if (commands > 0) labels.push(replaceVars(t('hub.activityRanCommands'), { n: String(commands) }));
+  if (tools > 0) labels.push(replaceVars(t('hub.activityUsedTools'), { n: String(tools) }));
+  return labels;
+}
+
+export function summarizeWorkingActivity(lines: string[], t: (key: string) => string): string[] {
+  return workingActivityLabels(lines, t);
+}
+
 export function WorkingCard({
   phase,
   t,
@@ -209,6 +260,39 @@ export function WorkingThinkingBlock({ text, t }: { text: string; t: (key: strin
     <WorkingSection label={t('hub.thinking')}>
       <div className="max-h-[280px] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-inset px-3 py-2 text-[12px] leading-[1.7] text-fg-4">
         {text}
+      </div>
+    </WorkingSection>
+  );
+}
+
+export function WorkingNarrativeBlock({ text, t }: { text: string; t: (key: string) => string }) {
+  const cleaned = text.trim();
+  if (!cleaned) return null;
+  return (
+    <WorkingSection label={t('hub.process')}>
+      <div className="space-y-3 text-[13px] leading-[1.75] text-fg-3">
+        {cleaned.split(/\n{2,}/).map((part, index) => (
+          <p key={index} className="whitespace-pre-wrap break-words">
+            {part.trim()}
+          </p>
+        ))}
+      </div>
+    </WorkingSection>
+  );
+}
+
+export function WorkingActivitySummary({ lines, t }: { lines: string[]; t: (key: string) => string }) {
+  const labels = workingActivityLabels(lines, t);
+  if (!labels.length) return null;
+  return (
+    <WorkingSection label={t('hub.activitySummary')}>
+      <div className="space-y-1">
+        {labels.map((label, index) => (
+          <div key={`${index}:${label}`} className="flex items-center gap-2 py-[2px] text-[12px] leading-[1.5] text-fg-5">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fg-5/30" />
+            <span>{label}</span>
+          </div>
+        ))}
       </div>
     </WorkingSection>
   );

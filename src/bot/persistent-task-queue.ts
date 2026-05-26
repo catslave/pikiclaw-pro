@@ -90,3 +90,18 @@ export function removePersistedQueuedTask(taskId: string) {
   if (next.length === file.tasks.length) return;
   writeQueueFile({ version: 1, tasks: next });
 }
+
+export function reorderPersistedQueuedTasks(taskIds: string[]) {
+  if (!taskIds.length) return;
+  const order = new Map(taskIds.map((taskId, idx) => [taskId, idx]));
+  const file = readQueueFile();
+  const matching = file.tasks.filter(task => order.has(task.taskId));
+  if (matching.length < 2) return;
+  const baseCreatedAt = Math.min(...matching.map(task => task.createdAt));
+  const next = file.tasks.map(task => {
+    const idx = order.get(task.taskId);
+    return idx == null ? task : { ...task, createdAt: baseCreatedAt + idx };
+  });
+  next.sort((a, b) => a.createdAt - b.createdAt);
+  writeQueueFile({ version: 1, tasks: next });
+}

@@ -54,6 +54,7 @@ export interface SessionQueryOpts {
   agent?: Agent | Agent[];
   limit?: number;
   userStatus?: UserStatus[];
+  archiveMode?: 'active' | 'archived' | 'all';
 }
 
 /** Unified query result — superset of the old SessionListResult. */
@@ -86,6 +87,8 @@ export interface SessionPatch {
   title?: string | null;
   userStatus?: UserStatus | null;
   userNote?: string | null;
+  pinned?: boolean;
+  archived?: boolean;
   classification?: SessionClassification;
   migratedFrom?: { agent: Agent; sessionId: string };
   migratedTo?: { agent: Agent; sessionId: string };
@@ -174,6 +177,15 @@ export async function querySessions(opts: SessionQueryOpts): Promise<SessionQuer
   if (opts.userStatus?.length) {
     const allowed = new Set<string>(opts.userStatus);
     allSessions = allSessions.filter(s => allowed.has(resolveUserStatus(s)));
+  }
+
+  const archiveMode = opts.archiveMode || 'active';
+  if (archiveMode !== 'all') {
+    allSessions = allSessions.filter(session => (
+      archiveMode === 'archived'
+        ? session.archived === true
+        : session.archived !== true
+    ));
   }
 
   // Apply limit

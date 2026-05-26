@@ -10,6 +10,7 @@ import { cn } from './utils';
 
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
+const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
@@ -41,6 +42,8 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/dashboard': 'dashboard',
+    '/usage': 'usage',
+    '/archive': 'system',
     '/im': 'im',
     '/agents': 'agents',
     '/extensions': 'extensions',
@@ -53,7 +56,8 @@ function locationToTab(pathname: string): DashboardTab {
 function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/') return '/';
   if (pathname === '/permissions') return '/system';
-  if (['/dashboard', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (pathname === '/archive') return '/system';
+  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -250,6 +254,12 @@ export function App() {
                     <AgentTab />
                   </PageWrapper>
                 } />
+                <Route path="/usage" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <UsageTab />
+                  </PageWrapper>
+                } />
+                <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
                 <Route path="/permissions" element={<Navigate to="/system" replace />} />
                 <Route path="/extensions" element={
                   <PageWrapper title={tabMeta.title} description={tabMeta.description}>

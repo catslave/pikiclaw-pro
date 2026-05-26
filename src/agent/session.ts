@@ -32,6 +32,8 @@ import type {
   SessionTailResult,
   SessionMessagesWindow,
   HandoverRef,
+  SessionSideChatParentRef,
+  SessionSideChatRef,
 } from './types.js';
 import {
   dedupeStrings,
@@ -274,6 +276,46 @@ function normalizeHandoverRef(value: unknown): HandoverRef | null {
   return { agent: agent as Agent, sessionId };
 }
 
+function normalizeSideChatParentRef(value: unknown): SessionSideChatParentRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as { agent?: unknown; sessionId?: unknown };
+  const agent = typeof v.agent === 'string' ? v.agent.trim() : '';
+  const sessionId = typeof v.sessionId === 'string' ? v.sessionId.trim() : '';
+  if (!agent || !sessionId) return null;
+  return { agent: agent as Agent, sessionId };
+}
+
+function normalizeSideChatRef(value: unknown): SessionSideChatRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  const parent = normalizeSideChatParentRef(value);
+  if (!parent) return null;
+  const createdAt = typeof v.createdAt === 'string' && v.createdAt.trim() ? v.createdAt : new Date().toISOString();
+  const updatedAt = typeof v.updatedAt === 'string' && v.updatedAt.trim() ? v.updatedAt : createdAt;
+  return {
+    ...parent,
+    title: typeof v.title === 'string' && v.title.trim() ? v.title.trim() : null,
+    createdAt,
+    updatedAt,
+    ...(v.hidden === true ? { hidden: true } : {}),
+  };
+}
+
+function normalizeSideChatRefs(value: unknown): SessionSideChatRef[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const refs: SessionSideChatRef[] = [];
+  for (const entry of value) {
+    const ref = normalizeSideChatRef(entry);
+    if (!ref) continue;
+    const key = `${ref.agent}:${ref.sessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push(ref);
+  }
+  return refs;
+}
+
 interface SessionWorkspaceInfo {
   sessionId: string;
   workspacePath: string;
@@ -309,6 +351,9 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     classification: raw?.classification ?? null,
     userStatus: raw?.userStatus ?? null,
     userNote: typeof raw?.userNote === 'string' ? raw.userNote : null,
+    pinned: raw?.pinned === true,
+    archived: raw?.archived === true,
+    archivedAt: typeof raw?.archivedAt === 'string' && raw.archivedAt.trim() ? raw.archivedAt : null,
     lastQuestion: typeof raw?.lastQuestion === 'string' ? raw.lastQuestion : null,
     lastAnswer: typeof raw?.lastAnswer === 'string' ? raw.lastAnswer : null,
     lastMessageText: typeof raw?.lastMessageText === 'string' ? raw.lastMessageText : null,
@@ -317,6 +362,8 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     migratedFrom: raw?.migratedFrom ?? null,
     migratedTo: raw?.migratedTo ?? null,
     linkedSessions: Array.isArray(raw?.linkedSessions) ? raw.linkedSessions : [],
+    sideChatOf: normalizeSideChatParentRef(raw?.sideChatOf),
+    sideChats: normalizeSideChatRefs(raw?.sideChats),
     handoverFrom: normalizeHandoverRef(raw?.handoverFrom),
   };
 }
@@ -353,6 +400,9 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
+    pinned: record.pinned === true,
+    archived: record.archived === true,
+    archivedAt: record.archivedAt ?? null,
     lastQuestion: record.lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText: record.lastMessageText,
@@ -361,6 +411,8 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    sideChatOf: record.sideChatOf ?? null,
+    sideChats: record.sideChats ?? [],
     handoverFrom: record.handoverFrom ?? null,
   });
 }
@@ -415,6 +467,21 @@ function migrateSessionLayout(workdir: string, record: ManagedSessionRecord): Ma
 // Save / update
 // ---------------------------------------------------------------------------
 
+function upsertSideChatRef(parent: ManagedSessionRecord, child: ManagedSessionRecord, now: string) {
+  const refs = Array.isArray(parent.sideChats) ? parent.sideChats : [];
+  const nextRef: SessionSideChatRef = {
+    agent: child.agent,
+    sessionId: child.sessionId,
+    title: child.title,
+    createdAt: child.createdAt,
+    updatedAt: child.updatedAt || now,
+  };
+  const idx = refs.findIndex(ref => ref.agent === child.agent && ref.sessionId === child.sessionId);
+  parent.sideChats = idx >= 0
+    ? refs.map((ref, i) => i === idx ? { ...ref, ...nextRef, hidden: ref.hidden === true ? true : undefined } : ref)
+    : [...refs, nextRef];
+}
+
 export function saveSessionRecord(workdir: string, record: ManagedSessionRecord): ManagedSessionRecord {
   record = migrateSessionLayout(workdir, record);
   ensureDir(sessionDirPath(workdir, record.agent, record.sessionId));
@@ -425,28 +492,86 @@ export function saveSessionRecord(workdir: string, record: ManagedSessionRecord)
   const pos = index.sessions.findIndex(entry => entry.agent === record.agent && entry.sessionId === record.sessionId);
   if (pos >= 0) index.sessions[pos] = record;
   else index.sessions.unshift(record);
+  const parentRef = record.sideChatOf;
+  const parentRecord = parentRef
+    ? index.sessions.find(entry => entry.agent === parentRef.agent && entry.sessionId === parentRef.sessionId)
+    : null;
+  if (parentRecord) {
+    upsertSideChatRef(parentRecord, record, record.updatedAt);
+    parentRecord.updatedAt = record.updatedAt;
+  }
   index.sessions.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   writeSessionIndex(workdir, index.sessions);
+  if (parentRecord) writeSessionMeta(parentRecord);
   writeSessionMeta(record);
   return record;
 }
 
 /**
- * Update mutable session metadata (classification, userStatus, userNote, links, migration)
- * for an existing pikiclaw-managed session. Returns true if the record was found and updated.
+ * Update mutable session metadata (classification, userStatus, userNote, links, migration).
+ * User-owned metadata can be written to native-only sessions by creating a lightweight
+ * managed overlay, so actions like pin/rename persist for sessions discovered from an
+ * agent's own history.
  */
 export function updateSessionMeta(
   workdir: string,
   agent: Agent,
   sessionId: string,
-  patch: Partial<Pick<ManagedSessionRecord, 'title' | 'userStatus' | 'userNote' | 'classification' | 'migratedFrom' | 'migratedTo'>> & {
+  patch: Partial<Pick<ManagedSessionRecord, 'title' | 'userStatus' | 'userNote' | 'pinned' | 'archived' | 'classification' | 'migratedFrom' | 'migratedTo'>> & {
     addLink?: { agent: Agent; sessionId: string };
   },
 ): boolean {
   const resolvedWorkdir = path.resolve(workdir);
   const index = loadSessionIndex(resolvedWorkdir);
-  const record = index.sessions.find(s => s.sessionId === sessionId && s.agent === agent);
-  if (!record) return false;
+  let record = index.sessions.find(s => s.sessionId === sessionId && s.agent === agent);
+  if (!record) {
+    const canCreateMetadataOverlay = (
+      patch.title !== undefined
+      || patch.userStatus !== undefined
+      || patch.userNote !== undefined
+      || patch.pinned !== undefined
+      || patch.archived !== undefined
+    );
+    if (!canCreateMetadataOverlay) return false;
+
+    const now = new Date().toISOString();
+    record = {
+      sessionId,
+      agent,
+      workdir: resolvedWorkdir,
+      workspacePath: sessionWorkspacePath(resolvedWorkdir, agent, sessionId),
+      threadId: legacyThreadId(agent, sessionId),
+      createdAt: now,
+      updatedAt: now,
+      title: null,
+      titleSource: null,
+      model: null,
+      thinkingEffort: null,
+      stagedFiles: [],
+      runState: 'completed',
+      runDetail: null,
+      runUpdatedAt: null,
+      runPid: null,
+      classification: null,
+      userStatus: null,
+      userNote: null,
+      pinned: false,
+      archived: false,
+      archivedAt: null,
+      lastQuestion: null,
+      lastAnswer: null,
+      lastMessageText: null,
+      lastThinking: null,
+      lastPlan: null,
+      migratedFrom: null,
+      migratedTo: null,
+      linkedSessions: [],
+      sideChatOf: null,
+      sideChats: [],
+      handoverFrom: null,
+    };
+    index.sessions.unshift(record);
+  }
 
   if (patch.title !== undefined) {
     record.title = patch.title;
@@ -454,6 +579,11 @@ export function updateSessionMeta(
   }
   if (patch.userStatus !== undefined) record.userStatus = patch.userStatus;
   if (patch.userNote !== undefined) record.userNote = patch.userNote;
+  if (patch.pinned !== undefined) record.pinned = patch.pinned === true;
+  if (patch.archived !== undefined) {
+    record.archived = patch.archived === true;
+    record.archivedAt = record.archived ? (record.archivedAt || new Date().toISOString()) : null;
+  }
   if (patch.classification !== undefined) record.classification = patch.classification;
   if (patch.migratedFrom !== undefined) record.migratedFrom = patch.migratedFrom;
   if (patch.migratedTo !== undefined) record.migratedTo = patch.migratedTo;
@@ -466,6 +596,15 @@ export function updateSessionMeta(
   }
 
   record.updatedAt = new Date().toISOString();
+  const parentRef = record.sideChatOf;
+  const parentRecord = parentRef
+    ? index.sessions.find(entry => entry.agent === parentRef.agent && entry.sessionId === parentRef.sessionId)
+    : null;
+  if (parentRecord) {
+    upsertSideChatRef(parentRecord, record, record.updatedAt);
+    parentRecord.updatedAt = record.updatedAt;
+    writeSessionMeta(parentRecord);
+  }
   writeSessionIndex(resolvedWorkdir, index.sessions);
   writeSessionMeta(record);
   return true;
@@ -483,6 +622,15 @@ export function adoptAgentSessionTitle(workdir: string, agent: Agent, sessionId:
   record.titleSource = 'agent';
   record.updatedAt = new Date().toISOString();
 
+  const parentRef = record.sideChatOf;
+  const parentRecord = parentRef
+    ? index.sessions.find(entry => entry.agent === parentRef.agent && entry.sessionId === parentRef.sessionId)
+    : null;
+  if (parentRecord) {
+    upsertSideChatRef(parentRecord, record, record.updatedAt);
+    parentRecord.updatedAt = record.updatedAt;
+    writeSessionMeta(parentRecord);
+  }
   writeSessionIndex(resolvedWorkdir, index.sessions);
   writeSessionMeta(record);
   return true;
@@ -533,6 +681,28 @@ export function promoteSessionId(workdir: string, agent: Agent, pendingId: strin
   );
   record.sessionId = nativeId;
   record.workspacePath = sessionWorkspacePath(resolvedWorkdir, agent, nativeId);
+  if (record.sideChatOf) {
+    const parent = index.sessions.find(entry => (
+      entry.agent === record.sideChatOf!.agent
+      && entry.sessionId === record.sideChatOf!.sessionId
+    ));
+    if (parent?.sideChats?.length) {
+      const now = new Date().toISOString();
+      parent.sideChats = parent.sideChats.map(ref => (
+        ref.agent === agent && ref.sessionId === pendingId
+          ? { ...ref, sessionId: nativeId, title: record.title ?? ref.title, updatedAt: now }
+          : ref
+      ));
+      parent.updatedAt = now;
+      writeSessionMeta(parent);
+      const refreshed = loadSessionIndex(resolvedWorkdir);
+      const parentIdx = refreshed.sessions.findIndex(entry => entry.agent === parent.agent && entry.sessionId === parent.sessionId);
+      if (parentIdx >= 0) {
+        refreshed.sessions[parentIdx] = parent;
+        writeSessionIndex(resolvedWorkdir, refreshed.sessions);
+      }
+    }
+  }
   saveSessionRecord(resolvedWorkdir, record);
 }
 
@@ -578,6 +748,28 @@ export function recordFork(workdir: string, opts: {
   writeSessionIndex(resolvedWorkdir, index.sessions);
   writeSessionMeta(parent);
   writeSessionMeta(child);
+}
+
+export function recordSideChat(workdir: string, opts: {
+  parent: { agent: Agent; sessionId: string };
+  child: { agent: Agent; sessionId: string };
+}): boolean {
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const parent = index.sessions.find(e => e.agent === opts.parent.agent && e.sessionId === opts.parent.sessionId);
+  const child = index.sessions.find(e => e.agent === opts.child.agent && e.sessionId === opts.child.sessionId);
+  if (!parent || !child) return false;
+
+  const now = new Date().toISOString();
+  child.sideChatOf = { agent: parent.agent, sessionId: parent.sessionId };
+  upsertSideChatRef(parent, child, now);
+  parent.updatedAt = now;
+  child.updatedAt = now;
+
+  writeSessionIndex(resolvedWorkdir, index.sessions);
+  writeSessionMeta(parent);
+  writeSessionMeta(child);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -683,10 +875,12 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       title, titleSource: title ? 'prompt' : null, model: null, thinkingEffort: null, stagedFiles: [],
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
       runPid: null,
-      classification: null, userStatus: null, userNote: null,
+      classification: null, userStatus: null, userNote: null, pinned: false,
+      archived: false, archivedAt: null,
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
       lastThinking: null, lastPlan: null,
       migratedFrom: null, migratedTo: null, linkedSessions: [],
+      sideChatOf: null, sideChats: [],
       handoverFrom: normalizeHandoverRef(opts.handoverFrom),
     };
   }
@@ -736,12 +930,17 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
+    pinned: record.pinned === true,
+    archived: record.archived === true,
+    archivedAt: record.archivedAt ?? null,
     lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    sideChatOf: record.sideChatOf ?? null,
+    sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
     handoverFrom: record.handoverFrom ?? null,
   };
@@ -751,16 +950,31 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
 // Public session queries
 // ---------------------------------------------------------------------------
 
+export interface ListPikiclawSessionsOptions {
+  includeSideChats?: boolean;
+}
+
 // Exported for drivers
-export function listPikiclawSessions(workdir: string, agent: Agent, limit?: number): ManagedSessionRecord[] {
+export function listPikiclawSessions(
+  workdir: string,
+  agent: Agent,
+  limit?: number,
+  opts: ListPikiclawSessionsOptions = {},
+): ManagedSessionRecord[] {
   const records = loadSessionIndex(path.resolve(workdir)).sessions
     .filter(entry => entry.agent === agent)
+    .filter(entry => opts.includeSideChats === true || !entry.sideChatOf)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   return typeof limit === 'number' ? records.slice(0, limit) : records;
 }
 
 export function findPikiclawSession(workdir: string, agent: Agent, sessionId: string): ManagedSessionRecord | null {
-  return listPikiclawSessions(workdir, agent).find(entry => entry.sessionId === sessionId) || null;
+  return listPikiclawSessions(workdir, agent, undefined, { includeSideChats: true }).find(entry => entry.sessionId === sessionId) || null;
+}
+
+export function findPikiclawSessionInfo(workdir: string, agent: Agent, sessionId: string): SessionInfo | null {
+  const record = findPikiclawSession(workdir, agent, sessionId);
+  return record ? managedRecordToSessionInfo(record) : null;
 }
 
 export interface DeleteAgentSessionOpts {
@@ -829,6 +1043,25 @@ export async function deleteAgentSession(opts: DeleteAgentSessionOpts): Promise<
   }
 
   if (record) {
+    const now = new Date().toISOString();
+    if (record.sideChatOf) {
+      const parent = index.sessions.find(s => s.agent === record.sideChatOf!.agent && s.sessionId === record.sideChatOf!.sessionId);
+      if (parent?.sideChats?.length) {
+        parent.sideChats = parent.sideChats.filter(ref => !(ref.agent === agent && ref.sessionId === sessionId));
+        parent.updatedAt = now;
+        writeSessionMeta(parent);
+      }
+    }
+    if (record.sideChats?.length) {
+      const childKeys = new Set(record.sideChats.map(ref => `${ref.agent}:${ref.sessionId}`));
+      for (const child of index.sessions) {
+        if (!child.sideChatOf || !childKeys.has(`${child.agent}:${child.sessionId}`)) continue;
+        if (child.sideChatOf.agent !== agent || child.sideChatOf.sessionId !== sessionId) continue;
+        child.sideChatOf = null;
+        child.updatedAt = now;
+        writeSessionMeta(child);
+      }
+    }
     index.sessions.splice(recordIdx, 1);
     writeSessionIndex(resolvedWorkdir, index.sessions);
     result.recordRemoved = true;
@@ -976,6 +1209,9 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       classification: managed.classification ?? native.classification ?? null,
       userStatus: managed.userStatus ?? native.userStatus ?? null,
       userNote: managed.userNote ?? native.userNote ?? null,
+      pinned: managed.pinned === true,
+      archived: managed.archived === true,
+      archivedAt: managed.archivedAt ?? native.archivedAt ?? null,
       lastQuestion: useNativeTimeline
         ? (native.lastQuestion ?? managed.lastQuestion ?? null)
         : (managed.lastQuestion ?? native.lastQuestion ?? null),
@@ -988,6 +1224,8 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       migratedFrom: managed.migratedFrom ?? native.migratedFrom ?? null,
       migratedTo: managed.migratedTo ?? native.migratedTo ?? null,
       linkedSessions: managed.linkedSessions?.length ? managed.linkedSessions : (native.linkedSessions ?? []),
+      sideChatOf: managed.sideChatOf ?? native.sideChatOf ?? null,
+      sideChats: managed.sideChats?.length ? managed.sideChats : (native.sideChats ?? []),
       numTurns: useNativeTimeline ? (native.numTurns ?? managed.numTurns ?? null) : (managed.numTurns ?? native.numTurns ?? null),
     });
   }
@@ -997,8 +1235,9 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
     merged.push(managed);
   }
 
-  merged.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
-  return merged;
+  const visible = merged.filter(session => !session.sideChatOf);
+  visible.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
+  return visible;
 }
 
 // ---------------------------------------------------------------------------

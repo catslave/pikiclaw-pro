@@ -20,7 +20,9 @@ import {
   getSessionStreamState,
   queueDashboardSessionTask,
   forkDashboardSessionTask,
+  createDashboardSideChat,
   steerSessionTask,
+  reorderSessionQueuedTasks,
   interactionSelectOption,
   interactionSubmitText,
   interactionSkip,
@@ -396,6 +398,7 @@ app.post('/api/session-hub/sessions', async (c) => {
       agent: body?.agents,
       userStatus: body?.userStatus,
       limit: body?.limit,
+      archiveMode: body?.archiveMode === 'archived' || body?.archiveMode === 'all' ? body.archiveMode : 'active',
     });
     return c.json({
       ...result,
@@ -443,6 +446,36 @@ app.post('/api/session-hub/session/title', async (c) => {
       return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
     }
     const updated = updateSession(workdir, agent, sessionId, { title: title || null });
+    return c.json({ ok: true, updated });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/pinned', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId } = body || {};
+    const pinned = body?.pinned === true;
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const updated = updateSession(workdir, agent, sessionId, { pinned });
+    return c.json({ ok: true, updated });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/archive', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId } = body || {};
+    const archived = body?.archived === true;
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const updated = updateSession(workdir, agent, sessionId, { archived });
     return c.json({ ok: true, updated });
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
@@ -734,6 +767,27 @@ app.post('/api/session-hub/session/fork', async (c) => {
   }
 });
 
+app.post('/api/session-hub/session/side-chat', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId, title } = body || {};
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const result = createDashboardSideChat({
+      workdir,
+      agent,
+      parentSessionId: sessionId,
+      title: title || null,
+    });
+    if (!result.ok) return c.json(result, 400);
+    runtime.debug(`[session-side-chat] parent=${agent}:${sessionId} child=${result.sessionKey}`);
+    return c.json(result);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
 app.post('/api/session-hub/session/recall', async (c) => {
   try {
     const body = await c.req.json();
@@ -774,6 +828,20 @@ app.post('/api/session-hub/session/steer', async (c) => {
     }
     const result = await steerSessionTask(taskId);
     return c.json(result, result.ok ? 200 : 503);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/reorder-queue', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { agent, sessionId, taskIds } = body || {};
+    if (!agent || !sessionId || !Array.isArray(taskIds)) {
+      return c.json({ ok: false, error: 'agent, sessionId, and taskIds are required' }, 400);
+    }
+    const result = reorderSessionQueuedTasks(agent, sessionId, taskIds);
+    return c.json(result, result.ok ? 200 : 409);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }

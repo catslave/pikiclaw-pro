@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo, type DragEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AGENT_ACCEPTED_PROVIDER_KINDS, cn, EFFORT_OPTIONS, getAgentMeta, shortenModel } from '../../utils';
 import { api } from '../../api';
@@ -6,12 +6,14 @@ import { useStore } from '../../store';
 import { Spinner } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import {
-  makeComposerImageAttachment,
+  isImageFile,
+  makeComposerAttachment,
   revokeComposerAttachments,
+  verifyComposerAttachmentFile,
   formatFileSize,
   copyImageFile,
   parseSessionKey,
-  type ComposerImageAttachment,
+  type ComposerAttachment,
 } from './utils';
 import type { SessionInfo, AgentRuntimeStatus, SkillInfo } from '../../types';
 
@@ -115,7 +117,7 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, onRecall, onSteer, onStopAll, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, onRecall, onSteer, onReorderQueued, onStopAll, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -135,6 +137,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   pendingQueuedSends?: Array<{ taskId: string | null; prompt: string; imageUrls?: string[] }>;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
+  onReorderQueued?: (taskIds: string[]) => void | Promise<void>;
   /** Stop the running stream AND cancel every queued task for this session. */
   onStopAll?: () => void | Promise<void>;
   editDraft?: string | null;
@@ -142,6 +145,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
 }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [uploadingAttachmentCount, setUploadingAttachmentCount] = useState(0);
   const [localTaskId, setLocalTaskId] = useState<string | null>(null);
   // Per-task in-flight tracking. A global boolean would freeze every row's
   // button when one recall completes but other tasks remain queued/streaming
@@ -161,10 +165,13 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [selectedAgent, setSelectedAgent] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState('');
-  const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [queuedPreviewUrl, setQueuedPreviewUrl] = useState<string | null>(null);
   const [expandedQueuedTaskIds, setExpandedQueuedTaskIds] = useState<Set<string>>(() => new Set());
+  const [draggingQueuedTaskId, setDraggingQueuedTaskId] = useState<string | null>(null);
+  const [dragOverQueuedTaskId, setDragOverQueuedTaskId] = useState<string | null>(null);
+  const [reorderingQueued, setReorderingQueued] = useState(false);
   const [pendingAgent, setPendingAgent] = useState<string | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [pendingEffort, setPendingEffort] = useState<string | null>(null);
@@ -178,11 +185,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [cascadeStep, setCascadeStep] = useState<CascadeStep>('closed');
   const [cascadePos, setCascadePos] = useState<{ left: number; bottom: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputValueRef = useRef('');
   const composingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const attachmentsRef = useRef<ComposerImageAttachment[]>([]);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   const [skillMenuIndex, setSkillMenuIndex] = useState(0);
@@ -218,13 +226,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   }, []);
 
   useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
-  useEffect(() => { attachmentsRef.current = imageAttachments; }, [imageAttachments]);
+  useEffect(() => { attachmentsRef.current = composerAttachments; }, [composerAttachments]);
 
   // Restore draft on mount, save on unmount
   const dk = draftKey(workdir, session.agent || '', session.sessionId);
   const dkRef = useRef(dk);
   dkRef.current = dk;
   const persistDraft = useCallback((text: string, files?: File[]) => {
+    inputValueRef.current = text;
     const snapshotFiles = files ?? attachmentsRef.current.map(a => a.file);
     if (text || snapshotFiles.length) draftStore.set(dkRef.current, { text, files: snapshotFiles });
     else draftStore.delete(dkRef.current);
@@ -236,17 +245,23 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     const storedText = readDraftText(dk);
     if (saved) {
       draftStore.delete(dk);
-      setInput(saved.text || storedText || '');
-      setImageAttachments(saved.files.length ? saved.files.map(makeComposerImageAttachment) : []);
+      const nextText = saved.text || storedText || '';
+      inputValueRef.current = nextText;
+      setInput(nextText);
+      setComposerAttachments(saved.files.length ? saved.files.map(file => makeComposerAttachment(file, 'ready')) : []);
     } else {
-      setInput(storedText || '');
-      setImageAttachments([]);
+      const nextText = storedText || '';
+      inputValueRef.current = nextText;
+      setInput(nextText);
+      setComposerAttachments([]);
     }
     return () => {
-      const text = inputRef.current?.value || '';
+      const text = inputValueRef.current;
       const files = attachmentsRef.current.map(a => a.file);
       // Save draft — revoke preview URLs but keep File objects
-      for (const a of attachmentsRef.current) URL.revokeObjectURL(a.previewUrl);
+      for (const a of attachmentsRef.current) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
       if (text || files.length) draftStore.set(dkRef.current, { text, files });
       else draftStore.delete(dkRef.current);
       writeDraftText(dkRef.current, text);
@@ -370,32 +385,56 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     el.style.height = Math.min(el.scrollHeight, 200) + 'px';
   }, [input]);
 
-  const addImageAttachments = useCallback((files: ArrayLike<File> | null | undefined) => {
-    const nextFiles = Array.from(files || []).filter(file => file.type.startsWith('image/'));
+  const addComposerAttachments = useCallback((files: ArrayLike<File> | null | undefined) => {
+    const nextFiles = Array.from(files || []).filter(file => file instanceof File);
     if (!nextFiles.length) return;
-    setImageAttachments(prev => [...prev, ...nextFiles.map(makeComposerImageAttachment)]);
-  }, []);
+    const staged = nextFiles.map(file => makeComposerAttachment(file, 'adding'));
+    setComposerAttachments(prev => [...prev, ...staged]);
+    persistDraft(inputRef.current?.value || input, [...attachmentsRef.current.map(a => a.file), ...nextFiles]);
 
-  const clearImageAttachments = useCallback(() => {
+    void Promise.all(staged.map(async item => {
+      try {
+        await verifyComposerAttachmentFile(item.file);
+        return { id: item.id, status: 'ready' as const };
+      } catch (err: any) {
+        return {
+          id: item.id,
+          status: 'failed' as const,
+          error: err?.message || 'Read failed',
+        };
+      }
+    })).then(results => {
+      const byId = new Map(results.map(result => [result.id, result]));
+      setComposerAttachments(prev => prev.map(item => {
+        const result = byId.get(item.id);
+        return result ? { ...item, status: result.status, error: result.error } : item;
+      }));
+    });
+  }, [input, persistDraft]);
+
+  const clearComposerAttachments = useCallback(() => {
     setPreviewImageId(null);
-    setImageAttachments(prev => {
+    setComposerAttachments(prev => {
       revokeComposerAttachments(prev);
       return [];
     });
   }, []);
 
-  const removeImageAttachment = useCallback((id: string) => {
-    setImageAttachments(prev => {
+  const removeComposerAttachment = useCallback((id: string) => {
+    setComposerAttachments(prev => {
       const target = prev.find(item => item.id === id);
-      if (target) URL.revokeObjectURL(target.previewUrl);
-      return prev.filter(item => item.id !== id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      const next = prev.filter(item => item.id !== id);
+      persistDraft(inputValueRef.current, next.map(item => item.file));
+      return next;
     });
     setPreviewImageId(current => current === id ? null : current);
-  }, []);
+  }, [persistDraft]);
 
   const handleSend = useCallback(() => {
     const prompt = input.trim();
-    const attachments = imageAttachments.map(item => item.file);
+    if (composerAttachments.some(item => item.status !== 'ready')) return;
+    const attachments = composerAttachments.map(item => item.file);
     if ((!prompt && attachments.length === 0) || sending) return;
     const targetAgent = selectedAgent
       || session.agent
@@ -421,12 +460,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     setSending(true);
     // Stash content for potential recall restoration
     lastSentRef.current = { prompt, files: attachments };
+    inputValueRef.current = '';
     setInput('');
     draftStore.delete(dkRef.current);
     writeDraftText(dkRef.current, '');
     // Create fresh preview URLs before clearing (clearing revokes the originals)
-    const previewUrls = attachments.length ? attachments.map(f => URL.createObjectURL(f)) : undefined;
-    clearImageAttachments();
+    const previewUrls = attachments.length
+      ? attachments.filter(isImageFile).map(f => URL.createObjectURL(f))
+      : undefined;
+    clearComposerAttachments();
+    setUploadingAttachmentCount(attachments.length);
     onSendStart(prompt, previewUrls);
     onStreamQueued(); // Start polling immediately — don't wait for API response
     api.sendSessionMessage(workdir, targetAgent, targetSessionId, prompt, {
@@ -450,11 +493,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
         }
       })
       .catch(() => {})
-      .finally(() => setSending(false));
+      .finally(() => {
+        setUploadingAttachmentCount(0);
+        setSending(false);
+      });
   }, [
     agents,
-    clearImageAttachments,
-    imageAttachments,
+    clearComposerAttachments,
+    composerAttachments,
     input,
     onSendStart,
     onSendTaskAssigned,
@@ -501,6 +547,41 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       else next.add(taskId);
       return next;
     });
+  }, []);
+
+  const reorderQueuedTask = useCallback(async (dragTaskId: string | null, targetTaskId: string) => {
+    if (!dragTaskId || dragTaskId === targetTaskId || !onReorderQueued || reorderingQueued) return;
+    const ids = effectiveQueuedKey ? effectiveQueuedKey.split('\0') : [];
+    const from = ids.indexOf(dragTaskId);
+    const to = ids.indexOf(targetTaskId);
+    if (from < 0 || to < 0 || from === to) return;
+    const next = [...ids];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setReorderingQueued(true);
+    setDragOverQueuedTaskId(null);
+    try {
+      await onReorderQueued(next);
+    } finally {
+      setReorderingQueued(false);
+      setDraggingQueuedTaskId(null);
+      setDragOverQueuedTaskId(null);
+    }
+  }, [effectiveQueuedKey, onReorderQueued, reorderingQueued]);
+
+  const handleQueuedDragStart = useCallback((taskId: string, e: DragEvent<HTMLElement>) => {
+    if (reorderingQueued || !onReorderQueued || effectiveQueuedIds.length < 2) {
+      e.preventDefault();
+      return;
+    }
+    setDraggingQueuedTaskId(taskId);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', taskId);
+  }, [effectiveQueuedIds.length, onReorderQueued, reorderingQueued]);
+
+  const handleQueuedDragEnd = useCallback(() => {
+    setDraggingQueuedTaskId(null);
+    setDragOverQueuedTaskId(null);
   }, []);
 
   useEffect(() => {
@@ -551,7 +632,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     if (taskId === effectiveQueuedId) {
       const stash = lastSentRef.current;
       if (stash.prompt) setInput(stash.prompt);
-      if (stash.files.length) setImageAttachments(stash.files.map(makeComposerImageAttachment));
+      if (stash.files.length) setComposerAttachments(stash.files.map(file => makeComposerAttachment(file, 'ready')));
       persistDraft(stash.prompt, stash.files);
       lastSentRef.current = { prompt: '', files: [] };
     }
@@ -618,13 +699,13 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
 
   const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(e.clipboardData?.items || [])
-      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .filter(item => item.kind === 'file')
       .map(item => item.getAsFile())
       .filter((file): file is File => !!file);
     if (!files.length) return;
     e.preventDefault();
-    addImageAttachments(files);
-  }, [addImageAttachments]);
+    addComposerAttachments(files);
+  }, [addComposerAttachments]);
 
   const effectiveAgent = selectedAgent
     || session.agent
@@ -692,20 +773,24 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     ? ''
     : (selectedEffort || currentAgent?.selectedEffort || '');
   const effortLevels = EFFORT_OPTIONS[cascadeAgentId as keyof typeof EFFORT_OPTIONS] || [];
-  const previewAttachment = previewImageId ? imageAttachments.find(item => item.id === previewImageId) || null : null;
+  const previewAttachment = previewImageId
+    ? composerAttachments.find(item => item.id === previewImageId && item.previewUrl) || null
+    : null;
   const activePreview: LightboxSource | null = previewAttachment
     ? {
         key: previewAttachment.id,
-        url: previewAttachment.previewUrl,
+        url: previewAttachment.previewUrl!,
         name: previewAttachment.file.name,
         size: previewAttachment.file.size,
         file: previewAttachment.file,
-        onRemove: () => removeImageAttachment(previewAttachment.id),
+        onRemove: () => removeComposerAttachment(previewAttachment.id),
       }
     : queuedPreviewUrl
       ? { key: queuedPreviewUrl, url: queuedPreviewUrl }
       : null;
-  const canSend = (!!input.trim() || imageAttachments.length > 0) && !sending && !!effectiveAgent;
+  const hasPendingAttachments = composerAttachments.some(item => item.status === 'adding');
+  const hasFailedAttachments = composerAttachments.some(item => item.status === 'failed');
+  const canSend = (!!input.trim() || composerAttachments.length > 0) && !sending && !!effectiveAgent && !hasPendingAttachments && !hasFailedAttachments;
 
   const resetCascade = () => {
     setPendingAgent(null);
@@ -792,8 +877,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
           <div className="mb-2 space-y-1.5">
             {/* Row 1: Active stream — always visible when streaming */}
             {isActiveStream && (
-              <div className="flex items-center gap-2.5 rounded-lg border border-primary/20 bg-primary/[0.04] px-3.5 py-1.5 transition-colors">
-                <Spinner className="h-3 w-3 text-primary shrink-0" />
+              <div className="flex items-center gap-2.5 rounded-lg border border-ok/25 bg-panel/60 px-3.5 py-1.5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] backdrop-blur-md transition-colors">
+                <Spinner className="h-3 w-3 text-ok shrink-0" />
                 <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-3 truncate">{t('hub.running')}</span>
                 <button
                   onClick={handleStop}
@@ -809,150 +894,232 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               </div>
             )}
             {/* Rows 2..N: one row per queued task — each carries its own steer/recall */}
-            {effectiveQueuedIds.map((taskId, idx) => {
-              const isLatest = idx === effectiveQueuedIds.length - 1;
-              const positionLabel = effectiveQueuedIds.length > 1 ? `${t('hub.queued')} #${idx + 1}` : t('hub.queued');
-              // Per-task prompt + images come from pendingQueuedSends (client-
-              // only blob URLs) with the server snapshot as the text fallback.
-              // Server queue state doesn't carry image data, so an older
-              // queued row that survives a refresh just shows the text.
-              const optimistic = pendingQueuedSends?.find(p => p.taskId === taskId)
-                || (isLatest ? pendingQueuedSends?.find(p => !p.taskId) : undefined);
-              const taskPrompt = queuedTasks?.find(qt => qt.taskId === taskId)?.prompt
-                || optimistic?.prompt
-                || null;
-              const taskImages = optimistic?.imageUrls?.length ? optimistic.imageUrls : [];
-              const isExpanded = expandedQueuedTaskIds.has(taskId);
-              return (
-                <div
-                  key={taskId}
-                  className={cn(
-                    'flex gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors',
-                    isExpanded ? 'items-start' : 'items-center'
-                  )}
-                >
-                  <span className={cn('h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0', isExpanded && 'mt-2')} />
-                  <div className={cn('flex-1 min-w-0 flex gap-2', isExpanded ? 'items-start flex-wrap' : 'items-center')}>
-                    <button
-                      type="button"
-                      onClick={() => toggleQueuedExpanded(taskId)}
-                      title={taskPrompt || positionLabel}
-                      className="inline-flex items-center gap-1 rounded px-1 py-0.5 -ml-1 text-[12px] font-medium text-warn transition-colors hover:bg-warn/10 shrink-0"
+            {effectiveQueuedIds.length > 0 && (
+              <div className="max-h-[min(32vh,260px)] space-y-1.5 overflow-y-auto overscroll-contain pr-1 -mr-1">
+                {effectiveQueuedIds.map((taskId, idx) => {
+                  const isLatest = idx === effectiveQueuedIds.length - 1;
+                  const positionLabel = effectiveQueuedIds.length > 1 ? `${t('hub.queued')} #${idx + 1}` : t('hub.queued');
+                  // Per-task prompt + images come from pendingQueuedSends (client-
+                  // only blob URLs) with the server snapshot as the text fallback.
+                  // Server queue state doesn't carry image data, so an older
+                  // queued row that survives a refresh just shows the text.
+                  const optimistic = pendingQueuedSends?.find(p => p.taskId === taskId)
+                    || (isLatest ? pendingQueuedSends?.find(p => !p.taskId) : undefined);
+                  const taskPrompt = queuedTasks?.find(qt => qt.taskId === taskId)?.prompt
+                    || optimistic?.prompt
+                    || null;
+                  const taskImages = optimistic?.imageUrls?.length ? optimistic.imageUrls : [];
+                  const isExpanded = expandedQueuedTaskIds.has(taskId);
+                  return (
+                    <div
+                      key={taskId}
+                      onDragOver={e => {
+                        if (!draggingQueuedTaskId || draggingQueuedTaskId === taskId || reorderingQueued) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (dragOverQueuedTaskId !== taskId) setDragOverQueuedTaskId(taskId);
+                      }}
+                      onDragLeave={e => {
+                        const nextTarget = e.relatedTarget;
+                        if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) return;
+                        if (dragOverQueuedTaskId === taskId) setDragOverQueuedTaskId(null);
+                      }}
+                      onDrop={e => {
+                        if (!draggingQueuedTaskId || reorderingQueued) return;
+                        e.preventDefault();
+                        const draggedTaskId = e.dataTransfer.getData('text/plain') || draggingQueuedTaskId;
+                        void reorderQueuedTask(draggedTaskId, taskId);
+                      }}
+                      className={cn(
+                        'flex gap-2.5 rounded-lg border border-warn/30 bg-panel/60 px-3.5 py-1.5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] backdrop-blur-md transition-[background-color,border-color,box-shadow,opacity]',
+                        isExpanded ? 'items-start' : 'items-center',
+                        draggingQueuedTaskId === taskId && 'opacity-55',
+                        dragOverQueuedTaskId === taskId && draggingQueuedTaskId !== taskId && 'border-warn/70 bg-panel/75 shadow-[inset_0_0_0_1px_rgba(251,146,60,0.22),0_8px_24px_rgba(15,23,42,0.08)]'
+                      )}
                     >
-                      <svg
-                        width="10"
-                        height="10"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        className={cn('transition-transform', isExpanded && 'rotate-90')}
-                      >
-                        <polyline points="9 6 15 12 9 18" />
-                      </svg>
-                      {positionLabel}
-                    </button>
-                    {taskImages.length > 0 && (
-                      <div className="flex items-center gap-1 shrink-0">
-                        {taskImages.slice(0, 3).map((url, i) => (
+                      {effectiveQueuedIds.length > 1 && (
+                        <button
+                          type="button"
+                          draggable={!reorderingQueued}
+                          onDragStart={e => handleQueuedDragStart(taskId, e)}
+                          onDragEnd={handleQueuedDragEnd}
+                          title={t('hub.reorderQueuedHint')}
+                          aria-label={t('hub.reorderQueuedHint')}
+                          className={cn(
+                            'mt-0.5 grid h-4 w-3 shrink-0 place-items-center rounded text-warn/60 transition-colors hover:bg-warn/10 hover:text-warn active:cursor-grabbing',
+                            isExpanded ? 'mt-1.5' : '',
+                            reorderingQueued ? 'cursor-wait opacity-40' : 'cursor-grab'
+                          )}
+                        >
+                          <svg width="10" height="12" viewBox="0 0 10 12" fill="currentColor" aria-hidden="true">
+                            <circle cx="3" cy="2" r="1" />
+                            <circle cx="7" cy="2" r="1" />
+                            <circle cx="3" cy="6" r="1" />
+                            <circle cx="7" cy="6" r="1" />
+                            <circle cx="3" cy="10" r="1" />
+                            <circle cx="7" cy="10" r="1" />
+                          </svg>
+                        </button>
+                      )}
+                      <span className={cn('h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0', isExpanded && 'mt-2')} />
+                      <div className="flex-1 min-w-0">
+                        <div className={cn('flex min-w-0 gap-2', isExpanded ? 'items-start flex-wrap' : 'items-center')}>
                           <button
-                            key={`${url}-${i}`}
                             type="button"
-                            onClick={() => setQueuedPreviewUrl(url)}
-                            title={t('hub.previewImage')}
-                            className="block h-5 w-5 shrink-0 overflow-hidden rounded border border-warn/30 transition-opacity hover:opacity-80"
+                            onClick={() => toggleQueuedExpanded(taskId)}
+                            title={taskPrompt || positionLabel}
+                            className={cn(
+                              'inline-flex min-w-0 items-center gap-1 rounded px-1 py-0.5 -ml-1 text-left transition-colors hover:bg-warn/10',
+                              isExpanded ? 'shrink-0' : 'flex-1'
+                            )}
                           >
-                            <img src={url} alt="" className="h-full w-full object-cover" />
+                            <svg
+                              width="10"
+                              height="10"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className={cn('shrink-0 transition-transform', isExpanded && 'rotate-90')}
+                            >
+                              <polyline points="9 6 15 12 9 18" />
+                            </svg>
+                            <span className="shrink-0 text-[12px] font-medium text-warn">{positionLabel}</span>
+                            {!isExpanded && taskPrompt && (
+                              <span className="min-w-0 truncate text-[11px] text-fg-5/60">{taskPrompt}</span>
+                            )}
                           </button>
-                        ))}
-                        {taskImages.length > 3 && (
-                          <span className="text-[10px] text-fg-5/60">+{taskImages.length - 3}</span>
+                          {taskImages.length > 0 && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              {taskImages.slice(0, 3).map((url, i) => (
+                                <button
+                                  key={`${url}-${i}`}
+                                  type="button"
+                                  onClick={() => setQueuedPreviewUrl(url)}
+                                  title={t('hub.previewImage')}
+                                  className="block h-5 w-5 shrink-0 overflow-hidden rounded border border-warn/30 transition-opacity hover:opacity-80"
+                                >
+                                  <img src={url} alt="" className="h-full w-full object-cover" />
+                                </button>
+                              ))}
+                              {taskImages.length > 3 && (
+                                <span className="text-[10px] text-fg-5/60">+{taskImages.length - 3}</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        {isExpanded && taskPrompt && (
+                          <div
+                            title={taskPrompt}
+                            className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded bg-warn/[0.035] px-2 py-1.5 text-left text-[11px] text-fg-5/70"
+                          >
+                            {taskPrompt}
+                          </div>
                         )}
                       </div>
-                    )}
-                    {taskPrompt && (
-                      <button
-                        type="button"
-                        onClick={() => toggleQueuedExpanded(taskId)}
-                        title={taskPrompt}
-                        className={cn(
-                          'min-w-0 text-left text-[11px] text-fg-5/60 transition-colors hover:text-fg-4',
-                          isExpanded
-                            ? 'basis-full max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded bg-warn/[0.035] px-2 py-1.5'
-                            : 'flex-1 truncate'
-                        )}
-                      >
-                        {taskPrompt}
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      onClick={() => handleSteerQueued(taskId)}
-                      disabled={steeringIds.has(taskId)}
-                      title={t('hub.steerHint')}
-                      className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                    >
-                      {steeringIds.has(taskId)
-                        ? <Spinner className="h-2.5 w-2.5" />
-                        : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>}
-                      {t('hub.steer')}
-                    </button>
-                    <button
-                      onClick={() => handleRecallQueued(taskId)}
-                      disabled={recallingIds.has(taskId)}
-                      title={t('hub.recallHint')}
-                      className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                    >
-                      {recallingIds.has(taskId)
-                        ? <Spinner className="h-2.5 w-2.5" />
-                        : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>}
-                      {t('hub.recall')}
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => handleSteerQueued(taskId)}
+                          disabled={steeringIds.has(taskId)}
+                          title={t('hub.steerHint')}
+                          className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                        >
+                          {steeringIds.has(taskId)
+                            ? <Spinner className="h-2.5 w-2.5" />
+                            : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>}
+                          {t('hub.steer')}
+                        </button>
+                        <button
+                          onClick={() => handleRecallQueued(taskId)}
+                          disabled={recallingIds.has(taskId)}
+                          title={t('hub.recallHint')}
+                          className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                        >
+                          {recallingIds.has(taskId)
+                            ? <Spinner className="h-2.5 w-2.5" />
+                            : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>}
+                          {t('hub.recall')}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         <div className="relative rounded-xl border border-control-border bg-control shadow-[var(--th-composer-shadow)] transition-[border-color,box-shadow,background-color] duration-200 focus-within:border-control-border-h focus-within:shadow-[var(--th-composer-shadow-focus)]">
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
             multiple
             className="hidden"
             onChange={e => {
-              addImageAttachments(e.target.files);
+              addComposerAttachments(e.target.files);
               e.target.value = '';
             }}
           />
 
-          {imageAttachments.length > 0 && (
+          {composerAttachments.length > 0 && (
             <div className="px-3 pt-3">
+              <div className="mb-2 flex items-center gap-2 text-[10px] font-medium text-fg-5">
+                <span className="uppercase tracking-wider">{t('hub.attachments')}</span>
+                <span className="rounded-full border border-edge/35 bg-panel-alt/45 px-1.5 py-0.5">
+                  {composerAttachments.length}
+                </span>
+                <span className={cn(
+                  'rounded-full px-1.5 py-0.5',
+                  hasFailedAttachments
+                    ? 'bg-err/10 text-err'
+                    : hasPendingAttachments
+                      ? 'bg-warn/10 text-warn'
+                      : 'bg-ok/10 text-ok',
+                )}>
+                  {hasFailedAttachments
+                    ? t('hub.attachmentFailed')
+                    : hasPendingAttachments
+                      ? t('hub.attachmentAdding')
+                      : t('hub.attachmentReady')}
+                </span>
+              </div>
               <div className="flex gap-2 overflow-x-auto pb-1">
-                {imageAttachments.map(item => (
+                {composerAttachments.map(item => {
+                  const isImage = !!item.previewUrl;
+                  const fileExt = attachmentExtension(item.file);
+                  return (
                   <div key={item.id} className="relative shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setPreviewImageId(item.id)}
-                      title={t('hub.previewImage')}
-                      className="group relative h-[72px] w-[72px] overflow-hidden rounded-lg border border-edge/30 bg-panel-alt/30"
-                    >
-                      <img src={item.previewUrl} alt={item.file.name} className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]" />
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 via-black/10 to-transparent px-1.5 pb-1 pt-3 text-left">
-                        <div className="truncate text-[8px] font-medium text-white/90 leading-tight">{item.file.name}</div>
+                    {isImage ? (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewImageId(item.id)}
+                        title={t('hub.previewImage')}
+                        className="group relative h-[72px] w-[72px] overflow-hidden rounded-lg border border-edge/30 bg-panel-alt/30"
+                      >
+                        <img src={item.previewUrl} alt={item.file.name} className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]" />
+                        <AttachmentTileChrome item={item} t={t} />
+                      </button>
+                    ) : (
+                      <div
+                        title={item.file.name}
+                        className="relative flex h-[72px] w-[72px] flex-col items-center justify-center overflow-hidden rounded-lg border border-edge/30 bg-panel-alt/45 px-2 text-center"
+                      >
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="mb-1 text-fg-5/75">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <path d="M14 2v6h6" />
+                        </svg>
+                        <div className="max-w-full truncate text-[9px] font-semibold uppercase tracking-wide text-fg-4">{fileExt}</div>
+                        <AttachmentTileChrome item={item} t={t} />
                       </div>
-                    </button>
+                    )}
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        removeImageAttachment(item.id);
+                        removeComposerAttachment(item.id);
                       }}
-                      title={t('hub.removeImage')}
+                      title={t('hub.removeAttachment')}
                       className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full border border-white/10 bg-black/65 text-white/75 transition-colors hover:bg-black/80 hover:text-white"
                     >
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -961,21 +1128,25 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                       </svg>
                     </button>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {/* Slash command autocomplete popup */}
+          {/* Slash command autocomplete */}
           {skillMenuOpen && commandOptions.length > 0 && (
             <div
               ref={skillMenuRef}
-              className="absolute bottom-full left-0 right-0 mb-1.5 z-50 max-h-[200px] overflow-y-auto rounded-xl border border-edge/40 bg-[var(--th-dropdown)] backdrop-blur-xl shadow-lg animate-in"
+              className="mx-2.5 mt-2 max-h-[190px] overflow-y-auto rounded-lg border border-edge/35 bg-panel-alt/85 p-1 shadow-sm animate-in"
+              role="listbox"
+              aria-label={t('hub.commands')}
             >
-              <div className="px-3 pt-2 pb-1 border-b border-edge/20">
-                <span className="text-[10px] font-semibold text-fg-5 uppercase tracking-wider">{t('hub.commands')}</span>
+              <div className="flex h-7 items-center justify-between px-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-5">{t('hub.commands')}</span>
+                <span className="text-[10px] text-fg-5/55">{t('hub.commandMenuHint')}</span>
               </div>
-              <div className="py-1">
+              <div className="space-y-0.5">
                 {commandOptions.map((option, idx) => {
                   const isBuiltin = option.kind === 'builtin';
                   const title = isBuiltin
@@ -988,25 +1159,27 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                     <button
                       key={`${option.kind}:${option.command}`}
                       data-command-idx={idx}
+                      role="option"
+                      aria-selected={idx === skillMenuIndex}
                       onMouseDown={e => { e.preventDefault(); selectCommandOption(option); }}
                       onMouseEnter={() => setSkillMenuIndex(idx)}
                       className={cn(
-                        'flex flex-col w-full px-3 py-1.5 text-left transition-colors',
+                        'grid min-h-[38px] w-full grid-cols-[minmax(105px,0.8fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors',
                         idx === skillMenuIndex
-                          ? 'bg-panel-h text-fg'
-                          : 'text-fg-3 hover:bg-panel-alt/50',
+                          ? 'bg-blue-400/10 text-fg ring-1 ring-blue-400/20'
+                          : 'text-fg-4 hover:bg-panel-h/60',
                       )}
                     >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span className="font-mono text-[12.5px] font-medium">/{option.command}</span>
-                        <span className="rounded bg-panel-alt px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-fg-5">
-                          {isBuiltin ? t('hub.commandBuiltIn') : t('hub.commandSkill')}
-                        </span>
-                        {title && <span className="min-w-0 truncate text-[11px] text-fg-5">{title}</span>}
+                      <span className="min-w-0 truncate font-mono text-[12px] font-semibold">/{option.command}</span>
+                      <span className="rounded border border-edge/25 bg-control px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-fg-5">
+                        {isBuiltin ? t('hub.commandBuiltIn') : t('hub.commandSkill')}
                       </span>
-                      {description && (
-                        <span className="mt-0.5 text-[11px] text-fg-5 truncate">{description}</span>
-                      )}
+                      <span className="min-w-0">
+                        {title && <span className="block truncate text-[11.5px] font-medium text-fg-3">{title}</span>}
+                        {description && (
+                          <span className="block truncate text-[10.5px] text-fg-5/70">{description}</span>
+                        )}
+                      </span>
                     </button>
                   );
                 })}
@@ -1034,15 +1207,15 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              title={t('hub.addImages')}
-              aria-label={t('hub.addImages')}
+              title={t('hub.addAttachments')}
+              aria-label={t('hub.addAttachments')}
               className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] leading-none text-fg-5/50 transition-colors hover:bg-panel-h/60 hover:text-fg-3"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" className="shrink-0">
                 <path d="M12 5v14" />
                 <path d="M5 12h14" />
               </svg>
-              <span className="whitespace-nowrap">{t('hub.addImages')}</span>
+              <span className="whitespace-nowrap">{t('hub.addAttachments')}</span>
             </button>
 
             {/* Cascade config trigger */}
@@ -1243,7 +1416,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               onClick={handleSend}
               disabled={!canSend}
               title={canSend ? t('hub.sendHint') : t('hub.send')}
-              aria-label={sending ? t('hub.sending') : t('hub.send')}
+              aria-label={sending ? (uploadingAttachmentCount > 0 ? t('hub.uploadingAttachments') : t('hub.sending')) : t('hub.send')}
               className={cn(
                 'inline-flex h-[30px] shrink-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] font-medium leading-none transition-all duration-200',
                 canSend
@@ -1255,7 +1428,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 ? <Spinner className="h-3.5 w-3.5" />
                 : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
               }
-              <span className="whitespace-nowrap">{sending ? t('hub.sending') : t('hub.send')}</span>
+              <span className="whitespace-nowrap">
+                {sending ? (uploadingAttachmentCount > 0 ? t('hub.uploadingAttachments') : t('hub.sending')) : t('hub.send')}
+              </span>
             </button>
           </div>
         </div>
@@ -1269,6 +1444,46 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     </div>
   );
 });
+
+function attachmentExtension(file: File): string {
+  const name = file.name || '';
+  const ext = name.includes('.') ? name.split('.').pop()?.trim() : '';
+  if (ext) return ext.slice(0, 5);
+  const subtype = file.type.includes('/') ? file.type.split('/').pop()?.trim() : '';
+  return (subtype || 'file').slice(0, 5);
+}
+
+function AttachmentTileChrome({ item, t }: {
+  item: ComposerAttachment;
+  t: (k: string) => string;
+}) {
+  const failed = item.status === 'failed';
+  const adding = item.status === 'adding';
+  return (
+    <>
+      <div className="pointer-events-none absolute left-1 top-1">
+        <span className={cn(
+          'inline-flex h-4 items-center gap-1 rounded-full px-1.5 text-[8px] font-semibold leading-none shadow-sm backdrop-blur',
+          failed
+            ? 'bg-err/90 text-white'
+            : adding
+              ? 'bg-warn/90 text-white'
+              : 'bg-black/58 text-white/90',
+        )}>
+          {adding && <Spinner className="h-2 w-2" />}
+          {!adding && (
+            <span className={cn('h-1.5 w-1.5 rounded-full', failed ? 'bg-white/90' : 'bg-ok')} />
+          )}
+          {failed ? t('hub.attachmentFailed') : adding ? t('hub.attachmentAdding') : t('hub.attachmentReady')}
+        </span>
+      </div>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 via-black/10 to-transparent px-1.5 pb-1 pt-3 text-left">
+        <div className="truncate text-[8px] font-medium text-white/90 leading-tight">{item.file.name}</div>
+        <div className="truncate text-[7px] text-white/62 leading-tight">{formatFileSize(item.file.size)}</div>
+      </div>
+    </>
+  );
+}
 
 type LightboxSource = {
   key: string;
@@ -1328,7 +1543,7 @@ function ComposerImageLightbox({ source, onClose, t }: {
                 onClick={onRemove}
                 className="rounded-lg border border-white/12 bg-white/10 px-3 py-1.5 text-[11px] font-medium text-white/88 transition-colors hover:bg-white/14"
               >
-                {t('hub.removeImage')}
+                {t('hub.removeAttachment')}
               </button>
             )}
             <button

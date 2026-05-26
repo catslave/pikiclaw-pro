@@ -60,6 +60,7 @@ import {
 import {
   loadPersistedQueuedTasks,
   removePersistedQueuedTask,
+  reorderPersistedQueuedTasks,
   upsertPersistedQueuedTask,
   type PersistedQueuedTask,
 } from './persistent-task-queue.js';
@@ -74,6 +75,7 @@ const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = BOT_TIMEOUTS.macosUserActivityPuls
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = BOT_TIMEOUTS.macosUserActivityPulseTimeoutS;
 const STREAM_TEXT_DEBUG_MIN_INTERVAL_MS = 1000;
 const STREAM_TEXT_DEBUG_MIN_BYTES_DELTA = 1024;
+const LIVE_STREAM_SNAPSHOT_WITHOUT_TASK_STALE_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -494,8 +496,42 @@ export class Bot {
   /** Get the current streaming snapshot for a session (used by polling endpoint).
    *  Follows the promotion chain so a pending or pre-rotation key still resolves. */
   getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
-    const snap = this.streamSnapshots.get(this.resolveSessionKey(sessionKey));
+    const key = this.resolveSessionKey(sessionKey);
+    const snap = this.pruneDeadStreamSnapshot(key);
     return snap ? this.enrichSnapshot(snap) : null;
+  }
+
+  private pruneDeadStreamSnapshot(sessionKey: string): StreamSnapshot | null {
+    const snap = this.streamSnapshots.get(sessionKey);
+    if (!snap || snap.phase === 'done') return snap || null;
+
+    const liveTaskIds = [snap.taskId, ...(snap.queuedTaskIds || [])].filter(taskId => this.activeTasks.has(taskId));
+    if (liveTaskIds.length === 0) {
+      if (Date.now() - snap.updatedAt < LIVE_STREAM_SNAPSHOT_WITHOUT_TASK_STALE_MS) return snap;
+      this.streamSnapshots.delete(sessionKey);
+      this.promotedFromAliases.delete(sessionKey);
+      return null;
+    }
+
+    if (snap.phase === 'queued') {
+      snap.taskId = liveTaskIds[0];
+      snap.queuedTaskIds = liveTaskIds.length > 1 ? liveTaskIds.slice(1) : undefined;
+    } else if (!this.activeTasks.has(snap.taskId)) {
+      if (Date.now() - snap.updatedAt < LIVE_STREAM_SNAPSHOT_WITHOUT_TASK_STALE_MS) return snap;
+      snap.phase = 'queued';
+      snap.taskId = liveTaskIds[0];
+      snap.queuedTaskIds = liveTaskIds.length > 1 ? liveTaskIds.slice(1) : undefined;
+      delete snap.startedAt;
+      delete snap.text;
+      delete snap.thinking;
+      delete snap.activity;
+      delete snap.plan;
+      delete snap.previewMeta;
+    } else {
+      snap.queuedTaskIds = liveTaskIds.slice(1);
+      if (!snap.queuedTaskIds.length) delete snap.queuedTaskIds;
+    }
+    return snap;
   }
 
   /**
@@ -525,6 +561,101 @@ export class Bot {
       next = { ...next, interactions: refreshed };
     }
     return next;
+  }
+
+  private queuedTaskOrderForSnapshot(snap: StreamSnapshot | null | undefined): string[] {
+    if (!snap) return [];
+    const ids: string[] = [];
+    if (snap.phase === 'queued' && snap.taskId) ids.push(snap.taskId);
+    if (snap.queuedTaskIds?.length) ids.push(...snap.queuedTaskIds);
+    return [...new Set(ids)];
+  }
+
+  private liveQueuedTaskOrder(sessionKey: string): string[] {
+    const key = this.resolveSessionKey(sessionKey);
+    const isLiveQueued = (taskId: string) => {
+      const task = this.activeTasks.get(taskId);
+      return !!task
+        && this.resolveSessionKey(task.sessionKey) === key
+        && task.status === 'queued'
+        && !task.cancelled;
+    };
+    const snapOrder = this.queuedTaskOrderForSnapshot(this.streamSnapshots.get(key)).filter(isLiveQueued);
+    if (snapOrder.length) return snapOrder;
+    const session = this.getSessionRuntimeByKey(key, { allowAnyWorkdir: true });
+    if (!session) return [];
+    return [...session.runningTaskIds]
+      .filter(isLiveQueued)
+      .sort((a, b) => (this.activeTasks.get(a)?.startedAt || 0) - (this.activeTasks.get(b)?.startedAt || 0));
+  }
+
+  private applyQueuedTaskOrderToSnapshot(sessionKey: string, orderedTaskIds: string[], opts: { persist?: boolean; push?: boolean } = {}): string[] {
+    const key = this.resolveSessionKey(sessionKey);
+    const snap = this.streamSnapshots.get(key);
+    if (!snap) return [];
+    const ordered = [...new Set(orderedTaskIds)].filter(taskId => {
+      const task = this.activeTasks.get(taskId);
+      return !!task
+        && this.resolveSessionKey(task.sessionKey) === key
+        && task.status === 'queued'
+        && !task.cancelled;
+    });
+    if (snap.phase === 'queued') {
+      if (ordered.length) {
+        snap.taskId = ordered[0];
+        snap.queuedTaskIds = ordered.length > 1 ? ordered.slice(1) : undefined;
+      } else {
+        snap.queuedTaskIds = undefined;
+      }
+    } else {
+      snap.queuedTaskIds = ordered.length ? ordered : undefined;
+    }
+    snap.updatedAt = Date.now();
+    if (opts.persist) {
+      try {
+        reorderPersistedQueuedTasks(ordered);
+      } catch (err: any) {
+        this.warn(`failed to persist queued task order: ${err?.message || err}`);
+      }
+    }
+    if (opts.push) this.pushSnapshotToSSE(key, true);
+    return ordered;
+  }
+
+  private shouldDeferQueuedTaskForOrder(sessionKey: string, taskId: string): boolean {
+    const task = this.activeTasks.get(taskId);
+    if (!task || task.status !== 'queued' || task.cancelled) return false;
+    const firstQueuedTaskId = this.liveQueuedTaskOrder(sessionKey)[0];
+    return !!firstQueuedTaskId && firstQueuedTaskId !== taskId;
+  }
+
+  reorderSessionQueuedTasks(sessionKey: string, orderedTaskIds: string[]): { reordered: boolean; queuedTaskIds: string[]; error?: string } {
+    const key = this.resolveSessionKey(sessionKey);
+    const current = this.liveQueuedTaskOrder(key);
+    if (current.length < 2) return { reordered: false, queuedTaskIds: current };
+    const requested = orderedTaskIds
+      .map(taskId => String(taskId || '').trim())
+      .filter(Boolean);
+    if (requested.length !== new Set(requested).size) {
+      return { reordered: false, queuedTaskIds: current, error: 'Duplicate queued task id' };
+    }
+    const currentSet = new Set(current);
+    const requestedSet = new Set(requested);
+    const sameTasks = current.length === requested.length
+      && current.every(taskId => requestedSet.has(taskId))
+      && requested.every(taskId => currentSet.has(taskId));
+    if (!sameTasks) {
+      return { reordered: false, queuedTaskIds: current, error: 'Queued tasks changed; refresh and try again' };
+    }
+    for (const taskId of current) {
+      const task = this.activeTasks.get(taskId);
+      if (task) task.deferForSteer = false;
+    }
+    const ordered = this.applyQueuedTaskOrderToSnapshot(key, requested, { persist: true, push: true });
+    if (ordered.length !== requested.length) {
+      return { reordered: false, queuedTaskIds: this.liveQueuedTaskOrder(key), error: 'Queued tasks changed; refresh and try again' };
+    }
+    return { reordered: true, queuedTaskIds: ordered };
   }
 
   /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
@@ -1447,8 +1578,8 @@ export class Bot {
   protected markQueueDeferralsForSteer(targetTaskId: string): void {
     const target = this.activeTasks.get(targetTaskId);
     if (!target) return;
-    const snapshot = this.streamSnapshots.get(target.sessionKey);
-    const queuedIds = snapshot?.queuedTaskIds || [];
+    const snapshot = this.streamSnapshots.get(this.resolveSessionKey(target.sessionKey));
+    const queuedIds = this.queuedTaskOrderForSnapshot(snapshot);
     // Reset any previous defer flags for this session's queued tasks first so
     // a new steer call doesn't stack on top of an earlier (now-stale) decision.
     for (const id of queuedIds) {
@@ -1456,6 +1587,13 @@ export class Bot {
       if (t) t.deferForSteer = false;
     }
     const targetIdx = queuedIds.indexOf(targetTaskId);
+    if (targetIdx > 0) {
+      this.applyQueuedTaskOrderToSnapshot(
+        target.sessionKey,
+        [targetTaskId, ...queuedIds.filter(id => id !== targetTaskId)],
+        { persist: true, push: true },
+      );
+    }
     for (let i = 0; i < targetIdx; i++) {
       const t = this.activeTasks.get(queuedIds[i]);
       if (t && t.status === 'queued' && !t.cancelled) t.deferForSteer = true;
@@ -1530,6 +1668,10 @@ export class Bot {
           // immediately so the chain advances to the steered task. The new
           // wrapper preserves the original fn so the deferred task still runs
           // (just after the steered one).
+          void this.queueSessionTask(session, task, taskId);
+          return undefined as unknown as T;
+        }
+        if (this.shouldDeferQueuedTaskForOrder(session.key, taskId)) {
           void this.queueSessionTask(session, task, taskId);
           return undefined as unknown as T;
         }
