@@ -113,6 +113,11 @@ export interface StreamPreviewMeta {
    * user knows the turn is being routed through a third-party provider.
    */
   providerName?: string | null;
+  /** Last driver/runtime event observed for this turn. Used as a lightweight
+   *  heartbeat when the visible answer is not changing. */
+  lastEvent?: string | null;
+  /** Non-fatal agent/runtime diagnostics surfaced during the live turn. */
+  diagnostics?: string[];
   /**
    * Number of image-generation calls currently in flight for this turn.
    * Codex bumps this on `image_generation_start` and decrements on

@@ -6,7 +6,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
-import { WorkingActivitySummary, WorkingCard, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
+import { WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
 import type { RichMessage, MessageBlock } from '../../types';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -34,6 +34,9 @@ export function AssistantMsg({
   const activitySummarySource = activityBlocks
     .filter(block => block.type === 'tool_use')
     .map(block => summarizeToolUse(block));
+  const activityDetailLines = activityBlocks.map(block => (
+    block.type === 'tool_use' ? summarizeToolUse(block) : summarizeToolResult(block)
+  ));
   const activitySummary = summarizeWorkingActivity(activitySummarySource, t);
   const planSteps = latestPlan?.plan?.steps || [];
   const currentPlanStep = planSteps.find(step => step.status === 'inProgress')
@@ -72,6 +75,8 @@ export function AssistantMsg({
             <WorkingSubAgentList subAgents={subAgents} t={t} />
             <WorkingThinkingBlock text={thinkingText} t={t} />
             <WorkingActivitySummary lines={activitySummarySource} t={t} />
+            <WorkingActivityDetails lines={activityDetailLines} t={t} />
+            <WorkingDiagnostics diagnostics={message.usage?.diagnostics} t={t} />
           </div>
         </WorkingCard>
       )}

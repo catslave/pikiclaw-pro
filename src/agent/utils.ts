@@ -245,6 +245,8 @@ export function buildStreamPreviewMeta(s: {
   byokProviderName?: string | null;
   subAgents?: ReadonlyMap<string, StreamSubAgent> | null;
   generatingImages?: number;
+  lastEvent?: string | null;
+  diagnostics?: string[];
 }): StreamPreviewMeta {
   const ctx = computeContext(s);
   const meta: StreamPreviewMeta = {
@@ -253,6 +255,8 @@ export function buildStreamPreviewMeta(s: {
     contextUsedTokens: ctx.contextUsedTokens, contextPercent: ctx.contextPercent,
   };
   if (s.byokProviderName) meta.providerName = s.byokProviderName;
+  if (s.lastEvent) meta.lastEvent = s.lastEvent;
+  if (s.diagnostics?.length) meta.diagnostics = [...s.diagnostics];
   if (s.subAgents && s.subAgents.size > 0) meta.subAgents = Array.from(s.subAgents.values());
   if (s.generatingImages && s.generatingImages > 0) meta.generatingImages = s.generatingImages;
   return meta;

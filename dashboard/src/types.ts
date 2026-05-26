@@ -482,6 +482,10 @@ export interface StreamPreviewMeta {
   /** BYOK provider name (e.g. "OpenRouter") when the agent is bound to a
    *  Profile; absent for native-auth turns. Drives the "via <provider>" tag. */
   providerName?: string | null;
+  /** Last driver/runtime event observed for this turn. */
+  lastEvent?: string | null;
+  /** Non-fatal agent/runtime diagnostics surfaced during the live turn. */
+  diagnostics?: string[];
   /** Number of image-generation calls currently in flight for this turn.
    *  Renderers show a "Generating image…" indicator while > 0. */
   generatingImages?: number;

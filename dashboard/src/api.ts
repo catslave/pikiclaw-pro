@@ -24,6 +24,7 @@ import type {
   SessionMessagesResult,
   SkillInfo,
   StreamPlan,
+  StreamPreviewMeta,
   SessionTailMessage,
   SessionsPageResult,
   WorkspaceEntry,
@@ -636,6 +637,7 @@ export interface StreamSnapshot {
   thinking?: string;
   activity?: string;
   plan?: StreamPlan | null;
+  previewMeta?: StreamPreviewMeta | null;
   sessionId?: string | null;
   error?: string;
   /** Active human-in-the-loop interaction prompts (im_ask_user / Codex user-input). */

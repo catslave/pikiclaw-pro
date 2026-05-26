@@ -697,6 +697,63 @@ describe('stageSessionFiles', () => {
 });
 
 describe('codex stream', () => {
+  it('surfaces codex stderr diagnostics in live preview meta', async () => {
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+process.stderr.write('ERROR invalid YAML: mapping values are not allowed here\\n');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-stderr' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-stderr' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: { threadId: 'thread-stderr', item: { id: 'msg-stderr', type: 'agentMessage', phase: 'final_answer' } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/agentMessage/delta',
+      params: { threadId: 'thread-stderr', itemId: 'msg-stderr', delta: 'done' },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: 'thread-stderr', turn: { id: 'turn-stderr', status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const metaEvents: any[] = [];
+    const result = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, _activity, meta) => {
+        if (meta) metaEvents.push(meta);
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(metaEvents.some(meta => meta.lastEvent === 'Codex stderr')).toBe(true);
+    expect(metaEvents.some(meta => (
+      meta.diagnostics || []
+    ).some((line: string) => line.includes('Skill config error')))).toBe(true);
+  });
+
   it('passes developerInstructions on resume and surfaces structured plans and file changes', async () => {
     const callsFile = path.join(tmpDir, 'codex-rpc-calls.jsonl');
     const script = `#!/usr/bin/env node

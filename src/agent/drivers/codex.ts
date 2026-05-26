@@ -49,6 +49,7 @@ const CODEX_APPSERVER_SPAWN_TIMEOUT_MS = _CODEX_APPSERVER_SPAWN_TIMEOUT_MS;
 type RpcCallback = (msg: any) => void;
 type NotificationHandler = (method: string, params: any) => void;
 type RequestHandler = (method: string, params: any, requestId: string) => Promise<any> | any;
+type StderrHandler = (text: string) => void;
 
 export class CodexAppServer {
   private proc: ReturnType<typeof spawn> | null = null;
@@ -57,6 +58,7 @@ export class CodexAppServer {
   private pending = new Map<number, RpcCallback>();
   private notificationHandlers = new Set<NotificationHandler>();
   private requestHandlers = new Set<RequestHandler>();
+  private stderrHandlers = new Set<StderrHandler>();
   private ready = false;
   private startPromise: Promise<boolean> | null = null;
   private configOverrides: string[] = [];
@@ -97,7 +99,13 @@ export class CodexAppServer {
       this.pending.clear();
       this.ready = false;
 
-      proc.stderr?.on('data', (c: Buffer) => { agentLog(`[codex-rpc][stderr] ${c.toString().trim().slice(0, 200)}`); });
+      proc.stderr?.on('data', (c: Buffer) => {
+        const text = c.toString();
+        agentLog(`[codex-rpc][stderr] ${text.trim().slice(0, 200)}`);
+        for (const handler of [...this.stderrHandlers]) {
+          try { handler(text); } catch {}
+        }
+      });
       proc.stdout.on('data', (chunk: Buffer) => {
         this.buf += chunk.toString('utf-8');
         const lines = this.buf.split('\n');
@@ -215,6 +223,11 @@ export class CodexAppServer {
   onRequest(handler: RequestHandler): () => void {
     this.requestHandlers.add(handler);
     return () => { this.requestHandlers.delete(handler); };
+  }
+
+  onStderr(handler: StderrHandler): () => void {
+    this.stderrHandlers.add(handler);
+    return () => { this.stderrHandlers.delete(handler); };
   }
 
   private respond(id: any, result: any): void {
@@ -1008,6 +1021,28 @@ function buildCodexPreviewText(s: {
   return commentary || finalText;
 }
 
+function stripAnsi(text: string): string {
+  return String(text || '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
+function codexDiagnosticsFromStderr(text: string): string[] {
+  return stripAnsi(text)
+    .split(/\r?\n/)
+    .map(line => normalizeActivityLine(line))
+    .filter(Boolean)
+    .filter(line => /(AuthRequired|invalid YAML|failed|error|quota|rate limit|timeout|MODEL_CAPACITY|capacity)/i.test(line))
+    .map(line => {
+      if (/AuthRequired/i.test(line)) return `MCP auth required: ${shortValue(line, 180)}`;
+      if (/invalid YAML/i.test(line)) return `Skill config error: ${shortValue(line, 180)}`;
+      return `Codex diagnostic: ${shortValue(line, 180)}`;
+    });
+}
+
+function markCodexProgress(s: { recentNarrative: string[]; lastEvent: string | null }, label: string): void {
+  s.lastEvent = label;
+  pushRecentActivity(s.recentNarrative, label, 12);
+}
+
 // ---------------------------------------------------------------------------
 // Token usage
 // ---------------------------------------------------------------------------
@@ -1148,6 +1183,8 @@ interface CodexStreamState {
   activeToolCalls: Map<string, CodexActiveToolCall>;
   recentNarrative: string[];
   recentFailures: string[];
+  diagnostics: string[];
+  lastEvent: string | null;
   completedCommands: number;
   plan: StreamPreviewPlan | null;
   /** Image blocks emitted this turn by Codex's built-in `image_gen` tool. */
@@ -1187,6 +1224,7 @@ function createCodexStreamState(opts: StreamOpts): CodexStreamState {
     activeCommands: new Map(),
     activeToolCalls: new Map(),
     recentNarrative: [], recentFailures: [],
+    diagnostics: [], lastEvent: null,
     completedCommands: 0,
     plan: null,
     imageBlocks: [],
@@ -1230,6 +1268,7 @@ function handleCodexNotification(
     if (method !== 'turn/started' && method !== 'model/rerouted') return;
     if (params.threadId !== s.sessionId) return;
   }
+  s.lastEvent = method;
 
   switch (method) {
     case 'item/started':
@@ -1502,11 +1541,28 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   let interrupted = false;
   let unsubscribeNotifications = () => {};
   let unsubscribeRequests = () => {};
+  let unsubscribeStderr = () => {};
   let settleTurnDone: (() => void) | null = null;
   let emitPreview = () => {};
   let publishedTurnControl = false;
+  const s = createCodexStreamState(opts);
+  const emit = () => {
+    s.activity = buildCodexActivityPreview(s);
+    const previewText = buildCodexPreviewText(s);
+    const previewActivity = buildCodexActivityPreview(s, { includeCommentary: false });
+    opts.onText(previewText, s.thinking, previewActivity, buildStreamPreviewMeta(s), s.plan);
+  };
+  emitPreview = emit;
 
   try {
+    unsubscribeStderr = srv.onStderr(text => {
+      const diagnostics = codexDiagnosticsFromStderr(text);
+      if (!diagnostics.length) return;
+      for (const diagnostic of diagnostics) pushRecentActivity(s.diagnostics, diagnostic, 6);
+      s.lastEvent = 'Codex stderr';
+      emit();
+    });
+
     const config: string[] = [];
     if (opts.codexExtraArgs?.length) {
       for (let i = 0; i < opts.codexExtraArgs.length; i++) {
@@ -1520,11 +1576,14 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       config.push('features.goals=true');
     }
 
+    markCodexProgress(s, 'Starting Codex app-server');
+    emit();
     if (!(await srv.ensureRunning(config, opts.extraEnv))) {
       return codexErrorResult('Failed to start codex app-server.', start, opts.sessionId, opts.model, opts.thinkingEffort);
     }
+    markCodexProgress(s, 'Codex app-server initialized');
+    emit();
 
-    const s = createCodexStreamState(opts);
     const publishTurnControl = () => {
       if (publishedTurnControl || !opts.onCodexTurnReady || !s.sessionId || !s.turnId) return;
       publishedTurnControl = true;
@@ -1572,9 +1631,13 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       developerInstructions: opts.codexDeveloperInstructions || undefined,
     };
     if (opts.sessionId) {
+      markCodexProgress(s, 'Resuming Codex thread');
+      emit();
       agentLog(`[codex-rpc] thread/resume id=${opts.sessionId}`);
       threadResp = await srv.call('thread/resume', { threadId: opts.sessionId, ...threadParams }, 60_000);
     } else {
+      markCodexProgress(s, 'Starting Codex thread');
+      emit();
       agentLog(`[codex-rpc] thread/start cwd=${opts.workdir} model=${opts.codexModel || '(default)'}`);
       threadResp = await srv.call('thread/start', threadParams, 60_000);
     }
@@ -1594,6 +1657,8 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       }
     }
     agentLog(`[codex-rpc] thread ready: id=${s.sessionId} model=${s.model}`);
+    markCodexProgress(s, 'Codex thread ready');
+    emit();
 
     // turn/start
     const input = buildCodexTurnInput(opts.prompt, opts.attachments || []);
@@ -1613,14 +1678,6 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
         if (s.turnId && s.sessionId) srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
         settleTurnDone?.();
       }, opts.timeout * 1000 + CODEX_STREAM_HARD_KILL_GRACE_MS);
-
-      const emit = () => {
-        s.activity = buildCodexActivityPreview(s);
-        const previewText = buildCodexPreviewText(s);
-        const previewActivity = buildCodexActivityPreview(s, { includeCommentary: false });
-        opts.onText(previewText, s.thinking, previewActivity, buildStreamPreviewMeta(s), s.plan);
-      };
-      emitPreview = emit;
 
       unsubscribeNotifications = srv.onNotification((method, params) => {
         handleCodexNotification(method, params, s, opts, deadline, emit, hardTimer, settleTurnDone, publishTurnControl);
@@ -1662,6 +1719,8 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     agentLog(`[codex-rpc] full command: cd ${Q(opts.workdir)} && ${cliParts.join(' ')}`);
 
     agentLog(`[codex-rpc] turn/start prompt="${opts.prompt.slice(0, 300)}${opts.prompt.length > 300 ? '…' : ''}" effort=${effort}`);
+    markCodexProgress(s, 'Starting Codex turn');
+    emit();
     const turnResp = await srv.call('turn/start', {
       threadId: s.sessionId, input,
       model: opts.codexModel || undefined,
@@ -1677,6 +1736,8 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       return codexErrorResult(errMsg, start, s.sessionId, s.model, s.thinkingEffort);
     }
     s.turnId = turnResp.result?.turn?.id ?? null;
+    markCodexProgress(s, 'Codex turn started');
+    emit();
     publishTurnControl();
 
     await turnDone;
@@ -1721,6 +1782,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   } finally {
     unsubscribeNotifications();
     unsubscribeRequests();
+    unsubscribeStderr();
     srv.kill();
   }
 }

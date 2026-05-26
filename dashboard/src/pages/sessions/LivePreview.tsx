@@ -5,7 +5,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
-import { WorkingActivitySummary, WorkingCard, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
+import { WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
 import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
 export interface LiveStreamView {
@@ -107,6 +107,8 @@ export function LivePreview({
             <WorkingSubAgentList subAgents={subAgents} t={t} />
             <WorkingThinkingBlock text={stream.thinking || ''} t={t} />
             <WorkingActivitySummary lines={activityLines} t={t} />
+            <WorkingActivityDetails lines={activityLines} t={t} />
+            <WorkingDiagnostics diagnostics={stream.previewMeta?.diagnostics} t={t} />
             {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && !stream.text && (
               <div className="text-[12px] text-fg-5">{t('hub.workingIdle')}</div>
             )}

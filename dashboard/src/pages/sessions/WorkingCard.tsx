@@ -73,6 +73,10 @@ function Badge({ children, title }: { children: ReactNode; title?: string }) {
   );
 }
 
+function shortBadgeText(value: string): string {
+  return value.length > 28 ? `${value.slice(0, 25)}...` : value;
+}
+
 function normalizeActivityLine(line: string): string {
   return line.replace(/\s+/g, ' ').trim();
 }
@@ -166,10 +170,17 @@ export function WorkingCard({
     ? formatDuration(Math.max(0, (phase === 'streaming' ? now : (doneMs ?? now)) - startMs))
     : null;
   const tokens = tokenSummary(previewMeta);
+  const lastEvent = previewMeta?.lastEvent?.trim() || '';
+  const idleMs = phase === 'streaming' && updatedAt
+    ? Math.max(0, now - updatedAt)
+    : null;
+  const idleLabel = idleMs != null && idleMs >= 15_000
+    ? replaceVars(t('hub.workingIdleFor'), { time: formatDuration(idleMs) })
+    : null;
   const countLabel = stepCount && stepCount > 0
     ? replaceVars(t('hub.workingStepCount'), { n: String(stepCount) })
     : null;
-  const hasBadges = !!(elapsedLabel || tokens || countLabel);
+  const hasBadges = !!(elapsedLabel || idleLabel || lastEvent || tokens || countLabel);
   const fallbackPreview = previewText?.trim() || t('hub.workingIdle');
   const dot = phase === 'streaming'
     ? { color: 'bg-emerald-400/70', pulse: true }
@@ -185,6 +196,8 @@ export function WorkingCard({
       badge={hasBadges ? (
         <span className="flex shrink-0 items-center gap-1">
           {elapsedLabel && <Badge title={t('hub.workingElapsed')}>{elapsedLabel}</Badge>}
+          {idleLabel && <Badge title={t('hub.workingNoRecentUpdate')}>{idleLabel}</Badge>}
+          {lastEvent && <Badge title={t('hub.lastEvent')}>{shortBadgeText(lastEvent)}</Badge>}
           {tokens && <Badge title={tokens.title}>{tokens.label}</Badge>}
           {countLabel && <Badge>{countLabel}</Badge>}
         </span>
@@ -291,6 +304,43 @@ export function WorkingActivitySummary({ lines, t }: { lines: string[]; t: (key:
           <div key={`${index}:${label}`} className="flex items-center gap-2 py-[2px] text-[12px] leading-[1.5] text-fg-5">
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fg-5/30" />
             <span>{label}</span>
+          </div>
+        ))}
+      </div>
+    </WorkingSection>
+  );
+}
+
+export function WorkingActivityDetails({ lines, t }: { lines: string[]; t: (key: string) => string }) {
+  const details = lines
+    .map(normalizeActivityLine)
+    .filter(Boolean)
+    .slice(-10);
+  if (!details.length) return null;
+  return (
+    <WorkingSection label={t('hub.activityDetails')}>
+      <div className="space-y-1 rounded-md bg-inset px-3 py-2">
+        {details.map((line, index) => (
+          <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
+            <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
+            <span className="min-w-0 break-words">{line}</span>
+          </div>
+        ))}
+      </div>
+    </WorkingSection>
+  );
+}
+
+export function WorkingDiagnostics({ diagnostics, t }: { diagnostics?: string[] | null; t: (key: string) => string }) {
+  const items = (diagnostics || []).map(normalizeActivityLine).filter(Boolean).slice(-6);
+  if (!items.length) return null;
+  return (
+    <WorkingSection label={t('hub.diagnostics')}>
+      <div className="space-y-1 rounded-md border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2">
+        {items.map((line, index) => (
+          <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-amber-200/85">
+            <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-amber-300/65" />
+            <span className="min-w-0 break-words">{line}</span>
           </div>
         ))}
       </div>
