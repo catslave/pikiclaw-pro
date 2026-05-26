@@ -22,6 +22,7 @@ import {
   appendSystemPrompt, pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
   sanitizeSessionUserPreviewText, emitSessionIdUpdate,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
+  adoptNativeSessionTitles,
   mergeManagedAndNativeSessions, applyTurnWindow,
   stripInjectedPrompts, attachAgentImage,
   roundPercent, emptyUsage, Q,
@@ -701,6 +702,7 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
         model: null,
         createdAt: data.startTime || data.createdAt || null,
         title,
+        titleSource: title ? 'prompt' : null,
         running: data.lastUpdated ? Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS : false,
         runState: data.lastUpdated && Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
         runDetail: null,
@@ -737,6 +739,7 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
+    titleSource: record.titleSource ?? null,
     running: record.runState === 'running',
     runState: record.runState,
     runDetail: record.runDetail,
@@ -754,7 +757,8 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
-  const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
+  const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'gemini', pikiclawSessions, nativeSessions);
+  const merged = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
   const projectName = geminiProjectName(resolvedWorkdir);
   const chatsDir = projectName ? geminiChatsDir(resolvedWorkdir) || '' : '';

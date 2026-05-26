@@ -321,6 +321,8 @@ export interface StreamResult {
 // ---------------------------------------------------------------------------
 
 /** Persistent record for a pikiclaw-managed session stored in the session index. */
+export type SessionTitleSource = 'prompt' | 'agent' | 'user';
+
 export interface ManagedSessionRecord {
   sessionId: string;
   agent: Agent;
@@ -330,6 +332,7 @@ export interface ManagedSessionRecord {
   createdAt: string;
   updatedAt: string;
   title: string | null;
+  titleSource?: SessionTitleSource | null;
   model: string | null;
   thinkingEffort: string | null;
   stagedFiles: string[];
@@ -410,6 +413,7 @@ export interface SessionInfo {
   thinkingEffort?: string | null;
   createdAt: string | null;
   title: string | null;
+  titleSource?: SessionTitleSource | null;
   running: boolean;
   runState: SessionRunState;
   runDetail: string | null;

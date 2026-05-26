@@ -80,7 +80,7 @@ export {
 
 // ── Re-export: session management ───────────────────────────────────────────
 export {
-  updateSessionMeta, promoteSessionId, recordFork,
+  updateSessionMeta, adoptAgentSessionTitle, adoptNativeSessionTitles, promoteSessionId, recordFork,
   listPikiclawSessions, findPikiclawSession, getSessionStoredConfig,
   ensureManagedSession, findManagedThreadSession, stageSessionFiles,
   mergeManagedAndNativeSessions,

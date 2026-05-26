@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildCodexTurnInput,
+  adoptAgentSessionTitle,
   doClaudeStream,
   doCodexStream,
   doGeminiStream,
@@ -26,6 +27,7 @@ import {
   sessionListDisplayTitle,
   shutdownCodexServer,
   stageSessionFiles,
+  updateSessionMeta,
   type StreamOpts,
 } from '../src/agent/index.ts';
 import { makeTmpDir, withTempHome } from './support/env.ts';
@@ -154,6 +156,98 @@ describe('buildCodexTurnInput and usage helpers', () => {
       lastQuestion: 'local question',
       lastAnswer: 'local answer',
       lastMessageText: 'local answer',
+    });
+  });
+
+  it('uses an agent-generated native title over the first prompt placeholder', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-auto-title',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'local-model',
+        createdAt: '2026-03-16T00:00:00.000Z',
+        title: 'chat item name 的问题，我觉得这里要优化一下',
+        titleSource: 'prompt',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:02:00.000Z',
+        lastQuestion: 'chat item name 的问题，我觉得这里要优化一下',
+        lastAnswer: 'done',
+        lastMessageText: 'done',
+      },
+    ], [
+      {
+        sessionId: 'sess-auto-title',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'native-model',
+        createdAt: '2026-03-16T00:00:30.000Z',
+        title: '自动生成 Chat 标题',
+        titleSource: 'agent',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:03:00.000Z',
+        lastQuestion: 'native question',
+        lastAnswer: 'native answer',
+        lastMessageText: 'native answer',
+      },
+    ]);
+
+    expect(merged[0]).toMatchObject({
+      sessionId: 'sess-auto-title',
+      title: '自动生成 Chat 标题',
+      titleSource: 'agent',
+    });
+  });
+
+  it('keeps a user-renamed title even when the native agent title changes', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-user-title',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'local-model',
+        createdAt: '2026-03-16T00:00:00.000Z',
+        title: '我的固定名称',
+        titleSource: 'user',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:02:00.000Z',
+        lastQuestion: 'local question',
+        lastAnswer: 'local answer',
+        lastMessageText: 'local answer',
+      },
+    ], [
+      {
+        sessionId: 'sess-user-title',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'native-model',
+        createdAt: '2026-03-16T00:00:30.000Z',
+        title: 'native generated title',
+        titleSource: 'agent',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:03:00.000Z',
+        lastQuestion: 'native question',
+        lastAnswer: 'native answer',
+        lastMessageText: 'native answer',
+      },
+    ]);
+
+    expect(merged[0]).toMatchObject({
+      sessionId: 'sess-user-title',
+      title: '我的固定名称',
+      titleSource: 'user',
     });
   });
 
@@ -419,6 +513,32 @@ describe('stageSessionFiles', () => {
 
     const record = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === staged.sessionId);
     expect(record?.title).toBe('第一行问题前缀');
+    expect(record?.titleSource).toBe('prompt');
+  });
+
+  it('adopts an agent-generated title once, then leaves later naming to the user', () => {
+    const workdir = makeTmpDir('pikiclaw-agent-title-');
+    const staged = stageSessionFiles({
+      agent: 'codex',
+      workdir,
+      files: [],
+      title: 'please improve chat item naming',
+    });
+
+    expect(adoptAgentSessionTitle(workdir, 'codex', staged.sessionId, 'Improve Chat Naming')).toBe(true);
+    let record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.title).toBe('Improve Chat Naming');
+    expect(record?.titleSource).toBe('agent');
+
+    expect(adoptAgentSessionTitle(workdir, 'codex', staged.sessionId, 'Later Native Rename')).toBe(false);
+    record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.title).toBe('Improve Chat Naming');
+
+    expect(updateSessionMeta(workdir, 'codex', staged.sessionId, { title: 'Manual Chat Name' })).toBe(true);
+    expect(adoptAgentSessionTitle(workdir, 'codex', staged.sessionId, 'Ignored Native Rename')).toBe(false);
+    record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.title).toBe('Manual Chat Name');
+    expect(record?.titleSource).toBe('user');
   });
 
   it('promotes pending sessions without leaving stale pending records or breaking old workspace paths', () => {

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type {
   ManagedSessionRecord,
+  SessionTitleSource,
   SessionRunState,
   SessionClassification,
   SessionInfo,
@@ -108,6 +109,24 @@ function nextThreadId(): string { return `thread_${crypto.randomBytes(6).toStrin
 function legacyThreadId(agent: Agent, sessionId: string): string { return `legacy:${agent}:${sessionId}`; }
 function normalizeThreadId(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeSessionTitleSource(value: unknown): SessionTitleSource | null {
+  return value === 'prompt' || value === 'agent' || value === 'user' ? value : null;
+}
+
+function promptDerivedTitle(prompt: string | null | undefined): string | null {
+  return summarizePromptTitle(prompt) || null;
+}
+
+function canAdoptAgentTitle(record: Pick<ManagedSessionRecord | SessionInfo, 'title' | 'titleSource'>): boolean {
+  if (record.titleSource === 'prompt') return true;
+  return !record.title && !record.titleSource;
+}
+
+function nativeAgentTitle(native: Pick<SessionInfo, 'title' | 'titleSource'> | null | undefined): string | null {
+  if (!native || native.titleSource !== 'agent') return null;
+  return promptDerivedTitle(native.title);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +298,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     createdAt: typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString(),
     title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
+    titleSource: normalizeSessionTitleSource(raw?.titleSource),
     model: typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : null,
     thinkingEffort: typeof raw?.thinkingEffort === 'string' && raw.thinkingEffort.trim() ? raw.thinkingEffort.trim() : null,
     stagedFiles: Array.isArray(raw?.stagedFiles) ? dedupeStrings(raw.stagedFiles.filter((v: unknown) => typeof v === 'string')) : [],
@@ -327,7 +347,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     workspacePath: record.workspacePath,
     threadId: record.threadId,
     createdAt: record.createdAt, updatedAt: record.updatedAt,
-    title: record.title, model: record.model, thinkingEffort: record.thinkingEffort, stagedFiles: record.stagedFiles,
+    title: record.title, titleSource: record.titleSource ?? null, model: record.model, thinkingEffort: record.thinkingEffort, stagedFiles: record.stagedFiles,
     runState: record.runState, runDetail: record.runDetail, runUpdatedAt: record.runUpdatedAt,
     runPid: record.runPid,
     classification: record.classification,
@@ -428,7 +448,10 @@ export function updateSessionMeta(
   const record = index.sessions.find(s => s.sessionId === sessionId && s.agent === agent);
   if (!record) return false;
 
-  if (patch.title !== undefined) record.title = patch.title;
+  if (patch.title !== undefined) {
+    record.title = patch.title;
+    record.titleSource = patch.title ? 'user' : null;
+  }
   if (patch.userStatus !== undefined) record.userStatus = patch.userStatus;
   if (patch.userNote !== undefined) record.userNote = patch.userNote;
   if (patch.classification !== undefined) record.classification = patch.classification;
@@ -446,6 +469,42 @@ export function updateSessionMeta(
   writeSessionIndex(resolvedWorkdir, index.sessions);
   writeSessionMeta(record);
   return true;
+}
+
+export function adoptAgentSessionTitle(workdir: string, agent: Agent, sessionId: string, title: string | null | undefined): boolean {
+  const nextTitle = promptDerivedTitle(title);
+  if (!nextTitle) return false;
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const record = index.sessions.find(s => s.sessionId === sessionId && s.agent === agent);
+  if (!record || !canAdoptAgentTitle(record)) return false;
+
+  record.title = nextTitle;
+  record.titleSource = 'agent';
+  record.updatedAt = new Date().toISOString();
+
+  writeSessionIndex(resolvedWorkdir, index.sessions);
+  writeSessionMeta(record);
+  return true;
+}
+
+export function adoptNativeSessionTitles(
+  workdir: string,
+  agent: Agent,
+  managedSessions: SessionInfo[],
+  nativeSessions: SessionInfo[],
+): SessionInfo[] {
+  const nativeById = new Map<string, SessionInfo>();
+  for (const native of nativeSessions) {
+    if (native.sessionId) nativeById.set(native.sessionId, native);
+  }
+  return managedSessions.map((managed) => {
+    if (!managed.sessionId || !canAdoptAgentTitle(managed)) return managed;
+    const nextTitle = nativeAgentTitle(nativeById.get(managed.sessionId));
+    if (!nextTitle) return managed;
+    if (!adoptAgentSessionTitle(workdir, agent, managed.sessionId, nextTitle)) return managed;
+    return { ...managed, title: nextTitle, titleSource: 'agent' };
+  });
 }
 
 /**
@@ -615,12 +674,13 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
     const sessionId = opts.sessionId?.trim() || nextPendingSessionId();
     const threadId = normalizeThreadId(opts.threadId)
       || (opts.sessionId ? legacyThreadId(opts.agent, sessionId) : nextThreadId());
+    const title = promptDerivedTitle(opts.title);
     record = {
       sessionId, agent: opts.agent, workdir,
       workspacePath: sessionWorkspacePath(workdir, opts.agent, sessionId),
       threadId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      title: summarizePromptTitle(opts.title) || null, model: null, thinkingEffort: null, stagedFiles: [],
+      title, titleSource: title ? 'prompt' : null, model: null, thinkingEffort: null, stagedFiles: [],
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
       runPid: null,
       classification: null, userStatus: null, userNote: null,
@@ -633,7 +693,13 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
   if (!record.threadId) record.threadId = normalizeThreadId(opts.threadId) || legacyThreadId(record.agent, record.sessionId);
   // Backfill handoverFrom on first staging only — never overwrite an existing one.
   if (!record.handoverFrom) record.handoverFrom = normalizeHandoverRef(opts.handoverFrom);
-  if (!record.title && opts.title) record.title = summarizePromptTitle(opts.title);
+  if (!record.title && opts.title) {
+    const title = promptDerivedTitle(opts.title);
+    if (title) {
+      record.title = title;
+      record.titleSource = record.titleSource || 'prompt';
+    }
+  }
   record.workspacePath = path.resolve(record.workspacePath);
   saveSessionRecord(workdir, record);
   return { sessionId: record.sessionId, workspacePath: record.workspacePath, record };
@@ -661,6 +727,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     thinkingEffort: record.thinkingEffort,
     createdAt: record.createdAt,
     title,
+    titleSource: record.titleSource ?? null,
     running: record.runState === 'running',
     runState: record.runState,
     runDetail: record.runDetail,
@@ -810,7 +877,13 @@ export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInf
     title: opts.title,
     threadId: opts.threadId,
   });
-  if (!session.record.title && opts.title) session.record.title = summarizePromptTitle(opts.title);
+  if (!session.record.title && opts.title) {
+    const title = promptDerivedTitle(opts.title);
+    if (title) {
+      session.record.title = title;
+      session.record.titleSource = session.record.titleSource || 'prompt';
+    }
+  }
   if (!session.record.model && opts.model) session.record.model = opts.model.trim() || null;
   saveSessionRecord(opts.workdir, session.record);
   return managedRecordToSessionInfo(session.record);
@@ -881,6 +954,7 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       continue;
     }
     const useNativeTimeline = preferNativeSessionTimeline(managed, native);
+    const adoptedTitle = canAdoptAgentTitle(managed) ? nativeAgentTitle(native) : null;
     merged.push({
       ...managed,
       ...native,
@@ -893,9 +967,10 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
         : (useNativeTimeline ? native.runState : managed.runState),
       runDetail: useNativeTimeline ? (native.runDetail ?? managed.runDetail) : (managed.runDetail ?? native.runDetail),
       runUpdatedAt: useNativeTimeline ? (native.runUpdatedAt ?? managed.runUpdatedAt) : (managed.runUpdatedAt ?? native.runUpdatedAt),
-      // Dashboard rename writes managed.title; native titles are derived from
-      // agent history and must not overwrite an explicit pikiclaw title.
-      title: managed.title || native.title,
+      // User renames are explicit and stable. Prompt-derived placeholders may
+      // be replaced once by an agent-native title generated after the first turn.
+      title: adoptedTitle || managed.title || native.title,
+      titleSource: adoptedTitle ? 'agent' : (managed.titleSource ?? native.titleSource ?? null),
       model: native.model || managed.model,
       createdAt: native.createdAt || managed.createdAt,
       classification: managed.classification ?? native.classification ?? null,

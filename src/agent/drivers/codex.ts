@@ -24,6 +24,7 @@ import {
   normalizeStreamPreviewPlan,
   IMAGE_EXTS,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
+  adoptNativeSessionTitles,
   mergeManagedAndNativeSessions,
   stripInjectedPrompts, sanitizeSessionUserPreviewText, computeContext, readTailLines, applyTurnWindow,
   roundPercent, toIsoFromEpochSeconds, labelFromWindowMinutes,
@@ -1702,6 +1703,7 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
         const stat = fs.statSync(fullPath);
         const idx = titleIndex.get(metaId);
         const title = idx?.threadName || readCodexInitialQuestion(fullPath);
+        const titleSource = idx?.threadName ? 'agent' as const : 'prompt' as const;
         const updatedAt = idx?.updatedAt || stat.mtime.toISOString();
         const tailQA = extractCodexTailQA(fullPath);
 
@@ -1713,6 +1715,7 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
           model: null,
           createdAt: meta.timestamp || stat.birthtime.toISOString(),
           title,
+          titleSource,
           running: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS,
           runState: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
           runDetail: null,
@@ -1809,6 +1812,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
+    titleSource: record.titleSource ?? null,
     running: record.runState === 'running',
     runState: record.runState,
     runDetail: record.runDetail,
@@ -1826,7 +1830,8 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
-  const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
+  const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'codex', pikiclawSessions, nativeSessions);
+  const merged = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
   const sessionsDir = path.join(getHome(), '.codex', 'sessions');
   agentLog(

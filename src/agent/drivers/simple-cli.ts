@@ -147,6 +147,7 @@ function recordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     thinkingEffort: record.thinkingEffort,
     createdAt: record.createdAt,
     title: record.title,
+    titleSource: record.titleSource ?? null,
     running: record.runState === 'running',
     runState: record.runState,
     runDetail: record.runDetail,

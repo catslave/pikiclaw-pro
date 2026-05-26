@@ -373,7 +373,13 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   // Capture staged files for MCP bridge before clearing
   const stagedFiles = [...session.record.stagedFiles];
   session.record.stagedFiles = [];
-  if (!session.record.title) session.record.title = summarizePromptTitle(displayPrompt) || null;
+  if (!session.record.title || (session.record.titleSource === 'prompt' && session.record.title === 'New session')) {
+    const title = summarizePromptTitle(displayPrompt) || null;
+    if (title) {
+      session.record.title = title;
+      session.record.titleSource = session.record.titleSource || 'prompt';
+    }
+  }
   session.record.lastQuestion = shortValue(displayPrompt, 500);
   session.record.lastMessageText = shortValue(displayPrompt, 500);
   setSessionRunState(session.record, 'running', null);
@@ -411,7 +417,13 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   session.record.model = result.model || session.record.model;
   if (result.thinkingEffort) session.record.thinkingEffort = result.thinkingEffort;
   const displayPrompt = collapseSkillPrompt(prompt) ?? prompt;
-  if (!session.record.title) session.record.title = summarizePromptTitle(displayPrompt);
+  if (!session.record.title || (session.record.titleSource === 'prompt' && session.record.title === 'New session')) {
+    const title = summarizePromptTitle(displayPrompt);
+    if (title) {
+      session.record.title = title;
+      session.record.titleSource = session.record.titleSource || 'prompt';
+    }
+  }
   session.record.lastQuestion = shortValue(displayPrompt, 500);
   session.record.lastAnswer = shortValue(result.message, 500);
   session.record.lastMessageText = shortValue(result.message, 500) || shortValue(displayPrompt, 500);

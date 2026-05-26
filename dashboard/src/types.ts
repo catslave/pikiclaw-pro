@@ -336,6 +336,7 @@ export interface InteractionSnapshot {
 export interface SessionInfo {
   sessionId: string;
   title?: string;
+  titleSource?: 'prompt' | 'agent' | 'user' | null;
   createdAt?: string;
   running?: boolean;
   isCurrent?: boolean;
