@@ -279,7 +279,7 @@ Environment variables (per agent):
   CLAUDE_PERMISSION_MODE     Permission mode (default: bypassPermissions)
   CLAUDE_EXTRA_ARGS          Extra CLI args for claude
   CODEX_MODEL                Codex model name
-  CODEX_REASONING_EFFORT     Reasoning effort (default: xhigh)
+  CODEX_REASONING_EFFORT     Reasoning effort (default: medium)
   CODEX_FULL_ACCESS          Full-access mode (default: true)
   CODEX_EXTRA_ARGS           Extra CLI args for codex
   GEMINI_MODEL               Gemini model name

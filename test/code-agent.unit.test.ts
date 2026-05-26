@@ -697,6 +697,80 @@ describe('stageSessionFiles', () => {
 });
 
 describe('codex stream', () => {
+  it('reuses an idle codex app-server when no per-turn MCP bridge is active', async () => {
+    const spawnLog = path.join(tmpDir, 'codex-warm-spawns.log');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+const readline = require('node:readline');
+const spawnLog = ${JSON.stringify(spawnLog)};
+fs.appendFileSync(spawnLog, String(process.pid) + '\\n');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let threadSeq = 0;
+let turnSeq = 0;
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    const threadId = 'thread-warm-' + (++threadSeq);
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: threadId }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    const threadId = msg.params.threadId;
+    const turnId = 'turn-warm-' + (++turnSeq);
+    const msgId = 'msg-' + turnId;
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: turnId } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/started',
+      params: { threadId, turn: { id: turnId } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: { threadId, item: { id: msgId, type: 'agentMessage', phase: 'final_answer' } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/agentMessage/delta',
+      params: { threadId, itemId: msgId, delta: 'done ' + turnId },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId, turn: { id: turnId, status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const metaEvents: any[] = [];
+    const first = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, _activity, meta) => { if (meta) metaEvents.push(meta); },
+    }));
+    const second = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, _activity, meta) => { if (meta) metaEvents.push(meta); },
+    }));
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    const spawns = fs.readFileSync(spawnLog, 'utf-8').trim().split('\n').filter(Boolean);
+    expect(spawns).toHaveLength(1);
+    expect(metaEvents.some(meta => meta.lastEvent === 'Reusing Codex app-server')).toBe(true);
+    expect(metaEvents.some(meta => (
+      meta.diagnostics || []
+    ).some((line: string) => line.includes('app-server reused')))).toBe(true);
+  });
+
   it('surfaces codex stderr diagnostics in live preview meta', async () => {
     const script = `#!/usr/bin/env node
 const readline = require('node:readline');
@@ -752,6 +826,29 @@ rl.on('line', (line) => {
     expect(metaEvents.some(meta => (
       meta.diagnostics || []
     ).some((line: string) => line.includes('Skill config error')))).toBe(true);
+  });
+
+  it('skips an empty codex MCP bridge when only native user input is available', async () => {
+    await withTempHome(async () => {
+      const callsFile = path.join(tmpDir, 'codex-mcp-calls.log');
+      const script = `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(callsFile)}\nexit 0\n`;
+      fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+      const { startMcpBridge } = await import('../src/agent/mcp/bridge.ts');
+      const sessionDir = makeTmpDir('pikiclaw-mcp-session-');
+      const workspacePath = makeTmpDir('pikiclaw-mcp-workspace-');
+
+      const handle = await startMcpBridge({
+        sessionDir,
+        workspacePath,
+        workdir: tmpDir,
+        stagedFiles: [],
+        agent: 'codex',
+        onInteraction: async () => null,
+      });
+
+      expect(handle).toBeNull();
+      expect(fs.existsSync(callsFile)).toBe(false);
+    });
   });
 
   it('passes developerInstructions on resume and surfaces structured plans and file changes', async () => {

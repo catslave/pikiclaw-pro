@@ -191,6 +191,14 @@ export interface StreamOpts {
   codexDeveloperInstructions?: string;
   codexExtraArgs?: string[];
   codexPrevCumulative?: CodexCumulativeUsage;
+  /** True when this turn registered Codex MCP servers via the bridge. Pooled
+   *  app-server reuse is disabled in that case because the server may cache
+   *  per-turn MCP callback env. */
+  codexMcpBridgeActive?: boolean;
+  /** Measured in stream.ts before entering the Codex driver. */
+  codexMcpBridgeSetupMs?: number | null;
+  /** Time spent waiting behind earlier work for the same session. */
+  queueWaitMs?: number | null;
   // claude
   claudeModel?: string;
   claudePermissionMode?: string;

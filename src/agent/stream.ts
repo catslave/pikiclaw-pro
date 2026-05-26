@@ -466,6 +466,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
   try {
     const { startMcpBridge } = await import('./mcp/bridge.js');
     const sessionDir = path.dirname(session.workspacePath);
+    const mcpSetupStart = Date.now();
     bridge = await startMcpBridge({
       sessionDir,
       workspacePath: session.workspacePath,
@@ -476,7 +477,9 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       agent: opts.agent,
       onLog: (message: string) => agentLog(`[mcp] ${message}`),
     });
+    prepared.codexMcpBridgeSetupMs = Date.now() - mcpSetupStart;
     if (bridge) {
+      if (prepared.agent === 'codex') prepared.codexMcpBridgeActive = true;
       prepared.mcpConfigPath = bridge.configPath;
       if (bridge.mcpServers) prepared.mcpServers = bridge.mcpServers;
       if (bridge.extraEnv) prepared.extraEnv = { ...(prepared.extraEnv || {}), ...bridge.extraEnv };
@@ -486,6 +489,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       try { agentLog(`[mcp] config content:\n${fs.readFileSync(bridge.configPath, 'utf-8')}`); } catch {};
     }
   } catch (e: any) {
+    prepared.codexMcpBridgeSetupMs = null;
     agentWarn(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
   }
 

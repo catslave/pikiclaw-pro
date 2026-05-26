@@ -76,6 +76,7 @@ const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = BOT_TIMEOUTS.macosUserActivityPulseT
 const STREAM_TEXT_DEBUG_MIN_INTERVAL_MS = 1000;
 const STREAM_TEXT_DEBUG_MIN_BYTES_DELTA = 1024;
 const LIVE_STREAM_SNAPSHOT_WITHOUT_TASK_STALE_MS = 30_000;
+const SAME_AGENT_HANDOVER_MAX_CHARS = 24_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -446,7 +447,7 @@ export class Bot {
   // Convenience accessors (backward-compat)
   get codexModel(): string { return this.agentConfigs.codex?.model || ''; }
   set codexModel(v: string) { this.agentConfigs.codex.model = v; }
-  get codexReasoningEffort(): string { return this.agentConfigs.codex?.reasoningEffort || 'xhigh'; }
+  get codexReasoningEffort(): string { return this.agentConfigs.codex?.reasoningEffort || 'medium'; }
   set codexReasoningEffort(v: string) { this.agentConfigs.codex.reasoningEffort = v; }
   get codexFullAccess(): boolean { return this.agentConfigs.codex?.fullAccess ?? true; }
   get codexExtraArgs(): string[] { return this.agentConfigs.codex?.extraArgs || []; }
@@ -930,7 +931,7 @@ export class Bot {
     this.agentConfigs = {
       codex: {
         model: resolveAgentModel(config, 'codex'),
-        reasoningEffort: resolveAgentEffort(config, 'codex') || 'xhigh',
+        reasoningEffort: resolveAgentEffort(config, 'codex') || 'medium',
         fullAccess: envBool('CODEX_FULL_ACCESS', true),
         extraArgs: shellSplit(process.env.CODEX_EXTRA_ARGS || ''),
       },
@@ -2014,7 +2015,7 @@ export class Bot {
           this.createInteractionHandler(chatId, taskId),
           undefined,
           undefined,
-          opts.forkOf ? { forkOf: opts.forkOf } : undefined,
+          { ...(opts.forkOf ? { forkOf: opts.forkOf } : {}), queueWaitMs: Date.now() - queuedAt },
         );
         this.emitStreamDone(taskId, session.key, {
           sessionId: result.sessionId || session.sessionId,
@@ -2780,7 +2781,7 @@ export class Bot {
     onInteraction?: (request: AgentInteraction) => Promise<Record<string, any> | null>,
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
-    extras?: { forkOf?: { parentSessionId: string; atTurn: number } },
+    extras?: { forkOf?: { parentSessionId: string; atTurn: number }; queueWaitMs?: number },
   ): Promise<StreamResult> {
     const agentConfig = this.agentConfigs[cs.agent] || {};
     // Session-level config stored on disk — used as fallback between explicit override and global defaults
@@ -2815,6 +2816,7 @@ export class Bot {
           workdir: sessionWorkdir,
           toAgent: cs.agent,
           toModel: resolvedModel,
+          maxBudgetChars: handoverFrom.agent === cs.agent ? SAME_AGENT_HANDOVER_MAX_CHARS : null,
         });
         if (result.ok && result.seed) {
           prompt = result.seed + '\n\n' + prompt;
@@ -2904,6 +2906,7 @@ export class Bot {
       onInteraction,
       onSteerReady,
       onCodexTurnReady,
+      queueWaitMs: extras?.queueWaitMs,
       // Fork lineage — when set, the driver branches off the parent session.
       forkOf: extras?.forkOf,
     };

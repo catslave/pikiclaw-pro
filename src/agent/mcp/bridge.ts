@@ -527,7 +527,8 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   //   - structured tool-activity logging from the in-process MCP server → /log
   let callbackServer: http.Server | null = null;
   let port = 0;
-  const needsCallbackServer = !!sendFile || !!onInteraction;
+  const needsAskUserCallback = !!onInteraction && opts.agent !== 'codex';
+  const needsCallbackServer = !!sendFile || needsAskUserCallback;
 
   if (needsCallbackServer) {
     callbackServer = http.createServer((req, res) => {
@@ -700,7 +701,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     callbackServer.headersTimeout = MCP_TIMEOUTS.serverHeaders;
     // /ask-user can block indefinitely; drop the server-wide request timeout
     // when that endpoint is wired up.
-    if (onInteraction) callbackServer.requestTimeout = 0;
+    if (needsAskUserCallback) callbackServer.requestTimeout = 0;
 
     await new Promise<void>((resolve, reject) => {
       callbackServer!.on('error', reject);
@@ -716,22 +717,28 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   // Register the pikiclaw stdio MCP server when any in-process tool needs the
   // callback channel. `MCP_TOOLS_AVAILABLE` tells the server which tool
   // families to advertise.
-  if (port && (sendFile || onInteraction)) {
+  if (port && (sendFile || needsAskUserCallback)) {
     const { command, args } = resolveMcpServerCommand();
     const enabledTools: string[] = [];
     if (sendFile) enabledTools.push('workspace');
     // Codex has native user-input via JSON-RPC; don't expose `im_ask_user`.
     if (onInteraction && opts.agent !== 'codex') enabledTools.push('ask-user');
-    const envVars = {
-      MCP_WORKSPACE_PATH: workspacePath,
-      MCP_WORKDIR: opts.workdir || '',
-      MCP_AGENT: opts.agent || '',
-      MCP_STAGED_FILES: JSON.stringify(stagedFiles),
-      MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
-      MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
-      MCP_TOOLS_AVAILABLE: enabledTools.join(','),
-    };
-    servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
+    if (!enabledTools.length) {
+      if (callbackServer) await new Promise<void>(resolve => callbackServer!.close(() => resolve()));
+      callbackServer = null;
+      port = 0;
+    } else {
+      const envVars = {
+        MCP_WORKSPACE_PATH: workspacePath,
+        MCP_WORKDIR: opts.workdir || '',
+        MCP_AGENT: opts.agent || '',
+        MCP_STAGED_FILES: JSON.stringify(stagedFiles),
+        MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
+        MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
+        MCP_TOOLS_AVAILABLE: enabledTools.join(','),
+      };
+      servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
+    }
   }
 
   // Nothing to register — skip bridge entirely

@@ -35,6 +35,7 @@ import {
 } from '../index.js';
 import {
   CODEX_APPSERVER_SPAWN_TIMEOUT_MS as _CODEX_APPSERVER_SPAWN_TIMEOUT_MS,
+  CODEX_APPSERVER_IDLE_TTL_MS,
   CODEX_STREAM_HARD_KILL_GRACE_MS,
   SESSION_RUNNING_THRESHOLD_MS,
 } from '../../core/constants.js';
@@ -45,6 +46,7 @@ import { getHome } from '../../core/platform.js';
 // ---------------------------------------------------------------------------
 
 const CODEX_APPSERVER_SPAWN_TIMEOUT_MS = _CODEX_APPSERVER_SPAWN_TIMEOUT_MS;
+const CODEX_STREAM_SERVER_POOL_MAX_PER_KEY = 2;
 
 type RpcCallback = (msg: any) => void;
 type NotificationHandler = (method: string, params: any) => void;
@@ -216,6 +218,8 @@ export class CodexAppServer {
     for (const cb of this.pending.values()) cb({ error: { message: 'app-server terminated' } });
     this.pending.clear();
     this.notificationHandlers.clear();
+    this.requestHandlers.clear();
+    this.stderrHandlers.clear();
   }
 
   get isRunning(): boolean { return this.ready && !!this.proc && !this.proc.killed; }
@@ -243,9 +247,111 @@ function getSharedServer(): CodexAppServer {
   return _sharedServer;
 }
 
+interface CodexStreamServerPoolEntry {
+  server: CodexAppServer;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface CodexStreamServerLease {
+  server: CodexAppServer;
+  reused: boolean;
+  pooled: boolean;
+  release: (discard?: boolean) => void;
+}
+
+const codexStreamServerPool = new Map<string, CodexStreamServerPoolEntry[]>();
+
+function stableEnvEntries(env?: Record<string, string>): Array<[string, string]> {
+  if (!env) return [];
+  return Object.keys(env).sort().map(key => [key, String(env[key] ?? '')]);
+}
+
+function codexStreamServerPoolKey(config: string[], extraEnv?: Record<string, string>): string {
+  const hash = crypto.createHash('sha256')
+    .update(JSON.stringify({ config, env: stableEnvEntries(extraEnv) }))
+    .digest('hex')
+    .slice(0, 16);
+  return `codex:${hash}`;
+}
+
+function acquireCodexStreamServer(config: string[], extraEnv?: Record<string, string>, opts: { disablePool?: boolean } = {}): CodexStreamServerLease {
+  if (opts.disablePool) {
+    const server = new CodexAppServer();
+    return {
+      server,
+      reused: false,
+      pooled: false,
+      release: () => { server.kill(); },
+    };
+  }
+
+  const key = codexStreamServerPoolKey(config, extraEnv);
+  const bucket = codexStreamServerPool.get(key) || [];
+  while (bucket.length) {
+    const entry = bucket.pop()!;
+    if (entry.timer) clearTimeout(entry.timer);
+    if (entry.server.isRunning) {
+      codexStreamServerPool.set(key, bucket);
+      return {
+        server: entry.server,
+        reused: true,
+        pooled: true,
+        release: (discard = false) => releaseCodexStreamServer(key, entry.server, discard),
+      };
+    }
+    entry.server.kill();
+  }
+  codexStreamServerPool.set(key, bucket);
+  const server = new CodexAppServer();
+  return {
+    server,
+    reused: false,
+    pooled: true,
+    release: (discard = false) => releaseCodexStreamServer(key, server, discard),
+  };
+}
+
+function releaseCodexStreamServer(key: string, server: CodexAppServer, discard = false): void {
+  if (discard || !server.isRunning) {
+    server.kill();
+    return;
+  }
+  const entry: CodexStreamServerPoolEntry = {
+    server,
+    timer: null,
+  };
+  entry.timer = setTimeout(() => {
+    const bucket = codexStreamServerPool.get(key) || [];
+    const idx = bucket.indexOf(entry);
+    if (idx >= 0) bucket.splice(idx, 1);
+    if (!bucket.length) codexStreamServerPool.delete(key);
+    server.kill();
+  }, CODEX_APPSERVER_IDLE_TTL_MS);
+  const bucket = codexStreamServerPool.get(key) || [];
+  bucket.push(entry);
+  while (bucket.length > CODEX_STREAM_SERVER_POOL_MAX_PER_KEY) {
+    const evicted = bucket.shift();
+    if (!evicted) break;
+    if (evicted.timer) clearTimeout(evicted.timer);
+    evicted.server.kill();
+  }
+  codexStreamServerPool.set(key, bucket);
+}
+
+function shutdownCodexStreamServerPool(): void {
+  for (const bucket of codexStreamServerPool.values()) {
+    for (const entry of bucket) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.server.kill();
+    }
+  }
+  codexStreamServerPool.clear();
+}
+
 export function shutdownCodexServer(): void {
   _sharedServer?.kill();
   _sharedServer = null;
+  shutdownCodexStreamServerPool();
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1149,33 @@ function markCodexProgress(s: { recentNarrative: string[]; lastEvent: string | n
   pushRecentActivity(s.recentNarrative, label, 12);
 }
 
+function formatTimingMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function buildCodexTimingDiagnostic(s: CodexStreamState): string {
+  const timings = s.phaseTimings;
+  const parts: string[] = [];
+  const queue = formatTimingMs(timings.queueWaitMs);
+  const mcp = formatTimingMs(timings.mcpBridgeSetupMs);
+  const app = formatTimingMs(timings.appServerMs);
+  const thread = formatTimingMs(timings.threadMs);
+  const turnStart = formatTimingMs(timings.turnStartMs);
+  const firstEvent = formatTimingMs(timings.firstEventMs);
+  const total = formatTimingMs(timings.totalMs);
+  if (queue) parts.push(`queue ${queue}`);
+  if (mcp) parts.push(`mcp ${mcp}`);
+  if (timings.appServerReused) parts.push('app-server reused');
+  else if (app) parts.push(`app-server ${app}`);
+  if (thread) parts.push(`thread ${thread}`);
+  if (turnStart) parts.push(`turn-start ${turnStart}`);
+  if (firstEvent) parts.push(`first-event ${firstEvent}`);
+  if (total) parts.push(`total ${total}`);
+  return `Timing: ${parts.join(', ') || 'unavailable'}`;
+}
+
 // ---------------------------------------------------------------------------
 // Token usage
 // ---------------------------------------------------------------------------
@@ -1143,6 +1276,7 @@ export function buildCodexTurnInput(prompt: string, attachments: string[]): any[
 // ---------------------------------------------------------------------------
 
 interface CodexStreamState {
+  startedAtMs: number;
   sessionId: string | null;
   text: string;
   thinking: string;
@@ -1185,6 +1319,17 @@ interface CodexStreamState {
   recentFailures: string[];
   diagnostics: string[];
   lastEvent: string | null;
+  phaseTimings: {
+    queueWaitMs?: number | null;
+    mcpBridgeSetupMs?: number | null;
+    appServerMs?: number | null;
+    appServerReused?: boolean;
+    appServerPooled?: boolean;
+    threadMs?: number | null;
+    turnStartMs?: number | null;
+    firstEventMs?: number | null;
+    totalMs?: number | null;
+  };
   completedCommands: number;
   plan: StreamPreviewPlan | null;
   /** Image blocks emitted this turn by Codex's built-in `image_gen` tool. */
@@ -1207,6 +1352,7 @@ function createCodexStreamState(opts: StreamOpts): CodexStreamState {
     : null;
   const byokProvider = opts.byokProviderName || null;
   return {
+    startedAtMs: Date.now(),
     sessionId: opts.sessionId,
     text: '', thinking: '', activity: '', msgs: [], thinkParts: [],
     model: opts.model, thinkingEffort: opts.thinkingEffort,
@@ -1225,6 +1371,11 @@ function createCodexStreamState(opts: StreamOpts): CodexStreamState {
     activeToolCalls: new Map(),
     recentNarrative: [], recentFailures: [],
     diagnostics: [], lastEvent: null,
+    phaseTimings: {
+      queueWaitMs: opts.queueWaitMs ?? null,
+      mcpBridgeSetupMs: opts.codexMcpBridgeSetupMs ?? null,
+      firstEventMs: null,
+    },
     completedCommands: 0,
     plan: null,
     imageBlocks: [],
@@ -1269,6 +1420,9 @@ function handleCodexNotification(
     if (params.threadId !== s.sessionId) return;
   }
   s.lastEvent = method;
+  if (s.phaseTimings.firstEventMs == null) {
+    s.phaseTimings.firstEventMs = Date.now() - s.startedAtMs;
+  }
 
   switch (method) {
     case 'item/started':
@@ -1536,7 +1690,8 @@ async function handleCodexRequest(
 
 export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   const start = Date.now();
-  const srv = new CodexAppServer();
+  let serverLease: CodexStreamServerLease | null = null;
+  let discardServerLease = true;
   let timedOut = false;
   let interrupted = false;
   let unsubscribeNotifications = () => {};
@@ -1555,14 +1710,6 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   emitPreview = emit;
 
   try {
-    unsubscribeStderr = srv.onStderr(text => {
-      const diagnostics = codexDiagnosticsFromStderr(text);
-      if (!diagnostics.length) return;
-      for (const diagnostic of diagnostics) pushRecentActivity(s.diagnostics, diagnostic, 6);
-      s.lastEvent = 'Codex stderr';
-      emit();
-    });
-
     const config: string[] = [];
     if (opts.codexExtraArgs?.length) {
       for (let i = 0; i < opts.codexExtraArgs.length; i++) {
@@ -1576,11 +1723,25 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       config.push('features.goals=true');
     }
 
-    markCodexProgress(s, 'Starting Codex app-server');
+    serverLease = acquireCodexStreamServer(config, opts.extraEnv, { disablePool: !!opts.codexMcpBridgeActive });
+    const srv = serverLease.server;
+    s.phaseTimings.appServerReused = serverLease.reused;
+    s.phaseTimings.appServerPooled = serverLease.pooled;
+    unsubscribeStderr = srv.onStderr(text => {
+      const diagnostics = codexDiagnosticsFromStderr(text);
+      if (!diagnostics.length) return;
+      for (const diagnostic of diagnostics) pushRecentActivity(s.diagnostics, diagnostic, 6);
+      s.lastEvent = 'Codex stderr';
+      emit();
+    });
+
+    markCodexProgress(s, serverLease.reused ? 'Reusing Codex app-server' : 'Starting Codex app-server');
     emit();
+    const appServerStart = Date.now();
     if (!(await srv.ensureRunning(config, opts.extraEnv))) {
       return codexErrorResult('Failed to start codex app-server.', start, opts.sessionId, opts.model, opts.thinkingEffort);
     }
+    s.phaseTimings.appServerMs = Date.now() - appServerStart;
     markCodexProgress(s, 'Codex app-server initialized');
     emit();
 
@@ -1634,12 +1795,16 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       markCodexProgress(s, 'Resuming Codex thread');
       emit();
       agentLog(`[codex-rpc] thread/resume id=${opts.sessionId}`);
+      const threadStart = Date.now();
       threadResp = await srv.call('thread/resume', { threadId: opts.sessionId, ...threadParams }, 60_000);
+      s.phaseTimings.threadMs = Date.now() - threadStart;
     } else {
       markCodexProgress(s, 'Starting Codex thread');
       emit();
       agentLog(`[codex-rpc] thread/start cwd=${opts.workdir} model=${opts.codexModel || '(default)'}`);
+      const threadStart = Date.now();
       threadResp = await srv.call('thread/start', threadParams, 60_000);
+      s.phaseTimings.threadMs = Date.now() - threadStart;
     }
 
     if (threadResp.error) {
@@ -1721,11 +1886,13 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     agentLog(`[codex-rpc] turn/start prompt="${opts.prompt.slice(0, 300)}${opts.prompt.length > 300 ? '…' : ''}" effort=${effort}`);
     markCodexProgress(s, 'Starting Codex turn');
     emit();
+    const turnStart = Date.now();
     const turnResp = await srv.call('turn/start', {
       threadId: s.sessionId, input,
       model: opts.codexModel || undefined,
       effort: mapEffort(opts.thinkingEffort),
     }, 60_000);
+    s.phaseTimings.turnStartMs = Date.now() - turnStart;
 
     if (turnResp.error) {
       opts.abortSignal?.removeEventListener('abort', abortStream);
@@ -1762,6 +1929,10 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       || (timedOut ? `Timed out after ${opts.timeout}s waiting for turn completion.` : null)
       || (!ok ? `Turn ${s.turnStatus || 'unknown'}.` : null);
     const stopReason = timedOut ? 'timeout' : ((interrupted || s.turnStatus === 'interrupted') ? 'interrupted' : null);
+    s.phaseTimings.totalMs = Date.now() - start;
+    pushRecentActivity(s.diagnostics, buildCodexTimingDiagnostic(s), 6);
+    emit();
+    discardServerLease = !ok;
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
     agentLog(`[codex-rpc] result: ok=${ok} elapsed=${elapsed}s text=${s.text.length}chars session=${s.sessionId} status=${s.turnStatus}`);
 
@@ -1783,7 +1954,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     unsubscribeNotifications();
     unsubscribeRequests();
     unsubscribeStderr();
-    srv.kill();
+    serverLease?.release(discardServerLease);
   }
 }
 

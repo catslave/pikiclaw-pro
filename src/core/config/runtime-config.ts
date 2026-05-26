@@ -17,7 +17,7 @@ export const DEFAULT_AGENT_MODELS: Record<Agent, string> = {
 
 export const DEFAULT_AGENT_EFFORTS: Partial<Record<Agent, string>> = {
   claude: 'high',
-  codex: 'xhigh',
+  codex: 'medium',
   copilot: 'medium',
   cursor: 'medium',
   gemini: 'high',

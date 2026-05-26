@@ -65,6 +65,8 @@ export interface CompactForHandoverOpts {
   workdir: string;
   toAgent: Agent;
   toModel?: string | null;
+  /** Optional absolute cap for the generated handover seed budget. */
+  maxBudgetChars?: number | null;
 }
 
 export interface HandoverResult {
@@ -105,7 +107,10 @@ export function describeHandoverRef(ref: HandoverRef | null | undefined): string
  */
 export async function compactForHandover(opts: CompactForHandoverOpts): Promise<HandoverResult> {
   const windowTokens = agentWindowTokens(opts.toAgent, opts.toModel);
-  const budgetChars = Math.floor(windowTokens * HANDOVER_WINDOW_FRACTION * CHARS_PER_TOKEN);
+  const defaultBudgetChars = Math.floor(windowTokens * HANDOVER_WINDOW_FRACTION * CHARS_PER_TOKEN);
+  const budgetChars = opts.maxBudgetChars && opts.maxBudgetChars > 0
+    ? Math.min(defaultBudgetChars, Math.floor(opts.maxBudgetChars))
+    : defaultBudgetChars;
 
   let messages: TailMessage[] = [];
   let turnsTotal = 0;
