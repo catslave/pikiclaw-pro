@@ -10,6 +10,34 @@ import { cn } from '../utils';
 const IconSun = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>;
 const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
 
+function PikiclawLogo() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true" className="drop-shadow-[0_2px_6px_rgba(245,158,11,0.30)]">
+      <defs>
+        <linearGradient id="pikiclaw-face" x1="8" y1="5" x2="23" y2="26" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#fde68a" />
+          <stop offset="0.58" stopColor="#facc15" />
+          <stop offset="1" stopColor="#f59e0b" />
+        </linearGradient>
+        <linearGradient id="pikiclaw-bolt" x1="20" y1="4" x2="29" y2="24" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#fff7ed" />
+          <stop offset="1" stopColor="#f97316" />
+        </linearGradient>
+      </defs>
+      <path d="M21.6 12.4 27.4 5l-2.6 7.2h3.7L21.7 23l1.8-7.4h-3.3z" fill="url(#pikiclaw-bolt)" stroke="#92400e" strokeWidth="1.1" strokeLinejoin="round" />
+      <path d="M10.1 11.8 7.4 4.8l6.2 4.7z" fill="#fbbf24" stroke="#92400e" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M21.9 11.8 24.6 4.8l-6.2 4.7z" fill="#fbbf24" stroke="#92400e" strokeWidth="1.2" strokeLinejoin="round" />
+      <circle cx="16" cy="17" r="10.4" fill="url(#pikiclaw-face)" stroke="#92400e" strokeWidth="1.25" />
+      <path d="M14.7 9.8 12.6 15h3.1l-1.1 4.4 4.8-6.4h-3.2l1.1-3.2z" fill="#fff7ed" opacity="0.74" />
+      <circle cx="12.2" cy="16.4" r="1.35" fill="#422006" />
+      <circle cx="19.8" cy="16.4" r="1.35" fill="#422006" />
+      <circle cx="9.7" cy="19.6" r="1.65" fill="#fb7185" opacity="0.78" />
+      <circle cx="22.3" cy="19.6" r="1.65" fill="#fb7185" opacity="0.78" />
+      <path d="M13.4 21.1c1.4 1.2 3.8 1.2 5.2 0" fill="none" stroke="#422006" strokeWidth="1.25" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
   dashboard: '/dashboard',
@@ -49,8 +77,8 @@ export function Sidebar({
       <div className="mx-auto flex min-h-14 max-w-[1180px] flex-wrap items-center gap-2.5 px-4 py-2">
         {/* Logo */}
         <div className="mr-1.5 flex items-center gap-2.5 shrink-0">
-          <div className="flex h-8 w-8 items-center justify-center rounded-md border border-edge bg-[linear-gradient(145deg,rgba(226,232,240,0.18),rgba(148,163,184,0.08))] shadow-[0_6px_18px_var(--th-glow-a)]">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-fg" strokeWidth="2.2" strokeLinecap="round"><path d="M13 2L3 14h8l-1 8 11-13h-8l1-7z"/></svg>
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-amber-300/35 bg-[linear-gradient(145deg,rgba(250,204,21,0.28),rgba(251,146,60,0.12))] shadow-[0_8px_22px_rgba(245,158,11,0.18),inset_0_1px_0_rgba(255,255,255,0.35)]">
+            <PikiclawLogo />
           </div>
           <div className="leading-none">
             <div className="text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw</div>
