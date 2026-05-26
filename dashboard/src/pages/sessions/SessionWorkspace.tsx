@@ -515,6 +515,38 @@ function sessionAttentionVariant(session: SessionInfo): 'ok' | 'warn' | null {
   return null;
 }
 
+function shouldMarkSessionReadOnOpen(session: SessionInfo): boolean {
+  return sessionDisplayState(session) === 'completed'
+    && (session.userStatus === 'inbox' || session.userStatus === 'active' || session.userStatus === 'review');
+}
+
+function sessionOriginLabel(session: SessionInfo): string | null {
+  const channel = session.origin?.channel?.trim();
+  if (!channel || channel === 'dashboard') return null;
+  const labels: Record<string, string> = {
+    feishu: 'Feishu',
+    weixin: 'WeChat',
+    wechat: 'WeChat',
+    telegram: 'Telegram',
+    slack: 'Slack',
+    discord: 'Discord',
+    dingtalk: 'DingTalk',
+    wecom: 'WeCom',
+  };
+  const label = labels[channel.toLowerCase()] || channel;
+  const chatType = session.origin?.chatType?.trim();
+  return chatType ? `${label} ${chatType}` : label;
+}
+
+function sessionOriginTitle(session: SessionInfo): string | undefined {
+  const origin = session.origin;
+  if (!origin?.channel || !origin.chatId) return undefined;
+  const parts = [`${origin.channel}:${origin.chatId}`];
+  if (origin.sourceMessageId) parts.push(`message:${origin.sourceMessageId}`);
+  if (origin.userId) parts.push(`user:${origin.userId}`);
+  return parts.join(' ');
+}
+
 function workspaceGroupAttention(sessions: SessionInfo[]): { variant: 'ok' | 'warn'; pulse: boolean } | null {
   let hasWarn = false;
   let hasOk = false;
@@ -649,6 +681,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [focusedSlotIndex, setFocusedSlotIndex] = useState<number | null>(readStoredFocusedSlot);
   const [liveSessionStates, setLiveSessionStates] = useState<Record<string, LiveSessionState>>({});
   const spotlightSlotTimerRef = useRef<number | null>(null);
+  const focusedOpenSessionsSnapshotRef = useRef<{ slots: SessionSlot[]; focusedIndex: number } | null>(null);
   const openSessionsRef = useRef(openSessions);
   openSessionsRef.current = openSessions;
   const openSideChatsByParentRef = useRef(openSideChatsByParent);
@@ -1578,14 +1611,45 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setActiveSlotIndex(openSessionsRef.current.length);
   }, [setActiveSlotIndex, setShowNewSession]);
 
+  const markSessionReadOnOpen = useCallback((session: SessionInfo, workdir: string) => {
+    const agent = session.agent || '';
+    if (!agent || !session.sessionId || !shouldMarkSessionReadOnOpen(session)) return;
+
+    setSessionsMap(prev => {
+      const list = prev[workdir];
+      if (!list) return prev;
+      return {
+        ...prev,
+        [workdir]: list.map(item => (
+          item.agent === agent && item.sessionId === session.sessionId
+            ? { ...item, userStatus: 'done' as const }
+            : item
+        )),
+      };
+    });
+
+    void api.updateSessionStatus(workdir, agent, session.sessionId, 'done')
+      .then(res => {
+        if (!res.ok || !res.updated) {
+          if (!res.ok) toastSession(res.error || t('session.updateStatusFailed'), false);
+          void loadSessionsForWorkspace(workdir, { background: true, force: true });
+        }
+      })
+      .catch((err: any) => {
+        toastSession(err?.message || t('session.updateStatusFailed'), false);
+        void loadSessionsForWorkspace(workdir, { background: true, force: true });
+      });
+  }, [loadSessionsForWorkspace, t, toastSession]);
+
   /* ── Select session — stable callback that takes wsPath ── */
   const handleSelectSession = useCallback((session: SessionInfo, workdir: string) => {
     warmSession(session, workdir);
+    markSessionReadOnOpen(session, workdir);
     setShowNewSession(null);
     startTransition(() => {
       setSelectedSession({ agent: session.agent || '', sessionId: session.sessionId, workdir });
     });
-  }, [setSelectedSession, setShowNewSession, warmSession]);
+  }, [markSessionReadOnOpen, setSelectedSession, setShowNewSession, warmSession]);
 
   const handlePanelSessionChange = useCallback((next: { agent: string; sessionId: string; workdir: string }, fromSlotIdx?: number) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
@@ -2052,13 +2116,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const agent = item.session.agent || '';
     if (!agent || !item.session.sessionId) return;
     warmSession(item.session, item.workdir);
+    markSessionReadOnOpen(item.session, item.workdir);
     setDashboardFocusedSlot({
       agent,
       sessionId: item.session.sessionId,
       workdir: item.workdir,
       mountKey: nextMountKey(),
     });
-  }, [warmSession]);
+  }, [markSessionReadOnOpen, warmSession]);
 
   const handleMarkDashboardDone = useCallback(async (item: DashboardSessionItem) => {
     const agent = item.session.agent || '';
@@ -2162,9 +2227,43 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [dashboardCreateTaskWorkdir, dashboardFocusedSlot, mode]);
-  const closeFocusMode = useCallback(() => setFocusedSlotIndex(null), []);
+  const closeFocusMode = useCallback(() => {
+    const snapshot = focusedOpenSessionsSnapshotRef.current;
+    focusedOpenSessionsSnapshotRef.current = null;
+    setFocusedSlotIndex(null);
+    if (!snapshot) return;
+
+    setOpenSessions(prev => {
+      const currentByStorageKey = new Map(prev.map(slot => [sessionSlotStorageKey(slot), slot]));
+      const currentByMountKey = new Map(prev.map(slot => [slot.mountKey, slot]));
+      const usedCurrentSlots = new Set<SessionSlot>();
+      let restoredMissingSlot = false;
+      const orderedSlots: SessionSlot[] = [];
+
+      snapshot.slots.forEach((snapshotSlot, snapshotIndex) => {
+        const currentSlot = currentByStorageKey.get(sessionSlotStorageKey(snapshotSlot)) || currentByMountKey.get(snapshotSlot.mountKey);
+        if (currentSlot) {
+          orderedSlots.push(currentSlot);
+          usedCurrentSlots.add(currentSlot);
+          return;
+        }
+        if (snapshotIndex === snapshot.focusedIndex) return;
+        orderedSlots.push({ ...snapshotSlot });
+        restoredMissingSlot = true;
+      });
+      prev.forEach(slot => {
+        if (!usedCurrentSlots.has(slot)) orderedSlots.push(slot);
+      });
+
+      return restoredMissingSlot ? orderedSlots : prev;
+    });
+  }, [setOpenSessions]);
   const handleSlotDoubleClick = useCallback((slotIdx: number, event: ReactMouseEvent<HTMLDivElement>) => {
     if (shouldIgnoreFocusModeTarget(event.target)) return;
+    focusedOpenSessionsSnapshotRef.current = {
+      slots: openSessionsRef.current.map(slot => ({ ...slot })),
+      focusedIndex: slotIdx,
+    };
     setActiveSlotIndex(slotIdx);
     setFocusedSlotIndex(slotIdx);
   }, [setActiveSlotIndex]);
@@ -2181,11 +2280,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   useEffect(() => {
     if (focusedSlotIndex == null) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setFocusedSlotIndex(null);
+      if (event.key === 'Escape') closeFocusMode();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [focusedSlotIndex]);
+  }, [closeFocusMode, focusedSlotIndex]);
   const [draggingSlotIndex, setDraggingSlotIndex] = useState<number | null>(null);
   const [dragOverSlotIndex, setDragOverSlotIndex] = useState<number | null>(null);
 
@@ -2611,14 +2710,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const slotFrameClass = isFocused
                 ? 'fixed inset-y-4 left-1/2 z-[70] w-[calc(100vw-24px)] -translate-x-1/2 rounded-2xl border-edge-h/80 bg-[var(--th-modal-bg)] ring-[1px] ring-inset ring-white/[0.08] backdrop-blur-xl sm:w-[min(1080px,calc(100vw-48px))] md:inset-y-8 md:w-[min(1180px,calc(100vw-64px))]'
                 : isActive
-                ? 'border-primary/55 ring-[3px] ring-primary/[0.16] bg-primary/[0.045]'
+                ? 'border-[color:var(--th-selection-border)] ring-[3px] ring-[color:var(--th-selection-ring)] bg-[var(--th-selection-soft)]'
                 : slotState === 'running'
                   ? 'border-ok/45 bg-ok/[0.035] hover:border-ok/80 hover:bg-ok/[0.095] hover:ring-[3px] hover:ring-ok/[0.18]'
                   : slotState === 'incomplete'
                     ? 'border-warn/50 bg-warn/[0.035] hover:border-warn/80 hover:bg-warn/[0.10] hover:ring-[3px] hover:ring-warn/[0.18]'
-                    : 'border-edge/70 hover:border-primary/60 hover:bg-primary/[0.085] hover:ring-[3px] hover:ring-primary/[0.16]';
+                    : 'border-edge/70 hover:border-edge-h hover:bg-[var(--th-selection-soft)] hover:ring-[3px] hover:ring-[color:var(--th-selection-ring)]';
               const slotHeaderClass = isActive
-                ? 'border-b-primary/35 bg-primary/[0.12]'
+                ? 'border-b-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)]'
                 : slotState === 'running'
                   ? 'border-b-ok/25 bg-ok/[0.055]'
                   : slotState === 'incomplete'
@@ -2627,7 +2726,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const slotShadow = isFocused
                 ? 'var(--th-elevated-shadow)'
                 : isActive
-                ? 'var(--th-card-shadow), 0 0 0 2px color-mix(in srgb, var(--th-primary) 24%, transparent), 0 18px 48px rgba(15,23,42,0.18)'
+                ? 'var(--th-card-shadow), 0 0 0 2px var(--th-selection-ring), 0 18px 48px rgba(15,23,42,0.18)'
                 : 'var(--th-card-shadow)';
               return (
                 <div
@@ -2639,8 +2738,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     isFocused ? 'fixed' : 'relative',
                     slotFrameClass,
                     !isFocused && 'hover:-translate-y-[1px] hover:bg-panel-alt/20',
-                    draggingSlotIndex === slotIdx && 'opacity-75 scale-[0.985] ring-[3px] ring-primary/25',
-                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-primary/[0.16] ring-[3px] ring-primary/35',
+                    draggingSlotIndex === slotIdx && 'opacity-75 scale-[0.985] ring-[3px] ring-[color:var(--th-selection-ring)]',
+                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selection-bg)] ring-[3px] ring-[color:var(--th-selection-ring)]',
                   )}
                   style={{ boxShadow: slotShadow }}
                   onClick={() => setActiveSlotIndex(slotIdx)}
@@ -2650,10 +2749,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 >
                   {isActive && !isFocused && (
                     <>
-                      <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-1 rounded-l-xl bg-primary/80" aria-hidden="true" />
+                      <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-1 rounded-l-xl bg-[var(--th-selection-accent)]" aria-hidden="true" />
                       <div
                         className={cn(
-                          'pointer-events-none absolute inset-0 z-20 rounded-xl border border-primary/45 bg-primary/[0.04] transition-opacity duration-700',
+                          'pointer-events-none absolute inset-0 z-20 rounded-xl border border-[color:var(--th-selection-border)] bg-[var(--th-selection-soft)] transition-opacity duration-700',
                           isSpotlighted ? 'opacity-100' : 'opacity-0',
                         )}
                         aria-hidden="true"
@@ -2666,7 +2765,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     'cursor-grab active:cursor-grabbing',
                     slotHeaderClass,
                     isFocused && 'border-edge-h/70 bg-[var(--th-header)]',
-                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-primary/[0.16]',
+                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selection-bg)]',
                   )}
                     draggable
                     onDragStart={e => handleSlotDragStart(slotIdx, e)}
@@ -2680,7 +2779,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                         className={cn(
                           'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold shadow-sm transition-colors',
                           isActive
-                            ? 'border-primary/65 bg-primary/[0.18] text-fg'
+                            ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] text-fg'
                             : 'border-edge/45 bg-control/70 text-fg-4',
                         )}
                         title={slot.workdir}
@@ -4010,12 +4109,12 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
         className={cn(
           'mx-2 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-[background,border-color,box-shadow,opacity] duration-150',
           groupHeaderSelected
-            ? 'border-primary/45 bg-primary/[0.16] ring-1 ring-primary/35 shadow-[inset_3px_0_0_var(--th-primary)] hover:bg-primary/[0.18]'
+            ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-1 ring-[color:var(--th-selection-ring)] shadow-[inset_3px_0_0_var(--th-selection-accent)] hover:bg-[var(--th-selection-bg-h)]'
             : isActive
               ? 'border-edge-h/70 bg-panel-h/75 hover:border-edge-h hover:bg-panel-h'
             : 'border-transparent bg-transparent hover:border-edge/70 hover:bg-panel-h/45',
           draggingPath === wsPath && 'opacity-60',
-          dragOverPath === wsPath && draggingPath !== wsPath && 'bg-primary/[0.16] ring-2 ring-inset ring-primary/45',
+          dragOverPath === wsPath && draggingPath !== wsPath && 'bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]',
         )}
         onClick={() => setExpanded(v => {
           const next = !v;
@@ -4040,7 +4139,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
           <polyline points="9 6 15 12 9 18" />
         </svg>
         <div className="flex-1 min-w-0 flex items-baseline gap-2">
-          <span className={cn('min-w-0 truncate text-[12px] font-semibold', groupHeaderSelected ? 'text-primary' : 'text-fg-2')}>
+          <span className={cn('min-w-0 truncate text-[12px] font-semibold', groupHeaderSelected ? 'text-fg' : 'text-fg-2')}>
             {displayName}
           </span>
           {hasAlias && (
@@ -4240,8 +4339,9 @@ const SessionCard = memo(function SessionCard({
   const displayText = sessionListDisplayText(session).slice(0, 500) || session.sessionId.slice(0, 16);
   const contextText = sessionListContextText(session, displayText).slice(0, 500);
   const modelShort = session.model ? shortenModel(session.model) : null;
+  const originLabel = sessionOriginLabel(session);
   const attentionVariant = sessionAttentionVariant(session);
-  const showUnreadDot = !!attentionVariant;
+  const showUnreadDot = !!attentionVariant && displayState !== 'running';
   const indentPx = forkDepth > 0 ? Math.min(forkDepth, 3) * 14 : 0;
   const baseLeftPx = 12;
 
@@ -4258,14 +4358,14 @@ const SessionCard = memo(function SessionCard({
       onBlur={onCancelWarm}
       className={cn(
         'h-[86px] w-full overflow-hidden rounded-lg border pr-3 py-2 text-left transition-[background,border-color,box-shadow,transform] duration-150',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
         isSelected
-          ? 'border-primary/60 bg-primary/[0.16] ring-2 ring-inset ring-primary/40 hover:bg-primary/[0.20] shadow-sm'
+          ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)] hover:bg-[var(--th-selection-bg-h)] shadow-sm'
           : isOpen
-            ? 'border-primary/25 bg-primary/[0.035] hover:border-primary/40 hover:bg-primary/[0.07] hover:ring-2 hover:ring-inset hover:ring-primary/15'
+            ? 'border-[color:var(--th-selection-ring)] bg-[var(--th-selection-soft)] hover:border-[color:var(--th-selection-border)] hover:bg-[var(--th-selection-bg)] hover:ring-2 hover:ring-inset hover:ring-[color:var(--th-selection-ring)]'
             : 'border-edge/45 bg-panel/55 hover:border-edge-h hover:bg-panel-h/55',
         !isSelected && 'hover:translate-x-0.5',
-        isSelected && 'shadow-[inset_4px_0_0_var(--th-primary)]',
+        isSelected && 'shadow-[inset_4px_0_0_var(--th-selection-accent)]',
       )}
       style={{
         paddingLeft: baseLeftPx + indentPx,
@@ -4290,6 +4390,14 @@ const SessionCard = memo(function SessionCard({
         )}
         {modelShort && (
           <span className="truncate max-w-[72px] font-mono text-fg-5/40 text-[9px]">{modelShort}</span>
+        )}
+        {originLabel && (
+          <span
+            title={sessionOriginTitle(session)}
+            className="shrink-0 rounded border border-edge/50 bg-fg-5/[0.06] px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-fg-5/70"
+          >
+            {originLabel}
+          </span>
         )}
         <div className="ml-auto flex items-center gap-1.5 shrink-0 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
           {!!session.numTurns && (

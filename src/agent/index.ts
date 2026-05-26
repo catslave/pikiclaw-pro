@@ -29,7 +29,7 @@ export type {
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
   StreamOpts, StreamResult,
-  ManagedSessionRecord, SessionRunState, SessionClassification,
+  ManagedSessionRecord, SessionOrigin, SessionOriginChannel, SessionRunState, SessionClassification,
   SessionInfo, SessionListResult, SessionListOpts,
   TailMessage, MessageBlock, RichMessage,
   SessionTailResult, SessionTailOpts,

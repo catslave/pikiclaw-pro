@@ -146,6 +146,7 @@ function recordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     model: record.model,
     thinkingEffort: record.thinkingEffort,
     createdAt: record.createdAt,
+    origin: record.origin ?? null,
     title: record.title,
     titleSource: record.titleSource ?? null,
     running: record.runState === 'running',

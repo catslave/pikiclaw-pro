@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { cn, shortenModel } from '../../utils';
-import { CollapsibleCard } from '../../components/ui';
+import { ChevronIcon, CollapsibleCard } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
 import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
@@ -67,14 +67,10 @@ function tokenSummary(meta: StreamPreviewMeta | null | undefined): { label: stri
 
 function Badge({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <span title={title} className="shrink-0 rounded-md border border-edge bg-fg-5/[0.05] px-1.5 py-0.5 text-[10px] font-mono text-fg-5/70">
+    <span title={title} className="shrink-0 whitespace-nowrap rounded-md border border-edge/80 bg-inset px-1.5 py-0.5 text-[10px] leading-none font-mono text-fg-5/75">
       {children}
     </span>
   );
-}
-
-function shortBadgeText(value: string): string {
-  return value.length > 28 ? `${value.slice(0, 25)}...` : value;
 }
 
 function normalizeActivityLine(line: string): string {
@@ -170,7 +166,6 @@ export function WorkingCard({
     ? formatDuration(Math.max(0, (phase === 'streaming' ? now : (doneMs ?? now)) - startMs))
     : null;
   const tokens = tokenSummary(previewMeta);
-  const lastEvent = previewMeta?.lastEvent?.trim() || '';
   const idleMs = phase === 'streaming' && updatedAt
     ? Math.max(0, now - updatedAt)
     : null;
@@ -180,7 +175,7 @@ export function WorkingCard({
   const countLabel = stepCount && stepCount > 0
     ? replaceVars(t('hub.workingStepCount'), { n: String(stepCount) })
     : null;
-  const hasBadges = !!(elapsedLabel || idleLabel || lastEvent || tokens || countLabel);
+  const hasBadges = !!(elapsedLabel || idleLabel || tokens || countLabel);
   const fallbackPreview = previewText?.trim() || t('hub.workingIdle');
   const dot = phase === 'streaming'
     ? { color: 'bg-emerald-400/70', pulse: true }
@@ -194,10 +189,9 @@ export function WorkingCard({
       label={t('hub.working')}
       preview={preview ?? <span className="text-[12px] text-fg-4 truncate">{fallbackPreview}</span>}
       badge={hasBadges ? (
-        <span className="flex shrink-0 items-center gap-1">
+        <span className="flex shrink-0 items-center gap-1 overflow-hidden">
           {elapsedLabel && <Badge title={t('hub.workingElapsed')}>{elapsedLabel}</Badge>}
           {idleLabel && <Badge title={t('hub.workingNoRecentUpdate')}>{idleLabel}</Badge>}
-          {lastEvent && <Badge title={t('hub.lastEvent')}>{shortBadgeText(lastEvent)}</Badge>}
           {tokens && <Badge title={tokens.title}>{tokens.label}</Badge>}
           {countLabel && <Badge>{countLabel}</Badge>}
         </span>
@@ -213,7 +207,35 @@ export function WorkingCard({
   );
 }
 
-export function WorkingSection({ label, children }: { label?: string; children: ReactNode }) {
+export function WorkingSection({
+  label,
+  children,
+  defaultOpen = true,
+}: {
+  label?: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const collapsible = label && !defaultOpen;
+
+  if (collapsible) {
+    return (
+      <section className="space-y-1.5">
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5/75 hover:text-fg-4 transition-colors"
+          onClick={() => setOpen(v => !v)}
+          aria-expanded={open}
+        >
+          <ChevronIcon open={open} className="h-3 w-3" />
+          <span>{label}</span>
+        </button>
+        {open && children}
+      </section>
+    );
+  }
+
   return (
     <section className="space-y-1.5">
       {label && <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5/75">{label}</div>}
@@ -318,7 +340,7 @@ export function WorkingActivityDetails({ lines, t }: { lines: string[]; t: (key:
     .slice(-10);
   if (!details.length) return null;
   return (
-    <WorkingSection label={t('hub.activityDetails')}>
+    <WorkingSection label={t('hub.activityDetails')} defaultOpen={false}>
       <div className="space-y-1 rounded-md bg-inset px-3 py-2">
         {details.map((line, index) => (
           <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
@@ -335,7 +357,7 @@ export function WorkingDiagnostics({ diagnostics, t }: { diagnostics?: string[] 
   const items = (diagnostics || []).map(normalizeActivityLine).filter(Boolean).slice(-6);
   if (!items.length) return null;
   return (
-    <WorkingSection label={t('hub.diagnostics')}>
+    <WorkingSection label={t('hub.diagnostics')} defaultOpen={false}>
       <div className="space-y-1 rounded-md border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2">
         {items.map((line, index) => (
           <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-amber-200/85">

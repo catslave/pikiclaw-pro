@@ -336,6 +336,28 @@ export interface StreamResult {
 /** Persistent record for a pikiclaw-managed session stored in the session index. */
 export type SessionTitleSource = 'prompt' | 'agent' | 'user';
 
+export type SessionOriginChannel =
+  | 'dashboard'
+  | 'feishu'
+  | 'weixin'
+  | 'telegram'
+  | 'slack'
+  | 'discord'
+  | 'dingtalk'
+  | 'wecom'
+  | (string & {});
+
+export interface SessionOrigin {
+  channel: SessionOriginChannel;
+  chatId: string;
+  chatType?: string | null;
+  sourceMessageId?: string | null;
+  userId?: string | null;
+  openId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ManagedSessionRecord {
   sessionId: string;
   agent: Agent;
@@ -344,6 +366,7 @@ export interface ManagedSessionRecord {
   threadId: string | null;
   createdAt: string;
   updatedAt: string;
+  origin: SessionOrigin | null;
   title: string | null;
   titleSource?: SessionTitleSource | null;
   model: string | null;
@@ -446,6 +469,7 @@ export interface SessionInfo {
   model: string | null;
   thinkingEffort?: string | null;
   createdAt: string | null;
+  origin?: SessionOrigin | null;
   title: string | null;
   titleSource?: SessionTitleSource | null;
   running: boolean;
@@ -603,6 +627,8 @@ export interface StageSessionFilesOpts {
   threadId?: string | null;
   /** When creating a fresh session due to cross-agent switch, record the source. */
   handoverFrom?: HandoverRef | null;
+  /** Terminal/channel that first created or adopted this managed session. */
+  origin?: Partial<SessionOrigin> | null;
 }
 
 /** Result of staging files into a session workspace. */
@@ -622,6 +648,7 @@ export interface EnsureManagedSessionOpts {
   title?: string | null;
   model?: string | null;
   threadId?: string | null;
+  origin?: Partial<SessionOrigin> | null;
 }
 
 // ---------------------------------------------------------------------------

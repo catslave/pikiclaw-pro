@@ -518,6 +518,40 @@ describe('stageSessionFiles', () => {
     expect(record?.titleSource).toBe('prompt');
   });
 
+  it('persists terminal origin metadata into managed session listings', async () => {
+    const workdir = makeTmpDir('pikiclaw-origin-');
+    const staged = stageSessionFiles({
+      agent: 'hermes',
+      workdir,
+      files: [],
+      title: 'from feishu',
+      origin: {
+        channel: 'feishu',
+        chatId: 'oc_test_chat',
+        chatType: 'group',
+        sourceMessageId: 'om_test_message',
+        userId: 'ou_test_user',
+      },
+    });
+
+    const record = listPikiclawSessions(workdir, 'hermes').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.origin).toMatchObject({
+      channel: 'feishu',
+      chatId: 'oc_test_chat',
+      chatType: 'group',
+      sourceMessageId: 'om_test_message',
+      userId: 'ou_test_user',
+    });
+
+    const listed = await getSessions({ agent: 'hermes', workdir });
+    expect(listed.ok).toBe(true);
+    expect(listed.sessions[0]?.origin).toMatchObject({
+      channel: 'feishu',
+      chatId: 'oc_test_chat',
+      chatType: 'group',
+    });
+  });
+
   it('adopts an agent-generated title once, then leaves later naming to the user', () => {
     const workdir = makeTmpDir('pikiclaw-agent-title-');
     const staged = stageSessionFiles({

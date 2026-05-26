@@ -34,6 +34,7 @@ import type {
   HandoverRef,
   SessionSideChatParentRef,
   SessionSideChatRef,
+  SessionOrigin,
 } from './types.js';
 import {
   dedupeStrings,
@@ -265,6 +266,7 @@ interface EnsureSessionWorkspaceOpts {
   title?: string | null;
   threadId?: string | null;
   handoverFrom?: HandoverRef | null;
+  origin?: Partial<SessionOrigin> | null;
 }
 
 function normalizeHandoverRef(value: unknown): HandoverRef | null {
@@ -274,6 +276,31 @@ function normalizeHandoverRef(value: unknown): HandoverRef | null {
   const sessionId = typeof v.sessionId === 'string' ? v.sessionId.trim() : '';
   if (!agent || !sessionId) return null;
   return { agent: agent as Agent, sessionId };
+}
+
+function normalizeSessionOrigin(value: unknown, fallbackCreatedAt?: string | null): SessionOrigin | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Partial<SessionOrigin>;
+  const channel = typeof v.channel === 'string' ? v.channel.trim() : '';
+  const chatId = typeof v.chatId === 'string' ? v.chatId.trim() : '';
+  if (!channel || !chatId) return null;
+  const now = new Date().toISOString();
+  const createdAt = typeof v.createdAt === 'string' && v.createdAt.trim()
+    ? v.createdAt
+    : (fallbackCreatedAt || now);
+  const updatedAt = typeof v.updatedAt === 'string' && v.updatedAt.trim()
+    ? v.updatedAt
+    : now;
+  return {
+    channel,
+    chatId,
+    chatType: typeof v.chatType === 'string' && v.chatType.trim() ? v.chatType.trim() : null,
+    sourceMessageId: typeof v.sourceMessageId === 'string' && v.sourceMessageId.trim() ? v.sourceMessageId.trim() : null,
+    userId: typeof v.userId === 'string' && v.userId.trim() ? v.userId.trim() : null,
+    openId: typeof v.openId === 'string' && v.openId.trim() ? v.openId.trim() : null,
+    createdAt,
+    updatedAt,
+  };
 }
 
 function normalizeSideChatParentRef(value: unknown): SessionSideChatParentRef | null {
@@ -339,6 +366,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     threadId: normalizeThreadId(raw?.threadId) || legacyThreadId(agent, sessionId),
     createdAt: typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString(),
+    origin: normalizeSessionOrigin(raw?.origin, typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : null),
     title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
     titleSource: normalizeSessionTitleSource(raw?.titleSource),
     model: typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : null,
@@ -543,6 +571,7 @@ export function updateSessionMeta(
       threadId: legacyThreadId(agent, sessionId),
       createdAt: now,
       updatedAt: now,
+      origin: null,
       title: null,
       titleSource: null,
       model: null,
@@ -867,13 +896,15 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
     const threadId = normalizeThreadId(opts.threadId)
       || (opts.sessionId ? legacyThreadId(opts.agent, sessionId) : nextThreadId());
     const title = promptDerivedTitle(opts.title);
+    const now = new Date().toISOString();
     record = {
       sessionId, agent: opts.agent, workdir,
       workspacePath: sessionWorkspacePath(workdir, opts.agent, sessionId),
       threadId,
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      createdAt: now, updatedAt: now,
+      origin: normalizeSessionOrigin(opts.origin, now),
       title, titleSource: title ? 'prompt' : null, model: null, thinkingEffort: null, stagedFiles: [],
-      runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
+      runState: 'completed', runDetail: null, runUpdatedAt: now,
       runPid: null,
       classification: null, userStatus: null, userNote: null, pinned: false,
       archived: false, archivedAt: null,
@@ -887,6 +918,21 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
   if (!record.threadId) record.threadId = normalizeThreadId(opts.threadId) || legacyThreadId(record.agent, record.sessionId);
   // Backfill handoverFrom on first staging only — never overwrite an existing one.
   if (!record.handoverFrom) record.handoverFrom = normalizeHandoverRef(opts.handoverFrom);
+  if (!record.origin) {
+    record.origin = normalizeSessionOrigin(opts.origin, record.createdAt);
+  } else {
+    const nextOrigin = normalizeSessionOrigin(opts.origin, record.origin.createdAt);
+    if (nextOrigin && record.origin.channel === nextOrigin.channel && record.origin.chatId === nextOrigin.chatId) {
+      record.origin = {
+        ...record.origin,
+        chatType: nextOrigin.chatType ?? record.origin.chatType ?? null,
+        sourceMessageId: nextOrigin.sourceMessageId ?? record.origin.sourceMessageId ?? null,
+        userId: nextOrigin.userId ?? record.origin.userId ?? null,
+        openId: nextOrigin.openId ?? record.origin.openId ?? null,
+        updatedAt: nextOrigin.updatedAt,
+      };
+    }
+  }
   if (!record.title && opts.title) {
     const title = promptDerivedTitle(opts.title);
     if (title) {
@@ -920,6 +966,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     model: record.model,
     thinkingEffort: record.thinkingEffort,
     createdAt: record.createdAt,
+    origin: record.origin ?? null,
     title,
     titleSource: record.titleSource ?? null,
     running: record.runState === 'running',
@@ -1109,6 +1156,7 @@ export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInf
     sessionId: opts.sessionId,
     title: opts.title,
     threadId: opts.threadId,
+    origin: opts.origin,
   });
   if (!session.record.title && opts.title) {
     const title = promptDerivedTitle(opts.title);
@@ -1137,6 +1185,7 @@ export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFile
     title: opts.title,
     threadId: opts.threadId,
     handoverFrom: opts.handoverFrom,
+    origin: opts.origin,
   });
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.files);
   if (importedFiles.length) {
@@ -1206,6 +1255,7 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       titleSource: adoptedTitle ? 'agent' : (managed.titleSource ?? native.titleSource ?? null),
       model: native.model || managed.model,
       createdAt: native.createdAt || managed.createdAt,
+      origin: managed.origin ?? native.origin ?? null,
       classification: managed.classification ?? native.classification ?? null,
       userStatus: managed.userStatus ?? native.userStatus ?? null,
       userNote: managed.userNote ?? native.userNote ?? null,

@@ -339,6 +339,7 @@ export interface SessionInfo {
   title?: string;
   titleSource?: 'prompt' | 'agent' | 'user' | null;
   createdAt?: string;
+  origin?: SessionOrigin | null;
   running?: boolean;
   isCurrent?: boolean;
   model?: string;
@@ -370,6 +371,17 @@ export interface SessionInfo {
   sideChatOf?: SessionSideChatParentRef | null;
   sideChats?: SessionSideChatRef[];
   numTurns?: number | null;
+}
+
+export interface SessionOrigin {
+  channel: string;
+  chatId: string;
+  chatType?: string | null;
+  sourceMessageId?: string | null;
+  userId?: string | null;
+  openId?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Reference to a related session (migration twin or fork child/parent). */

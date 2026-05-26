@@ -25,6 +25,7 @@ import {
 } from '../../bot/orchestration.js';
 import {
   stageSessionFiles,
+  type SessionOrigin,
 } from '../../agent/index.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
@@ -300,8 +301,19 @@ export class FeishuBot extends Bot {
       || this.hydrateSessionRuntime(sessionRef);
   }
 
-  private ensureSession(chatId: string, title: string, files: string[]): SessionRuntime {
-    return this.ensureSessionForChat(chatId, title, files);
+  private originFromContext(ctx: FeishuContext): Partial<SessionOrigin> {
+    return {
+      channel: 'feishu',
+      chatId: ctx.chatId,
+      chatType: ctx.chatType,
+      sourceMessageId: ctx.messageId,
+      userId: ctx.from.userId || null,
+      openId: ctx.from.openId || null,
+    };
+  }
+
+  private ensureSession(chatId: string, title: string, files: string[], origin?: Partial<SessionOrigin> | null): SessionRuntime {
+    return this.ensureSessionForChat(chatId, title, files, origin);
   }
 
   private resolveIncomingSession(ctx: FeishuContext, text: string, files: string[]): SessionRuntime {
@@ -310,12 +322,16 @@ export class FeishuBot extends Bot {
     const repliedSession = this.sessionFromMessage(ctx.chatId, replyMessageId);
     if (repliedSession) {
       this.log(`[resolveSession] reply matched session=${repliedSession.sessionId} chat=${ctx.chatId}`);
+      this.attachSessionOrigin(repliedSession, this.originFromContext(ctx));
       this.applySessionSelection(cs, repliedSession);
       return repliedSession;
     }
     const selected = this.getSelectedSession(cs);
-    if (selected) return selected;
-    return this.ensureSession(ctx.chatId, text, files);
+    if (selected) {
+      this.attachSessionOrigin(selected, this.originFromContext(ctx));
+      return selected;
+    }
+    return this.ensureSession(ctx.chatId, text, files, this.originFromContext(ctx));
   }
 
   // ---- commands -------------------------------------------------------------
@@ -763,6 +779,7 @@ export class FeishuBot extends Bot {
             sessionId: session.sessionId,
             title: undefined,
             threadId: session.threadId,
+            origin: this.originFromContext(ctx),
           });
           session.workspacePath = staged.workspacePath;
           session.threadId = staged.threadId;

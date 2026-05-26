@@ -37,6 +37,7 @@ import {
 } from '../../bot/command-ui.js';
 import { BOT_SHUTDOWN_FORCE_EXIT_MS, buildSessionTaskId } from '../../bot/orchestration.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
+import type { SessionOrigin } from '../../agent/index.js';
 import { expandTilde } from '../../core/platform.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import {
@@ -178,8 +179,17 @@ export class WeixinBot extends Bot {
     this.shutdownForceExitTimer.unref?.();
   }
 
-  private resolveSession(chatId: string, title: string, files: string[]): SessionRuntime {
-    return this.ensureSessionForChat(chatId, title, files);
+  private originFromContext(ctx: WeixinContext): Partial<SessionOrigin> {
+    return {
+      channel: 'weixin',
+      chatId: ctx.chatId,
+      sourceMessageId: ctx.messageId,
+      userId: ctx.from.userId,
+    };
+  }
+
+  private resolveSession(ctx: WeixinContext, title: string, files: string[]): SessionRuntime {
+    return this.ensureSessionForChat(ctx.chatId, title, files, this.originFromContext(ctx));
   }
 
   private async handleCommand(text: string, ctx: WeixinContext): Promise<boolean> {
@@ -858,7 +868,7 @@ export class WeixinBot extends Bot {
    * `/skill` expansion as if the user had typed it.
    */
   private async dispatchUserPrompt(ctx: WeixinContext, text: string, files: string[]): Promise<void> {
-    const session = this.resolveSession(ctx.chatId, text, files);
+    const session = this.resolveSession(ctx, text, files);
     const prompt = buildPrompt(text, files);
     const taskId = buildSessionTaskId(session, this.nextTaskId++);
     this.beginTask({
@@ -947,7 +957,7 @@ export class WeixinBot extends Bot {
       return;
     }
 
-    const session = this.resolveSession(ctx.chatId, text, msg.files);
+    const session = this.resolveSession(ctx, text, msg.files);
     const prompt = buildPrompt(text, msg.files);
     const taskId = buildSessionTaskId(session, this.nextTaskId++);
     this.beginTask({

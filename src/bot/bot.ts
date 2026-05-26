@@ -21,7 +21,7 @@ import {
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
   type ThreadGoal, type GoalStatus, type CodexThreadGoal, type ClaudeNativeGoal,
-  type HandoverRef,
+  type HandoverRef, type SessionOrigin,
 } from '../agent/index.js';
 import { compactForHandover, describeHandoverRef } from '../agent/handover.js';
 import { getActiveProfileId, setActiveProfile, getProfile } from '../model/index.js';
@@ -176,6 +176,7 @@ export interface SessionRuntime {
   modelId?: string | null;
   thinkingEffort?: string | null;
   runningTaskIds: Set<string>;
+  origin?: SessionOrigin | null;
   /**
    * Reference to the prior-agent session whose context should hand over to this
    * one. Only consulted on the first turn (`isPendingSessionId(sessionId)`); after
@@ -1064,6 +1065,7 @@ export class Bot {
     modelId?: string | null;
     thinkingEffort?: string | null;
     handoverFrom?: HandoverRef | null;
+    origin?: SessionOrigin | null;
   }): SessionRuntime | null {
     if (!session.sessionId) return null;
     return this.upsertSessionRuntime({
@@ -1076,6 +1078,7 @@ export class Bot {
       modelId: session.modelId ?? null,
       thinkingEffort: session.thinkingEffort ?? null,
       handoverFrom: session.handoverFrom ?? null,
+      origin: session.origin ?? null,
     });
   }
 
@@ -1089,6 +1092,7 @@ export class Bot {
     thinkingEffort?: string | null;
     workdir?: string;
     handoverFrom?: HandoverRef | null;
+    origin?: SessionOrigin | null;
   }): SessionRuntime {
     const workdir = path.resolve(session.workdir || this.workdir);
     const requestedKey = this.sessionKey(session.agent, session.sessionId);
@@ -1112,6 +1116,7 @@ export class Bot {
       if (session.handoverFrom !== undefined && !existing.handoverFrom) {
         existing.handoverFrom = session.handoverFrom;
       }
+      if (session.origin !== undefined && !existing.origin) existing.origin = session.origin;
       return existing;
     }
 
@@ -1127,6 +1132,7 @@ export class Bot {
       thinkingEffort: session.thinkingEffort ?? null,
       runningTaskIds: new Set<string>(),
       handoverFrom: session.handoverFrom ?? null,
+      origin: session.origin ?? null,
     };
     this.sessionStates.set(requestedKey, runtime);
     return runtime;
@@ -1179,6 +1185,7 @@ export class Bot {
       workspacePath: managed.workspacePath ?? session.workspacePath ?? null,
       threadId: managed.threadId ?? session.threadId ?? null,
       modelId: session.model ?? managed.model ?? null,
+      origin: managed.origin ?? null,
     });
     if (!runtime) {
       this.applySessionSelection(cs, null);
@@ -1331,13 +1338,29 @@ export class Bot {
       workspacePath: managed.workspacePath ?? null,
       threadId: managed.threadId ?? threadId,
       modelId: managed.model ?? null,
+      origin: managed.origin ?? null,
     });
   }
 
-  protected ensureSessionForChat(chatId: ChatId, title: string, files: string[]): SessionRuntime {
+  protected attachSessionOrigin(session: SessionRuntime, origin?: Partial<SessionOrigin> | null) {
+    if (!origin?.channel || !origin.chatId || !session.sessionId) return;
+    if (session.origin) return;
+    const managed = ensureManagedSession({
+      agent: session.agent,
+      sessionId: session.sessionId,
+      workdir: session.workdir,
+      origin,
+    });
+    session.origin = managed.origin ?? null;
+  }
+
+  protected ensureSessionForChat(chatId: ChatId, title: string, files: string[], origin?: Partial<SessionOrigin> | null): SessionRuntime {
     const cs = this.chat(chatId);
     const selected = this.getSelectedSession(cs);
-    if (selected) return selected;
+    if (selected) {
+      this.attachSessionOrigin(selected, origin);
+      return selected;
+    }
 
     // Auto-resume an existing same-thread session of this agent (back-and-forth
     // toggling). The handover queued on `cs.pendingHandoverFrom` is intentionally
@@ -1346,6 +1369,7 @@ export class Bot {
     const resumed = this.findThreadSessionRuntime(chatId, cs.activeThreadId, cs.agent);
     if (resumed) {
       cs.pendingHandoverFrom = null;
+      this.attachSessionOrigin(resumed, origin);
       this.applySessionSelection(cs, resumed);
       return resumed;
     }
@@ -1361,6 +1385,7 @@ export class Bot {
       title: title || 'New session',
       threadId: cs.activeThreadId ?? null,
       handoverFrom,
+      origin,
     });
     const runtime = this.upsertSessionRuntime({
       agent: cs.agent,
@@ -1371,6 +1396,7 @@ export class Bot {
       thinkingEffort: this.effortForAgent(cs.agent),
       handoverFrom: staged.handoverFrom,
     });
+    this.attachSessionOrigin(runtime, origin);
     this.applySessionSelection(cs, runtime);
     return runtime;
   }

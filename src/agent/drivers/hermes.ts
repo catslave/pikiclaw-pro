@@ -405,6 +405,7 @@ async function getHermesSessions(workdir: string, limit?: number): Promise<Sessi
     threadId: record.threadId,
     model: record.model,
     createdAt: record.createdAt,
+    origin: record.origin ?? null,
     title: record.title,
     titleSource: record.titleSource ?? null,
     running: record.runState === 'running',
