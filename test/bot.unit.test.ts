@@ -232,6 +232,33 @@ describe('Bot emitStream queue tracking', () => {
 
     expect(bot.getStreamSnapshot(sessionKey)).toBeNull();
   });
+
+  it('throttles stream text debug logs for tiny deltas', () => {
+    const bot = new Bot() as any;
+    const sessionKey = 'codex:sess-debug-throttle';
+    const debugSpy = vi.spyOn(bot, 'debug').mockImplementation(() => {});
+
+    bot.emitStreamStart('run-1', {
+      key: sessionKey,
+      agent: 'codex',
+      sessionId: 'sess-debug-throttle',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      modelId: null,
+      thinkingEffort: null,
+    });
+    debugSpy.mockClear();
+
+    bot.emitStreamText('run-1', sessionKey, 'a', '');
+    bot.emitStreamText('run-1', sessionKey, 'ab', '');
+    bot.emitStreamText('run-1', sessionKey, 'abc', '');
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+
+    bot.emitStreamText('run-1', sessionKey, 'x'.repeat(1100), '');
+    expect(debugSpy).toHaveBeenCalledTimes(2);
+
+    bot.emitStreamDone('run-1', sessionKey, { sessionId: 'sess-debug-throttle', incomplete: false });
+    expect(bot.streamTextDebugState.size).toBe(0);
+  });
 });
 
 describe('Bot resetConversationForChat', () => {

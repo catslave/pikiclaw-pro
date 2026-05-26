@@ -72,6 +72,8 @@ import { BOT_TIMEOUTS } from '../core/constants.js';
 export const DEFAULT_RUN_TIMEOUT_S = BOT_TIMEOUTS.defaultRunTimeoutS;
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = BOT_TIMEOUTS.macosUserActivityPulseInterval;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = BOT_TIMEOUTS.macosUserActivityPulseTimeoutS;
+const STREAM_TEXT_DEBUG_MIN_INTERVAL_MS = 1000;
+const STREAM_TEXT_DEBUG_MIN_BYTES_DELTA = 1024;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -529,6 +531,7 @@ export class Bot {
   private _onStreamSnapshot: ((sessionKey: string, snapshot: StreamSnapshot | null) => void) | null = null;
   private streamPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private streamPushPending = new Map<string, boolean>();
+  private streamTextDebugState = new Map<string, { loggedAt: number; textBytes: number; thinkingBytes: number; phase: string }>();
 
   /** Called by the dashboard layer to subscribe to stream snapshot changes. */
   onStreamSnapshot(cb: (sessionKey: string, snapshot: StreamSnapshot | null) => void): void {
@@ -733,14 +736,32 @@ export class Bot {
   ) {
     const key = this.liveSessionKey(taskId, fallbackKey);
     const snap = this.streamSnapshots.get(key);
-    this.debug(`[stream-lifecycle] text task=${taskId} key=${key} bytes=${text.length}/${thinking.length} snap=${snap ? snap.phase : 'NONE'}`);
+    const phase = snap ? snap.phase : 'NONE';
+    if (this.shouldDebugStreamText(taskId, text.length, thinking.length, phase)) {
+      this.debug(`[stream-lifecycle] text task=${taskId} key=${key} bytes=${text.length}/${thinking.length} snap=${phase}`);
+    }
     this.emitStream(key, {
       type: 'text', text, thinking, activity, plan: plan ?? null, previewMeta: meta ?? null,
     });
   }
 
+  private shouldDebugStreamText(taskId: string, textBytes: number, thinkingBytes: number, phase: string): boolean {
+    const now = Date.now();
+    const prev = this.streamTextDebugState.get(taskId);
+    const byteDelta = prev ? Math.abs(textBytes - prev.textBytes) + Math.abs(thinkingBytes - prev.thinkingBytes) : Number.POSITIVE_INFINITY;
+    const shouldLog = !prev
+      || phase !== prev.phase
+      || now - prev.loggedAt >= STREAM_TEXT_DEBUG_MIN_INTERVAL_MS
+      || byteDelta >= STREAM_TEXT_DEBUG_MIN_BYTES_DELTA;
+    if (shouldLog) {
+      this.streamTextDebugState.set(taskId, { loggedAt: now, textBytes, thinkingBytes, phase });
+    }
+    return shouldLog;
+  }
+
   protected emitStreamDone(taskId: string, fallbackKey: string, opts: { sessionId: string | null; incomplete: boolean; error?: string }) {
     const key = this.liveSessionKey(taskId, fallbackKey);
+    this.streamTextDebugState.delete(taskId);
     this.debug(`[stream-lifecycle] done task=${taskId} key=${key} sessionId=${opts.sessionId || '(none)'} incomplete=${opts.incomplete}`);
     this.emitStream(key, {
       type: 'done', taskId,
@@ -751,6 +772,7 @@ export class Bot {
   }
 
   protected emitStreamCancelled(taskId: string, fallbackKey: string) {
+    this.streamTextDebugState.delete(taskId);
     this.emitStream(this.liveSessionKey(taskId, fallbackKey), { type: 'cancelled', taskId });
   }
 
