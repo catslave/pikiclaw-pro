@@ -14,7 +14,6 @@ const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/Usage
 const JiraTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).JiraTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
-const SkillsTab = lazy(async () => ({ default: (await import('./pages/skills/SkillsTab')).SkillsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
 const TelegramModal = lazy(async () => ({ default: (await import('./components/Modals')).TelegramModal }));
 const FeishuModal = lazy(async () => ({ default: (await import('./components/Modals')).FeishuModal }));
@@ -50,7 +49,7 @@ function locationToTab(pathname: string): DashboardTab {
     '/im': 'im',
     '/agents': 'agents',
     '/extensions': 'extensions',
-    '/skills': 'skills',
+    '/skills': 'extensions',
     '/permissions': 'system',
     '/system': 'system',
   };
@@ -62,7 +61,8 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
   if (pathname === '/jira') return '/dashboard';
-  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
+  if (pathname === '/skills') return '/extensions';
+  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -259,11 +259,7 @@ export function App() {
             <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} />
           </PageWrapper>
         } />
-        <Route path="/skills" element={
-          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-            <SkillsTab />
-          </PageWrapper>
-        } />
+        <Route path="/skills" element={<Navigate to="/extensions" replace />} />
         <Route path="/system" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />

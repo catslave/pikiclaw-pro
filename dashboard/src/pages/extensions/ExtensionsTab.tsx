@@ -49,6 +49,7 @@ function authKindLabel(locale: string, auth: McpAuthSpec): string {
 const BRAND_PALETTE: Record<string, { hex: string; letter?: string }> = {
   github:           { hex: '#24292f', letter: 'GH' },
   atlassian:        { hex: '#0052cc', letter: 'A' },
+  gitlab:           { hex: '#fc6d26', letter: 'GL' },
   notion:           { hex: '#111827', letter: 'N' },
   linear:           { hex: '#5e6ad2', letter: 'L' },
   sentry:           { hex: '#362d59', letter: 'S' },
@@ -2741,22 +2742,22 @@ function ExtensionTabNav({
       ),
     },
     {
-      id: 'cli',
-      labelZh: '命令行',
-      labelEn: 'CLI',
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M4 17 l5 -5 -5 -5" /><path d="M12 19 h8" />
-        </svg>
-      ),
-    },
-    {
       id: 'skill',
       labelZh: '技能包',
       labelEn: 'Skills',
       icon: (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 2 l3 7 h7 l-5.5 4.5 2 7.5 L12 17 l-6.5 4 2 -7.5 L2 9 h7 z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'cli',
+      labelZh: '命令行',
+      labelEn: 'CLI',
+      icon: (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 17 l5 -5 -5 -5" /><path d="M12 19 h8" />
         </svg>
       ),
     },
@@ -2784,57 +2785,6 @@ function ExtensionTabNav({
         </TabsTrigger>
       ))}
     </TabsList>
-  );
-}
-
-function JiraMcpSettingsPanel({ locale }: { locale: string }) {
-  const [copied, setCopied] = useState(false);
-  const copySearch = useCallback(async () => {
-    try {
-      await navigator.clipboard?.writeText('Atlassian Jira MCP');
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1400);
-    } catch {
-      setCopied(false);
-    }
-  }, []);
-
-  return (
-    <div className="rounded-xl border border-edge bg-panel p-4 shadow-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-base font-semibold tracking-tight text-fg">
-            {L(locale, 'Jira MCP 设置', 'Jira MCP Settings')}
-          </div>
-          <div className="mt-1 max-w-2xl text-[13px] leading-relaxed text-fg-4">
-            {L(locale,
-              'Jira 的连接、授权和 MCP Server 生命周期放在 Extensions 管理；Dashboard 只消费已经连接好的 Jira 能力。',
-              'Jira connection, authorization, and MCP server lifecycle live in Extensions; Dashboard only consumes the connected Jira capability.',
-            )}
-          </div>
-        </div>
-        <Badge>{L(locale, '全局扩展', 'Global extension')}</Badge>
-      </div>
-      <div className="mt-3 grid gap-2 md:grid-cols-3">
-        <div className="rounded-md border border-edge/60 bg-panel-alt px-3 py-2">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">MCP</div>
-          <div className="mt-1 text-sm text-fg-2">Atlassian / Jira</div>
-        </div>
-        <div className="rounded-md border border-edge/60 bg-panel-alt px-3 py-2">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{L(locale, '用途', 'Usage')}</div>
-          <div className="mt-1 text-sm text-fg-2">{L(locale, '同步分配给我的 ticket', 'Sync assigned tickets')}</div>
-        </div>
-        <div className="rounded-md border border-edge/60 bg-panel-alt px-3 py-2">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{L(locale, '状态', 'State')}</div>
-          <div className="mt-1 text-sm text-fg-2">{L(locale, '在下方 MCP 列表安装/授权', 'Install or authorize below')}</div>
-        </div>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button size="sm" variant="secondary" onClick={() => void copySearch()}>
-          {copied ? L(locale, '已复制搜索词', 'Copied search text') : L(locale, '复制 Atlassian 搜索词', 'Copy Atlassian search')}
-        </Button>
-      </div>
-    </div>
   );
 }
 
@@ -2872,14 +2822,9 @@ export function ExtensionsTab({
       </div>
 
       <div key={tab} className="animate-in-fade">
-        {tab === 'mcp' && (
-          <div className="space-y-7">
-            <JiraMcpSettingsPanel locale={locale} />
-            <McpCatalogSection scope="global" workdir={workdir} locale={locale} onOpenBrowserSetup={onOpenBrowserSetup} />
-          </div>
-        )}
-        {tab === 'cli' && <CliCatalogSection locale={locale} scope="global" />}
+        {tab === 'mcp' && <McpCatalogSection scope="global" workdir={workdir} locale={locale} onOpenBrowserSetup={onOpenBrowserSetup} />}
         {tab === 'skill' && <SkillsCatalogSection scope="global" workdir={workdir} locale={locale} />}
+        {tab === 'cli' && <CliCatalogSection locale={locale} scope="global" />}
       </div>
     </div>
   );
@@ -2913,8 +2858,8 @@ export function WorkspaceExtensionsBody({ workdir }: { workdir: string }) {
       </div>
       <div key={tab} className="animate-in-fade">
         {tab === 'mcp' && <McpCatalogSection scope="workspace" workdir={workdir} locale={locale} />}
-        {tab === 'cli' && <CliCatalogSection locale={locale} scope="workspace" />}
         {tab === 'skill' && <SkillsCatalogSection scope="workspace" workdir={workdir} locale={locale} />}
+        {tab === 'cli' && <CliCatalogSection locale={locale} scope="workspace" />}
       </div>
     </div>
   );

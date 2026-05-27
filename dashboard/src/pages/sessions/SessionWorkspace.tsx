@@ -1131,7 +1131,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     { to: '/im', label: t('tab.im') },
     { to: '/agents', label: t('tab.agent') },
     { to: '/extensions', label: t('tab.extensions') },
-    { to: '/skills', label: t('tab.skills') },
     { to: '/system', label: t('tab.system') },
   ], [t]);
 

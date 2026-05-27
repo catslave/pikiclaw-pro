@@ -45,7 +45,6 @@ const TAB_ROUTES: Record<string, string> = {
   im: '/im',
   agents: '/agents',
   extensions: '/extensions',
-  skills: '/skills',
   system: '/system',
 };
 
@@ -74,7 +73,6 @@ export function Sidebar({
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im') },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('tab.agent') },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('tab.extensions') },
-    { key: 'skills', to: TAB_ROUTES.skills, label: t('tab.skills') },
     { key: 'system', to: TAB_ROUTES.system, label: t('tab.system') },
   ], [t]);
   const appStatus = resolveAppStatusBadge(state, t);

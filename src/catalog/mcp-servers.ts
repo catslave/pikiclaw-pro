@@ -119,7 +119,7 @@ export const MCP_SERVERS: RecommendedMcpServer[] = [
   },
   {
     id: 'atlassian',
-    name: 'Atlassian',
+    name: 'Jira',
     description: 'Jira issues, Confluence pages, sprint planning',
     descriptionZh: 'Jira 工单、Confluence 文档、Sprint 管理',
     category: 'productivity',
@@ -128,6 +128,18 @@ export const MCP_SERVERS: RecommendedMcpServer[] = [
     auth: { type: 'mcp-oauth' },
     iconSlug: 'atlassian',
     homepage: 'https://www.atlassian.com/platform/remote-mcp-server',
+  },
+  {
+    id: 'gitlab',
+    name: 'GitLab',
+    description: 'Projects, issues, merge requests, pipelines, and repository context',
+    descriptionZh: '项目、Issue、Merge Request、Pipeline 和仓库上下文',
+    category: 'dev',
+    recommendedScope: 'global',
+    transport: { type: 'http', url: 'https://gitlab.com/api/v4/mcp' },
+    auth: { type: 'mcp-oauth' },
+    iconSlug: 'gitlab',
+    homepage: 'https://docs.gitlab.com/user/gitlab_duo/model_context_protocol/mcp_server/',
   },
   {
     id: 'notion',
