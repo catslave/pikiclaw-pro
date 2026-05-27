@@ -2787,6 +2787,57 @@ function ExtensionTabNav({
   );
 }
 
+function JiraMcpSettingsPanel({ locale }: { locale: string }) {
+  const [copied, setCopied] = useState(false);
+  const copySearch = useCallback(async () => {
+    try {
+      await navigator.clipboard?.writeText('Atlassian Jira MCP');
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      setCopied(false);
+    }
+  }, []);
+
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-base font-semibold tracking-tight text-fg">
+            {L(locale, 'Jira MCP 设置', 'Jira MCP Settings')}
+          </div>
+          <div className="mt-1 max-w-2xl text-[13px] leading-relaxed text-fg-4">
+            {L(locale,
+              'Jira 的连接、授权和 MCP Server 生命周期放在 Extensions 管理；Dashboard 只消费已经连接好的 Jira 能力。',
+              'Jira connection, authorization, and MCP server lifecycle live in Extensions; Dashboard only consumes the connected Jira capability.',
+            )}
+          </div>
+        </div>
+        <Badge>{L(locale, '全局扩展', 'Global extension')}</Badge>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-3">
+        <div className="rounded-md border border-edge/60 bg-panel-alt px-3 py-2">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">MCP</div>
+          <div className="mt-1 text-sm text-fg-2">Atlassian / Jira</div>
+        </div>
+        <div className="rounded-md border border-edge/60 bg-panel-alt px-3 py-2">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{L(locale, '用途', 'Usage')}</div>
+          <div className="mt-1 text-sm text-fg-2">{L(locale, '同步分配给我的 ticket', 'Sync assigned tickets')}</div>
+        </div>
+        <div className="rounded-md border border-edge/60 bg-panel-alt px-3 py-2">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{L(locale, '状态', 'State')}</div>
+          <div className="mt-1 text-sm text-fg-2">{L(locale, '在下方 MCP 列表安装/授权', 'Install or authorize below')}</div>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" onClick={() => void copySearch()}>
+          {copied ? L(locale, '已复制搜索词', 'Copied search text') : L(locale, '复制 Atlassian 搜索词', 'Copy Atlassian search')}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function ExtensionsTab({
   onOpenBrowserSetup,
 }: {
@@ -2823,6 +2874,7 @@ export function ExtensionsTab({
       <div key={tab} className="animate-in-fade">
         {tab === 'mcp' && (
           <div className="space-y-7">
+            <JiraMcpSettingsPanel locale={locale} />
             <McpCatalogSection scope="global" workdir={workdir} locale={locale} onOpenBrowserSetup={onOpenBrowserSetup} />
           </div>
         )}

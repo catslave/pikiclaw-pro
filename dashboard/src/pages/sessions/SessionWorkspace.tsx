@@ -479,7 +479,7 @@ function readStoredWorkspaceSidebarCollapsed(): boolean {
 
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'dashboard' | 'settings';
-type DashboardViewKey = 'workspace' | 'jira' | 'todos' | 'automation' | 'assistants' | 'knowledge';
+type DashboardViewKey = 'workspace' | 'jira';
 type DashboardScope = 'all' | string;
 type DashboardColumnKey = 'running' | 'pending' | 'review' | 'incomplete' | 'done';
 type DashboardSessionItem = {
@@ -910,7 +910,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   mode = 'workspace',
   settingsContent = null,
   dashboardJiraContent = null,
-  dashboardProContent = null,
   version = '...',
   restartPhase = null,
   onRestartClick,
@@ -919,7 +918,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   mode?: SessionWorkspaceMode;
   settingsContent?: ReactNode;
   dashboardJiraContent?: ReactNode;
-  dashboardProContent?: ((view: Exclude<DashboardViewKey, 'workspace' | 'jira'>) => ReactNode) | null;
   version?: string;
   restartPhase?: RestartPhase;
   onRestartClick?: () => void;
@@ -938,10 +936,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const requestedDashboardView = searchParams.get('view');
   const dashboardView: DashboardViewKey = mode === 'dashboard' && (
     requestedDashboardView === 'jira'
-    || requestedDashboardView === 'todos'
-    || requestedDashboardView === 'automation'
-    || requestedDashboardView === 'assistants'
-    || requestedDashboardView === 'knowledge'
   ) ? requestedDashboardView : 'workspace';
   const setDashboardView = useCallback((next: DashboardViewKey) => {
     const params = new URLSearchParams(searchParams);
@@ -1126,6 +1120,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const workspaceSettingsItems = useMemo(() => [
     { to: '/', label: t('tab.sessions') },
     { to: '/dashboard', label: t('tab.dashboard') },
+    { to: '/inbox', label: t('tab.inbox') },
     { to: '/usage', label: t('tab.usage') },
     { to: '/im', label: t('tab.im') },
     { to: '/agents', label: t('tab.agent') },
@@ -3275,7 +3270,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <div className="mt-0.5 text-[11px] text-fg-5">{t('dashboard.viewSwitchHint')}</div>
               </div>
               <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge bg-panel-alt p-0.5">
-                {(['workspace', 'jira', 'todos', 'automation', 'assistants', 'knowledge'] as const).map(view => (
+                {(['workspace', 'jira'] as const).map(view => (
                   <button
                     key={view}
                     type="button"
@@ -3285,7 +3280,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       dashboardView === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
                     )}
                   >
-                    {view === 'workspace' ? t('dashboard.viewWorkspace') : view === 'jira' ? t('dashboard.viewJira') : t(`dashboard.view.${view}`)}
+                    {view === 'workspace' ? t('dashboard.viewWorkspace') : t('dashboard.viewJira')}
                   </button>
                 ))}
               </div>
@@ -3293,10 +3288,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             {dashboardView === 'jira' ? (
               <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge/70 bg-panel/80 p-3 shadow-[var(--th-card-shadow)]">
                 {dashboardJiraContent}
-              </div>
-            ) : dashboardView !== 'workspace' ? (
-              <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge/70 bg-panel/80 p-3 shadow-[var(--th-card-shadow)]">
-                {dashboardProContent?.(dashboardView)}
               </div>
             ) : (
               <>

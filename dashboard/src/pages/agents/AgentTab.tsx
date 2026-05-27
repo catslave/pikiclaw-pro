@@ -28,6 +28,7 @@ import { SectionCard } from '../shared';
 import ModelsSection, { useModelLayer, type ModelLayerSnapshot } from '../models/ModelsTab';
 import LocalModelsSection, { useLocalBackends } from '../local-models/LocalModelsSection';
 import ProfilesSection from '../profiles/ProfilesSection';
+import { ProAgentWorkflowSection } from './ProAgentWorkflowSection';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'];
@@ -1182,6 +1183,8 @@ export function AgentTab() {
         </div>
         <ProfilesSection snapshot={modelLayer} />
       </section>
+
+      <ProAgentWorkflowSection />
 
       <section className="space-y-3 pt-4">
         <div className="flex items-baseline justify-between border-t border-edge pt-4">

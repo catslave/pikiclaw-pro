@@ -699,6 +699,15 @@ export const api = {
       body,
       { timeoutMs: 30_000, ...opts },
     ),
+  runSkillCommand: (
+    body: { command: 'test' | 'login' | 'create-account'; environment: string; subject?: string; workdir?: string; agent?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      '/api/pro/skill-command',
+      body,
+      { timeoutMs: 30_000, ...opts },
+    ),
   createProTask: (
     task: {
       title: string;

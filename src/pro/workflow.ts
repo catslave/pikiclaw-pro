@@ -49,6 +49,41 @@ interface WorkflowFile {
   knowledge: KnowledgeEntry[];
 }
 
+const DEFAULT_ASSISTANTS: AgentAssistant[] = [
+  {
+    id: 'assistant_refinement',
+    name: 'Refinement Assistant',
+    responsibility: 'Clarify ticket/task goal, boundary, acceptance points, risks, and estimate coding, review, verification, and user-understanding time.',
+    preferredAgents: ['codex', 'claude'],
+    createdAt: '2026-05-27T00:00:00.000Z',
+    updatedAt: '2026-05-27T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_coding',
+    name: 'Coding Assistant',
+    responsibility: 'Implement scoped changes, keep diffs reviewable, run focused validation, and respond to review comments with follow-up coding.',
+    preferredAgents: ['codex', 'claude'],
+    createdAt: '2026-05-27T00:00:00.000Z',
+    updatedAt: '2026-05-27T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_ticket_sync',
+    name: 'Ticket Sync Assistant',
+    responsibility: 'Sync Jira tickets into Pikiclaw tasks, append remote updates without overwriting local task history, and flag newly assigned or changed work.',
+    preferredAgents: ['codex'],
+    createdAt: '2026-05-27T00:00:00.000Z',
+    updatedAt: '2026-05-27T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_knowledge',
+    name: 'Knowledge Assistant',
+    responsibility: 'After refinement completes, extract reusable concepts, terminology, assumptions, and basic knowledge points that help the user understand the task faster.',
+    preferredAgents: ['codex', 'claude'],
+    createdAt: '2026-05-27T00:00:00.000Z',
+    updatedAt: '2026-05-27T00:00:00.000Z',
+  },
+];
+
 function workflowFilePath() {
   return process.env.PIKICLAW_PRO_WORKFLOW_FILE || path.join(os.homedir(), '.pikiclaw', 'pro', 'workflow.json');
 }
@@ -85,7 +120,12 @@ function writeFile(file: WorkflowFile) {
 }
 
 export function listAgentAssistants(): AgentAssistant[] {
-  return readFile().assistants.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const fileAssistants = readFile().assistants;
+  const customIds = new Set(fileAssistants.map(item => item.id));
+  return [
+    ...fileAssistants,
+    ...DEFAULT_ASSISTANTS.filter(item => !customIds.has(item.id)),
+  ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 export function createAgentAssistant(input: { name: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {

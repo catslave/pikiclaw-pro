@@ -12,7 +12,7 @@ const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const JiraTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).JiraTab }));
-const ProDashboardView = lazy(async () => ({ default: (await import('./pages/pro/ProDashboardView')).ProDashboardView }));
+const InboxTab = lazy(async () => ({ default: (await import('./pages/inbox/InboxTab')).InboxTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SkillsTab = lazy(async () => ({ default: (await import('./pages/skills/SkillsTab')).SkillsTab }));
@@ -46,6 +46,7 @@ function locationToTab(pathname: string): DashboardTab {
     '/': 'sessions',
     '/dashboard': 'dashboard',
     '/jira': 'dashboard',
+    '/inbox': 'inbox',
     '/usage': 'usage',
     '/archive': 'system',
     '/im': 'im',
@@ -63,7 +64,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
   if (pathname === '/jira') return '/dashboard';
-  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
+  if (['/dashboard', '/inbox', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -229,6 +230,11 @@ export function App() {
     ? null
     : (
       <Routes>
+        <Route path="/inbox" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <InboxTab />
+          </PageWrapper>
+        } />
         <Route path="/im" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <IMAccessTab
@@ -294,7 +300,6 @@ export function App() {
                   mode={sessionWorkspaceMode}
                   settingsContent={settingsContent}
                   dashboardJiraContent={<JiraTab />}
-                  dashboardProContent={(view) => <ProDashboardView view={view} />}
                   version={version}
                   restartPhase={restartPhase}
                   onRestartClick={onRestartClick}

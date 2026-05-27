@@ -249,6 +249,53 @@ app.post('/api/pro/skill-quick-setup', async (c) => {
   }
 });
 
+app.post('/api/pro/skill-command', async (c) => {
+  try {
+    const body = await c.req.json();
+    const command = readString(body?.command);
+    const environment = readString(body?.environment);
+    const subject = readString(body?.subject);
+    if (!['test', 'login', 'create-account'].includes(command)) {
+      return c.json({ ok: false, error: 'unsupported command' }, 400);
+    }
+    if (!environment) return c.json({ ok: false, error: 'environment is required' }, 400);
+    const config = loadUserConfig();
+    const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
+    const displayCommand = command === 'create-account' ? 'create account' : command;
+    const slashCommand = command === 'create-account'
+      ? `/create ${environment} account`
+      : `/${command} ${environment}${subject ? ` ${subject}` : ''}`;
+    const prompt = [
+      `Execute Pikiclaw skill command: ${slashCommand}`,
+      '',
+      `Action: ${displayCommand}`,
+      `Environment: ${environment}`,
+      subject ? `Subject: ${subject}` : '',
+      '',
+      'Requirements:',
+      '- Use the managed browser/profile if login or UI validation is needed.',
+      '- For test, open the target environment, validate the requested flow, and summarize the result/status.',
+      '- For login, open the environment and complete or verify login state.',
+      '- For create account, prepare the account flow and report the created account handoff without exposing secrets in logs.',
+      '- When the browser is closed or the flow finishes, return a concise execution result that can update the task/test state.',
+    ].filter(Boolean).join('\n');
+    const queued = await queueDashboardSessionTask({
+      workdir,
+      agent: readString(body?.agent) || null,
+      sessionId: '',
+      prompt,
+      attachments: [],
+    });
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+    return c.json({ ok: true, queued });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
 app.get('/api/pro/tasks/:taskId', (c) => {
   const task = getProTask(c.req.param('taskId'));
   if (!task) return c.json({ ok: false, error: 'task not found' }, 404);

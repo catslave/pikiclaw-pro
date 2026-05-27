@@ -23,6 +23,12 @@ export function SkillsTab() {
   const [error, setError] = useState<string | null>(null);
   const [quickRepo, setQuickRepo] = useState('');
   const [quickRunning, setQuickRunning] = useState(false);
+  const [commandDraft, setCommandDraft] = useState<{ command: 'test' | 'login' | 'create-account'; environment: string; subject: string }>({
+    command: 'test',
+    environment: 'cnlab03',
+    subject: '',
+  });
+  const [commandRunning, setCommandRunning] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +77,26 @@ export function SkillsTab() {
     }
   };
 
+  const runSkillCommand = async () => {
+    if (!commandDraft.environment.trim() || commandRunning) return;
+    setCommandRunning(true);
+    try {
+      const res = await api.runSkillCommand({
+        command: commandDraft.command,
+        environment: commandDraft.environment.trim(),
+        subject: commandDraft.subject.trim() || undefined,
+        workdir: runtimeWorkdir,
+      });
+      if (!res.ok) throw new Error(res.error || 'Skill command failed');
+      toast('Skill command queued');
+      setCommandDraft(prev => ({ ...prev, subject: '' }));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Skill command failed', false);
+    } finally {
+      setCommandRunning(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex min-h-40 items-center justify-center text-sm text-fg-4">
@@ -105,6 +131,61 @@ export function SkillsTab() {
             {quickRunning ? <Spinner /> : null}
             Start setup
           </Button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-edge bg-panel p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-fg">Parameterized skill commands</h3>
+            <p className="mt-1 text-sm text-fg-4">Run browser-backed environment workflows such as test, login, and account creation with cnlab as a parameter.</p>
+          </div>
+          <span className="rounded border border-edge bg-control px-2 py-1 text-[11px] text-fg-5">Browser workflow</span>
+        </div>
+        <div className="mt-3 grid gap-2 lg:grid-cols-[180px_160px_1fr_auto]">
+          <select
+            value={commandDraft.command}
+            onChange={event => setCommandDraft(prev => ({ ...prev, command: event.target.value as typeof commandDraft.command }))}
+            className="h-9 rounded-md border border-control-border bg-control px-3 text-[13px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          >
+            <option value="test">test</option>
+            <option value="login">login</option>
+            <option value="create-account">create account</option>
+          </select>
+          <input
+            value={commandDraft.environment}
+            onChange={event => setCommandDraft(prev => ({ ...prev, environment: event.target.value }))}
+            placeholder="cnlab03"
+            className="h-9 rounded-md border border-control-border bg-control px-3 text-[13px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+          <input
+            value={commandDraft.subject}
+            onChange={event => setCommandDraft(prev => ({ ...prev, subject: event.target.value }))}
+            placeholder="Optional target flow, user, or scenario"
+            className="h-9 min-w-0 rounded-md border border-control-border bg-control px-3 text-[13px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+          <Button variant="primary" disabled={!commandDraft.environment.trim() || commandRunning} onClick={() => void runSkillCommand()}>
+            {commandRunning ? <Spinner /> : null}
+            Run
+          </Button>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {[
+            { command: 'test' as const, environment: 'cnlab03', label: '/test cnlab03' },
+            { command: 'test' as const, environment: 'cnlab01', label: '/test cnlab01' },
+            { command: 'login' as const, environment: 'cnlab03', label: '/login cnlab03' },
+            { command: 'login' as const, environment: 'cnlab01', label: '/login cnlab01' },
+            { command: 'create-account' as const, environment: 'cnlab03', label: '/create cnlab03 account' },
+          ].map(preset => (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() => setCommandDraft(prev => ({ ...prev, command: preset.command, environment: preset.environment }))}
+              className="rounded border border-edge bg-control px-2 py-1 font-mono text-[12px] text-fg-3 transition hover:border-edge-strong hover:bg-control-h hover:text-fg"
+            >
+              {preset.label}
+            </button>
+          ))}
         </div>
       </div>
 
