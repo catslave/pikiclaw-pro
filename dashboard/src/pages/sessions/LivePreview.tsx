@@ -5,7 +5,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
-import { WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
+import { WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
 import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
 export interface LiveStreamView {
@@ -29,7 +29,6 @@ export interface LiveStreamView {
 export function liveStreamHasBody(stream: LiveStreamView): boolean {
   return !!stream.text
     || !!stream.thinking
-    || !!(stream.activity && stream.activity.split('\n').filter(Boolean).length)
     || hasPlan(stream.plan)
     || !!(stream.subAgents && stream.subAgents.length);
 }
@@ -45,15 +44,50 @@ export function liveStreamShouldRender(stream: LiveStreamView): boolean {
   return stream.phase === 'done' && !!stream.error;
 }
 
+function deriveWorkingStatus({
+  phase,
+  activityLines,
+  currentPlanStep,
+  thinking,
+  text,
+  previewMeta,
+  t,
+}: {
+  phase: LiveStreamView['phase'];
+  activityLines: string[];
+  currentPlanStep: string;
+  thinking: string;
+  text: string;
+  previewMeta?: StreamPreviewMeta | null;
+  t: (k: string) => string;
+}): string {
+  if (phase === 'done') return t('hub.statusTurnDone');
+  const diagnostics = previewMeta?.diagnostics || [];
+  if (diagnostics.some(line => /error|failed|timeout|rate limit|quota/i.test(line))) return t('hub.statusNeedsAttention');
+  if ((previewMeta?.generatingImages ?? 0) > 0) return t('hub.statusGeneratingImage');
+  const last = activityLines[activityLines.length - 1] || previewMeta?.lastEvent || '';
+  if (/Codex connection|app-server|thread\/(start|resume)|Resuming|Starting/i.test(last)) return t('hub.statusConnecting');
+  if (/^(Read|Open|List|Inspect image)\b/i.test(last)) return t('hub.statusScanningFiles');
+  if (/^(Edit|Write|Updated)\b/i.test(last)) return t('hub.statusEditingFiles');
+  if (/^(Search|Grep|Glob|Find|WebSearch|Search web|Open web page)\b/i.test(last)) return t('hub.statusSearching');
+  if (/^(Bash|Shell|Command)\b/i.test(last) || /\b(npm|pnpm|yarn|pytest|go test|cargo test|mvn|gradle)\b/i.test(last)) return t('hub.statusRunningCommands');
+  if (currentPlanStep) return t('hub.statusFollowingPlan');
+  if (thinking) return t('hub.statusThinking');
+  if (text) return t('hub.statusWritingAnswer');
+  return t('hub.working');
+}
+
 /* ── Live streaming preview ── */
 export function LivePreview({
   stream,
   t,
   onOpenFileLink,
+  workdir,
 }: {
   stream: LiveStreamView;
   t: (k: string) => string;
   onOpenFileLink?: OpenFileLinkHandler;
+  workdir?: string;
 }) {
   const showPlan = hasPlan(stream.plan);
   const hasAnyBody = liveStreamHasBody(stream);
@@ -65,7 +99,7 @@ export function LivePreview({
     (stream.activity || '').split('\n').filter(Boolean),
     [stream.activity],
   );
-  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink }), [onOpenFileLink]);
+  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
   const lastActivity = activityLines[activityLines.length - 1] || '';
   const subAgents = stream.subAgents ?? null;
   const currentPlanStep = showPlan
@@ -74,16 +108,26 @@ export function LivePreview({
   const thinkingPreview = stream.thinking ? lastNLines(stream.thinking, 1) : '';
   const activitySummary = summarizeWorkingActivity(activityLines, t);
   const workingPreview = currentPlanStep || thinkingPreview || activitySummary[0] || lastActivity || '';
+  const workingStatus = deriveWorkingStatus({
+    phase: stream.phase,
+    activityLines,
+    currentPlanStep,
+    thinking: stream.thinking || '',
+    text: stream.text || '',
+    previewMeta: stream.previewMeta ?? null,
+    t,
+  });
   const workingStepCount = (activitySummary.length || activityLines.length)
     || (showPlan ? stream.plan.steps.length : 0)
     || (subAgents?.length ?? 0)
     || (stream.thinking ? 1 : 0);
-  const showWorking = stream.phase === 'streaming'
-    || activityLines.length > 0
-    || !!stream.thinking
+  const showWorking = (
+    !!stream.thinking
     || showPlan
     || !!(subAgents && subAgents.length)
-    || !!stream.previewMeta;
+    || !!stream.previewMeta?.diagnostics?.length
+    || activityLines.length > 0
+  );
 
   return (
     <div className="space-y-3 animate-in">
@@ -98,11 +142,9 @@ export function LivePreview({
           previewMeta={stream.previewMeta ?? null}
           previewText={workingPreview}
           stepCount={workingStepCount}
+          statusLabel={workingStatus}
         >
           <div className="space-y-3 px-3.5 py-3">
-            {stream.phase === 'streaming' && stream.text && !showPlan && !stream.thinking && (
-              <WorkingNarrativeBlock text={stream.text} t={t} />
-            )}
             <WorkingPlanList plan={stream.plan} t={t} />
             <WorkingSubAgentList subAgents={subAgents} t={t} />
             <WorkingThinkingBlock text={stream.thinking || ''} t={t} />

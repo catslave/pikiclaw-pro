@@ -251,7 +251,7 @@ class Runtime {
       if (phase !== prev) {
         prevPhases.set(sessionKey, phase);
         if (!phase) prevPhases.delete(sessionKey); // clean up null entries
-        this.emitDashboardEvent({ type: 'sessions-changed', key: sessionKey });
+        this.emitDashboardEvent({ type: 'sessions-changed', key: sessionKey, snapshot: phase ? { phase } : null });
       }
     });
   }

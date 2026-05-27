@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { cn } from '../../utils';
@@ -11,6 +11,8 @@ const isFilePath = (href: string) => /^(file:\/\/|\/|~\/|\.\.?\/|[A-Za-z]:[\\/]|
 
 export type FileLinkTarget = { path: string; line?: number };
 export type OpenFileLinkHandler = (target: FileLinkTarget) => void;
+
+const remoteBranchUrlCache = new Map<string, string | null>();
 
 function safeDecodeHref(href: string): string {
   try { return decodeURI(href); } catch { return href; }
@@ -55,6 +57,23 @@ function fileLinkTitle(target: FileLinkTarget): string {
   return target.line ? `${target.path}:${target.line}` : target.path;
 }
 
+function TargetTooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span className="group relative inline-block align-baseline">
+      {children}
+      <span className="pointer-events-none absolute left-0 top-full z-[90] mt-1 hidden max-h-28 max-w-[min(420px,72vw)] overflow-hidden whitespace-normal break-all rounded-md border border-edge bg-dropdown px-2 py-1 text-[11px] leading-snug text-fg-3 shadow-lg group-hover:block">
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function looksLikeRemoteBranchRef(text: string): boolean {
+  return /^[A-Za-z0-9._-]+\/[^\s\\~^:?*[\]]+$/.test(text)
+    && !text.includes('//')
+    && !text.endsWith('/');
+}
+
 /* ── Copy button for fenced code blocks ── */
 export function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -77,7 +96,118 @@ export function classifyCode(text: string): string {
   return 'bg-[rgba(255,255,255,0.06)] border-edge/20 text-fg-3';
 }
 
-export function createMdComponents({ onOpenFileLink }: { onOpenFileLink?: OpenFileLinkHandler } = {}): Record<string, React.ComponentType<any>> {
+function themeValue(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function MermaidBlock({ text }: { text: string }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSvg(null);
+    setError(null);
+
+    const render = async () => {
+      try {
+        const { default: mermaid } = await import('mermaid');
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'base',
+          themeVariables: {
+            background: 'transparent',
+            primaryColor: themeValue('--th-panel', '#0f172a'),
+            primaryTextColor: themeValue('--th-fg', '#f8fafc'),
+            primaryBorderColor: themeValue('--th-edge-h', '#64748b'),
+            lineColor: themeValue('--th-fg-5', '#94a3b8'),
+            secondaryColor: themeValue('--th-panel-alt', '#1e293b'),
+            tertiaryColor: themeValue('--th-session-bg', '#111827'),
+            textColor: themeValue('--th-fg-2', '#e2e8f0'),
+            fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+          },
+        });
+        const renderId = `mermaid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const result = await mermaid.render(renderId, text);
+        if (!cancelled) setSvg(result.svg);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    void render();
+    return () => { cancelled = true; };
+  }, [text]);
+
+  return (
+    <div className="rounded-lg overflow-hidden border border-edge/30 bg-[rgba(0,0,0,0.12)] my-3 not-prose">
+      <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-edge/15 bg-[rgba(0,0,0,0.08)]">
+        <span className="text-[10px] font-mono text-fg-5/60">mermaid</span>
+        <CopyButton text={text} />
+      </div>
+      <div className="overflow-x-auto px-3.5 py-3">
+        {svg ? (
+          <div
+            className="min-w-fit [&>svg]:h-auto [&>svg]:max-w-full"
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        ) : error ? (
+          <div className="space-y-2">
+            <div className="rounded-md border border-err/25 bg-err/[0.06] px-3 py-2 text-[12px] leading-[1.6] text-err">
+              {error}
+            </div>
+            <pre className="text-[12px] leading-[1.65] text-fg-3 font-mono whitespace-pre-wrap break-words">
+              <code>{text}</code>
+            </pre>
+          </div>
+        ) : (
+          <div className="text-[12px] text-fg-5">Rendering diagram...</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RemoteBranchCode({ text, workdir, className }: { text: string; workdir: string; className: string }) {
+  const cacheKey = `${workdir}\0${text}`;
+  const [url, setUrl] = useState<string | null | undefined>(() => remoteBranchUrlCache.get(cacheKey));
+
+  useEffect(() => {
+    if (url !== undefined) return;
+    let cancelled = false;
+    void api.gitRemoteBranchUrl(workdir, text)
+      .then(res => {
+        const nextUrl = res.ok && res.url ? res.url : null;
+        remoteBranchUrlCache.set(cacheKey, nextUrl);
+        if (!cancelled) setUrl(nextUrl);
+      })
+      .catch(() => {
+        remoteBranchUrlCache.set(cacheKey, null);
+        if (!cancelled) setUrl(null);
+      });
+    return () => { cancelled = true; };
+  }, [cacheKey, text, url, workdir]);
+
+  if (!url) return <code className={className}>{text}</code>;
+  return (
+    <TargetTooltip label={url}>
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(className, 'inline-flex cursor-pointer items-center hover:brightness-125')}
+        aria-label={url}
+      >
+        {text}
+      </a>
+    </TargetTooltip>
+  );
+}
+
+export function createMdComponents({ onOpenFileLink, workdir }: { onOpenFileLink?: OpenFileLinkHandler; workdir?: string } = {}): Record<string, React.ComponentType<any>> {
   const openFileLink = onOpenFileLink || defaultOpenFileLink;
   return {
   h1: ({ children }: any) => <h2 className="text-[16px] font-bold text-fg mt-4 mb-2">{children}</h2>,
@@ -88,22 +218,29 @@ export function createMdComponents({ onOpenFileLink }: { onOpenFileLink?: OpenFi
   em: ({ children }: any) => <em className="italic text-fg-3">{children}</em>,
   a: ({ href, children }: any) => {
     if (href && isWebUrl(href)) {
-      return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors">{children}</a>;
+      return (
+        <TargetTooltip label={href}>
+          <a href={href} target="_blank" rel="noopener noreferrer" aria-label={href} className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors">{children}</a>
+        </TargetTooltip>
+      );
     }
     const fileTarget = href ? parseFileLinkTarget(href) : null;
     if (fileTarget) {
+      const title = fileLinkTitle(fileTarget);
       return (
-        <button
-          type="button"
-          className="inline cursor-pointer rounded-sm bg-transparent p-0 text-left text-blue-400 underline decoration-blue-400/30 underline-offset-2 transition-colors hover:text-blue-300"
-          title={fileLinkTitle(fileTarget)}
-          onClick={() => openFileLink(fileTarget)}
-        >
-          {children}
-        </button>
+        <TargetTooltip label={title}>
+          <button
+            type="button"
+            className="inline cursor-pointer rounded-sm bg-transparent p-0 text-left text-blue-400 underline decoration-blue-400/30 underline-offset-2 transition-colors hover:text-blue-300"
+            aria-label={title}
+            onClick={() => openFileLink(fileTarget)}
+          >
+            {children}
+          </button>
+        </TargetTooltip>
       );
     }
-    return <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30">{children}</span>;
+    return <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30" title={href || undefined}>{children}</span>;
   },
   ul: ({ children }: any) => <ul className="space-y-1 my-2 ml-1">{children}</ul>,
   ol: ({ children }: any) => <ol className="space-y-1 my-2 ml-1 list-decimal list-inside">{children}</ol>,
@@ -117,19 +254,38 @@ export function createMdComponents({ onOpenFileLink }: { onOpenFileLink?: OpenFi
   hr: () => <hr className="border-edge/30 my-4" />,
   code: ({ className, children, ...props }: any) => {
     const text = String(children).replace(/\n$/, '');
-    const langMatch = /language-(\w+)/.exec(className || '');
+    const langMatch = /language-([^\s]+)/.exec(className || '');
 
     // Inline code (no language class, no embedded newlines)
     if (!langMatch && !className && !text.includes('\n')) {
       const fileTarget = parseFileLinkTarget(text);
       if (fileTarget) {
-        return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border cursor-pointer hover:brightness-125 transition-all', classifyCode(fileTarget.path))} title={fileLinkTitle(fileTarget)} onClick={() => openFileLink(fileTarget)}>{text}</code>;
+        const title = fileLinkTitle(fileTarget);
+        return (
+          <TargetTooltip label={title}>
+            <code
+              className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border cursor-pointer hover:brightness-125 transition-all', classifyCode(fileTarget.path))}
+              aria-label={title}
+              onClick={() => openFileLink(fileTarget)}
+            >
+              {text}
+            </code>
+          </TargetTooltip>
+        );
       }
-      return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border', classifyCode(text))}>{text}</code>;
+      const codeClassName = cn('px-1.5 py-[1px] rounded text-[12px] font-mono border', classifyCode(text));
+      if (workdir && looksLikeRemoteBranchRef(text)) {
+        return <RemoteBranchCode text={text} workdir={workdir} className={codeClassName} />;
+      }
+      return <code className={codeClassName}>{text}</code>;
     }
 
     // Fenced code block
     const lang = langMatch?.[1] || '';
+    if (['mermaid', 'mmd'].includes(lang.toLowerCase())) {
+      return <MermaidBlock text={text} />;
+    }
+
     return (
       <div className="rounded-lg overflow-hidden border border-edge/30 bg-[rgba(0,0,0,0.25)] my-3 not-prose">
         <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-edge/15 bg-[rgba(0,0,0,0.12)]">

@@ -441,6 +441,7 @@ export interface SessionSideChatRef {
   title: string | null;
   createdAt: string;
   updatedAt: string;
+  userStatus?: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   hidden?: boolean;
 }
 

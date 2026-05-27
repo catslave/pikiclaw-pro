@@ -10,6 +10,7 @@ import type {
   OpenTarget,
   GitChangesResult,
   GitDiffContentResult,
+  GitRemoteBranchUrlResult,
   HostInfo,
   LocalModelsProbeResponse,
   LsDirResult,
@@ -18,6 +19,7 @@ import type {
   McpSearchResult,
   McpServerConfig,
   PermissionRequestResult,
+  PlatformSkillInfo,
   SkillCatalogItem,
   RemoteSkillInfo,
   SessionHubResult,
@@ -195,6 +197,10 @@ export const api = {
   },
   gitChanges: (dir: string) =>
     json<GitChangesResult>(`/api/git-changes?path=${encodeURIComponent(dir)}`),
+  gitRemoteBranchUrl: (workdir: string, ref: string) => {
+    const params = new URLSearchParams({ workdir, ref });
+    return json<GitRemoteBranchUrlResult>(`/api/git-remote-branch-url?${params.toString()}`);
+  },
   fileContent: (workdir: string, filePath: string) => {
     const params = new URLSearchParams({ workdir, path: filePath });
     return json<FileContentResult>(`/api/file-content?${params.toString()}`);
@@ -284,6 +290,11 @@ export const api = {
   getSkills: (workdir: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; skills: SkillInfo[]; error?: string }>(
       `/api/session-hub/skills?workdir=${encodeURIComponent(workdir)}`,
+      { timeoutMs: 5_000, ...opts },
+    ),
+  getPlatformSkills: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; skills: PlatformSkillInfo[]; error?: string }>(
+      '/api/platform-skills/catalog',
       { timeoutMs: 5_000, ...opts },
     ),
 
@@ -432,6 +443,27 @@ export const api = {
     }>(
       '/api/session-hub/session/delete',
       { workdir, agent, sessionId, purgeNative },
+      opts,
+    ),
+  deleteSideChat: (
+    workdir: string,
+    parentAgent: string,
+    parentSessionId: string,
+    agent: string,
+    sessionId: string,
+    purgeNative = false,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{
+      ok: boolean;
+      recordRemoved?: boolean;
+      sideChatRefRemoved?: boolean;
+      pikiclawPathsRemoved?: string[];
+      nativePathsRemoved?: string[];
+      error?: string;
+    }>(
+      '/api/session-hub/session/side-chat/delete',
+      { workdir, parentAgent, parentSessionId, agent, sessionId, purgeNative },
       opts,
     ),
   addWorkspace: (wsPath: string, name?: string, opts?: ApiRequestOptions) =>

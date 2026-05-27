@@ -21,6 +21,8 @@ import {
   type TurnHistoryWindow,
 } from './utils';
 
+export type SessionPanelChange = { agent: string; sessionId: string; workdir: string; openInNewSlot?: boolean };
+
 const SESSION_PAGE_TURNS = 12;
 const TOP_LOAD_THRESHOLD_PX = 160;
 const BOTTOM_STICK_THRESHOLD_PX = 96;
@@ -46,7 +48,7 @@ export const SessionPanel = memo(function SessionPanel({
   session: SessionInfo;
   workdir: string;
   active?: boolean;
-  onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
+  onSessionChange?: (next: SessionPanelChange) => void;
   onOpenFileLink?: OpenFileLinkHandler;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
@@ -250,7 +252,7 @@ export const SessionPanel = memo(function SessionPanel({
       setForkRequest(null);
       setForkPrompt('');
       // Hand off to the parent so the new child session opens in its own panel.
-      onSessionChange?.({ agent, sessionId, workdir });
+      onSessionChange?.({ agent, sessionId, workdir, openInNewSlot: true });
     } finally {
       setForkSubmitting(false);
     }
@@ -774,11 +776,20 @@ export const SessionPanel = memo(function SessionPanel({
     if (pendingPrompt && last.user?.text?.trim() !== pendingPrompt.trim()) return result;
     return [...result.slice(0, -1), { ...last, assistant: null }];
   }, [rawTurns, liveStream, pendingPrompt, optimisticBridgesImages]);
+  const liveStreamVisible = !!liveStream && liveStreamShouldRender(liveStream);
+  const liveStreamAttachIndex = useMemo(() => {
+    if (!liveStreamVisible || !turns.length) return -1;
+    const index = turns.length - 1;
+    const last = turns[index];
+    if (!last.user) return -1;
+    if (pendingPrompt && last.user.text?.trim() !== pendingPrompt.trim()) return -1;
+    return index;
+  }, [liveStreamVisible, pendingPrompt, turns]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-[var(--th-session-bg)]">
       {/* ── Messages ── */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overscroll-contain">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
         {loading ? (
           <div className="flex items-center justify-center py-20"><Spinner className="h-5 w-5 text-fg-4" /></div>
         ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !liveStream ? (
@@ -827,6 +838,8 @@ export const SessionPanel = memo(function SessionPanel({
                   turn={turn}
                   turnIndex={absoluteTurnIndex}
                   agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
+                  previewMeta={i === liveStreamAttachIndex ? liveStream?.previewMeta ?? null : undefined}
+                  liveAssistant={i === liveStreamAttachIndex && liveStream ? <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} /> : undefined}
                   onResend={(txt) => {
                     scrollToBottomRef.current = true;
                     handleSendStart(txt);
@@ -837,6 +850,7 @@ export const SessionPanel = memo(function SessionPanel({
                   onEdit={(txt) => setEditDraft(txt)}
                   onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
                   onOpenFileLink={onOpenFileLink}
+                  workdir={workdir}
                   retryProminent={retryProminent}
                 />
               );
@@ -870,10 +884,10 @@ export const SessionPanel = memo(function SessionPanel({
             )}
             {/* Live stream preview — skip entirely when the stream has nothing to show
                 (no body, no error). Prevents a phantom header above an empty body. */}
-            {liveStream && liveStreamShouldRender(liveStream) && (
+            {liveStreamVisible && liveStreamAttachIndex < 0 && liveStream && (
               <div className="mb-6">
                 <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta} />
-                <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} />
+                <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} />
               </div>
             )}
             <div className="h-4" />

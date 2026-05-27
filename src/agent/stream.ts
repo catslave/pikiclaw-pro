@@ -25,7 +25,7 @@ import type {
 import {
   Q, agentLog, agentWarn, agentError, joinErrorMessages, normalizeErrorMessage,
   buildStreamPreviewMeta, computeContext, shortValue, isPendingSessionId, dedupeStrings,
-  normalizeStreamPreviewPlan,
+  normalizeStreamPreviewPlan, stripOaiMemoryCitations,
 } from './utils.js';
 import {
   saveSessionRecord, setSessionRunState, applySessionRunResult,
@@ -414,6 +414,19 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
 
 function finalizeStreamResult(result: StreamResult, workdir: string, prompt: string, session: SessionWorkspaceInfo): StreamResult {
   if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
+  const message = stripOaiMemoryCitations(result.message);
+  const assistantBlocks = result.assistantBlocks
+    ?.map(block => {
+      if (block.type !== 'text' && block.type !== 'thinking') return block;
+      const content = stripOaiMemoryCitations(block.content);
+      return { ...block, content };
+    })
+    .filter(block => block.type !== 'text' || block.content.trim());
+  const cleanResult: StreamResult = {
+    ...result,
+    message: message || result.error || '(no textual response)',
+    assistantBlocks,
+  };
   session.record.model = result.model || session.record.model;
   if (result.thinkingEffort) session.record.thinkingEffort = result.thinkingEffort;
   const displayPrompt = collapseSkillPrompt(prompt) ?? prompt;
@@ -425,13 +438,13 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
     }
   }
   session.record.lastQuestion = shortValue(displayPrompt, 500);
-  session.record.lastAnswer = shortValue(result.message, 500);
-  session.record.lastMessageText = shortValue(result.message, 500) || shortValue(displayPrompt, 500);
-  session.record.lastThinking = trimSessionText(result.thinking);
-  session.record.lastPlan = normalizeStreamPreviewPlan(result.plan);
-  applySessionRunResult(session.record, result);
+  session.record.lastAnswer = shortValue(cleanResult.message, 500);
+  session.record.lastMessageText = shortValue(cleanResult.message, 500) || shortValue(displayPrompt, 500);
+  session.record.lastThinking = trimSessionText(cleanResult.thinking);
+  session.record.lastPlan = normalizeStreamPreviewPlan(cleanResult.plan);
+  applySessionRunResult(session.record, cleanResult);
   saveSessionRecord(workdir, session.record);
-  return { ...result, sessionId: session.sessionId, workspacePath: session.workspacePath };
+  return { ...cleanResult, sessionId: session.sessionId, workspacePath: session.workspacePath };
 }
 
 // SessionWorkspaceInfo type (matches the internal type used by session.ts)

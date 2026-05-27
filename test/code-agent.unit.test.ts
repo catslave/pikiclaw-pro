@@ -25,6 +25,7 @@ import {
   promoteSessionId,
   recordSideChat,
   sanitizeSessionUserPreviewText,
+  stripOaiMemoryCitations,
   sessionListDisplayTitle,
   shutdownCodexServer,
   stageSessionFiles,
@@ -105,6 +106,22 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(sanitizeSessionUserPreviewText('@/tmp/a.jpg @/tmp/b.webp prompt')).toBe('prompt');
     // Leaves unmatched bare @ tokens alone (not an image extension).
     expect(sanitizeSessionUserPreviewText('@user mentions are not paths')).toBe('@user mentions are not paths');
+  });
+
+  it('strips internal OAI memory citations from assistant-visible text', () => {
+    const raw = [
+      'Actual answer.',
+      '',
+      '<oai-mem-citation>',
+      '<citation_entries>',
+      'MEMORY.md:530-530|note=[internal context]',
+      '</citation_entries>',
+      '<rollout_ids>',
+      '</rollout_ids>',
+      '</oai-mem-citation>',
+    ].join('\n');
+    expect(stripOaiMemoryCitations(raw)).toBe('Actual answer.');
+    expect(stripOaiMemoryCitations('Actual answer.\n<oai-mem-citation>unfinished')).toBe('Actual answer.');
   });
 
   it('merges native session metadata while keeping pikiclaw title, workspace, and run state', () => {
@@ -788,11 +805,18 @@ rl.on('line', (line) => {
     fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
 
     const metaEvents: any[] = [];
+    const activities: string[] = [];
     const first = await doCodexStream(baseOpts('codex', {
-      onText: (_text, _thinking, _activity, meta) => { if (meta) metaEvents.push(meta); },
+      onText: (_text, _thinking, activity, meta) => {
+        if (activity) activities.push(activity);
+        if (meta) metaEvents.push(meta);
+      },
     }));
     const second = await doCodexStream(baseOpts('codex', {
-      onText: (_text, _thinking, _activity, meta) => { if (meta) metaEvents.push(meta); },
+      onText: (_text, _thinking, activity, meta) => {
+        if (activity) activities.push(activity);
+        if (meta) metaEvents.push(meta);
+      },
     }));
 
     expect(first.ok).toBe(true);
@@ -803,6 +827,11 @@ rl.on('line', (line) => {
     expect(metaEvents.some(meta => (
       meta.diagnostics || []
     ).some((line: string) => line.includes('app-server reused')))).toBe(true);
+    expect(metaEvents.some(meta => (
+      meta.diagnostics || []
+    ).some((line: string) => line.includes('Codex connection: Reusing Codex app-server')))).toBe(true);
+    expect(activities.join('\n')).not.toContain('Codex app-server');
+    expect(activities.join('\n')).not.toContain('Codex thread ready');
   });
 
   it('surfaces codex stderr diagnostics in live preview meta', async () => {
@@ -1033,6 +1062,93 @@ rl.on('line', (line) => {
     ]);
     expect(activities.some(activity => activity.includes('Edit files...'))).toBe(true);
     expect(result2.activity).toContain('Updated src/bot-telegram.ts');
+
+    // --- surfaces Codex file/search tool targets instead of generic "Use tool" ---
+    shutdownCodexServer();
+
+    const script2b = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-tools' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-tools' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-tools',
+        item: {
+          id: 'tool-read',
+          type: 'dynamicToolCall',
+          tool: 'functions.read_file',
+          arguments: JSON.stringify({ file_path: 'src/agent/drivers/codex.ts' }),
+          status: 'inProgress',
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-tools',
+        item: {
+          id: 'tool-read',
+          type: 'dynamicToolCall',
+          tool: 'functions.read_file',
+          arguments: JSON.stringify({ file_path: 'src/agent/drivers/codex.ts' }),
+          status: 'completed',
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-tools',
+        item: {
+          id: 'tool-search',
+          type: 'dynamicToolCall',
+          tool: 'functions.grep',
+          arguments: JSON.stringify({ pattern: 'summarizeCodexToolCall', path: 'src/agent' }),
+          status: 'inProgress',
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: 'thread-tools', turn: { id: 'turn-tools', status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script2b, { mode: 0o755 });
+
+    const toolActivities: string[] = [];
+    const result2b = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, activity) => {
+        if (activity?.trim()) toolActivities.push(activity);
+      },
+    }));
+
+    expect(result2b.ok).toBe(true);
+    expect(toolActivities.some(activity => activity.includes('Read drivers/codex.ts...'))).toBe(true);
+    expect(result2b.activity).toContain('Read drivers/codex.ts done');
+    expect(result2b.activity).toContain('Search summarizeCodexToolCall...');
 
     // --- parses nested token usage into session context percent ---
     shutdownCodexServer();

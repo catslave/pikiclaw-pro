@@ -12,6 +12,7 @@ import {
   fmtRelative,
   getAgentMeta,
   normalizeLiveSessionState,
+  sanitizeSessionQuestionPreview,
   shortenModel,
   sessionDisplayState,
   sessionListContextText,
@@ -27,6 +28,7 @@ import { UserBubble } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 import type { FileLinkTarget, OpenFileLinkHandler } from './markdown';
+import type { SessionPanelChange } from './SessionPanel';
 
 // Kick off SessionPanel import the moment this module loads so the lazy boundary
 // resolves before the user can compose & send a new message. The previous
@@ -47,6 +49,7 @@ const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
 const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 const STATUS_SUMMARY_RECENT_MS = 24 * 60 * 60 * 1000;
+const VISIBLE_WORKSPACE_REFRESH_MIN_INTERVAL_MS = 15_000;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
 const MENU_ITEM_BASE_CLASS = 'mx-1 flex h-8 w-[calc(100%-0.5rem)] items-center gap-2 rounded px-2 text-left text-[12px] font-medium text-fg-3 transition-[background,color] duration-150 focus-visible:outline-none';
 const menuItemClass = (tone: 'default' | 'primary' | 'danger' = 'default') => cn(
@@ -62,6 +65,15 @@ const workspaceBaseName = (workspacePath: string) => {
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1] || workspacePath;
 };
+
+function sideChatDisplayTitle(info: Pick<SessionInfo, 'lastQuestion' | 'title'>, fallbackIndex: number, sideChatLabel: string): string {
+  const question = sanitizeSessionQuestionPreview(info.lastQuestion);
+  if (question) return question.slice(0, 80);
+  const title = String(info.title || '').trim();
+  const defaultTitles = new Set(['Side chat', '侧聊', sideChatLabel]);
+  if (title && !defaultTitles.has(title)) return title.slice(0, 80);
+  return `${sideChatLabel} ${fallbackIndex + 1}`;
+}
 
 function isAbsoluteLocalPath(filePath: string): boolean {
   return /^(\/|~\/|[A-Za-z]:[\\/])/.test(filePath);
@@ -86,6 +98,17 @@ function ExitFocusIcon({ className }: { className?: string }) {
       <line x1="4" y1="20" x2="10" y2="14" />
       <polyline points="20 10 14 10 14 4" />
       <line x1="20" y1="4" x2="14" y2="10" />
+    </svg>
+  );
+}
+
+function EnterFocusIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="3" y1="21" x2="10" y2="14" />
     </svg>
   );
 }
@@ -248,11 +271,7 @@ function mergeSideChatRefs(...groups: Array<SideChatRef[] | null | undefined>): 
       byKey.set(key, existing ? { ...existing, ...ref } : ref);
     }
   }
-  const refTime = (ref: SideChatRef) => {
-    const parsed = Date.parse(ref.updatedAt || ref.createdAt || '');
-    return Number.isFinite(parsed) ? parsed : 0;
-  };
-  return Array.from(byKey.values()).sort((a, b) => refTime(b) - refTime(a));
+  return Array.from(byKey.values());
 }
 
 function readStoredOpenSideChats(): OpenSideChatsMap {
@@ -506,18 +525,29 @@ function sessionAttentionVariant(session: SessionInfo): 'ok' | 'warn' | null {
   const displayState = sessionDisplayState(session);
   if (displayState === 'running') return 'ok';
   if (displayState === 'incomplete') return 'warn';
-  if (
-    displayState === 'completed'
-    && (session.userStatus === 'inbox' || session.userStatus === 'active' || session.userStatus === 'review')
-  ) {
-    return 'ok';
-  }
+  if (isUnreadCompletedSession(session)) return 'ok';
   return null;
 }
 
-function shouldMarkSessionReadOnOpen(session: SessionInfo): boolean {
+function isUnreadCompletedSession(session: SessionInfo): boolean {
+  const hasReadableContent = !!(
+    session.lastQuestion
+    || session.lastAnswer
+    || session.lastMessageText
+    || (typeof session.numTurns === 'number' && session.numTurns > 0)
+  );
   return sessionDisplayState(session) === 'completed'
-    && (session.userStatus === 'inbox' || session.userStatus === 'active' || session.userStatus === 'review');
+    && hasReadableContent
+    && session.userStatus !== 'done'
+    && session.userStatus !== 'parked';
+}
+
+function shouldMarkSessionReadOnOpen(session: SessionInfo): boolean {
+  return isUnreadCompletedSession(session);
+}
+
+function localReadSessionKey(agent: string, sessionId: string): string {
+  return sKey(agent, sessionId);
 }
 
 function sessionOriginLabel(session: SessionInfo): string | null {
@@ -680,6 +710,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [spotlightSlotIndex, setSpotlightSlotIndex] = useState<number | null>(null);
   const [focusedSlotIndex, setFocusedSlotIndex] = useState<number | null>(readStoredFocusedSlot);
   const [liveSessionStates, setLiveSessionStates] = useState<Record<string, LiveSessionState>>({});
+  const [locallyReadSessionKeys, setLocallyReadSessionKeys] = useState<Set<string>>(() => new Set());
   const spotlightSlotTimerRef = useRef<number | null>(null);
   const focusedOpenSessionsSnapshotRef = useRef<{ slots: SessionSlot[]; focusedIndex: number } | null>(null);
   const openSessionsRef = useRef(openSessions);
@@ -692,6 +723,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   sessionsMapRef.current = sessionsMap;
   const liveSessionStatesRef = useRef(liveSessionStates);
   liveSessionStatesRef.current = liveSessionStates;
+  const visibleWorkspaceRefreshRef = useRef<Record<string, number>>({});
 
   // Persist wrappers — localStorage survives dashboard/app restarts; sessionStorage
   // mirrors it as a same-tab fallback and migrates old pre-localStorage state.
@@ -1017,12 +1049,22 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     useCallback((event) => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const eventKey = event.key;
+      const eventPhase = event.snapshot && typeof event.snapshot === 'object' ? (event.snapshot as { phase?: unknown }).phase : null;
       // Find workspace(s) that contain this session, or refresh all if unknown
       const targets = eventKey
         ? workspaces.filter(ws => (sessionsMapRef.current[ws.path] || []).some(s => sKey(s.agent || '', s.sessionId) === eventKey))
         : workspaces;
+      if (eventKey && eventPhase && eventPhase !== 'done') {
+        const openTarget = openSessionsRef.current.find(slot => sKey(slot.agent, slot.sessionId) === eventKey);
+        if (targets.length || openTarget) return;
+      }
       // If the session isn't in any known workspace yet (new session), refresh all
-      const toRefresh = targets.length ? targets : workspaces;
+      const openTarget = eventKey ? openSessionsRef.current.find(slot => sKey(slot.agent, slot.sessionId) === eventKey) : null;
+      const toRefresh = targets.length
+        ? targets
+        : openTarget
+          ? workspaces.filter(ws => ws.path === openTarget.workdir)
+          : workspaces;
       const timers = sessionsChangedTimers.current;
       for (const ws of toRefresh) {
         if (timers.has(ws.path)) clearTimeout(timers.get(ws.path)!);
@@ -1037,8 +1079,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const hydrateSession = useCallback((session: SessionInfo): SessionInfo => {
     const agent = session.agent || '';
     if (!agent || !session.sessionId) return session;
-    return applyLiveSessionState(session, liveSessionStates[sKey(agent, session.sessionId)] || null);
-  }, [liveSessionStates]);
+    const hydrated = applyLiveSessionState(session, liveSessionStates[sKey(agent, session.sessionId)] || null);
+    return locallyReadSessionKeys.has(localReadSessionKey(agent, session.sessionId))
+      ? { ...hydrated, userStatus: 'done' as const }
+      : hydrated;
+  }, [liveSessionStates, locallyReadSessionKeys]);
 
   useDashboardEvent(
     'stream-update',
@@ -1087,8 +1132,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
     const refreshVisibleWorkspaces = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
       for (const ws of workspaces) {
-        void loadSessionsForWorkspace(ws.path, { background: true, force: true });
+        const last = visibleWorkspaceRefreshRef.current[ws.path] ?? 0;
+        if (now - last < VISIBLE_WORKSPACE_REFRESH_MIN_INTERVAL_MS) continue;
+        visibleWorkspaceRefreshRef.current[ws.path] = now;
+        void loadSessionsForWorkspace(ws.path, { background: true });
       }
     };
 
@@ -1614,6 +1663,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const markSessionReadOnOpen = useCallback((session: SessionInfo, workdir: string) => {
     const agent = session.agent || '';
     if (!agent || !session.sessionId || !shouldMarkSessionReadOnOpen(session)) return;
+    const readKey = localReadSessionKey(agent, session.sessionId);
+
+    setLocallyReadSessionKeys(prev => {
+      if (prev.has(readKey)) return prev;
+      const next = new Set(prev);
+      next.add(readKey);
+      return next;
+    });
 
     setSessionsMap(prev => {
       const list = prev[workdir];
@@ -1623,20 +1680,54 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         [workdir]: list.map(item => (
           item.agent === agent && item.sessionId === session.sessionId
             ? { ...item, userStatus: 'done' as const }
+            : item.sideChats?.some(ref => ref.agent === agent && ref.sessionId === session.sessionId)
+              ? {
+                ...item,
+                sideChats: item.sideChats.map(ref => (
+                  ref.agent === agent && ref.sessionId === session.sessionId
+                    ? { ...ref, userStatus: 'done' as const }
+                    : ref
+                )),
+              }
             : item
         )),
       };
+    });
+    setSideChatInfoMap(prev => {
+      let changed = false;
+      const next: Record<string, SessionInfo> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        if (value.agent === agent && value.sessionId === session.sessionId) {
+          next[key] = { ...value, userStatus: 'done' as const };
+          changed = true;
+        } else {
+          next[key] = value;
+        }
+      }
+      return changed ? next : prev;
     });
 
     void api.updateSessionStatus(workdir, agent, session.sessionId, 'done')
       .then(res => {
         if (!res.ok || !res.updated) {
           if (!res.ok) toastSession(res.error || t('session.updateStatusFailed'), false);
+          setLocallyReadSessionKeys(prev => {
+            if (!prev.has(readKey)) return prev;
+            const next = new Set(prev);
+            next.delete(readKey);
+            return next;
+          });
           void loadSessionsForWorkspace(workdir, { background: true, force: true });
         }
       })
       .catch((err: any) => {
         toastSession(err?.message || t('session.updateStatusFailed'), false);
+        setLocallyReadSessionKeys(prev => {
+          if (!prev.has(readKey)) return prev;
+          const next = new Set(prev);
+          next.delete(readKey);
+          return next;
+        });
         void loadSessionsForWorkspace(workdir, { background: true, force: true });
       });
   }, [loadSessionsForWorkspace, t, toastSession]);
@@ -1651,10 +1742,24 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [markSessionReadOnOpen, setSelectedSession, setShowNewSession, warmSession]);
 
-  const handlePanelSessionChange = useCallback((next: { agent: string; sessionId: string; workdir: string }, fromSlotIdx?: number) => {
+  const handlePanelSessionChange = useCallback((next: SessionPanelChange, fromSlotIdx?: number) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
     startTransition(() => {
       if (fromSlotIdx != null) {
+        if (next.openInNewSlot) {
+          setShowNewSession(null);
+          setOpenSessions(prev => {
+            const existingIdx = prev.findIndex(s => s.workdir === next.workdir && s.agent === next.agent && s.sessionId === next.sessionId);
+            if (existingIdx >= 0) {
+              setActiveSlotIndex(existingIdx);
+              return prev;
+            }
+            const updated = [...prev, { agent: next.agent, sessionId: next.sessionId, workdir: next.workdir, mountKey: nextMountKey() }];
+            setActiveSlotIndex(updated.length - 1);
+            return updated;
+          });
+          return;
+        }
         const previousSlot = openSessionsRef.current[fromSlotIdx];
         // Session promotion: update sessionId but preserve mountKey so the
         // panel stays mounted and doesn't lose streaming state.
@@ -1765,8 +1870,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, [loadSessionsForWorkspace, mergeSessionIntoWorkspaceMap, promoteSlotForSideChat, setActiveSideChatByParent, setOpenSideChatsByParent, t, toastSession, warmSession]);
 
-  const handleHideSideChat = useCallback((parentSlot: SessionSlot, sideSlot: SessionSlot) => {
+  const handleDeleteSideChat = useCallback(async (parentSlot: SessionSlot, sideSlot: SessionSlot) => {
+    if (!sideSlot.agent || !sideSlot.sessionId) return;
     const parentKey = sessionSlotStorageKey(parentSlot);
+
     setOpenSideChatsByParent(prev => {
       const existing = prev[parentKey] || [];
       return { ...prev, [parentKey]: existing.filter(s => !(s.agent === sideSlot.agent && s.sessionId === sideSlot.sessionId)) };
@@ -1779,7 +1886,53 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       else delete next[parentKey];
       return next;
     });
-  }, [setActiveSideChatByParent, setOpenSideChatsByParent]);
+    setSideChatRefsByParent(prev => {
+      const existing = prev[parentKey] || [];
+      return {
+        ...prev,
+        [parentKey]: existing.filter(ref => !(ref.agent === sideSlot.agent && ref.sessionId === sideSlot.sessionId)),
+      };
+    });
+    setSideChatInfoMap(prev => {
+      const next = { ...prev };
+      delete next[sessionSlotStorageKey(sideSlot)];
+      return next;
+    });
+    setSessionsMap(prev => {
+      const sessions = prev[parentSlot.workdir] || [];
+      if (!sessions.length) return prev;
+      return {
+        ...prev,
+        [parentSlot.workdir]: sessions
+          .filter(s => !(s.agent === sideSlot.agent && s.sessionId === sideSlot.sessionId))
+          .map(s => (
+            s.agent === parentSlot.agent && s.sessionId === parentSlot.sessionId
+              ? { ...s, sideChats: (s.sideChats || []).filter(ref => !(ref.agent === sideSlot.agent && ref.sessionId === sideSlot.sessionId)) }
+              : s
+          )),
+      };
+    });
+
+    try {
+      const res = await api.deleteSideChat(
+        sideSlot.workdir,
+        parentSlot.agent,
+        parentSlot.sessionId,
+        sideSlot.agent,
+        sideSlot.sessionId,
+      );
+      if (!res.ok) throw new Error(res.error || 'Failed to delete side chat');
+    } catch {
+      try {
+        const fallback = await api.deleteSession(sideSlot.workdir, sideSlot.agent, sideSlot.sessionId, false);
+        if (!fallback.ok) toastSession(fallback.error || 'Failed to delete side chat', false);
+      } catch (fallbackErr) {
+        toastSession(fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr), false);
+      }
+    } finally {
+      void loadSessionsForWorkspace(parentSlot.workdir, { background: true, force: true });
+    }
+  }, [loadSessionsForWorkspace, setActiveSideChatByParent, setOpenSideChatsByParent, toastSession]);
 
   const handleSideChatResizeStart = useCallback((parentKey: string, event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -1961,6 +2114,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       createdAt: fromParentRef.createdAt,
       runUpdatedAt: fromParentRef.updatedAt,
       runState: 'completed' as const,
+      userStatus: fromParentRef.userStatus ?? null,
     } : {
       sessionId: sideSlot.sessionId,
       agent: sideSlot.agent,
@@ -2258,15 +2412,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       return restoredMissingSlot ? orderedSlots : prev;
     });
   }, [setOpenSessions]);
-  const handleSlotDoubleClick = useCallback((slotIdx: number, event: ReactMouseEvent<HTMLDivElement>) => {
-    if (shouldIgnoreFocusModeTarget(event.target)) return;
+  const enterFocusMode = useCallback((slotIdx: number) => {
     focusedOpenSessionsSnapshotRef.current = {
       slots: openSessionsRef.current.map(slot => ({ ...slot })),
       focusedIndex: slotIdx,
     };
     setActiveSlotIndex(slotIdx);
+    setSlotMenu(null);
     setFocusedSlotIndex(slotIdx);
   }, [setActiveSlotIndex]);
+  const handleSlotDoubleClick = useCallback((slotIdx: number, event: ReactMouseEvent<HTMLDivElement>) => {
+    if (shouldIgnoreFocusModeTarget(event.target)) return;
+    enterFocusMode(slotIdx);
+  }, [enterFocusMode]);
 
   useEffect(() => {
     if (focusedSlotIndex == null) return;
@@ -2609,7 +2767,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           <>
             {focusedSlotIndex != null && (
               <div
-                className="fixed inset-0 z-[60] bg-[var(--th-overlay)] backdrop-blur-[2px]"
+                className="fixed inset-0 z-[60] bg-[var(--th-focus-backdrop)]"
                 aria-hidden="true"
                 onClick={closeFocusMode}
               />
@@ -2682,6 +2840,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const isSpotlighted = isActive && spotlightSlotIndex === slotIdx;
               const isFocused = focusedSlotIndex === slotIdx;
               const slotState = sessionDisplayState(info);
+              const hasUnreadCompletedState = shouldMarkSessionReadOnOpen(info);
               const slotTitle = info.title || info.lastQuestion?.slice(0, 120) || slot.sessionId.slice(0, 12);
               const workspaceDisplayName = workspaces.find(ws => ws.path === slot.workdir)?.name || workspaceBaseName(slot.workdir);
               const slotActionTarget: SessionActionTarget = {
@@ -2701,32 +2860,40 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const activeSideKey = activeSideChatByParent[parentSlotKey];
               const activeSideSlot = openSideSlots.find(s => sideChatSlotKey(s) === activeSideKey) || openSideSlots[0] || null;
               const renderSidePanel = !!activeSideSlot && (isFocused || shouldInlineSideChat);
+              const sideChatRefSlots = sideChatRefs.map(ref => ({
+                agent: ref.agent || slot.agent,
+                sessionId: ref.sessionId,
+                workdir: slot.workdir,
+                mountKey: '',
+              }));
+              const sideChatKnownSlots = [...openSideSlots, ...sideChatRefSlots];
+              const sideChatKnownKeys = new Set<string>();
+              const uniqueSideChatKnownSlots = sideChatKnownSlots.filter(sideSlot => {
+                const key = sideChatSlotKey(sideSlot);
+                if (sideChatKnownKeys.has(key)) return false;
+                sideChatKnownKeys.add(key);
+                return true;
+              });
+              const hasSideChats = uniqueSideChatKnownSlots.length > 0;
+              const sideChatsHaveUnread = uniqueSideChatKnownSlots.some(sideSlot => shouldMarkSessionReadOnOpen(resolveSideSlotInfo(info, sideSlot)));
               const sideChatToggleLabel = renderSidePanel
                 ? t('session.hideSideChat')
-                : sideChatRefs.length > 0
+                : hasSideChats
                   ? t('session.showSideChats')
                   : t('session.newSideChat');
               const sideChatWidth = sideChatWidthsByParent[parentSlotKey] || SIDE_CHAT_DEFAULT_WIDTH;
               const slotFrameClass = isFocused
-                ? 'fixed inset-y-4 left-1/2 z-[70] w-[calc(100vw-24px)] -translate-x-1/2 rounded-2xl border-edge-h/80 bg-[var(--th-modal-bg)] ring-[1px] ring-inset ring-white/[0.08] backdrop-blur-xl sm:w-[min(1080px,calc(100vw-48px))] md:inset-y-8 md:w-[min(1180px,calc(100vw-64px))]'
+                ? 'fixed inset-y-4 left-1/2 z-[70] w-[calc(100vw-24px)] -translate-x-1/2 rounded-2xl border-edge-h/80 bg-[var(--th-modal-bg)] ring-[1px] ring-inset ring-white/[0.06] sm:w-[min(1080px,calc(100vw-48px))] md:inset-y-8 md:w-[min(1180px,calc(100vw-64px))]'
                 : isActive
-                ? 'border-[color:var(--th-selection-border)] ring-[3px] ring-[color:var(--th-selection-ring)] bg-[var(--th-selection-soft)]'
-                : slotState === 'running'
-                  ? 'border-ok/45 bg-ok/[0.035] hover:border-ok/80 hover:bg-ok/[0.095] hover:ring-[3px] hover:ring-ok/[0.18]'
-                  : slotState === 'incomplete'
-                    ? 'border-warn/50 bg-warn/[0.035] hover:border-warn/80 hover:bg-warn/[0.10] hover:ring-[3px] hover:ring-warn/[0.18]'
-                    : 'border-edge/70 hover:border-edge-h hover:bg-[var(--th-selection-soft)] hover:ring-[3px] hover:ring-[color:var(--th-selection-ring)]';
+                ? 'border-[color:var(--th-selection-border)] bg-panel-h/60'
+                : 'border-edge/70 hover:border-edge-h hover:bg-panel-h/35';
               const slotHeaderClass = isActive
-                ? 'border-b-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)]'
-                : slotState === 'running'
-                  ? 'border-b-ok/25 bg-ok/[0.055]'
-                  : slotState === 'incomplete'
-                    ? 'border-b-warn/25 bg-warn/[0.065]'
-                    : 'bg-panel/95';
+                ? 'border-b-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)]'
+                : 'bg-panel/95';
               const slotShadow = isFocused
                 ? 'var(--th-elevated-shadow)'
                 : isActive
-                ? 'var(--th-card-shadow), 0 0 0 2px var(--th-selection-ring), 0 18px 48px rgba(15,23,42,0.18)'
+                ? 'var(--th-card-shadow), 0 0 0 1px var(--th-selection-ring)'
                 : 'var(--th-card-shadow)';
               return (
                 <div
@@ -2737,19 +2904,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     'min-w-0 overflow-hidden rounded-xl border bg-panel flex flex-col transition-[border-color,box-shadow,transform,opacity,background-color] duration-200',
                     isFocused ? 'fixed' : 'relative',
                     slotFrameClass,
-                    !isFocused && 'hover:-translate-y-[1px] hover:bg-panel-alt/20',
-                    draggingSlotIndex === slotIdx && 'opacity-75 scale-[0.985] ring-[3px] ring-[color:var(--th-selection-ring)]',
-                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selection-bg)] ring-[3px] ring-[color:var(--th-selection-ring)]',
+                    !isFocused && 'hover:-translate-y-[1px]',
+                    hasUnreadCompletedState && !isActive && !isFocused && 'border-ok/55 bg-ok/[0.035] ring-2 ring-ok/15',
+                    draggingSlotIndex === slotIdx && 'opacity-75 scale-[0.985] ring-2 ring-[color:var(--th-selection-ring)]',
+                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selected-bg)] ring-2 ring-[color:var(--th-selection-ring)]',
                   )}
                   style={{ boxShadow: slotShadow }}
-                  onClick={() => setActiveSlotIndex(slotIdx)}
+                  onClick={() => {
+                    setActiveSlotIndex(slotIdx);
+                    markSessionReadOnOpen(info, slot.workdir);
+                  }}
                   onDoubleClick={e => handleSlotDoubleClick(slotIdx, e)}
                   onDragOver={e => handleSlotDragOver(slotIdx, e)}
                   onDrop={e => handleSlotDrop(slotIdx, e)}
                 >
                   {isActive && !isFocused && (
                     <>
-                      <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-1 rounded-l-xl bg-[var(--th-selection-accent)]" aria-hidden="true" />
+                      <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-px rounded-l-xl bg-[var(--th-selection-accent)]" aria-hidden="true" />
                       <div
                         className={cn(
                           'pointer-events-none absolute inset-0 z-20 rounded-xl border border-[color:var(--th-selection-border)] bg-[var(--th-selection-soft)] transition-opacity duration-700',
@@ -2764,8 +2935,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     'group shrink-0 flex items-center gap-2 px-3 h-9 border-b border-edge/45 shadow-[0_1px_0_var(--th-inset-hl)]',
                     'cursor-grab active:cursor-grabbing',
                     slotHeaderClass,
+                    hasUnreadCompletedState && !isFocused && 'border-b-ok/35 bg-ok/[0.055]',
                     isFocused && 'border-edge-h/70 bg-[var(--th-header)]',
-                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selection-bg)]',
+                    dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selected-bg)]',
                   )}
                     draggable
                     onDragStart={e => handleSlotDragStart(slotIdx, e)}
@@ -2773,13 +2945,22 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     title={t('hub.dragSession')}
                   >
                     {/* Left: status · workdir / title */}
-                    <Dot variant={slotState === 'running' ? 'ok' : slotState === 'incomplete' ? 'warn' : 'idle'} pulse={slotState === 'running'} />
+                    {slotState === 'running' ? (
+                      <Dot variant="ok" pulse />
+                    ) : slotState === 'incomplete' ? (
+                      <Dot variant="warn" />
+                    ) : hasUnreadCompletedState ? (
+                      <span
+                        aria-hidden="true"
+                        className="h-2.5 w-2.5 shrink-0 rounded-full bg-ok shadow-[0_0_0_3px_var(--th-panel),0_0_8px_var(--th-ok-glow)] ring-1 ring-ok/25"
+                      />
+                    ) : null}
                     <div className="flex-1 min-w-0 flex items-center gap-1.5">
                       <span
                         className={cn(
                           'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold shadow-sm transition-colors',
                           isActive
-                            ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] text-fg'
+                            ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)] text-fg'
                             : 'border-edge/45 bg-control/70 text-fg-4',
                         )}
                         title={slot.workdir}
@@ -2815,18 +2996,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                               cancelHeaderRenameSession();
                             }
                           }}
-                          className="h-6 min-w-0 flex-1 rounded-md border border-primary/35 bg-panel px-1.5 text-[11px] font-semibold text-fg shadow-sm outline-none transition focus:border-primary/60 focus:ring-2 focus:ring-primary/[0.12] disabled:opacity-60"
+                          className="h-6 min-w-0 flex-1 rounded-md border border-control-border bg-panel px-1.5 text-[11px] font-semibold text-fg shadow-sm outline-none transition focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)] disabled:opacity-60"
                           aria-label={t('session.rename')}
                         />
                       ) : (
                         <div
                           className={cn(
                             'min-w-0 flex items-center gap-1 rounded-md px-1 py-0.5 text-[11px] font-semibold transition-colors',
-                            isActive ? 'bg-control/75 text-fg shadow-sm' : 'text-fg',
+                            isActive ? 'bg-[var(--th-selected-bg)] text-fg shadow-sm' : 'text-fg',
                           )}
                           title={slotTitle}
                         >
                           <span className="min-w-0 truncate">{slotTitle}</span>
+                          {hasUnreadCompletedState && (
+                            <span className="shrink-0 rounded border border-ok/25 bg-ok/[0.10] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-ok">
+                              {t('session.statusCompleted')}
+                            </span>
+                          )}
                           <button
                             data-focus-ignore
                             type="button"
@@ -2836,7 +3022,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                               setActiveSlotIndex(slotIdx);
                               openHeaderRenameSession(slotActionTarget);
                             }}
-                            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-fg-5/60 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 group-hover:opacity-100"
+                            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-fg-5/60 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover:opacity-100"
                             title={t('session.rename')}
                             aria-label={t('session.rename')}
                           >
@@ -2848,21 +3034,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                         </div>
                       )}
                     </div>
-                    {isFocused && (
-                      <button
-                        data-focus-ignore
-                        type="button"
-                        onMouseDown={e => e.stopPropagation()}
-                        onClick={e => { e.stopPropagation(); closeFocusMode(); }}
-                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-edge/45 bg-panel/60 text-fg-4 transition-colors hover:border-primary/30 hover:bg-primary/[0.08] hover:text-primary"
-                        title={t('hub.exitFocusMode')}
-                        aria-label={t('hub.exitFocusMode')}
-                      >
-                        <ExitFocusIcon className="h-3.5 w-3.5 shrink-0" />
-                      </button>
-                    )}
                     {/* Right: compact meta + explicit action menu */}
-                    <div className="shrink-0 flex items-center gap-1.5 text-[9px] text-fg-5/50 tabular-nums">
+                    <div className="shrink-0 flex items-center gap-2 text-[9px] text-fg-5/50 tabular-nums">
                       <span title={t('hub.created')}>{fmtTime(info.createdAt)}</span>
                       {info.runUpdatedAt && <span title={t('hub.updated')}>{fmtRelative(info.runUpdatedAt)}</span>}
                       {!!info.numTurns && (
@@ -2897,56 +3070,97 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                             handleShowSideChats(slot, sideChatRefs, slotIdx);
                             return;
                           }
+                          if (hasSideChats) {
+                            promoteSlotForSideChat(slotIdx);
+                            return;
+                          }
                           void handleOpenSideChat(slotIdx, slot, info);
                         }}
                         className={cn(
-                          'relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-primary',
-                          renderSidePanel && 'bg-primary/[0.10] text-primary',
+                          'relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg',
+                          renderSidePanel && 'bg-[var(--th-selected-bg)] text-fg',
                         )}
                         title={sideChatToggleLabel}
                         aria-label={sideChatToggleLabel}
                       >
                         <SideChatCollapseIcon className="h-3.5 w-3.5 shrink-0" />
-                        {!renderSidePanel && sideChatRefs.length > 0 && (
-                          <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+                        {!renderSidePanel && hasSideChats && (
+                          <span
+                            className={cn(
+                              'absolute right-1 top-1 rounded-full',
+                              sideChatsHaveUnread ? 'h-2 w-2 bg-ok shadow-[0_0_8px_var(--th-ok-glow)]' : 'h-1.5 w-1.5 bg-fg-5/70',
+                            )}
+                            aria-hidden="true"
+                          />
                         )}
                       </button>
-                      <button
-                        data-focus-ignore
-                        type="button"
-                        onMouseDown={e => e.stopPropagation()}
-                        onClick={e => {
-                          e.stopPropagation();
-                          handleSlotMenuOpen(e.currentTarget.getBoundingClientRect(), slotIdx, slot, info);
-                        }}
-                        className={cn(
-                          'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] font-semibold leading-none text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg-2',
-                          slotMenu?.slotIdx === slotIdx && 'bg-panel-h text-fg-2',
-                        )}
-                        title={t('session.openActions')}
-                        aria-label={t('session.openActions')}
-                        aria-haspopup="menu"
-                      >
-                        ...
-                      </button>
-                      <button
-                        data-focus-ignore
-                        type="button"
-                        onMouseDown={e => e.stopPropagation()}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSlotMenu(null);
-                          handleCloseSlot(slotIdx);
-                        }}
-                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-err/10 hover:text-err"
-                        title={t('hub.closePanel')}
-                        aria-label={t('hub.closePanel')}
-                      >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-                          <path d="M18 6 6 18" />
-                          <path d="M6 6l12 12" />
-                        </svg>
-                      </button>
+                      {isFocused && (
+                        <button
+                          data-focus-ignore
+                          type="button"
+                          onMouseDown={e => e.stopPropagation()}
+                          onClick={e => { e.stopPropagation(); closeFocusMode(); }}
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-edge/45 bg-panel/60 text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+                          title={t('hub.exitFocusMode')}
+                          aria-label={t('hub.exitFocusMode')}
+                        >
+                          <ExitFocusIcon className="h-3.5 w-3.5 shrink-0" />
+                        </button>
+                      )}
+                      {!isFocused && (
+                        <>
+                          <button
+                            data-focus-ignore
+                            type="button"
+                            onMouseDown={e => e.stopPropagation()}
+                            onClick={e => {
+                              e.stopPropagation();
+                              enterFocusMode(slotIdx);
+                            }}
+                            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg"
+                            title={t('hub.enterFocusMode')}
+                            aria-label={t('hub.enterFocusMode')}
+                          >
+                            <EnterFocusIcon className="h-3.5 w-3.5 shrink-0" />
+                          </button>
+                          <button
+                            data-focus-ignore
+                            type="button"
+                            onMouseDown={e => e.stopPropagation()}
+                            onClick={e => {
+                              e.stopPropagation();
+                              handleSlotMenuOpen(e.currentTarget.getBoundingClientRect(), slotIdx, slot, info);
+                            }}
+                            className={cn(
+                              'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] font-semibold leading-none text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg-2',
+                              slotMenu?.slotIdx === slotIdx && 'bg-panel-h text-fg-2',
+                            )}
+                            title={t('session.openActions')}
+                            aria-label={t('session.openActions')}
+                            aria-haspopup="menu"
+                          >
+                            ...
+                          </button>
+                          <button
+                            data-focus-ignore
+                            type="button"
+                            onMouseDown={e => e.stopPropagation()}
+                            onClick={e => {
+                              e.stopPropagation();
+                              setSlotMenu(null);
+                              handleCloseSlot(slotIdx);
+                            }}
+                            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-err/10 hover:text-err"
+                            title={t('hub.closePanel')}
+                            aria-label={t('hub.closePanel')}
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                              <path d="M18 6 6 18" />
+                              <path d="M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                   <div className={cn('flex-1 min-h-0 flex flex-col overflow-hidden', isFocused && 'bg-[var(--th-modal-bg)]')}>
@@ -2987,24 +3201,25 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                             onPointerDown={e => handleSideChatResizeStart(parentSlotKey, e)}
                             className="group absolute left-0 top-0 z-20 h-full w-4 -translate-x-1/2 cursor-col-resize touch-none"
                           >
-                            <div className="mx-auto h-full w-px bg-edge-h/60 transition-colors group-hover:w-[2px] group-hover:bg-primary/80" />
+                            <div className="mx-auto h-full w-px bg-edge-h/60 transition-colors group-hover:w-[2px] group-hover:bg-fg-5/70" />
                           </div>
                           <div className="h-10 shrink-0 flex items-center gap-1 border-b border-edge-h/70 bg-[var(--th-header)] px-2 shadow-[0_1px_0_var(--th-inset-hl)]">
                             <div className="min-w-0 flex-1 overflow-x-auto">
                               <div className="flex min-w-max items-center gap-1">
-                                {openSideSlots.map(sideSlot => {
+                                {openSideSlots.map((sideSlot, sideSlotIdx) => {
                                   const sideInfo = resolveSideSlotInfo(info, sideSlot);
-                                  const sideTitle = sideInfo.title || sideInfo.lastQuestion?.slice(0, 80) || t('session.sideChat');
+                                  const sideTitle = sideChatDisplayTitle(sideInfo, sideSlotIdx, t('session.sideChat'));
                                   const sideKey = sideChatSlotKey(sideSlot);
                                   const tabActive = sideKey === sideChatSlotKey(activeSideSlot);
+                                  const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
                                   return (
                                     <div
                                       key={sideSlot.mountKey || sessionSlotStorageKey(sideSlot)}
                                       className={cn(
                                         'inline-flex h-7 max-w-[190px] items-center rounded-md border transition-colors',
                                         tabActive
-                                          ? 'border-primary/45 bg-primary/[0.11] text-primary'
-                                          : 'border-edge/65 bg-panel/75 text-fg-3 hover:border-primary/30 hover:text-fg',
+                                          ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)] text-fg'
+                                          : 'border-edge/65 bg-panel/75 text-fg-3 hover:border-edge-h hover:bg-panel-h/50 hover:text-fg',
                                       )}
                                       title={sideTitle}
                                     >
@@ -3013,20 +3228,29 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                                         onClick={e => {
                                           e.stopPropagation();
                                           setActiveSideChatByParent(prev => ({ ...prev, [parentSlotKey]: sideKey }));
+                                          markSessionReadOnOpen(sideInfo, sideSlot.workdir);
                                         }}
-                                        className="min-w-0 flex-1 truncate px-2 text-left text-[11px]"
+                                        className="min-w-0 flex-1 px-2 text-left text-[11px]"
                                       >
-                                        {sideTitle}
+                                        <span className="flex min-w-0 items-center gap-1.5">
+                                          {sideUnread && (
+                                            <span
+                                              aria-hidden="true"
+                                              className="h-1.5 w-1.5 shrink-0 rounded-full bg-ok shadow-[0_0_6px_var(--th-ok-glow)]"
+                                            />
+                                          )}
+                                          <span className="min-w-0 truncate">{sideTitle}</span>
+                                        </span>
                                       </button>
                                       <button
                                         type="button"
-                                        onClick={e => { e.stopPropagation(); handleHideSideChat(slot, sideSlot); }}
+                                        onClick={e => { e.stopPropagation(); void handleDeleteSideChat(slot, sideSlot); }}
                                         className={cn(
                                           'mr-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors',
-                                          tabActive ? 'text-primary/70 hover:bg-primary/[0.14] hover:text-primary' : 'text-fg-5 hover:bg-panel-h hover:text-fg',
+                                          tabActive ? 'text-fg-4 hover:bg-panel-h hover:text-fg' : 'text-fg-5 hover:bg-panel-h hover:text-fg',
                                         )}
-                                        title={t('session.hideSideChat')}
-                                        aria-label={t('session.hideSideChat')}
+                                        title={t('hub.closePanel')}
+                                        aria-label={t('hub.closePanel')}
                                       >
                                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
                                           <path d="M18 6 6 18" />
@@ -3041,32 +3265,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                             <button
                               type="button"
                               onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
-                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-edge/65 bg-panel text-fg-4 transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-primary"
+                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-edge/65 bg-panel text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
                               title={t('session.newSideChat')}
                               aria-label={t('session.newSideChat')}
                             >
                               +
-                            </button>
-                            <button
-                              type="button"
-                              onClick={e => {
-                                e.stopPropagation();
-                                setOpenSideChatsByParent(prev => {
-                                  const next = { ...prev };
-                                  delete next[parentSlotKey];
-                                  return next;
-                                });
-                                setActiveSideChatByParent(prev => {
-                                  const next = { ...prev };
-                                  delete next[parentSlotKey];
-                                  return next;
-                                });
-                              }}
-                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-edge/65 bg-panel text-fg-4 transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-primary"
-                              title={t('session.hideSideChat')}
-                              aria-label={t('session.hideSideChat')}
-                            >
-                              <SideChatCollapseIcon className="h-3.5 w-3.5 shrink-0" />
                             </button>
                           </div>
                           <div className="min-h-0 flex-1 bg-[var(--th-session-bg)]">
@@ -3287,10 +3490,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         };
         const menuSlot = openSessions[slotMenu.slotIdx] || null;
         const menuInfo = menuSlot ? resolveSlotInfo(menuSlot) : null;
-        const menuParentKey = menuSlot ? sessionSlotStorageKey(menuSlot) : '';
-        const menuSideChatRefs = menuSlot && menuInfo
-          ? mergeSideChatRefs(menuInfo.sideChats, sideChatRefsByParent[menuParentKey])
-          : [];
         return (
           <div
             className="fixed z-[60] min-w-[176px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
@@ -3305,17 +3504,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             <button
               type="button"
               role="menuitem"
-              onClick={() => runSlotAction(() => { void executeArchiveSession(slotMenu.target, !slotMenu.target.archived); })}
-              className={menuItemClass('primary')}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="4" width="18" height="4" rx="1" /><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8" /><path d="M10 12h4" />
-              </svg>
-              {slotMenu.target.archived ? t('session.restore') : t('session.archive')}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
               onClick={() => runSlotAction(() => handleNewSessionRequest(slotMenu.target.workdir))}
               className={menuItemClass('primary')}
             >
@@ -3324,19 +3512,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {t('hub.newSession')}
             </button>
-            {menuSlot && menuSideChatRefs.length > 0 && (
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => runSlotAction(() => handleShowSideChats(menuSlot, menuSideChatRefs, slotMenu.slotIdx))}
-                className={menuItemClass('primary')}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" /><circle cx="12" cy="12" r="3" />
-                </svg>
-                {t('session.showSideChats')}
-              </button>
-            )}
             <button
               type="button"
               role="menuitem"
@@ -3365,6 +3540,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
               </svg>
               {t('hub.files')}
+            </button>
+            <div role="separator" className="my-1 border-t border-edge/70" />
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => runSlotAction(() => { void executeArchiveSession(slotMenu.target, !slotMenu.target.archived); })}
+              className={menuItemClass('primary')}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="4" width="18" height="4" rx="1" /><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8" /><path d="M10 12h4" />
+              </svg>
+              {slotMenu.target.archived ? t('session.restore') : t('session.archive')}
             </button>
             <button
               type="button"
@@ -4250,7 +4437,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
 
       {/* Sessions */}
       {expanded && (
-        <div className="mt-1 px-1 pb-1">
+        <div className="mt-1 px-2 pb-1">
           {loading ? (
             <div className="flex items-center justify-center py-4">
               <Spinner className="h-3 w-3 text-fg-5" />
@@ -4348,7 +4535,7 @@ const SessionCard = memo(function SessionCard({
   const kebabRef = useRef<HTMLButtonElement | null>(null);
 
   return (
-    <div className="relative group px-0.5">
+    <div className="relative group">
     <button
       data-session-card
       onClick={onClick}
@@ -4428,8 +4615,8 @@ const SessionCard = memo(function SessionCard({
         )}
         <span
           className={cn(
-            'min-w-0 flex-1 break-words text-[12px] leading-snug',
-            showUnreadDot ? 'font-semibold text-fg' : 'text-fg-2',
+            'min-w-0 flex-1 break-words text-[12px] font-semibold leading-snug text-fg',
+            showUnreadDot && 'font-bold',
           )}
           title={displayText}
           style={{

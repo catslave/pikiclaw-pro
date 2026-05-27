@@ -2,7 +2,7 @@
 
 /* ── Theme variables: dark (default) ── */
 :root {
-  --th-surface: #080a0d;
+  --th-surface: #111113;
   --th-fg: rgba(248,250,252,0.94);
   --th-fg-2: rgba(248,250,252,0.80);
   --th-fg-3: rgba(226,232,240,0.76);
@@ -10,11 +10,11 @@
   --th-fg-5: rgba(148,163,184,0.68);
   --th-fg-6: rgba(148,163,184,0.38);
 
-  --th-panel: rgba(15,23,42,0.52);
-  --th-panel-h: rgba(15,23,42,0.70);
-  --th-panel-alt: rgba(15,23,42,0.34);
+  --th-panel: rgba(28,28,30,0.74);
+  --th-panel-h: rgba(44,44,46,0.82);
+  --th-panel-alt: rgba(44,44,46,0.48);
   --th-inset: rgba(255,255,255,0.05);
-  --th-session-bg: rgba(8,13,24,0.42);
+  --th-session-bg: #121214;
 
   /* Form controls — distinct from --th-inset so inputs/selects read as
      interactive instead of as a subtle inline highlight surface. */
@@ -23,21 +23,28 @@
   --th-control-border: rgba(148,163,184,0.28);
   --th-control-border-h: rgba(148,163,184,0.45);
 
-  --th-edge: rgba(148,163,184,0.18);
-  --th-edge-h: rgba(148,163,184,0.32);
+  --th-edge: rgba(235,235,245,0.14);
+  --th-edge-h: rgba(235,235,245,0.26);
 
   --th-inset-hl: rgba(255,255,255,0.05);
   --th-selected-bg: rgba(255,255,255,0.07);
   --th-selected-bg-h: rgba(255,255,255,0.10);
+  --th-selection-accent: rgba(235,235,245,0.48);
+  --th-selection-border: rgba(235,235,245,0.22);
+  --th-selection-ring: rgba(235,235,245,0.10);
+  --th-selection-bg: rgba(235,235,245,0.08);
+  --th-selection-bg-h: rgba(235,235,245,0.12);
+  --th-selection-soft: rgba(235,235,245,0.045);
 
   --th-primary: #f8fafc;
   --th-primary-fg: #09090b;
   --th-primary-h: #ffffff;
 
-  --th-sidebar: rgba(8,10,13,0.78);
-  --th-header: rgba(8,10,13,0.74);
-  --th-modal-bg: rgba(10,14,20,0.96);
+  --th-sidebar: rgba(20,20,22,0.78);
+  --th-header: rgba(30,30,32,0.76);
+  --th-modal-bg: #1c1c1e;
   --th-overlay: rgba(2,6,23,0.6);
+  --th-focus-backdrop: rgba(17,17,19,0.78);
   --th-dropdown: rgba(12,16,24,0.98);
 
   --th-grid-dot: rgba(148,163,184,0.08);
@@ -52,10 +59,10 @@
   --th-orb2: rgba(96,165,250,0.09);
   --th-orb3: rgba(59,130,246,0.05);
   --th-noise: 0.02;
-  --th-card-shadow: 0 8px 30px rgba(2,6,23,0.14);
+  --th-card-shadow: 0 8px 26px rgba(0,0,0,0.18);
   --th-composer-shadow: 0 10px 28px rgba(0,0,0,0.20);
-  --th-composer-shadow-focus: 0 0 0 3px rgba(148,163,184,0.12), 0 14px 36px rgba(0,0,0,0.26);
-  --th-elevated-shadow: 0 24px 80px rgba(0,0,0,0.35), var(--th-card-shadow);
+  --th-composer-shadow-focus: 0 0 0 3px rgba(235,235,245,0.08), 0 14px 36px rgba(0,0,0,0.26);
+  --th-elevated-shadow: 0 28px 86px rgba(0,0,0,0.38), var(--th-card-shadow);
 
   /* Status colors (shared) */
   --th-ok: #34d399;
@@ -91,7 +98,7 @@
 
 /* ── Light theme overrides ── */
 [data-theme="light"] {
-  --th-surface: #eef2f6;
+  --th-surface: #f5f5f7;
   --th-fg: rgba(15,23,42,0.98);
   --th-fg-2: rgba(15,23,42,0.88);
   --th-fg-3: rgba(30,41,59,0.86);
@@ -100,13 +107,13 @@
   --th-fg-6: rgba(71,85,105,0.38);
 
   --th-panel: rgba(255,255,255,0.94);
-  --th-panel-h: rgba(255,255,255,0.96);
-  --th-panel-alt: rgba(255,255,255,0.88);
-  --th-inset: rgba(15,23,42,0.05);
-  --th-session-bg: #f7f9fc;
+  --th-panel-h: rgba(255,255,255,0.98);
+  --th-panel-alt: rgba(255,255,255,0.82);
+  --th-inset: rgba(0,0,0,0.035);
+  --th-session-bg: #fbfbfd;
 
-  --th-edge: rgba(15,23,42,0.10);
-  --th-edge-h: rgba(15,23,42,0.16);
+  --th-edge: rgba(60,60,67,0.12);
+  --th-edge-h: rgba(60,60,67,0.20);
 
   /* Form controls — pure white in light theme so inputs read as fillable. */
   --th-control-bg: #ffffff;
@@ -114,32 +121,33 @@
   --th-control-border: rgba(15,23,42,0.18);
   --th-control-border-h: rgba(15,23,42,0.32);
 
-  --th-primary: #2563eb;
+  --th-primary: #475569;
   --th-primary-fg: #ffffff;
-  --th-primary-h: #1d4ed8;
+  --th-primary-h: #334155;
 
-  --th-sidebar: rgba(238,242,246,0.9);
-  --th-header: rgba(238,242,246,0.88);
-  --th-modal-bg: rgba(255,255,255,0.96);
-  --th-overlay: rgba(15,23,42,0.18);
+  --th-sidebar: rgba(242,242,247,0.86);
+  --th-header: rgba(248,248,250,0.86);
+  --th-modal-bg: #ffffff;
+  --th-overlay: rgba(0,0,0,0.14);
+  --th-focus-backdrop: rgba(245,245,247,0.82);
   --th-dropdown: rgba(255,255,255,0.99);
 
-  --th-grid-dot: rgba(100,116,139,0.1);
+  --th-grid-dot: rgba(60,60,67,0.08);
   --th-grad-start: #0f172a;
   --th-grad-mid: #334155;
   --th-grad-end: #64748b;
   --th-glow-a: rgba(100,116,139,0.18);
-  --th-glow-b: rgba(56,189,248,0.1);
+  --th-glow-b: rgba(100,116,139,0.10);
   --th-shimmer-a: rgba(15,23,42,0.045);
   --th-shimmer-b: rgba(100,116,139,0.12);
   --th-orb1: rgba(148,163,184,0.12);
-  --th-orb2: rgba(56,189,248,0.08);
-  --th-orb3: rgba(14,165,233,0.05);
+  --th-orb2: rgba(100,116,139,0.08);
+  --th-orb3: rgba(71,85,105,0.05);
   --th-noise: 0.012;
-  --th-card-shadow: 0 16px 40px rgba(15,23,42,0.1);
-  --th-composer-shadow: 0 10px 30px rgba(15,23,42,0.10), 0 1px 0 rgba(255,255,255,0.90);
-  --th-composer-shadow-focus: 0 0 0 3px rgba(15,23,42,0.07), 0 14px 34px rgba(15,23,42,0.14);
-  --th-elevated-shadow: 0 24px 72px rgba(15,23,42,0.16), 0 6px 20px rgba(15,23,42,0.08), var(--th-card-shadow);
+  --th-card-shadow: 0 10px 28px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.80);
+  --th-composer-shadow: 0 10px 28px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.90);
+  --th-composer-shadow-focus: 0 0 0 3px rgba(0,0,0,0.045), 0 14px 34px rgba(0,0,0,0.10);
+  --th-elevated-shadow: 0 26px 76px rgba(0,0,0,0.16), 0 6px 20px rgba(0,0,0,0.06), var(--th-card-shadow);
 
   --th-ok: #22c55e;
   --th-ok-glow: rgba(34,197,94,0.35);
@@ -156,9 +164,9 @@
   --th-badge-err-text: #991b1b;
   --th-badge-err-bg: rgba(239,68,68,0.12);
   --th-badge-err-border: rgba(239,68,68,0.22);
-  --th-badge-accent-text: #0c4a6e;
-  --th-badge-accent-bg: rgba(14,165,233,0.12);
-  --th-badge-accent-border: rgba(14,165,233,0.22);
+  --th-badge-accent-text: #334155;
+  --th-badge-accent-bg: rgba(100,116,139,0.12);
+  --th-badge-accent-border: rgba(100,116,139,0.22);
   --th-badge-muted-text: rgba(51,65,85,0.82);
   --th-badge-muted-bg: rgba(255,255,255,0.76);
   --th-badge-muted-border: rgba(15,23,42,0.12);
@@ -174,6 +182,12 @@
   --th-inset-hl: rgba(255,255,255,0.72);
   --th-selected-bg: rgba(15,23,42,0.06);
   --th-selected-bg-h: rgba(15,23,42,0.09);
+  --th-selection-accent: rgba(15,23,42,0.24);
+  --th-selection-border: rgba(15,23,42,0.16);
+  --th-selection-ring: rgba(15,23,42,0.08);
+  --th-selection-bg: rgba(15,23,42,0.065);
+  --th-selection-bg-h: rgba(15,23,42,0.09);
+  --th-selection-soft: rgba(15,23,42,0.045);
 }
 
 /* ── Tailwind theme tokens ── */
@@ -233,6 +247,12 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+[data-theme="light"] body {
+  background-image:
+    radial-gradient(circle at top right, rgba(148, 163, 184, 0.08), transparent 28%),
+    radial-gradient(circle at bottom left, rgba(100, 116, 139, 0.06), transparent 24%);
+}
+
 #root {
   min-height: 100vh;
 }
@@ -240,7 +260,7 @@ body {
 button:not(:disabled) { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 
-::selection { background: rgba(129, 140, 248, 0.25); }
+::selection { background: rgba(100, 116, 139, 0.24); }
 
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -366,14 +386,21 @@ button:disabled { cursor: not-allowed; }
   contain: layout style;
 }
 
-@supports (content-visibility: auto) {
-  .session-turn {
-    content-visibility: auto;
-    contain-intrinsic-size: 1px 320px;
-  }
-}
-
 /* ── Turn separation: whitespace boundary between conversation rounds ── */
 .session-turn + .session-turn {
   margin-top: 2rem;
+}
+
+.session-md {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.session-md > * {
+  max-width: 100%;
+}
+
+.session-md code {
+  overflow-wrap: anywhere;
 }

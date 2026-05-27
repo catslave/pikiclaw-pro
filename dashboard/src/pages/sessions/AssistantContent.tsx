@@ -18,12 +18,14 @@ export function AssistantMsg({
   startedAt,
   completedAt,
   onOpenFileLink,
+  workdir,
 }: {
   message: RichMessage;
   t: (k: string) => string;
   startedAt?: string | null;
   completedAt?: string | null;
   onOpenFileLink?: OpenFileLinkHandler;
+  workdir?: string;
 }) {
   const { activityBlocks, thinkingBlocks, narrativeBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
@@ -80,7 +82,7 @@ export function AssistantMsg({
           </div>
         </WorkingCard>
       )}
-      {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} t={t} onOpenFileLink={onOpenFileLink} />}
+      {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} />}
       {noticeBlocks.length > 0 && <SystemNoticeSection blocks={noticeBlocks} t={t} />}
     </div>
   );
@@ -294,12 +296,12 @@ function ImageFigure({
   );
 }
 
-export function OutputBlock({ blocks, t, onOpenFileLink }: { blocks: MessageBlock[]; t: (k: string) => string; onOpenFileLink?: OpenFileLinkHandler }) {
+export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: MessageBlock[]; t: (k: string) => string; onOpenFileLink?: OpenFileLinkHandler; workdir?: string }) {
   const textBlocks = blocks.filter(b => b.type === 'text');
   const imageBlocks = blocks.filter(b => b.type === 'image');
   const text = textBlocks.map(b => b.content).filter(Boolean).join('\n\n');
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink }), [onOpenFileLink]);
+  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
   if (!text.trim() && imageBlocks.length === 0) return null;
   return (
     <>

@@ -15,6 +15,7 @@ import agentRoutes, { preloadAgentStatus } from './routes/agents.js';
 import sessionRoutes from './routes/sessions.js';
 import extensionRoutes from './routes/extensions.js';
 import cliRoutes from './routes/cli.js';
+import platformSkillsRoutes from './routes/platform-skills.js';
 import modelsRoutes from './routes/models.js';
 import localModelsRoutes from './routes/local-models.js';
 import { runtime, type DashboardEvent } from './runtime.js';
@@ -135,6 +136,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
   app.route('/', sessionRoutes);
   app.route('/', extensionRoutes);
   app.route('/', cliRoutes);
+  app.route('/', platformSkillsRoutes);
   app.route('/', modelsRoutes);
   app.route('/', localModelsRoutes);
 
@@ -144,6 +146,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
   // Serve /assets/* for Vite-hashed JS/CSS bundles
   app.use('/assets/*', serveStatic({ root: dashboardRoot }));
+  app.get('/assets/*', (c) => c.text('Asset not found', 404));
 
   // Serve other static files at root level (favicon, manifest, etc.)
   app.use('/*', serveStatic({

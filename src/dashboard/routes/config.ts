@@ -482,6 +482,40 @@ app.get('/api/git-changes', (c) => {
   }
 });
 
+// Resolve `origin/branch-name` style refs to the remote GitHub/GitLab branch URL.
+app.get('/api/git-remote-branch-url', (c) => {
+  const workdir = c.req.query('workdir');
+  const ref = c.req.query('ref');
+  if (!workdir || !ref) return c.json({ ok: false, error: 'workdir and ref are required' }, 400);
+
+  const parsedRef = parseRemoteBranchRef(ref);
+  if (!parsedRef) return c.json({ ok: false, error: 'Not a remote branch ref' }, 400);
+
+  try {
+    const gitRoot = findGitRootOrNull(path.resolve(workdir));
+    if (!gitRoot) return c.json({ ok: false, error: 'Not a git repository' }, 404);
+
+    const remoteResult = spawnSync('git', ['config', '--get', `remote.${parsedRef.remote}.url`], {
+      cwd: gitRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 2_000,
+    });
+    const remoteUrl = remoteResult.stdout.trim();
+    if (remoteResult.status !== 0 || !remoteUrl) {
+      return c.json({ ok: false, remote: parsedRef.remote, branch: parsedRef.branch, error: 'Remote not found' }, 404);
+    }
+
+    const url = buildRemoteBranchUrl(remoteUrl, parsedRef.branch);
+    if (!url) {
+      return c.json({ ok: false, remote: parsedRef.remote, branch: parsedRef.branch, error: 'Unsupported remote host' }, 400);
+    }
+    return c.json({ ok: true, remote: parsedRef.remote, branch: parsedRef.branch, url });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 // Read a text file for in-dashboard preview.
 app.get('/api/file-content', (c) => {
   const workdir = c.req.query('workdir');
@@ -796,6 +830,56 @@ function findImmediateGitRoots(dir: string): string[] {
 
 function findGitRoot(dir: string): string {
   return findGitRootOrNull(dir) ?? dir;
+}
+
+function parseRemoteBranchRef(ref: string): { remote: string; branch: string } | null {
+  const trimmed = ref.trim();
+  const match = /^([A-Za-z0-9._-]+)\/(.+)$/.exec(trimmed);
+  if (!match) return null;
+  const remote = match[1];
+  const branch = match[2];
+  if (!remote || !branch) return null;
+  if (/[\s\\~^:?*[\]\0-\x1F\x7F]/.test(branch)) return null;
+  if (branch.startsWith('/') || branch.endsWith('/') || branch.includes('//')) return null;
+  if (branch.endsWith('.lock')) return null;
+  return { remote, branch };
+}
+
+function encodeBranchPath(branch: string): string {
+  return branch.split('/').map(segment => encodeURIComponent(segment)).join('/');
+}
+
+function normalizeGitRemoteUrl(remoteUrl: string): { host: string; repoUrl: string } | null {
+  const cleaned = remoteUrl.trim().replace(/\/+$/, '');
+  let host = '';
+  let repoPath = '';
+
+  const scpLike = /^git@([^:]+):(.+)$/i.exec(cleaned);
+  if (scpLike) {
+    host = scpLike[1];
+    repoPath = scpLike[2];
+  } else {
+    const sshLike = /^ssh:\/\/(?:[^@/]+@)?([^/]+)\/(.+)$/i.exec(cleaned);
+    const webLike = /^https?:\/\/([^/]+)\/(.+)$/i.exec(cleaned);
+    const match = sshLike || webLike;
+    if (!match) return null;
+    host = match[1];
+    repoPath = match[2];
+  }
+
+  repoPath = repoPath.replace(/^\/+/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+  if (!host || !repoPath) return null;
+  return { host, repoUrl: `https://${host}/${repoPath}` };
+}
+
+function buildRemoteBranchUrl(remoteUrl: string, branch: string): string | null {
+  const normalized = normalizeGitRemoteUrl(remoteUrl);
+  if (!normalized) return null;
+  const host = normalized.host.toLowerCase();
+  const encodedBranch = encodeBranchPath(branch);
+  if (host.includes('github.')) return `${normalized.repoUrl}/tree/${encodedBranch}`;
+  if (host.includes('gitlab.')) return `${normalized.repoUrl}/-/tree/${encodedBranch}`;
+  return null;
 }
 
 export default app;

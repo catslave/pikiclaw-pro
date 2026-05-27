@@ -10,17 +10,20 @@ import { AssistantMsg, hasRenderableAssistant } from './AssistantContent';
 import type { MessageBlock, RichMessage, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, t, onResend, onEdit, onFork, onOpenFileLink, retryProminent }: {
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, workdir, retryProminent }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
    *  agent is currently bound to a Profile. Saved turns lack this in their
    *  usage payload, so we accept it from the caller as a session-level prop. */
   providerName?: string | null;
+  previewMeta?: StreamPreviewMeta | null;
+  liveAssistant?: ReactNode;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
   /** When defined, the user-bubble shows a fork action that opens a fork composer scoped to this turn. */
   onFork?: (atTurn: number) => void;
   onOpenFileLink?: OpenFileLinkHandler;
+  workdir?: string;
   retryProminent?: boolean;
 }) {
   // Detect system continuation messages stored as user role (context compression summaries,
@@ -31,7 +34,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   // Skip the assistant header entirely when there's nothing to put under it —
   // a phantom header reads as "Claude said something invisible" to users.
   const showAssistant = !!turn.assistant && hasRenderableAssistant(turn.assistant);
-  const mdComponents = createMdComponents({ onOpenFileLink });
+  const showLiveAssistant = !!liveAssistant;
+  const mdComponents = createMdComponents({ onOpenFileLink, workdir });
 
   return (
     <div className="session-turn">
@@ -45,10 +49,12 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
           </ReactMarkdown>
         </div>
       )}
-      {showAssistant && (
+      {(showAssistant || showLiveAssistant) && (
         <>
-          <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={turn.assistant!.usage ?? null} />
-          <AssistantMessageFrame message={turn.assistant!} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} />
+          <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={previewMeta ?? turn.assistant?.usage ?? null} />
+          {showLiveAssistant
+            ? <div className="mb-6">{liveAssistant}</div>
+            : <AssistantMessageFrame message={turn.assistant!} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} workdir={workdir} />}
         </>
       )}
     </div>
@@ -186,12 +192,14 @@ function AssistantMessageFrame({
   startedAt,
   onFork,
   onOpenFileLink,
+  workdir,
 }: {
   message: RichMessage;
   t: (k: string) => string;
   startedAt?: string | null;
   onFork?: () => void;
   onOpenFileLink?: OpenFileLinkHandler;
+  workdir?: string;
 }) {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -208,7 +216,7 @@ function AssistantMessageFrame({
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
     >
-      <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} onOpenFileLink={onOpenFileLink} />
+      <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} />
       <HoverMessageActions
         align="left"
         visible={showActions}

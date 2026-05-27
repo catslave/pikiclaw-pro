@@ -405,6 +405,7 @@ export interface SessionSideChatRef {
   title: string | null;
   createdAt: string;
   updatedAt: string;
+  userStatus?: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   hidden?: boolean;
 }
 
@@ -564,6 +565,16 @@ export interface SkillInfo {
   mcpRequires?: string[];
 }
 
+export interface PlatformSkillInfo {
+  id: string;
+  trigger: string;
+  name: string;
+  description: string;
+  category: 'observability' | 'dev' | 'productivity';
+  status: 'ready' | 'experimental';
+  examples: string[];
+}
+
 // ---------------------------------------------------------------------------
 // MCP Extensions
 // ---------------------------------------------------------------------------
@@ -695,6 +706,14 @@ export interface GitChangesResult {
   ok: boolean;
   changes: GitChange[];
   isGit: boolean;
+  error?: string;
+}
+
+export interface GitRemoteBranchUrlResult {
+  ok: boolean;
+  url?: string;
+  remote?: string;
+  branch?: string;
   error?: string;
 }
 

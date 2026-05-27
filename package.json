@@ -69,6 +69,7 @@
     "dingtalk-stream": "^2.1.6-beta.1",
     "discord.js": "^14.26.4",
     "hono": "^4.12.9",
+    "mermaid": "^11.15.0",
     "qrcode": "^1.5.4",
     "remark-breaks": "^4.0.0",
     "undici": "^7.22.0",

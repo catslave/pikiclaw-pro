@@ -873,9 +873,35 @@ export class Bot {
     if (this.shouldDebugStreamText(taskId, text.length, thinking.length, phase)) {
       this.debug(`[stream-lifecycle] text task=${taskId} key=${key} bytes=${text.length}/${thinking.length} snap=${phase}`);
     }
+    const normalizedActivity = this.normalizeStreamActivity(activity);
+    const nextPlan = plan ?? null;
+    const nextMeta = meta ?? null;
+    if (snap?.phase === 'streaming'
+      && snap.text === text
+      && snap.thinking === thinking
+      && (snap.activity || '') === normalizedActivity
+      && JSON.stringify(snap.plan ?? null) === JSON.stringify(nextPlan)
+      && JSON.stringify(snap.previewMeta ?? null) === JSON.stringify(nextMeta)) {
+      return;
+    }
     this.emitStream(key, {
-      type: 'text', text, thinking, activity, plan: plan ?? null, previewMeta: meta ?? null,
+      type: 'text', text, thinking, activity: normalizedActivity, plan: nextPlan, previewMeta: nextMeta,
     });
+  }
+
+  private normalizeStreamActivity(activity = ''): string {
+    const lines = activity
+      .split('\n')
+      .map(line => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const line of lines) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      unique.push(line);
+    }
+    return unique.slice(-80).join('\n');
   }
 
   private shouldDebugStreamText(taskId: string, textBytes: number, thinkingBytes: number, phase: string): boolean {

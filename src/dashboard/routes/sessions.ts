@@ -35,7 +35,7 @@ import {
   updateSession, linkSessions,
   buildMigrationContext,
   exportSession, importSession,
-  deleteSession,
+  deleteSession, deleteSideChat,
   loadWorkspaces, addWorkspace, removeWorkspace, updateWorkspace, reorderWorkspaces,
   resolveUserStatus,
   type UserStatus, type SessionQueryResult,
@@ -505,6 +505,50 @@ app.post('/api/session-hub/session/delete', async (c) => {
     return c.json({
       ok: true,
       recordRemoved: result.recordRemoved,
+      pikiclawPathsRemoved: result.pikiclawPathsRemoved,
+      nativePathsRemoved: result.nativePathsRemoved,
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/side-chat/delete', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
+    const agent = typeof body?.agent === 'string' ? body.agent.trim() : '';
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    const parentAgent = typeof body?.parentAgent === 'string' ? body.parentAgent.trim() : '';
+    const parentSessionId = typeof body?.parentSessionId === 'string' ? body.parentSessionId.trim() : '';
+    const purgeNative = body?.purgeNative === true;
+    if (!workdir || !agent || !sessionId || !parentAgent || !parentSessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, sessionId, parentAgent, and parentSessionId are required' }, 400);
+    }
+    if (!runtime.isAgent(agent)) {
+      return c.json({ ok: false, error: `Unknown agent: ${agent}` }, 400);
+    }
+    if (!runtime.isAgent(parentAgent)) {
+      return c.json({ ok: false, error: `Unknown parent agent: ${parentAgent}` }, 400);
+    }
+    runtime.debug(
+      `[sessions] endpoint=side-chat-delete parent=${parentAgent}/${parentSessionId} agent=${agent} session=${sessionId} workdir=${workdir} purgeNative=${purgeNative}`,
+    );
+    const result = await deleteSideChat({
+      workdir,
+      agent: agent as Agent,
+      sessionId,
+      parentAgent: parentAgent as Agent,
+      parentSessionId,
+      purgeNative,
+    });
+    if (result.refusedReason === 'session-running') {
+      return c.json({ ok: false, error: 'session is still running — stop it first' }, 409);
+    }
+    return c.json({
+      ok: true,
+      recordRemoved: result.recordRemoved,
+      sideChatRefRemoved: result.sideChatRefRemoved,
       pikiclawPathsRemoved: result.pikiclawPathsRemoved,
       nativePathsRemoved: result.nativePathsRemoved,
     });

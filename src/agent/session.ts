@@ -324,6 +324,9 @@ function normalizeSideChatRef(value: unknown): SessionSideChatRef | null {
     title: typeof v.title === 'string' && v.title.trim() ? v.title.trim() : null,
     createdAt,
     updatedAt,
+    userStatus: v.userStatus === 'inbox' || v.userStatus === 'active' || v.userStatus === 'review' || v.userStatus === 'done' || v.userStatus === 'parked'
+      ? v.userStatus
+      : null,
     ...(v.hidden === true ? { hidden: true } : {}),
   };
 }
@@ -503,6 +506,7 @@ function upsertSideChatRef(parent: ManagedSessionRecord, child: ManagedSessionRe
     title: child.title,
     createdAt: child.createdAt,
     updatedAt: child.updatedAt || now,
+    userStatus: child.userStatus ?? null,
   };
   const idx = refs.findIndex(ref => ref.agent === child.agent && ref.sessionId === child.sessionId);
   parent.sideChats = idx >= 0
@@ -1053,6 +1057,16 @@ export interface DeleteAgentSessionResult {
   refusedReason: 'session-running' | null;
 }
 
+export interface DeleteSideChatSessionOpts extends DeleteAgentSessionOpts {
+  parentAgent: Agent;
+  parentSessionId: string;
+}
+
+export interface DeleteSideChatSessionResult extends DeleteAgentSessionResult {
+  /** True when the parent session's sideChats ref was removed. */
+  sideChatRefRemoved: boolean;
+}
+
 /**
  * Delete a pikiclaw-managed session. Two scopes:
  *   - default: drop the index entry + recursively delete the per-session dir
@@ -1138,6 +1152,36 @@ export async function deleteAgentSession(opts: DeleteAgentSessionOpts): Promise<
 
   result.ok = true;
   return result;
+}
+
+export async function deleteSideChatSession(opts: DeleteSideChatSessionOpts): Promise<DeleteSideChatSessionResult> {
+  const resolvedWorkdir = path.resolve(opts.workdir);
+  const beforeIndex = loadSessionIndex(resolvedWorkdir);
+  const wasLinked = beforeIndex.sessions
+    .find(s => s.agent === opts.parentAgent && s.sessionId === opts.parentSessionId)
+    ?.sideChats?.some(ref => ref.agent === opts.agent && ref.sessionId === opts.sessionId) === true;
+
+  const result = await deleteAgentSession(opts);
+  const out: DeleteSideChatSessionResult = { ...result, sideChatRefRemoved: result.refusedReason ? false : wasLinked };
+  if (result.refusedReason) return out;
+
+  const index = loadSessionIndex(resolvedWorkdir);
+  const parent = index.sessions.find(s => s.agent === opts.parentAgent && s.sessionId === opts.parentSessionId);
+  if (parent?.sideChats?.length) {
+    const before = parent.sideChats.length;
+    parent.sideChats = parent.sideChats.filter(ref => !(ref.agent === opts.agent && ref.sessionId === opts.sessionId));
+    const removedNow = parent.sideChats.length !== before;
+    out.sideChatRefRemoved = out.sideChatRefRemoved || removedNow;
+    if (removedNow) {
+      const now = new Date().toISOString();
+      parent.updatedAt = now;
+      writeSessionIndex(resolvedWorkdir, index.sessions);
+      writeSessionMeta(parent);
+    }
+  }
+
+  out.ok = true;
+  return out;
 }
 
 /**
@@ -1501,7 +1545,6 @@ export function classifySession(
 /** Derive a default userStatus from classification outcome */
 export function deriveUserStatus(outcome: SessionClassification['outcome']): 'review' | 'done' | 'active' {
   switch (outcome) {
-    case 'answer': return 'done';
     case 'partial': return 'active';
     default: return 'review';
   }

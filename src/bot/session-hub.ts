@@ -24,7 +24,9 @@ import {
   findPikiclawSession,
   updateSessionMeta,
   deleteAgentSession as _deleteAgentSession,
+  deleteSideChatSession as _deleteSideChatSession,
   type DeleteAgentSessionOpts, type DeleteAgentSessionResult,
+  type DeleteSideChatSessionOpts, type DeleteSideChatSessionResult,
   collapseSkillPrompt,
   type Agent, type SessionInfo, type SessionListResult,
   type SessionTailResult, type SessionTailOpts,
@@ -350,6 +352,10 @@ export function updateSession(workdir: string, agent: Agent, sessionId: string, 
  */
 export function deleteSession(opts: DeleteAgentSessionOpts): Promise<DeleteAgentSessionResult> {
   return _deleteAgentSession(opts);
+}
+
+export function deleteSideChat(opts: DeleteSideChatSessionOpts): Promise<DeleteSideChatSessionResult> {
+  return _deleteSideChatSession(opts);
 }
 
 /** Link two sessions together (bidirectional). */

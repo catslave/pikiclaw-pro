@@ -158,7 +158,7 @@ export const STREAM_PREVIEW_TIMEOUTS = {
 // ---------------------------------------------------------------------------
 
 /** How long an idle Codex app-server can be kept warm for reuse by the next turn. */
-export const CODEX_APPSERVER_IDLE_TTL_MS = 90_000;
+export const CODEX_APPSERVER_IDLE_TTL_MS = 5 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Channels — Telegram

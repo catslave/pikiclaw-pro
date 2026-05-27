@@ -5,6 +5,7 @@
 import path from 'node:path';
 import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, findPikiclawSessionInfo, getDriverCapabilities, isPendingSessionId, recordFork, recordSideChat, type Agent, type HandoverRef } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
+import { isLogTraceSlash, runLogTraceSkill } from '../platform/logtrace.js';
 import { runtime } from './runtime.js';
 
 const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes']);
@@ -113,6 +114,36 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     ? ''
     : (typeof request.effort === 'string' ? request.effort.trim().toLowerCase() : '');
 
+  let sessionId = request.sessionId;
+  let attachments = request.attachments || [];
+
+  // /logtrace — platform-owned skill. Pikiclaw runs the log CLI through a
+  // controlled adapter first, then sends the collected trace/report evidence to
+  // the selected agent for the actual explanation.
+  if (request.prompt && isLogTraceSlash(request.prompt)) {
+    const rawArgs = request.prompt.trim().replace(/^\/logtrace(?:\s+)?/, '');
+    const session = ensureManagedSession({
+      workdir: request.workdir,
+      agent: resolvedAgent,
+      sessionId: sessionId || '',
+      title: request.prompt || 'Log trace',
+      threadId: null,
+      origin: { channel: 'dashboard', chatId: 'dashboard' },
+      ...(modelId ? { model: modelId } : {}),
+    });
+    sessionId = session.sessionId || sessionId;
+    const logTrace = await runLogTraceSkill({
+      rawArgs,
+      sessionWorkspace: session.workspacePath || request.workdir,
+    });
+    request.prompt = logTrace.prompt;
+    runtime.debug(
+      `[session-send] resolved platform skill: logtrace ok=${logTrace.ok} ` +
+      `artifact=${logTrace.artifactPath || 'none'} traceDir=${logTrace.traceOutputDir || 'none'} ` +
+      `error=${logTrace.error || 'none'}`,
+    );
+  }
+
   // /goal — route directly to the goal bridge (claude native slash, codex RPC,
   // or portable goal.json for gemini/hermes). Must run BEFORE skill resolution
   // so the legacy `goal` skill doesn't grab the prompt and rewrite it into a
@@ -129,9 +160,6 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     prompt = skillResult.resolvedPrompt;
     runtime.debug(`[session-send] resolved skill: ${skillResult.skillName}`);
   }
-
-  let sessionId = request.sessionId;
-  let attachments = request.attachments || [];
 
   // Resolve handover source. Only meaningful when we're about to stage a fresh
   // session (sessionId blank or pending). For an existing session we never

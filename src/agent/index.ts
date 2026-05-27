@@ -71,7 +71,7 @@ export {
   roundPercent, toIsoFromEpochSeconds, normalizeUsageStatus,
   labelFromWindowMinutes, usageWindowFromRateLimit,
   parseJsonTail, modelFamily, normalizeClaudeModelId, emptyUsage,
-  readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText,
+  readTailLines, stripInjectedPrompts, stripOaiMemoryCitations, sanitizeSessionUserPreviewText,
   SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE,
   CLAUDE_AT_MENTION_IMAGE_RE, extractClaudeAtMentionImagePaths, stripClaudeAtMentionImages,
   isPendingSessionId, emitSessionIdUpdate,
@@ -88,8 +88,9 @@ export {
   applyTurnWindow, applyTurnFilter,
   classifySession, deriveUserStatus,
   exportSession, importSession,
-  deleteAgentSession,
+  deleteAgentSession, deleteSideChatSession,
   type DeleteAgentSessionOpts, type DeleteAgentSessionResult,
+  type DeleteSideChatSessionOpts, type DeleteSideChatSessionResult,
   isProcessAlive, isRunningSessionStale, reconcileOrphanedRunningSessions,
 } from './session.js';
 

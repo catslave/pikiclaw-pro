@@ -13,6 +13,7 @@ const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
+const SkillsTab = lazy(async () => ({ default: (await import('./pages/skills/SkillsTab')).SkillsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
 const TelegramModal = lazy(async () => ({ default: (await import('./components/Modals')).TelegramModal }));
 const FeishuModal = lazy(async () => ({ default: (await import('./components/Modals')).FeishuModal }));
@@ -47,6 +48,7 @@ function locationToTab(pathname: string): DashboardTab {
     '/im': 'im',
     '/agents': 'agents',
     '/extensions': 'extensions',
+    '/skills': 'skills',
     '/permissions': 'system',
     '/system': 'system',
   };
@@ -57,7 +59,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/') return '/';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
-  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -264,6 +266,11 @@ export function App() {
                 <Route path="/extensions" element={
                   <PageWrapper title={tabMeta.title} description={tabMeta.description}>
                     <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} />
+                  </PageWrapper>
+                } />
+                <Route path="/skills" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <SkillsTab />
                   </PageWrapper>
                 } />
                 <Route path="/system" element={

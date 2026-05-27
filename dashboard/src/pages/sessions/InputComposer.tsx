@@ -67,6 +67,13 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     descriptionKey: 'hub.commandPlanDesc',
     aliases: ['planning', 'todo', '计划'],
   },
+  {
+    command: 'logtrace',
+    insert: '/logtrace env=lab id= last=24h ',
+    labelKey: 'hub.commandLogTrace',
+    descriptionKey: 'hub.commandLogTraceDesc',
+    aliases: ['logs', 'trace', 'kibana', '日志', '排查'],
+  },
 ];
 
 /* ── Draft persistence across session switches ── */
@@ -538,7 +545,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const effectiveQueuedKey = effectiveQueuedIds.join('\0');
   const effectiveQueuedId = effectiveQueuedIds[effectiveQueuedIds.length - 1] || null;
   const hasQueuedTask = effectiveQueuedIds.length > 0;
-  const showTaskBar = hasQueuedTask || isActiveStream;
+  const showTaskBar = hasQueuedTask;
 
   const toggleQueuedExpanded = useCallback((taskId: string) => {
     setExpandedQueuedTaskIds(prev => {
@@ -872,28 +879,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     <div className="shrink-0" ref={composerRef}>
       {/* Floating centered input area */}
       <div className="w-full max-w-[860px] mx-auto px-4 pb-4 pt-2 sm:px-3">
-        {/* Task control bar — stacked rows when streaming + queued coexist */}
+        {/* Task control bar — queued follow-ups only. Active streams use the inline stop button near Send. */}
         {showTaskBar && (
           <div className="mb-2 space-y-1.5">
-            {/* Row 1: Active stream — always visible when streaming */}
-            {isActiveStream && (
-              <div className="flex items-center gap-2.5 rounded-lg border border-ok/25 bg-panel/60 px-3.5 py-1.5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] backdrop-blur-md transition-colors">
-                <Spinner className="h-3 w-3 text-ok shrink-0" />
-                <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-3 truncate">{t('hub.running')}</span>
-                <button
-                  onClick={handleStop}
-                  disabled={stoppingAll}
-                  title={t('hub.stopHint')}
-                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none shrink-0"
-                >
-                  {stoppingAll
-                    ? <Spinner className="h-2.5 w-2.5" />
-                    : <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>}
-                  {t('hub.stop')}
-                </button>
-              </div>
-            )}
-            {/* Rows 2..N: one row per queued task — each carries its own steer/recall */}
+            {/* One row per queued task — each carries its own steer/recall. */}
             {effectiveQueuedIds.length > 0 && (
               <div className="max-h-[min(32vh,260px)] space-y-1.5 overflow-y-auto overscroll-contain pr-1 -mr-1">
                 {effectiveQueuedIds.map((taskId, idx) => {
@@ -1410,6 +1399,21 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             )}
 
             <div className="flex-1" />
+
+            {isActiveStream && (
+              <button
+                type="button"
+                onClick={handleStop}
+                disabled={stoppingAll}
+                title={t('hub.stopHint')}
+                aria-label={t('hub.stop')}
+                className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg text-fg-5/60 transition-colors hover:bg-err/10 hover:text-err disabled:pointer-events-none disabled:opacity-30"
+              >
+                {stoppingAll
+                  ? <Spinner className="h-3.5 w-3.5" />
+                  : <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" /></svg>}
+              </button>
+            )}
 
             {/* Send button */}
             <button

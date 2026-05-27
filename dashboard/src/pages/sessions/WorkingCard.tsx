@@ -77,6 +77,120 @@ function normalizeActivityLine(line: string): string {
   return line.replace(/\s+/g, ' ').trim();
 }
 
+function cleanActivityDetail(line: string): string {
+  return normalizeActivityLine(line)
+    .replace(/\.\.\.$/, '')
+    .replace(/\s+done$/i, '')
+    .trim();
+}
+
+function stripLeadingLabel(line: string, labels: string[]): string {
+  const escaped = labels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return line.replace(new RegExp(`^(?:${escaped})\\s*:?\\s*`, 'i'), '').trim();
+}
+
+function pushUnique(target: string[], value: string, max = 120): void {
+  const normalized = cleanActivityDetail(value);
+  if (!normalized || /^(result|ok|done)$/i.test(normalized)) return;
+  const clipped = normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
+  if (!target.includes(clipped)) target.push(clipped);
+}
+
+interface ActivityDetailGroup {
+  label: string;
+  items: string[];
+}
+
+interface ActivityDetailBuckets {
+  files: string[];
+  searches: string[];
+  commands: string[];
+  tools: string[];
+}
+
+function collectActivityDetails(lines: string[]): ActivityDetailBuckets {
+  const files: string[] = [];
+  const searches: string[] = [];
+  const commands: string[] = [];
+  const tools: string[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of lines) {
+    const line = cleanActivityDetail(raw);
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    if (/^Executed\s+\d+\s+command/i.test(line) || /^Result:/i.test(line)) continue;
+
+    if (/^(Bash|Shell|Command)\b/i.test(line)) {
+      pushUnique(commands, stripLeadingLabel(line, ['Bash', 'Shell', 'Command']), 140);
+      continue;
+    }
+
+    if (/^(Search|Grep|Glob|Find|WebSearch|Search web|Open web page)\b/i.test(line)) {
+      pushUnique(searches, stripLeadingLabel(line, ['Search web', 'Open web page', 'WebSearch', 'Search', 'Grep', 'Glob', 'Find']), 120);
+      continue;
+    }
+
+    if (/^(Read|Open|Edit|Write|List|Updated|Inspect image)\b/i.test(line)) {
+      pushUnique(files, line, 120);
+      continue;
+    }
+
+    if (/\b[A-Za-z0-9_.-]+\.(tsx?|jsx?|css|json|md|py|go|java|kt|rs|yaml|yml)\b/.test(line)) {
+      pushUnique(files, line, 120);
+      continue;
+    }
+
+    if (/^Use\s+/i.test(line)) {
+      pushUnique(tools, line.replace(/^Use\s+/i, ''), 120);
+      continue;
+    }
+
+    if (!/^(Waiting for|Human input|Applied steer input)$/i.test(line)) {
+      pushUnique(tools, line, 120);
+    }
+  }
+
+  return { files, searches, commands, tools };
+}
+
+function summarizeActivityDetails(lines: string[], t: (key: string) => string): ActivityDetailGroup[] {
+  const { files, searches, commands, tools } = collectActivityDetails(lines);
+
+  const makeGroup = (label: string, items: string[]): ActivityDetailGroup | null => {
+    if (!items.length) return null;
+    const visible = items.slice(0, 6);
+    const hidden = items.length - visible.length;
+    return {
+      label,
+      items: hidden > 0 ? [...visible, replaceVars(t('hub.activityMore'), { n: String(hidden) })] : visible,
+    };
+  };
+
+  return [
+    makeGroup(t('hub.activityFiles'), files),
+    makeGroup(t('hub.activitySearchesDetail'), searches),
+    makeGroup(t('hub.activityCommands'), commands),
+    makeGroup(t('hub.activityOtherTools'), tools),
+  ].filter((group): group is ActivityDetailGroup => !!group);
+}
+
+function activityFileHighlights(lines: string[], t: (key: string) => string): string[] {
+  const files = collectActivityDetails(lines).files;
+  if (!files.length) return [];
+  const visible = files.slice(-4);
+  const hidden = files.length - visible.length;
+  return hidden > 0 ? [...visible, replaceVars(t('hub.activityMore'), { n: String(hidden) })] : visible;
+}
+
+function activityCommandHighlights(lines: string[], t: (key: string) => string): string[] {
+  const commands = collectActivityDetails(lines).commands;
+  if (!commands.length) return [];
+  const visible = commands.slice(-3);
+  const hidden = commands.length - visible.length;
+  return hidden > 0 ? [...visible, replaceVars(t('hub.activityMore'), { n: String(hidden) })] : visible;
+}
+
 function workingActivityLabels(lines: string[], t: (key: string) => string): string[] {
   const seen = new Set<string>();
   let files = 0;
@@ -136,6 +250,7 @@ export function WorkingCard({
   updatedAt,
   previewMeta,
   stepCount,
+  statusLabel,
   children,
   className,
 }: {
@@ -150,6 +265,7 @@ export function WorkingCard({
   updatedAt?: number | null;
   previewMeta?: StreamPreviewMeta | null;
   stepCount?: number;
+  statusLabel?: string | null;
   children?: ReactNode;
   className?: string;
 }) {
@@ -177,6 +293,19 @@ export function WorkingCard({
     : null;
   const hasBadges = !!(elapsedLabel || idleLabel || tokens || countLabel);
   const fallbackPreview = previewText?.trim() || t('hub.workingIdle');
+  const phaseLabel = statusLabel?.trim() && statusLabel.trim() !== t('hub.working')
+    ? statusLabel.trim()
+    : null;
+  const previewNode = preview ?? (
+    <span className="flex min-w-0 items-center gap-2 text-[12px] text-fg-4">
+      {phaseLabel && (
+        <span className="shrink-0 rounded-md border border-edge/70 bg-inset px-1.5 py-0.5 text-[10px] leading-none font-mono text-fg-5/80">
+          {phaseLabel}
+        </span>
+      )}
+      <span className="min-w-0 truncate">{fallbackPreview}</span>
+    </span>
+  );
   const dot = phase === 'streaming'
     ? { color: 'bg-emerald-400/70', pulse: true }
     : { color: 'bg-fg-5/35' };
@@ -187,7 +316,7 @@ export function WorkingCard({
       onToggle={() => setOpen(v => !v)}
       dot={dot}
       label={t('hub.working')}
-      preview={preview ?? <span className="text-[12px] text-fg-4 truncate">{fallbackPreview}</span>}
+      preview={previewNode}
       badge={hasBadges ? (
         <span className="flex shrink-0 items-center gap-1 overflow-hidden">
           {elapsedLabel && <Badge title={t('hub.workingElapsed')}>{elapsedLabel}</Badge>}
@@ -318,34 +447,64 @@ export function WorkingNarrativeBlock({ text, t }: { text: string; t: (key: stri
 
 export function WorkingActivitySummary({ lines, t }: { lines: string[]; t: (key: string) => string }) {
   const labels = workingActivityLabels(lines, t);
-  if (!labels.length) return null;
+  const files = activityFileHighlights(lines, t);
+  const commands = activityCommandHighlights(lines, t);
+  if (!labels.length && !files.length && !commands.length) return null;
   return (
     <WorkingSection label={t('hub.activitySummary')}>
-      <div className="space-y-1">
-        {labels.map((label, index) => (
-          <div key={`${index}:${label}`} className="flex items-center gap-2 py-[2px] text-[12px] leading-[1.5] text-fg-5">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fg-5/30" />
-            <span>{label}</span>
+      <div className="space-y-2">
+        {labels.length > 0 && (
+          <div className="space-y-1">
+            {labels.map((label, index) => (
+              <div key={`${index}:${label}`} className="flex items-center gap-2 py-[2px] text-[12px] leading-[1.5] text-fg-5">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fg-5/30" />
+                <span>{label}</span>
+              </div>
+            ))}
           </div>
-        ))}
+        )}
+        {files.length > 0 && (
+          <div className="space-y-1 rounded-md bg-inset/70 px-2.5 py-2">
+            <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-fg-5/70">{t('hub.activityFileLog')}</div>
+            {files.map((line, index) => (
+              <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
+                <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
+                <span className="min-w-0 break-words">{line}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {commands.length > 0 && (
+          <div className="space-y-1 rounded-md bg-inset/70 px-2.5 py-2">
+            <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-fg-5/70">{t('hub.activityCommandLog')}</div>
+            {commands.map((line, index) => (
+              <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
+                <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
+                <span className="min-w-0 break-words">{line}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </WorkingSection>
   );
 }
 
 export function WorkingActivityDetails({ lines, t }: { lines: string[]; t: (key: string) => string }) {
-  const details = lines
-    .map(normalizeActivityLine)
-    .filter(Boolean)
-    .slice(-10);
-  if (!details.length) return null;
+  const groups = summarizeActivityDetails(lines, t);
+  if (!groups.length) return null;
   return (
     <WorkingSection label={t('hub.activityDetails')} defaultOpen={false}>
-      <div className="space-y-1 rounded-md bg-inset px-3 py-2">
-        {details.map((line, index) => (
-          <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
-            <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
-            <span className="min-w-0 break-words">{line}</span>
+      <div className="space-y-3 rounded-md bg-inset px-3 py-2">
+        {groups.map(group => (
+          <div key={group.label} className="space-y-1">
+            <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-fg-5/70">{group.label}</div>
+            {group.items.map((line, index) => (
+              <div key={`${group.label}:${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
+                <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
+                <span className="min-w-0 break-words">{line}</span>
+              </div>
+            ))}
           </div>
         ))}
       </div>

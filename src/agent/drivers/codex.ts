@@ -27,7 +27,7 @@ import {
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   adoptNativeSessionTitles,
   mergeManagedAndNativeSessions,
-  stripInjectedPrompts, sanitizeSessionUserPreviewText, computeContext, readTailLines, applyTurnWindow,
+    stripInjectedPrompts, stripOaiMemoryCitations, sanitizeSessionUserPreviewText, computeContext, readTailLines, applyTurnWindow,
   roundPercent, toIsoFromEpochSeconds, labelFromWindowMinutes,
   usageWindowFromRateLimit, parseJsonTail, emptyUsage,
   attachAgentImage, codexHome,
@@ -764,6 +764,25 @@ function compactPathTarget(value: unknown, max = 80): string {
   return `...${compact.slice(-(max - 3))}`;
 }
 
+function codexArgValue(args: any, keys: string[]): unknown {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
+function codexPathArg(args: any): string {
+  return compactPathTarget(codexArgValue(args, ['file_path', 'path', 'absolute_path', 'relative_path', 'target_file', 'filename']), 120);
+}
+
+function codexSearchArg(args: any): string {
+  const value = codexArgValue(args, ['pattern', 'query', 'search_query', 'regex', 'glob']);
+  return typeof value === 'string' ? shortValue(value, 120) : '';
+}
+
 function summarizeCodexToolCall(item: any): CodexActiveToolCall | null {
   const rawName = codexToolName(item);
   const kind = codexToolKind(rawName);
@@ -775,11 +794,54 @@ function summarizeCodexToolCall(item: any): CodexActiveToolCall | null {
       const preview = commandPreview(command);
       return { kind, summary: preview ? `Bash: ${preview}` : 'Bash' };
     }
+    case 'local_shell_call': {
+      const command = args && typeof args === 'object' && !Array.isArray(args)
+        ? ((args as any).cmd ?? (args as any).command ?? (args as any).action?.command)
+        : null;
+      const preview = commandPreview(command);
+      return { kind, summary: preview ? `Bash: ${preview}` : 'Bash' };
+    }
+    case 'read':
+    case 'open':
+    case 'view':
+    case 'view_file':
+    case 'read_file': {
+      const target = codexPathArg(args);
+      return { kind, summary: target ? `Read ${target}` : 'Read file' };
+    }
+    case 'edit':
+    case 'write':
+    case 'create_file':
+    case 'update_file': {
+      const target = codexPathArg(args);
+      const label = kind === 'write' || kind === 'create_file' ? 'Write' : 'Edit';
+      return { kind, summary: target ? `${label} ${target}` : `${label} file` };
+    }
+    case 'grep':
+    case 'search':
+    case 'find':
+    case 'glob': {
+      const pattern = codexSearchArg(args);
+      return { kind, summary: pattern ? `Search ${pattern}` : 'Search files' };
+    }
+    case 'list':
+    case 'ls':
+    case 'list_files':
+    case 'list_directory': {
+      const target = codexPathArg(args) || compactPathTarget(codexArgValue(args, ['dir', 'directory', 'dir_path']), 120);
+      return { kind, summary: target ? `List ${target}` : 'List files' };
+    }
     case 'update_plan': return { kind, summary: 'Update plan' };
     case 'request_user_input': return { kind, summary: 'Request user input' };
-    case 'view_image': return { kind, summary: 'Inspect image' };
+    case 'view_image': {
+      const target = codexPathArg(args);
+      return { kind, summary: target ? `Inspect image ${target}` : 'Inspect image' };
+    }
     case 'parallel': return { kind, summary: 'Run multiple tools' };
     default: {
+      const target = codexPathArg(args) || codexSearchArg(args)
+        || shortValue(codexArgValue(args, ['cmd', 'command', 'description', 'url']), 120);
+      if (target) return { kind, summary: `Use ${kind.replace(/_/g, ' ')}: ${target}` };
       const label = shortValue(kind.replace(/_/g, ' '), 80);
       return label ? { kind, summary: `Use ${label}` } : null;
     }
@@ -837,9 +899,9 @@ function summarizeCodexRawResponseItem(item: any): string | null {
 }
 
 function extractCodexMessageText(content: unknown): string {
-  if (typeof content === 'string') return content.trim();
+  if (typeof content === 'string') return stripOaiMemoryCitations(content).trim();
   if (!Array.isArray(content)) return '';
-  return content
+  return stripOaiMemoryCitations(content
     .map((entry: any) => {
       if (!entry || typeof entry !== 'object') return '';
       if ((entry.type === 'output_text' || entry.type === 'input_text' || entry.type === 'text') && typeof entry.text === 'string') {
@@ -849,7 +911,7 @@ function extractCodexMessageText(content: unknown): string {
     })
     .filter(Boolean)
     .join('\n\n')
-    .trim();
+    .trim()).trim();
 }
 
 function extractCodexReasoningText(payload: any): string {
@@ -1144,9 +1206,9 @@ function codexDiagnosticsFromStderr(text: string): string[] {
     });
 }
 
-function markCodexProgress(s: { recentNarrative: string[]; lastEvent: string | null }, label: string): void {
+function markCodexProgress(s: { diagnostics: string[]; lastEvent: string | null }, label: string): void {
   s.lastEvent = label;
-  pushRecentActivity(s.recentNarrative, label, 12);
+  pushRecentActivity(s.diagnostics, `Codex connection: ${label}`, 8);
 }
 
 function formatTimingMs(ms: number | null | undefined): string | null {
@@ -1939,7 +2001,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     return {
       ok, sessionId: s.sessionId,
       workspacePath: null, model: s.model, thinkingEffort: s.thinkingEffort,
-      message: s.text.trim() || error || '(no textual response)',
+      message: stripOaiMemoryCitations(s.text).trim() || error || '(no textual response)',
       thinking: s.thinking.trim() || null,
       plan: s.plan?.steps?.length ? s.plan : null,
       elapsedS: (Date.now() - start) / 1000,
@@ -2090,7 +2152,7 @@ function extractCodexTailQA(filePath: string): { lastQuestion: string | null; la
           lastMessageText = shortValue(text, 500);
         }
       } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
-        const text = ev.payload.message.trim();
+        const text = stripOaiMemoryCitations(ev.payload.message).trim();
         if (text) {
           lastAnswer = shortValue(text, 500);
           lastMessageText = shortValue(text, 500);
@@ -2248,7 +2310,7 @@ function getCodexSessionTailFromRollout(opts: SessionTailOpts): SessionTailResul
         const text = stripInjectedPrompts(ev.payload.message).trim();
         if (text) allMsgs.push({ role: 'user', text });
       } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
-        const text = ev.payload.message.trim();
+        const text = stripOaiMemoryCitations(ev.payload.message).trim();
         if (text) allMsgs.push({ role: 'assistant', text });
       }
     }
@@ -2464,7 +2526,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
           allMsgs.push(userMessage);
           richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }], createdAt });
         } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
-          const text = ev.payload.message.trim();
+          const text = stripOaiMemoryCitations(ev.payload.message).trim();
           if (text) {
             fallbackMsgs.push({ role: 'assistant', text });
             fallbackRichMsgs.push({
