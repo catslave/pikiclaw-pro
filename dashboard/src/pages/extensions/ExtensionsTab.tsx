@@ -19,7 +19,9 @@ import { useStore } from '../../store';
 import type {
   AgentAssistant,
   AutomationRule,
+  JiraWorkflowConfig,
   JiraSyncRun,
+  ProTaskStatus,
   CliCatalogItem,
   McpAuthSpec,
   McpCatalogItem,
@@ -40,6 +42,19 @@ import { SettingRowAction, SettingRowCard, SettingRowLead } from '../shared';
 
 function L(locale: string, zh: string, en: string): string {
   return locale === 'zh-CN' ? zh : en;
+}
+
+const JIRA_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
+const JIRA_STATUS_LABEL: Record<ProTaskStatus, string> = {
+  backlog: 'Backlog',
+  refinement: 'Refinement',
+  coding: 'Coding',
+  resolved: 'Resolved',
+  done: 'Done',
+};
+
+function splitPool(value: string): string[] {
+  return value.split(',').map(item => item.trim()).filter(Boolean).slice(0, 12);
 }
 
 function authKindLabel(locale: string, auth: McpAuthSpec): string {
@@ -566,17 +581,21 @@ function JiraSyncDialog({
   const [activeRun, setActiveRun] = useState<JiraSyncRun | null>(null);
   const [syncRuns, setSyncRuns] = useState<JiraSyncRun[]>([]);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [jiraConfig, setJiraConfig] = useState<JiraWorkflowConfig>({});
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [assistantRes, automationRes, runsRes] = await Promise.all([
+    const [assistantRes, automationRes, runsRes, configRes] = await Promise.all([
       api.getProAssistants(),
       api.getProAutomations(),
       api.getJiraMcpSyncRuns(),
+      api.getJiraWorkflowConfig(),
     ]);
     const nextAssistants = assistantRes.ok ? assistantRes.assistants || [] : [];
     const nextJobs = automationRes.ok ? automationRes.automations || [] : [];
     if (runsRes.ok) setSyncRuns(runsRes.runs || []);
     const existing = nextJobs.find(job => job.key === 'jira-mcp-sync');
+    if (configRes.ok) setJiraConfig(configRes.config || {});
     setAssistants(nextAssistants);
     setJobs(nextJobs);
     setAssistantId(prev => prev || existing?.assistantId || nextAssistants.find(a => a.id === 'assistant_ticket_sync')?.id || nextAssistants[0]?.id || '');
@@ -590,6 +609,30 @@ function JiraSyncDialog({
       }
     }
   }, []);
+
+  const patchStatusWorkflow = (status: ProTaskStatus, patch: { instruction?: string; assistantId?: string; modelPool?: string[] }) => {
+    setJiraConfig(prev => ({
+      ...prev,
+      statusWorkflows: {
+        ...(prev.statusWorkflows || {}),
+        [status]: { ...(prev.statusWorkflows?.[status] || {}), ...patch },
+      },
+    }));
+  };
+
+  const saveWorkflowConfig = async () => {
+    setSavingWorkflow(true);
+    try {
+      const res = await api.updateJiraWorkflowConfig(jiraConfig);
+      if (!res.ok) throw new Error(res.error || 'Failed to save Jira workflow');
+      setJiraConfig(res.config || {});
+      toast(L(locale, 'Jira 工作流已保存', 'Jira workflow saved'), true);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to save Jira workflow', false);
+    } finally {
+      setSavingWorkflow(false);
+    }
+  };
 
   useEffect(() => {
     if (open) void refresh();
@@ -755,6 +798,48 @@ function JiraSyncDialog({
             {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
           </select>
         </div>
+        <details className="rounded-lg border border-edge bg-panel-alt p-3">
+          <summary className="cursor-pointer text-[13px] font-semibold text-fg">
+            {L(locale, '状态工作流设置', 'Status workflow settings')}
+          </summary>
+          <div className="mt-3 space-y-3">
+            {JIRA_STATUSES.map(status => {
+              const workflow = jiraConfig.statusWorkflows?.[status] || {};
+              return (
+                <div key={status} className="rounded-md border border-edge bg-panel px-2.5 py-2">
+                  <div className="mb-2 text-[12px] font-semibold text-fg">{JIRA_STATUS_LABEL[status]}</div>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <select
+                      value={workflow.assistantId || ''}
+                      onChange={event => patchStatusWorkflow(status, { assistantId: event.target.value || undefined })}
+                      className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+                    >
+                      <option value="">{L(locale, '不指定 Assistant', 'No assistant')}</option>
+                      {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+                    </select>
+                    <Input
+                      value={(workflow.modelPool || []).join(', ')}
+                      onChange={event => patchStatusWorkflow(status, { modelPool: splitPool(event.target.value) })}
+                      placeholder={L(locale, '多个 model 用逗号分隔', 'Models, comma separated')}
+                    />
+                  </div>
+                  <textarea
+                    value={workflow.instruction || ''}
+                    onChange={event => patchStatusWorkflow(status, { instruction: event.target.value })}
+                    placeholder={L(locale, '进入这个状态时，希望 agent 做什么？', 'What should the agent do in this status?')}
+                    className="mt-2 min-h-20 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+                  />
+                </div>
+              );
+            })}
+            <div className="flex justify-end">
+              <Button size="sm" variant="secondary" disabled={savingWorkflow} onClick={() => void saveWorkflowConfig()}>
+                {savingWorkflow ? <Spinner /> : null}
+                {L(locale, '保存工作流', 'Save workflow')}
+              </Button>
+            </div>
+          </div>
+        </details>
         {mode === 'auto' && (
           <div className="grid gap-2 md:grid-cols-2">
             <select value={cadence} onChange={event => setCadence(event.target.value as typeof cadence)} className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">

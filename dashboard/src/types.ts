@@ -1061,6 +1061,17 @@ export interface ProTask {
   defaultAssistantId?: string;
   jiraKey?: string;
   jiraUrl?: string;
+  jiraFields?: {
+    reporter?: string;
+    assignee?: string;
+    status?: string;
+    dueDate?: string;
+    priority?: string;
+    labels?: string[];
+    issueType?: string;
+    updatedAt?: string;
+    raw?: Record<string, unknown>;
+  };
   sprint?: string;
   createdAt: string;
   updatedAt: string;
@@ -1116,6 +1127,11 @@ export interface JiraWorkflowConfig {
   knowledgeAssistantId?: string;
   runKnowledgeOnRefinement?: boolean;
   runKnowledgeOnCoding?: boolean;
+  statusWorkflows?: Partial<Record<ProTaskStatus, {
+    instruction?: string;
+    assistantId?: string;
+    modelPool?: string[];
+  }>>;
 }
 
 export interface AutomationRule {

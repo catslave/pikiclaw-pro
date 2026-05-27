@@ -82,6 +82,11 @@ export interface JiraWorkflowConfig {
   knowledgeAssistantId?: string;
   runKnowledgeOnRefinement?: boolean;
   runKnowledgeOnCoding?: boolean;
+  statusWorkflows?: Partial<Record<'backlog' | 'refinement' | 'coding' | 'resolved' | 'done', {
+    instruction?: string;
+    assistantId?: string;
+    modelPool?: string[];
+  }>>;
 }
 
 interface WorkflowFile {
@@ -101,6 +106,10 @@ const DEFAULT_JIRA_CONFIG: JiraWorkflowConfig = {
   knowledgeAssistantId: 'assistant_knowledge',
   runKnowledgeOnRefinement: true,
   runKnowledgeOnCoding: true,
+  statusWorkflows: {
+    refinement: { assistantId: 'assistant_refinement', instruction: 'Analyze goal, scope, risks, dependencies, acceptance criteria, and estimate.' },
+    coding: { assistantId: 'assistant_coding', instruction: 'Implement the task with minimal changes, then summarize files, tests, and remaining risk.' },
+  },
 };
 
 const DEFAULT_ASSISTANTS: AgentAssistant[] = [
@@ -214,6 +223,20 @@ export function getJiraWorkflowConfig(): JiraWorkflowConfig {
 export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): JiraWorkflowConfig {
   const file = readFile();
   const current = { ...DEFAULT_JIRA_CONFIG, ...(file.jira || {}) };
+  const statusWorkflows: JiraWorkflowConfig['statusWorkflows'] = { ...(current.statusWorkflows || {}) };
+  if (input.statusWorkflows && typeof input.statusWorkflows === 'object') {
+    for (const status of ['backlog', 'refinement', 'coding', 'resolved', 'done'] as const) {
+      const raw = input.statusWorkflows[status];
+      if (!raw || typeof raw !== 'object') continue;
+      statusWorkflows[status] = {
+        instruction: normalizeText(raw.instruction, 6000) || undefined,
+        assistantId: normalizeText(raw.assistantId, 160) || undefined,
+        modelPool: Array.isArray(raw.modelPool)
+          ? raw.modelPool.map(model => normalizeText(model, 240)).filter(Boolean).slice(0, 12)
+          : [],
+      };
+    }
+  }
   const next: JiraWorkflowConfig = {
     refinementAssistantId: normalizeText(input.refinementAssistantId, 160) || current.refinementAssistantId,
     codingAssistantId: normalizeText(input.codingAssistantId, 160) || current.codingAssistantId,
@@ -221,6 +244,7 @@ export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): Ji
     knowledgeAssistantId: normalizeText(input.knowledgeAssistantId, 160) || current.knowledgeAssistantId,
     runKnowledgeOnRefinement: typeof input.runKnowledgeOnRefinement === 'boolean' ? input.runKnowledgeOnRefinement : current.runKnowledgeOnRefinement,
     runKnowledgeOnCoding: typeof input.runKnowledgeOnCoding === 'boolean' ? input.runKnowledgeOnCoding : current.runKnowledgeOnCoding,
+    statusWorkflows,
   };
   file.jira = next;
   writeFile(file);

@@ -24,6 +24,7 @@ import {
   syncJiraTask,
   updateStageRun,
   updateSubtask,
+  updateJiraFields,
   updateProTaskStatus,
   type VerificationResult,
 } from '../../pro/tasks.js';
@@ -88,8 +89,8 @@ function buildJiraMcpSyncPrompt(runId?: string): string {
     '- Use the Jira MCP tools to find issues assigned to me and recently updated issues relevant to my active work.',
     '- After pulling Jira issues, call the `pikiclaw_pro_sync_jira_issues` MCP tool with an `issues` array so Pikiclaw creates or updates task cards.',
     runId ? '- Include the same runId when calling `pikiclaw_pro_sync_jira_issues`.' : '',
-    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, and sprint when available.',
-    '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint/status, and changed remote notes.',
+    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, reporter, assignee, ticketStatus/status, dueDate, priority, and labels when available.',
+    '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint, native Jira fields, and changed remote notes.',
     '- Append remote updates as new notes instead of overwriting existing local task context.',
     '- Mark newly assigned tickets and changed tickets clearly.',
     '- Summarize what was synced, what changed, and anything that needs manual attention.',
@@ -328,6 +329,7 @@ app.patch('/api/pro/jira/config', async (c) => {
       knowledgeAssistantId: body?.knowledgeAssistantId,
       runKnowledgeOnRefinement: body?.runKnowledgeOnRefinement,
       runKnowledgeOnCoding: body?.runKnowledgeOnCoding,
+      statusWorkflows: body?.statusWorkflows,
     }) });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
@@ -658,6 +660,13 @@ app.post('/api/pro/jira/sync', async (c) => {
       jiraUrl: issue?.jiraUrl,
       sprint: issue?.sprint,
       workdir: issue?.workdir || runtime.getRequestWorkdir(config),
+      reporter: issue?.reporter,
+      assignee: issue?.assignee,
+      ticketStatus: issue?.ticketStatus || issue?.status,
+      dueDate: issue?.dueDate,
+      priority: issue?.priority,
+      labels: Array.isArray(issue?.labels) ? issue.labels : undefined,
+      rawFields: issue?.rawFields,
     }));
     return c.json({ ok: true, tasks });
   } catch (e: any) {
@@ -671,6 +680,17 @@ app.patch('/api/pro/tasks/:taskId/status', async (c) => {
     const status = readString(body?.status);
     if (!isProTaskStatus(status)) return c.json({ ok: false, error: 'invalid status' }, 400);
     const task = updateProTaskStatus(c.req.param('taskId'), status);
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/tasks/:taskId/jira-fields', async (c) => {
+  try {
+    const body = await c.req.json();
+    const task = updateJiraFields(c.req.param('taskId'), body || {});
     return c.json({ ok: true, task });
   } catch (e: any) {
     const status = e?.message === 'task not found' ? 404 : 400;

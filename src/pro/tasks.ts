@@ -156,6 +156,17 @@ export interface ProTask {
   defaultAssistantId?: string;
   jiraKey?: string;
   jiraUrl?: string;
+  jiraFields?: {
+    reporter?: string;
+    assignee?: string;
+    status?: string;
+    dueDate?: string;
+    priority?: string;
+    labels?: string[];
+    issueType?: string;
+    updatedAt?: string;
+    raw?: Record<string, unknown>;
+  };
   sprint?: string;
   createdAt: string;
   updatedAt: string;
@@ -202,6 +213,22 @@ export interface SyncJiraTaskInput {
   jiraUrl?: string;
   sprint?: string;
   workdir?: string;
+  reporter?: string;
+  assignee?: string;
+  ticketStatus?: string;
+  dueDate?: string;
+  priority?: string;
+  labels?: string[];
+  rawFields?: Record<string, unknown>;
+}
+
+export interface UpdateJiraFieldsInput {
+  reporter?: unknown;
+  assignee?: unknown;
+  status?: unknown;
+  dueDate?: unknown;
+  priority?: unknown;
+  labels?: unknown;
 }
 
 export interface UpdateStageRunInput {
@@ -277,6 +304,7 @@ function readFile(): ProTaskFile {
           subTasks: Array.isArray((task as any).subTasks) ? (task as any).subTasks : [],
           stageRuns: Array.isArray(task.stageRuns) ? task.stageRuns : [],
           verificationRuns: Array.isArray(task.verificationRuns) ? task.verificationRuns : [],
+          jiraFields: (task as any).jiraFields && typeof (task as any).jiraFields === 'object' ? (task as any).jiraFields : undefined,
           events: Array.isArray(task.events) ? task.events : [],
         })),
     };
@@ -376,6 +404,7 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     defaultAssistantId: normalizeText(input.defaultAssistantId, 120) || undefined,
     jiraKey: normalizeText(input.jiraKey, 80) || undefined,
     jiraUrl: normalizeText(input.jiraUrl, 2048) || undefined,
+    jiraFields: undefined,
     sprint: normalizeText(input.sprint, 120) || undefined,
     createdAt: now,
     updatedAt: now,
@@ -411,10 +440,23 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     if ((existing.sprint || '') !== (sprint || '')) changes.push('sprint');
     existing.title = title;
     existing.description = description;
+    const issueType = normalizeText(input.issueType, 80);
+    if ((existing.jiraFields?.issueType || '') !== issueType) changes.push('issueType');
+    const nextJiraFields = normalizeJiraFields(input, existing.jiraFields);
+    for (const [key, nextValue] of Object.entries({
+      reporter: nextJiraFields?.reporter,
+      assignee: nextJiraFields?.assignee,
+      status: nextJiraFields?.status,
+      dueDate: nextJiraFields?.dueDate,
+      priority: nextJiraFields?.priority,
+    })) {
+      if (((existing.jiraFields as any)?.[key] || '') !== (nextValue || '')) changes.push(`jira.${key}`);
+    }
     existing.kind = taskKindFromIssueType(input.issueType);
     existing.jiraUrl = normalizeText(input.jiraUrl, 2048) || existing.jiraUrl;
     existing.sprint = sprint;
     existing.workdir = normalizeText(input.workdir, 2048) || existing.workdir;
+    existing.jiraFields = nextJiraFields;
     existing.updatedAt = now;
     appendEvent(existing, {
       type: changes.length ? 'jira-updated' : 'jira-synced',
@@ -436,6 +478,7 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     workdir: normalizeText(input.workdir, 2048) || undefined,
     jiraKey,
     jiraUrl: normalizeText(input.jiraUrl, 2048) || undefined,
+    jiraFields: normalizeJiraFields(input),
     sprint: normalizeText(input.sprint, 120) || undefined,
     createdAt: now,
     updatedAt: now,
@@ -447,6 +490,48 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
   };
   appendEvent(task, { type: 'jira-synced', actor: 'system', summary: jiraKey ? `Jira issue ${jiraKey} synced.` : 'Jira issue synced.' });
   file.tasks.unshift(task);
+  writeFile(file);
+  return task;
+}
+
+function normalizeJiraFields(input: SyncJiraTaskInput, current?: ProTask['jiraFields']): ProTask['jiraFields'] {
+  const issueType = normalizeText(input.issueType, 80) || current?.issueType;
+  return {
+    ...(current || {}),
+    reporter: normalizeText(input.reporter, 240) || current?.reporter,
+    assignee: normalizeText(input.assignee, 240) || current?.assignee,
+    status: normalizeText(input.ticketStatus, 120) || current?.status,
+    dueDate: normalizeText(input.dueDate, 80) || current?.dueDate,
+    priority: normalizeText(input.priority, 120) || current?.priority,
+    issueType,
+    labels: Array.isArray(input.labels) ? input.labels.map(label => normalizeText(label, 120)).filter(Boolean).slice(0, 40) : current?.labels,
+    updatedAt: new Date().toISOString(),
+    raw: input.rawFields && typeof input.rawFields === 'object' ? input.rawFields : current?.raw,
+  };
+}
+
+export function updateJiraFields(taskId: string, input: UpdateJiraFieldsInput): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const current = task.jiraFields || {};
+  const labels = Array.isArray(input.labels)
+    ? input.labels.map(label => normalizeText(label, 120)).filter(Boolean).slice(0, 40)
+    : typeof input.labels === 'string'
+      ? input.labels.split(',').map(label => normalizeText(label, 120)).filter(Boolean).slice(0, 40)
+      : current.labels;
+  task.jiraFields = {
+    ...current,
+    reporter: normalizeText(input.reporter, 240) || current.reporter,
+    assignee: normalizeText(input.assignee, 240) || current.assignee,
+    status: normalizeText(input.status, 120) || current.status,
+    dueDate: normalizeText(input.dueDate, 80) || current.dueDate,
+    priority: normalizeText(input.priority, 120) || current.priority,
+    labels,
+    updatedAt: new Date().toISOString(),
+  };
+  task.updatedAt = new Date().toISOString();
+  appendEvent(task, { type: 'jira-updated', actor: 'user', summary: 'Jira native fields updated manually in Pikiclaw.' });
   writeFile(file);
   return task;
 }

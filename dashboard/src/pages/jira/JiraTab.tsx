@@ -261,7 +261,39 @@ const DEFAULT_JIRA_ASSISTANT_CONFIG: JiraWorkflowConfig = {
   knowledgeAssistantId: 'assistant_knowledge',
   runKnowledgeOnRefinement: true,
   runKnowledgeOnCoding: true,
+  statusWorkflows: {
+    refinement: { assistantId: 'assistant_refinement', instruction: 'Analyze goal, scope, risks, dependencies, acceptance criteria, and estimate.' },
+    coding: { assistantId: 'assistant_coding', instruction: 'Implement the task with minimal changes, then summarize files, tests, and remaining risk.' },
+  },
 };
+
+function modelPoolText(models?: string[]): string {
+  return (models || []).join(', ');
+}
+
+function parseModelPool(value: string): string[] {
+  return value.split(',').map(item => item.trim()).filter(Boolean).slice(0, 12);
+}
+
+function pickRandomModel(models?: string[]): string | null {
+  const pool = (models || []).filter(Boolean);
+  if (!pool.length) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function buildStatusWorkflowPrompt(task: ProTask, status: ProTaskStatus, instruction?: string): string | undefined {
+  const body = instruction?.trim();
+  if (!body) return undefined;
+  return [
+    `Task: ${task.title}`,
+    task.jiraKey ? `Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
+    task.description ? `Description:\n${task.description}` : '',
+    '',
+    `Pikiclaw task status moved to ${STATUS_LABEL[status]}.`,
+    'Status workflow instruction:',
+    body,
+  ].filter(Boolean).join('\n');
+}
 
 function JiraAssistantConfigModal({
   open,
@@ -301,6 +333,51 @@ function JiraAssistantConfigModal({
     </label>
   );
 
+  const renderStatusWorkflow = (status: ProTaskStatus) => {
+    const workflow = draft.statusWorkflows?.[status] || {};
+    const patch = (next: Partial<NonNullable<JiraWorkflowConfig['statusWorkflows']>[ProTaskStatus]>) => {
+      setDraft(prev => ({
+        ...prev,
+        statusWorkflows: {
+          ...(prev.statusWorkflows || {}),
+          [status]: { ...(prev.statusWorkflows?.[status] || {}), ...next },
+        },
+      }));
+    };
+    return (
+      <div key={status} className="rounded-md border border-edge bg-panel-alt px-3 py-2.5">
+        <div className="mb-2 text-[12px] font-semibold text-fg">{STATUS_LABEL[status]}</div>
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</div>
+            <select
+              value={workflow.assistantId || ''}
+              onChange={event => patch({ assistantId: event.target.value || undefined })}
+              className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+            >
+              <option value="">No assistant / runtime default</option>
+              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Model pool</div>
+            <Input
+              value={modelPoolText(workflow.modelPool)}
+              onChange={event => patch({ modelPool: parseModelPool(event.target.value) })}
+              placeholder="gpt-5.1, claude-sonnet-4.5"
+            />
+          </label>
+        </div>
+        <textarea
+          value={workflow.instruction || ''}
+          onChange={event => patch({ instruction: event.target.value })}
+          placeholder={`What should the agent do when a task enters ${STATUS_LABEL[status]}?`}
+          className="mt-2 min-h-24 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+        />
+      </div>
+    );
+  };
+
   return (
     <Modal open={open} onClose={onClose}>
       <ModalHeader title="Jira assistants" onClose={onClose} />
@@ -328,6 +405,12 @@ function JiraAssistantConfigModal({
               onChange={event => setDraft(prev => ({ ...prev, runKnowledgeOnCoding: event.target.checked }))}
             />
           </label>
+        </div>
+        <div>
+          <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Status workflows</div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {STATUSES.map(renderStatusWorkflow)}
+          </div>
         </div>
       </div>
       <div className="mt-4 flex justify-end gap-2">
@@ -363,6 +446,75 @@ function estimateSummary(run: StageRun): string | null {
   return parts.length ? parts.join(' · ') : null;
 }
 
+function JiraNativeFields({
+  task,
+  saving,
+  onSave,
+}: {
+  task: ProTask;
+  saving?: boolean;
+  onSave: (task: ProTask, fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] }) => void;
+}) {
+  const fields = task.jiraFields || {};
+  const [draft, setDraft] = useState({
+    reporter: fields.reporter || '',
+    assignee: fields.assignee || '',
+    status: fields.status || '',
+    dueDate: fields.dueDate || '',
+    priority: fields.priority || '',
+    labels: (fields.labels || []).join(', '),
+  });
+
+  useEffect(() => {
+    setDraft({
+      reporter: fields.reporter || '',
+      assignee: fields.assignee || '',
+      status: fields.status || '',
+      dueDate: fields.dueDate || '',
+      priority: fields.priority || '',
+      labels: (fields.labels || []).join(', '),
+    });
+  }, [task.id, fields.reporter, fields.assignee, fields.status, fields.dueDate, fields.priority, fields.labels]);
+
+  return (
+    <details className="rounded-md border border-edge bg-panel-alt px-3 py-2">
+      <summary className="cursor-pointer text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">
+        Jira native fields
+      </summary>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        <Input value={draft.reporter} onChange={event => setDraft(prev => ({ ...prev, reporter: event.target.value }))} placeholder="Reporter" />
+        <Input value={draft.assignee} onChange={event => setDraft(prev => ({ ...prev, assignee: event.target.value }))} placeholder="Assignee" />
+        <Input value={draft.status} onChange={event => setDraft(prev => ({ ...prev, status: event.target.value }))} placeholder="Jira ticket status" />
+        <Input value={draft.dueDate} onChange={event => setDraft(prev => ({ ...prev, dueDate: event.target.value }))} placeholder="Due date" />
+        <Input value={draft.priority} onChange={event => setDraft(prev => ({ ...prev, priority: event.target.value }))} placeholder="Priority" />
+        <Input value={draft.labels} onChange={event => setDraft(prev => ({ ...prev, labels: event.target.value }))} placeholder="Labels, comma separated" />
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] text-fg-5">
+          Pikiclaw status remains separate. Jira ticket status is manually synced here.
+          {fields.updatedAt ? ` Last synced ${formatTime(fields.updatedAt)}.` : ''}
+        </div>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={saving}
+          onClick={() => onSave(task, {
+            reporter: draft.reporter,
+            assignee: draft.assignee,
+            status: draft.status,
+            dueDate: draft.dueDate,
+            priority: draft.priority,
+            labels: parseModelPool(draft.labels),
+          })}
+        >
+          {saving ? <Spinner /> : null}
+          Save Jira fields
+        </Button>
+      </div>
+    </details>
+  );
+}
+
 function TaskDetail({
   task,
   verifyDraft,
@@ -378,7 +530,9 @@ function TaskDetail({
   onStatus,
   onStartStage,
   onDelete,
+  onUpdateJiraFields,
   deleting,
+  savingJiraFields,
   busyStage,
 }: {
   task: ProTask | null;
@@ -395,7 +549,9 @@ function TaskDetail({
   onStatus: (task: ProTask, status: ProTaskStatus) => void;
   onStartStage: (task: ProTask, stage: ProTaskStage) => void;
   onDelete: (task: ProTask) => void;
+  onUpdateJiraFields: (task: ProTask, fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] }) => void;
   deleting?: boolean;
+  savingJiraFields?: boolean;
   busyStage?: ProTaskStage | null;
 }) {
   if (!task) {
@@ -521,6 +677,7 @@ function TaskDetail({
             <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-fg-3">{task.description}</div>
           </section>
         )}
+        <JiraNativeFields task={task} saving={savingJiraFields} onSave={onUpdateJiraFields} />
         <section>
           <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Stage Chats</div>
           <div className="space-y-2">
@@ -663,6 +820,7 @@ export function JiraTab() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [savingJiraFieldsTaskId, setSavingJiraFieldsTaskId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -785,12 +943,35 @@ export function JiraTab() {
     }
   }, [deletingTaskId, toast]);
 
-  const startStage = useCallback(async (task: ProTask, stage: ProTaskStage, assistantId?: string): Promise<ProTask | null> => {
+  const updateTaskJiraFields = useCallback(async (
+    task: ProTask,
+    fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] },
+  ) => {
+    setSavingJiraFieldsTaskId(task.id);
+    try {
+      const result = await api.updateProTaskJiraFields(task.id, fields);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to update Jira fields');
+      upsertTask(result.task);
+      toast('Jira fields updated');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to update Jira fields', false);
+    } finally {
+      setSavingJiraFieldsTaskId(null);
+    }
+  }, [toast, upsertTask]);
+
+  const startStage = useCallback(async (
+    task: ProTask,
+    stage: ProTaskStage,
+    options: { assistantId?: string; prompt?: string; model?: string | null } = {},
+  ): Promise<ProTask | null> => {
     setBusy({ taskId: task.id, stage });
     try {
       const result = await api.startProTaskStage(task.id, stage, {
         workdir: task.workdir || state?.runtimeWorkdir,
-        assistantId: assistantId || undefined,
+        assistantId: options.assistantId || undefined,
+        prompt: options.prompt,
+        model: options.model,
       });
       if (!result.ok || !result.task) throw new Error(result.error || 'Failed to start stage chat');
       upsertTask(result.task);
@@ -822,14 +1003,19 @@ export function JiraTab() {
   const runConfiguredStageForStatus = useCallback(async (task: ProTask, status: ProTaskStatus) => {
     const stage = jiraStageForStatus(status);
     if (!stage) return task;
-    const stageAssistantId = stage === 'refinement' ? jiraConfig.refinementAssistantId : jiraConfig.codingAssistantId;
-    const stagedTask = await startStage(task, stage, stageAssistantId);
+    const workflow = jiraConfig.statusWorkflows?.[status] || {};
+    const stageAssistantId = workflow.assistantId || (stage === 'refinement' ? jiraConfig.refinementAssistantId : jiraConfig.codingAssistantId);
+    const stagedTask = await startStage(task, stage, {
+      assistantId: stageAssistantId,
+      prompt: buildStatusWorkflowPrompt(task, status, workflow.instruction),
+      model: pickRandomModel(workflow.modelPool),
+    });
     const taskAfterStage = stagedTask || task;
     const shouldRunKnowledge = stage === 'refinement'
       ? jiraConfig.runKnowledgeOnRefinement !== false
       : jiraConfig.runKnowledgeOnCoding !== false;
     if (shouldRunKnowledge && jiraConfig.knowledgeAssistantId) {
-      return await startStage(taskAfterStage, 'knowledge', jiraConfig.knowledgeAssistantId) || taskAfterStage;
+      return await startStage(taskAfterStage, 'knowledge', { assistantId: jiraConfig.knowledgeAssistantId }) || taskAfterStage;
     }
     return taskAfterStage;
   }, [jiraConfig, startStage]);
@@ -1072,7 +1258,9 @@ export function JiraTab() {
             onStatus={(task, status) => { void moveTaskToStatus(task, status); }}
             onStartStage={(task, stage) => { void startStage(task, stage); }}
             onDelete={(task) => { void deleteTask(task); }}
+            onUpdateJiraFields={(task, fields) => { void updateTaskJiraFields(task, fields); }}
             deleting={!!selectedTask && deletingTaskId === selectedTask.id}
+            savingJiraFields={!!selectedTask && savingJiraFieldsTaskId === selectedTask.id}
             busyStage={selectedTask && busy?.taskId === selectedTask.id ? busy.stage : null}
           />
         </div>

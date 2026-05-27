@@ -822,6 +822,20 @@ export const api = {
         ...opts,
       },
     ),
+  updateProTaskJiraFields: (
+    taskId: string,
+    fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] | string },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/jira-fields`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+        ...opts,
+      },
+    ),
   deleteProTask: (taskId: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
       `/api/pro/tasks/${encodeURIComponent(taskId)}`,

@@ -43,6 +43,13 @@ const tools: McpToolModule['tools'] = [
               description: { type: 'string' },
               issueType: { type: 'string' },
               type: { type: 'string' },
+              reporter: { type: 'string' },
+              assignee: { type: 'string' },
+              status: { type: 'string' },
+              ticketStatus: { type: 'string' },
+              dueDate: { type: 'string' },
+              priority: { type: 'string' },
+              labels: { type: 'array', items: { type: 'string' } },
               jiraUrl: { type: 'string' },
               url: { type: 'string' },
               sprint: { type: 'string' },
@@ -90,6 +97,24 @@ function normalizeDescription(value: unknown): string {
   }
 }
 
+function personName(value: unknown): string {
+  if (typeof value === 'string') return text(value, 240);
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return text(object.displayName || object.name || object.emailAddress || object.accountId, 240);
+  }
+  return '';
+}
+
+function namedValue(value: unknown): string {
+  if (typeof value === 'string') return text(value, 240);
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return text(object.name || object.value || object.id, 240);
+  }
+  return '';
+}
+
 function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): ToolResult {
   const issues = Array.isArray(args.issues) ? args.issues : [];
   if (!issues.length) return toolResult('Error: issues array is required', true);
@@ -124,6 +149,13 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         jiraUrl: text(issueField(issue, 'jiraUrl', 'url', 'browseUrl', 'webUrl'), 2048),
         sprint: text(issueField(issue, 'sprint', 'sprintName'), 120),
         workdir: text(issueField(issue, 'workdir'), 2048) || workdir,
+        reporter: personName(issueField(issue, 'reporter')),
+        assignee: personName(issueField(issue, 'assignee')),
+        ticketStatus: namedValue(issueField(issue, 'ticketStatus', 'status')),
+        dueDate: text(issueField(issue, 'dueDate', 'duedate'), 80),
+        priority: namedValue(issueField(issue, 'priority')),
+        labels: Array.isArray(issueField(issue, 'labels')) ? (issueField(issue, 'labels') as unknown[]).map(label => text(label, 120)).filter(Boolean) : undefined,
+        rawFields: issue.fields && typeof issue.fields === 'object' ? issue.fields as Record<string, unknown> : undefined,
       });
       const latestEvent = task.events?.[0];
       const action = latestEvent?.type === 'jira-updated'
