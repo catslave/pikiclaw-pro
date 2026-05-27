@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { api } from '../../api';
 import { BrandIcon } from '../../components/BrandIcon';
 import { Badge, Button, Dot, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { Agent, AgentRuntimeStatus, AgentStatusResponse, AppState, UsageResult, UsageWindowInfo } from '../../types';
+import type { Agent, AgentRuntimeStatus, AgentStatusResponse, AppState, ProUsageSummary, UsageResult, UsageWindowInfo } from '../../types';
 import { formatUsageSummary, usageBadgeText, usageTone } from '../../usage';
 import { cn, getAgentMeta } from '../../utils';
 
@@ -24,6 +25,17 @@ function formatTokens(value: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(Math.round(n));
+}
+
+function formatDuration(value: number | null | undefined): string {
+  const seconds = Math.max(0, Math.floor(Number(value || 0)));
+  if (!seconds) return '--';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -129,6 +141,16 @@ function MetricCard({ label, value, hint }: { label: string; value: string; hint
   );
 }
 
+function CompactMetric({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-md border border-edge bg-panel px-3 py-2.5">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">{label}</div>
+      <div className="mt-1 text-[16px] font-semibold text-fg">{value}</div>
+      {hint && <div className="mt-0.5 truncate text-[11px] text-fg-5">{hint}</div>}
+    </div>
+  );
+}
+
 function AgentUsageCard({ agent, t }: { agent: AgentRuntimeStatus; t: (key: string) => string }) {
   const meta = getAgentMeta(agent.agent);
   const usage = agent.usage;
@@ -192,6 +214,7 @@ export function UsageTab() {
 
   const [state, setState] = useState<AppState | null>(storeState);
   const [agentStatus, setAgentStatus] = useState<AgentStatusResponse | null>(storeAgentStatus);
+  const [proUsage, setProUsage] = useState<ProUsageSummary | null>(null);
   const [loading, setLoading] = useState(!storeState || !storeAgentStatus);
   const [error, setError] = useState<string | null>(null);
 
@@ -201,13 +224,15 @@ export function UsageTab() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextState, nextAgents] = await Promise.all([
+      const [nextState, nextAgents, nextProUsage] = await Promise.all([
         reload(),
         refreshAgentStatus(),
+        api.getProUsageSummary(240),
       ]);
       const current = useStore.getState();
       setState(nextState || current.state);
       setAgentStatus(nextAgents || current.agentStatus);
+      if (nextProUsage.ok) setProUsage(nextProUsage.summary);
       setError(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : t('usage.loadFailed');
@@ -249,6 +274,10 @@ export function UsageTab() {
   const warnAgents = installedAgents.filter(agent => usageTone(agent.usage) === 'warn').length;
   const unavailableAgents = installedAgents.length - okAgents - warnAgents;
   const nearestReset = windows.find(row => parseTime(row.window.resetAt) != null)?.window.resetAt || null;
+  const historical = proUsage?.totals || null;
+  const historicalTokenHint = historical
+    ? `${formatTokens(historical.inputTokens)} input / ${formatTokens(historical.outputTokens)} output`
+    : 'Saved transcript scan';
 
   return (
     <div className="animate-in space-y-4">
@@ -279,29 +308,143 @@ export function UsageTab() {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           label={t('usage.totalTokens')}
-          value={formatTokens(totalTokens)}
-          hint={`${formatTokens(inputTokens)} ${t('usage.inputTokens')} / ${formatTokens(outputTokens)} ${t('usage.outputTokens')}`}
+          value={formatTokens((historical?.totalTokens || 0) || totalTokens)}
+          hint={historical ? historicalTokenHint : `${formatTokens(inputTokens)} ${t('usage.inputTokens')} / ${formatTokens(outputTokens)} ${t('usage.outputTokens')}`}
+        />
+        <MetricCard
+          label="Chats"
+          value={formatTokens(historical?.chatCount || 0)}
+          hint={historical ? `${historical.sessionCount} sessions / ${historical.sideChatCount} side chats` : 'Historical chat scan'}
         />
         <MetricCard
           label={t('usage.totalTurns')}
-          value={formatTokens(runtimeStats?.totalTurns || 0)}
-          hint={state?.bot ? t('usage.currentProcess') : t('usage.runtimeOffline')}
+          value={formatTokens((historical?.turnCount || 0) || runtimeStats?.totalTurns || 0)}
+          hint={historical ? `Across ${proUsage?.scanned.chatCount || 0} scanned chats` : state?.bot ? t('usage.currentProcess') : t('usage.runtimeOffline')}
         />
         <MetricCard
-          label={t('usage.cacheRead')}
-          value={formatTokens(cachedTokens)}
-          hint={cachedTokens ? t('usage.cacheHint') : t('usage.cacheEmpty')}
-        />
-        <MetricCard
-          label={t('usage.agentWindows')}
-          value={`${okAgents}/${installedAgents.length}`}
-          hint={warnAgents || unavailableAgents
-            ? `${warnAgents} ${t('usage.warning')} · ${unavailableAgents} ${t('usage.unavailable')}`
-            : nearestReset
-              ? `${t('usage.nextReset')}: ${formatRelativeReset(nearestReset, t)}`
-              : t('usage.noResetData')}
+          label="Time"
+          value={formatDuration(historical?.activeSeconds)}
+          hint={historical ? `${formatDuration(historical.lifetimeSeconds)} total lifetime` : 'Best-effort from message timestamps'}
         />
       </div>
+
+      {proUsage && (
+        <section className="space-y-3 rounded-md border border-edge bg-panel p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-[13px] font-semibold text-fg-2">Historical Usage</h3>
+              <div className="mt-0.5 text-[11px] text-fg-5">
+                {proUsage.scanned.workspaceCount} workspaces · {proUsage.scanned.chatCount}/{proUsage.scanned.limit} chats scanned · {formatDateTime(proUsage.generatedAt)}
+              </div>
+            </div>
+            {proUsage.scanned.truncated && <Badge variant="warn">Limited scan</Badge>}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <CompactMetric label="Cache Read" value={formatTokens(proUsage.totals.cachedInputTokens || cachedTokens)} />
+            <CompactMetric label="Avg Active / Chat" value={formatDuration(proUsage.totals.chatCount ? proUsage.totals.activeSeconds / proUsage.totals.chatCount : 0)} />
+            <CompactMetric label="Task Cycle Avg" value={formatDuration(proUsage.taskTimings.averageRefinementToResolvedSeconds)} hint={`${proUsage.taskTimings.resolvedCount}/${proUsage.taskTimings.count} resolved`} />
+            <CompactMetric label="Agent Count" value={String(proUsage.byAgent.length)} hint="With saved sessions" />
+          </div>
+
+          <div className="grid gap-3 xl:grid-cols-2">
+            <div className="rounded-md border border-edge bg-panel-alt p-3">
+              <div className="mb-2 text-[12px] font-semibold text-fg-3">By Agent</div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[520px] text-[12px]">
+                  <thead>
+                    <tr className="border-b border-edge text-left text-[11px] uppercase tracking-[0.14em] text-fg-5">
+                      <th className="py-2 pr-3">Agent</th>
+                      <th className="py-2 pr-3">Chats</th>
+                      <th className="py-2 pr-3">Turns</th>
+                      <th className="py-2 pr-3">Tokens</th>
+                      <th className="py-2 pr-3">Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {proUsage.byAgent.map(row => (
+                      <tr key={row.agent} className="border-b border-edge/60 last:border-0">
+                        <td className="py-2 pr-3">
+                          <span className="inline-flex items-center gap-2">
+                            <BrandIcon brand={row.agent} size={14} />
+                            <span className="font-medium text-fg-2">{getAgentMeta(row.agent as Agent).label}</span>
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 font-mono text-fg-3">{row.chatCount}</td>
+                        <td className="py-2 pr-3 font-mono text-fg-3">{row.turnCount}</td>
+                        <td className="py-2 pr-3 font-mono text-fg-3">{formatTokens(row.totalTokens)}</td>
+                        <td className="py-2 pr-3 text-fg-4">{formatDuration(row.activeSeconds)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-edge bg-panel-alt p-3">
+              <div className="mb-2 text-[12px] font-semibold text-fg-3">Daily</div>
+              <div className="space-y-1.5">
+                {proUsage.byDay.slice(0, 10).map(day => (
+                  <div key={day.day} className="grid grid-cols-[92px_minmax(0,1fr)_80px] items-center gap-2 text-[12px]">
+                    <span className="font-mono text-fg-4">{day.day.slice(5)}</span>
+                    <div className="h-2 overflow-hidden rounded-sm bg-inset">
+                      <div
+                        className="h-full rounded-sm bg-primary"
+                        style={{ width: `${Math.min(100, proUsage.totals.totalTokens ? (day.totalTokens / proUsage.totals.totalTokens) * 100 : day.turnCount * 4)}%` }}
+                      />
+                    </div>
+                    <span className="text-right font-mono text-fg-3">{formatTokens(day.totalTokens)} · {day.turnCount}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 xl:grid-cols-2">
+            <div className="rounded-md border border-edge bg-panel-alt p-3">
+              <div className="mb-2 text-[12px] font-semibold text-fg-3">Top Chats</div>
+              <div className="space-y-1.5">
+                {proUsage.topChats.slice(0, 8).map(chat => (
+                  <div key={`${chat.agent}-${chat.sessionId}`} className="rounded-md border border-edge bg-panel px-2.5 py-2">
+                    <div className="flex items-center gap-2">
+                      <BrandIcon brand={chat.agent} size={13} />
+                      <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-2">{chat.title}</div>
+                      {chat.isSideChat && <Badge variant="muted">side</Badge>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-fg-5">
+                      <span>{formatTokens(chat.totalTokens)} tokens</span>
+                      <span>{chat.turnCount} turns</span>
+                      <span>{formatDuration(chat.activeSeconds)} active</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-edge bg-panel-alt p-3">
+              <div className="mb-2 text-[12px] font-semibold text-fg-3">Task Time</div>
+              <div className="space-y-1.5">
+                {proUsage.taskTimings.tasks.slice(0, 8).map(task => (
+                  <div key={task.taskId} className="rounded-md border border-edge bg-panel px-2.5 py-2">
+                    <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-2">{task.title}</div>
+                      <Badge variant={task.refinementToResolvedSeconds == null ? 'muted' : 'accent'}>{task.status}</Badge>
+                    </div>
+                    <div className="mt-1 text-[11px] text-fg-5">
+                      {task.jiraKey ? `${task.jiraKey} · ` : ''}refinement → resolved: {formatDuration(task.refinementToResolvedSeconds)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {!!proUsage.notes.length && (
+            <div className="rounded-md border border-edge bg-inset px-3 py-2 text-[11px] text-fg-5">
+              {proUsage.notes.join(' ')}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">

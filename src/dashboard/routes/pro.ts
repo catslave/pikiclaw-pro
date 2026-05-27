@@ -27,6 +27,7 @@ import {
   type VerificationResult,
 } from '../../pro/tasks.js';
 import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems } from '../../pro/todos.js';
+import { buildProUsageSummary } from '../../pro/usage-summary.js';
 import {
   createAgentAssistant,
   createAutomationRule,
@@ -57,6 +58,14 @@ function parseSessionKey(sessionKey: string | null | undefined): { agent: string
 
 app.get('/api/pro/tasks', (c) => {
   return c.json({ ok: true, tasks: listProTasks() });
+});
+
+app.get('/api/pro/usage-summary', async (c) => {
+  try {
+    return c.json({ ok: true, summary: await buildProUsageSummary(c.req.query('limit')) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
 });
 
 app.get('/api/pro/todos', (c) => {

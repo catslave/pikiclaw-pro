@@ -24,6 +24,7 @@ import type {
   McpServerConfig,
   PermissionRequestResult,
   PlatformSkillInfo,
+  ProUsageSummary,
   ProTask,
   ProTaskKind,
   ProTaskStage,
@@ -672,6 +673,11 @@ export const api = {
     ),
   getProAssistants: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; assistants: AgentAssistant[]; error?: string }>('/api/pro/assistants', opts),
+  getProUsageSummary: (limit = 240, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; summary: ProUsageSummary; error?: string }>(
+      `/api/pro/usage-summary?limit=${encodeURIComponent(String(limit))}`,
+      { timeoutMs: 90_000, ...opts },
+    ),
   getJiraWorkflowConfig: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; config: JiraWorkflowConfig; error?: string }>('/api/pro/jira/config', opts),
   updateJiraWorkflowConfig: (config: JiraWorkflowConfig, opts?: ApiRequestOptions) =>

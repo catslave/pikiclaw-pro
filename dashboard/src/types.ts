@@ -33,6 +33,78 @@ export interface UsageResult {
   error: string | null;
 }
 
+export interface ProUsageAgentSummary {
+  agent: string;
+  chatCount: number;
+  sessionCount: number;
+  sideChatCount: number;
+  turnCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  activeSeconds: number;
+  lifetimeSeconds: number;
+}
+
+export interface ProUsageDaySummary {
+  day: string;
+  chatCount: number;
+  turnCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+}
+
+export interface ProUsageChatSummary {
+  sessionId: string;
+  agent: string;
+  workdir: string;
+  title: string;
+  isSideChat: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+  turnCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  activeSeconds: number;
+  lifetimeSeconds: number;
+}
+
+export interface ProUsageTaskTimingSummary {
+  taskId: string;
+  title: string;
+  jiraKey?: string;
+  status: string;
+  refinementStartedAt: string | null;
+  resolvedAt: string | null;
+  refinementToResolvedSeconds: number | null;
+}
+
+export interface ProUsageSummary {
+  generatedAt: string;
+  scanned: {
+    workspaceCount: number;
+    chatCount: number;
+    limit: number;
+    truncated: boolean;
+  };
+  totals: ProUsageAgentSummary;
+  byAgent: ProUsageAgentSummary[];
+  byDay: ProUsageDaySummary[];
+  topChats: ProUsageChatSummary[];
+  taskTimings: {
+    count: number;
+    resolvedCount: number;
+    averageRefinementToResolvedSeconds: number | null;
+    tasks: ProUsageTaskTimingSummary[];
+  };
+  notes: string[];
+}
+
 /**
  * Read-only snapshot of an agent's *external* configuration (e.g. Hermes'
  * ~/.hermes/config.yaml). Pikiclaw never writes to the source — this is
