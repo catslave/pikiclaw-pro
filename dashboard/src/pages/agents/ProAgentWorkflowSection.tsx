@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
+import { BrandIcon } from '../../components/BrandIcon';
 import { Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { useStore } from '../../store';
 import type { AgentAssistant, AutomationRule } from '../../types';
@@ -59,6 +60,15 @@ function scheduleLabel(draft: typeof defaultJobDraft) {
   return draft.scheduleType === 'custom' ? draft.customSchedule.trim() : draft.scheduleType;
 }
 
+function AgentChip({ agent, label }: { agent: string; label?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[11px] text-fg-5">
+      <BrandIcon brand={agent} size={14} className="rounded-[3px]" />
+      <span>{label || agent}</span>
+    </span>
+  );
+}
+
 export function ProAssistantsSection() {
   const toast = useStore(s => s.toast);
   const agentStatus = useStore(s => s.agentStatus);
@@ -75,6 +85,11 @@ export function ProAssistantsSection() {
       .filter(agent => agent.installed !== false)
       .map(agent => ({ value: agent.agent, label: agent.label || agent.agent }));
   }, [agentStatus]);
+  const agentLabelByValue = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const agent of agentOptions) map.set(agent.value, agent.label);
+    return map;
+  }, [agentOptions]);
 
   const refresh = useCallback(async () => {
     const res = await api.getProAssistants();
@@ -189,9 +204,11 @@ export function ProAssistantsSection() {
                 </div>
               </button>
               <div className="mt-3 flex flex-wrap gap-1.5">
-                {(item.preferredAgents.length ? item.preferredAgents : ['runtime default']).map(agent => (
-                  <span key={agent} className="rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[11px] text-fg-5">{agent}</span>
-                ))}
+                {item.preferredAgents.length
+                  ? item.preferredAgents.map(agent => (
+                      <AgentChip key={agent} agent={agent} label={agentLabelByValue.get(agent)} />
+                    ))
+                  : <span className="rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[11px] text-fg-5">runtime default</span>}
               </div>
             </div>
           ))}
@@ -212,14 +229,15 @@ export function ProAssistantsSection() {
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agents</div>
             <div className="flex flex-wrap gap-2">
               {agentOptions.map(agent => (
-                <label key={agent.value} className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-edge bg-control px-2 py-1 text-[12px] text-fg-3 transition hover:bg-control-h">
+                <label key={agent.value} className="inline-flex cursor-pointer items-center gap-2 rounded border border-edge bg-control px-2 py-1 text-[12px] text-fg-3 transition hover:bg-control-h">
                   <input
                     type="checkbox"
                     checked={draft.preferredAgents.includes(agent.value)}
                     onChange={() => toggleDraftAgent(agent.value)}
                     className="h-3.5 w-3.5"
                   />
-                  {agent.label}
+                  <BrandIcon brand={agent.value} size={16} className="rounded-[4px]" />
+                  <span>{agent.label}</span>
                 </label>
               ))}
             </div>
