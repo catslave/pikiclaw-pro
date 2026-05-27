@@ -1,6 +1,6 @@
 import { Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useCallback, useRef, memo, useMemo, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
@@ -25,7 +25,7 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
 import type { AppState, SessionInfo, WorkspaceEntry, DirEntry, GitChange, OpenTarget } from '../../types';
 import { InputComposer } from './InputComposer';
-import { UserBubble, type SelectionSideChatRequest } from './TurnView';
+import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 import type { FileLinkTarget, OpenFileLinkHandler } from './markdown';
@@ -908,6 +908,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   active = true,
   mode = 'workspace',
   settingsContent = null,
+  dashboardJiraContent = null,
   version = '...',
   restartPhase = null,
   onRestartClick,
@@ -915,6 +916,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   active?: boolean;
   mode?: SessionWorkspaceMode;
   settingsContent?: ReactNode;
+  dashboardJiraContent?: ReactNode;
   version?: string;
   restartPhase?: RestartPhase;
   onRestartClick?: () => void;
@@ -929,6 +931,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? null);
   const toastSession = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const dashboardView = mode === 'dashboard' && searchParams.get('view') === 'jira' ? 'jira' : 'workspace';
+  const setDashboardView = useCallback((next: 'workspace' | 'jira') => {
+    const params = new URLSearchParams(searchParams);
+    if (next === 'jira') params.set('view', 'jira');
+    else params.delete('view');
+    setSearchParams(params, { replace: true });
+  }, [searchParams, setSearchParams]);
   const appStatus = resolveAppStatusBadge(appState, t);
   const themeToggleLabel = theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode');
 
@@ -1106,7 +1116,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const workspaceSettingsItems = useMemo(() => [
     { to: '/', label: t('tab.sessions') },
     { to: '/dashboard', label: t('tab.dashboard') },
-    { to: '/jira', label: t('tab.jira') },
     { to: '/usage', label: t('tab.usage') },
     { to: '/im', label: t('tab.im') },
     { to: '/agents', label: t('tab.agent') },
@@ -1128,6 +1137,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [dashboardPendingImageUrls, setDashboardPendingImageUrls] = useState<string[]>([]);
   const [dashboardPendingCreatedAt, setDashboardPendingCreatedAt] = useState<string | null>(null);
   const [createTaskPickerOpen, setCreateTaskPickerOpen] = useState(false);
+  const [quickTodoOpen, setQuickTodoOpen] = useState(false);
+  const [quickTodoText, setQuickTodoText] = useState('');
+  const [quickTodoSaving, setQuickTodoSaving] = useState(false);
   const [createTaskWorkdir, setCreateTaskWorkdir] = useState('');
   const deferredSearch = useDeferredValue(search);
   const initializedRef = useRef(false);
@@ -2261,6 +2273,68 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, [createAndOpenSideChat, loadSessionsForWorkspace, locale, t, toastSession]);
 
+  const handleCreateTodoFromSelection = useCallback(async (slot: SessionSlot, request: SelectionActionRequest) => {
+    if (!request.quote.trim() || !request.note.trim()) return;
+    const result = await api.createProTodo({
+      kind: 'todo',
+      title: request.note,
+      body: request.note,
+      source: {
+        type: 'chat-selection',
+        workdir: slot.workdir,
+        agent: slot.agent,
+        sessionId: slot.sessionId,
+        turnIndex: request.turnIndex,
+        quote: request.quote,
+      },
+    });
+    if (!result.ok) throw new Error(result.error || t('session.todoSaveFailed'));
+    toastSession(t('session.todoSaved'));
+  }, [t, toastSession]);
+
+  const handleCreateReviewCommentFromSelection = useCallback(async (slot: SessionSlot, request: SelectionActionRequest) => {
+    if (!request.quote.trim() || !request.note.trim()) return;
+    const result = await api.createProReviewComment({
+      title: request.note,
+      body: request.note,
+      source: {
+        type: 'review-comment',
+        workdir: slot.workdir,
+        agent: slot.agent,
+        sessionId: slot.sessionId,
+        turnIndex: request.turnIndex,
+        quote: request.quote,
+      },
+    });
+    if (!result.ok) throw new Error(result.error || t('session.commentSaveFailed'));
+    toastSession(t('session.commentSaved'));
+  }, [t, toastSession]);
+
+  const handleSaveQuickTodo = useCallback(async () => {
+    const body = quickTodoText.trim();
+    if (!body || quickTodoSaving) return;
+    setQuickTodoSaving(true);
+    try {
+      const result = await api.createProTodo({
+        kind: 'todo',
+        title: body,
+        body,
+        source: {
+          type: 'quick-capture',
+          workdir: runtimeWorkdir,
+        },
+      });
+      if (!result.ok) throw new Error(result.error || t('session.todoSaveFailed'));
+      setQuickTodoText('');
+      setQuickTodoOpen(false);
+      toastSession(t('session.todoSaved'));
+    } catch (e: any) {
+      toastSession(e?.message || t('session.todoSaveFailed'));
+    } finally {
+      setQuickTodoSaving(false);
+    }
+  }, [quickTodoSaving, quickTodoText, runtimeWorkdir, t, toastSession]);
+
   const handleDeleteSideChat = useCallback(async (parentSlot: SessionSlot, sideSlot: SessionSlot) => {
     if (!sideSlot.agent || !sideSlot.sessionId) return;
     const parentKey = sessionSlotStorageKey(parentSlot);
@@ -3022,6 +3096,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             <Button
               variant="ghost"
               size="icon"
+              onClick={() => setQuickTodoOpen(true)}
+              title={t('todo.quickAdd')}
+              aria-label={t('todo.quickAdd')}
+              className="h-8 w-8 shrink-0"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={() => setShowAddDialog(v => !v)}
               title={t('hub.addWorkspace')}
               aria-label={t('hub.addWorkspace')}
@@ -3110,6 +3197,39 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               ))}
             </div>
           ), document.body)}
+          {quickTodoOpen && createPortal((
+            <div
+              className="fixed inset-0 z-[230] flex items-start justify-center bg-black/20 px-4 pt-24 backdrop-blur-[2px]"
+              onMouseDown={() => setQuickTodoOpen(false)}
+            >
+              <div
+                className="w-full max-w-[420px] rounded-xl border border-edge-h bg-panel p-3 shadow-xl"
+                onMouseDown={event => event.stopPropagation()}
+              >
+                <div className="mb-2 text-[13px] font-semibold text-fg">{t('todo.quickAdd')}</div>
+                <textarea
+                  autoFocus
+                  value={quickTodoText}
+                  onChange={event => setQuickTodoText(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      void handleSaveQuickTodo();
+                    }
+                  }}
+                  placeholder={t('todo.quickAddPlaceholder')}
+                  className="min-h-24 w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
+                />
+                <div className="mt-2 flex justify-end gap-2">
+                  <Button variant="ghost" onClick={() => setQuickTodoOpen(false)}>{t('common.cancel')}</Button>
+                  <Button variant="primary" disabled={!quickTodoText.trim() || quickTodoSaving} onClick={handleSaveQuickTodo}>
+                    {quickTodoSaving ? <Spinner /> : null}
+                    {t('common.save')}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ), document.body)}
           <WorkspaceSidebarRuntimeControls
             appStatus={appStatus}
             restartPhase={restartPhase}
@@ -3139,46 +3259,75 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       >
         {mode === 'dashboard' ? (
           <>
-            <WorkspaceTaskDashboard
-              workspaces={workspaces}
-              scope={dashboardScope}
-              onScopeChange={setDashboardScope}
-              items={dashboardItems}
-              counts={dashboardCounts}
-              loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
-              onCreateTask={handleDashboardCreateTask}
-              onOpenSession={handleOpenDashboardSession}
-              onMarkDone={handleMarkDashboardDone}
-              t={t}
-            />
-            {dashboardCreateTaskWorkdir && (
-              <DashboardCreateTaskModal
-                workdir={dashboardCreateTaskWorkdir}
-                workspaceName={workspaces.find(ws => ws.path === dashboardCreateTaskWorkdir)?.name || workspaceBaseName(dashboardCreateTaskWorkdir)}
-                onClose={() => setDashboardCreateTaskWorkdir(null)}
-                onSessionCreated={handleDashboardNewSessionCreated}
-                t={t}
-              />
-            )}
-            {dashboardFocusedSlot && dashboardFocusedInfo && (
-              <DashboardSessionFocusModal
-                slot={dashboardFocusedSlot}
-                session={dashboardFocusedInfo}
-                workspaceName={workspaces.find(ws => ws.path === dashboardFocusedSlot.workdir)?.name || workspaceBaseName(dashboardFocusedSlot.workdir)}
-                active={active}
-                onClose={closeDashboardFocus}
-                onSessionChange={handleDashboardFocusedSessionChange}
-                onOpenFileLink={(target) => handleDashboardFocusFileLink(dashboardFocusedSlot.workdir, target)}
-                initialPendingPrompt={dashboardPendingPrompt}
-                initialPendingImageUrls={dashboardPendingImageUrls}
-                initialPendingCreatedAt={dashboardPendingCreatedAt}
-                onPendingPromptConsumed={() => {
-                  setDashboardPendingPrompt(null);
-                  setDashboardPendingImageUrls([]);
-                  setDashboardPendingCreatedAt(null);
-                }}
-                t={t}
-              />
+            <div className="mb-3 flex shrink-0 items-center justify-between gap-2 rounded-xl border border-edge/70 bg-panel/80 px-3 py-2 shadow-sm">
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold text-fg">{t('tab.dashboard')}</div>
+                <div className="mt-0.5 text-[11px] text-fg-5">{t('dashboard.viewSwitchHint')}</div>
+              </div>
+              <div className="inline-flex shrink-0 rounded-lg border border-edge bg-panel-alt p-0.5">
+                {(['workspace', 'jira'] as const).map(view => (
+                  <button
+                    key={view}
+                    type="button"
+                    onClick={() => setDashboardView(view)}
+                    className={cn(
+                      'h-7 rounded-md px-3 text-[12px] font-semibold transition',
+                      dashboardView === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
+                    )}
+                  >
+                    {view === 'workspace' ? t('dashboard.viewWorkspace') : t('dashboard.viewJira')}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {dashboardView === 'jira' ? (
+              <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge/70 bg-panel/80 p-3 shadow-[var(--th-card-shadow)]">
+                {dashboardJiraContent}
+              </div>
+            ) : (
+              <>
+                <WorkspaceTaskDashboard
+                  workspaces={workspaces}
+                  scope={dashboardScope}
+                  onScopeChange={setDashboardScope}
+                  items={dashboardItems}
+                  counts={dashboardCounts}
+                  loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
+                  onCreateTask={handleDashboardCreateTask}
+                  onOpenSession={handleOpenDashboardSession}
+                  onMarkDone={handleMarkDashboardDone}
+                  t={t}
+                />
+                {dashboardCreateTaskWorkdir && (
+                  <DashboardCreateTaskModal
+                    workdir={dashboardCreateTaskWorkdir}
+                    workspaceName={workspaces.find(ws => ws.path === dashboardCreateTaskWorkdir)?.name || workspaceBaseName(dashboardCreateTaskWorkdir)}
+                    onClose={() => setDashboardCreateTaskWorkdir(null)}
+                    onSessionCreated={handleDashboardNewSessionCreated}
+                    t={t}
+                  />
+                )}
+                {dashboardFocusedSlot && dashboardFocusedInfo && (
+                  <DashboardSessionFocusModal
+                    slot={dashboardFocusedSlot}
+                    session={dashboardFocusedInfo}
+                    workspaceName={workspaces.find(ws => ws.path === dashboardFocusedSlot.workdir)?.name || workspaceBaseName(dashboardFocusedSlot.workdir)}
+                    active={active}
+                    onClose={closeDashboardFocus}
+                    onSessionChange={handleDashboardFocusedSessionChange}
+                    onOpenFileLink={(target) => handleDashboardFocusFileLink(dashboardFocusedSlot.workdir, target)}
+                    initialPendingPrompt={dashboardPendingPrompt}
+                    initialPendingImageUrls={dashboardPendingImageUrls}
+                    initialPendingCreatedAt={dashboardPendingCreatedAt}
+                    onPendingPromptConsumed={() => {
+                      setDashboardPendingPrompt(null);
+                      setDashboardPendingImageUrls([]);
+                      setDashboardPendingCreatedAt(null);
+                    }}
+                    t={t}
+                  />
+                )}
+              </>
             )}
           </>
         ) : mode === 'settings' ? (
@@ -3603,6 +3752,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                             onSessionChange={(next) => handlePanelSessionChange(next, slotIdx)}
                             onOpenFileLink={(target) => handleOpenFileLink(slotIdx, slot.workdir, target)}
                             onCreateSideChatFromSelection={(request) => handleCreateSideChatFromSelection(slotIdx, slot, info, request)}
+                            onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(slot, request)}
+                            onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(slot, request)}
                             initialPendingPrompt={isActive ? newSessionPendingPrompt : null}
                             initialPendingImageUrls={isActive ? newSessionPendingImageUrls : undefined}
                             initialPendingCreatedAt={isActive ? newSessionPendingCreatedAt : null}
@@ -3715,6 +3866,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                                     active={active && isActive}
                                     onSessionChange={(next) => handleSideChatSessionChange(slot, activeSideSlot, next)}
                                     onOpenFileLink={(target) => handleOpenFileLink(slotIdx, activeSideSlot.workdir, target)}
+                                    onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(activeSideSlot, request)}
+                                    onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(activeSideSlot, request)}
                                   />
                                 </Suspense>
                               );

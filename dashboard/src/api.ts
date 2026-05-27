@@ -24,6 +24,9 @@ import type {
   ProTaskKind,
   ProTaskStage,
   ProTaskStatus,
+  TodoItem,
+  TodoItemKind,
+  TodoItemSource,
   VerificationResult,
   SkillCatalogItem,
   RemoteSkillInfo,
@@ -627,6 +630,27 @@ export const api = {
   // Pikiclaw Pro task workflow
   getProTasks: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; tasks: ProTask[]; error?: string }>('/api/pro/tasks', opts),
+  getProTodos: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; items: TodoItem[]; error?: string }>('/api/pro/todos', opts),
+  createProTodo: (
+    item: {
+      kind?: TodoItemKind;
+      title?: string;
+      body?: string;
+      source?: TodoItemSource;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; item?: TodoItem; error?: string }>('/api/pro/todos', item, opts),
+  createProReviewComment: (
+    item: {
+      title?: string;
+      body?: string;
+      source?: TodoItemSource;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; item?: TodoItem; error?: string }>('/api/pro/review-comments', item, opts),
   createProTask: (
     task: {
       title: string;

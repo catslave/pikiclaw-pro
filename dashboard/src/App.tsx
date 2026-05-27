@@ -44,7 +44,7 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/dashboard': 'dashboard',
-    '/jira': 'jira',
+    '/jira': 'dashboard',
     '/usage': 'usage',
     '/archive': 'system',
     '/im': 'im',
@@ -61,7 +61,8 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/') return '/';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
-  if (['/dashboard', '/jira', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
+  if (pathname === '/jira') return '/dashboard';
+  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -138,6 +139,10 @@ export function App() {
   }, [sessionShellActive]);
 
   useEffect(() => {
+    if (location.pathname === '/jira') {
+      navigate('/dashboard?view=jira', { replace: true });
+      return;
+    }
     const normalized = normalizeDashboardPath(location.pathname);
     if (!normalized) return;
     if (normalized === '/') {
@@ -246,11 +251,7 @@ export function App() {
             <UsageTab />
           </PageWrapper>
         } />
-        <Route path="/jira" element={
-          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-            <JiraTab />
-          </PageWrapper>
-        } />
+        <Route path="/jira" element={<Navigate to="/dashboard?view=jira" replace />} />
         <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
         <Route path="/permissions" element={<Navigate to="/system" replace />} />
         <Route path="/extensions" element={
@@ -291,6 +292,7 @@ export function App() {
                   active={sessionShellActive}
                   mode={sessionWorkspaceMode}
                   settingsContent={settingsContent}
+                  dashboardJiraContent={<JiraTab />}
                   version={version}
                   restartPhase={restartPhase}
                   onRestartClick={onRestartClick}

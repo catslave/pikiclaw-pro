@@ -11,9 +11,10 @@ import { AssistantMsg, hasRenderableAssistant } from './AssistantContent';
 import type { MessageBlock, RichMessage, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
-export type SelectionSideChatRequest = { quote: string; question: string };
+export type SelectionActionRequest = { quote: string; note: string; turnIndex?: number };
+export type SelectionSideChatRequest = SelectionActionRequest & { question: string };
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, workdir, retryProminent }: {
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
    *  agent is currently bound to a Profile. Saved turns lack this in their
@@ -27,6 +28,8 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   onFork?: (atTurn: number) => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
+  onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   workdir?: string;
   retryProminent?: boolean;
 }) {
@@ -58,7 +61,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
           <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={previewMeta ?? turn.assistant?.usage ?? null} />
           {showLiveAssistant
             ? <div className="mb-6">{liveAssistant}</div>
-            : <AssistantMessageFrame message={turn.assistant!} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} workdir={workdir} />}
+            : <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} />}
         </>
       )}
     </div>
@@ -204,19 +207,25 @@ function dedupeImageBlocks(blocks: MessageBlock[]): MessageBlock[] {
 
 function AssistantMessageFrame({
   message,
+  turnIndex,
   t,
   startedAt,
   onFork,
   onOpenFileLink,
   onCreateSideChatFromSelection,
+  onCreateTodoFromSelection,
+  onCreateReviewCommentFromSelection,
   workdir,
 }: {
   message: RichMessage;
+  turnIndex?: number;
   t: (k: string) => string;
   startedAt?: string | null;
   onFork?: () => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
+  onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   workdir?: string;
 }) {
   const [showActions, setShowActions] = useState(false);
@@ -226,9 +235,8 @@ function AssistantMessageFrame({
     quote: string;
     rect: { left: number; top: number; width: number; height: number };
     highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
-    asking: boolean;
-    question: string;
-    creating: boolean;
+    note: string;
+    creating: null | 'comment' | 'side-chat' | 'todo';
   } | null>(null);
   const copyText = stripOaiMemoryCitations(message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n'));
 
@@ -265,7 +273,7 @@ function AssistantMessageFrame({
   }, [selectionDraft]);
 
   const handleSelectionEnd = () => {
-    if (!onCreateSideChatFromSelection || !frameRef.current) return;
+    if (!frameRef.current || (!onCreateSideChatFromSelection && !onCreateTodoFromSelection && !onCreateReviewCommentFromSelection)) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
     const rawQuote = selection.toString().replace(/\s+\n/g, '\n').trim();
@@ -287,9 +295,8 @@ function AssistantMessageFrame({
       quote: rawQuote.slice(0, 8000),
       rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
       highlightRects,
-      asking: false,
-      question: '',
-      creating: false,
+      note: '',
+      creating: null,
     });
   };
 
@@ -301,17 +308,27 @@ function AssistantMessageFrame({
     setSelectionDraft(null);
   };
 
-  const submitSelectionSideChat = async () => {
-    if (!selectionDraft || !onCreateSideChatFromSelection || selectionDraft.creating) return;
-    const question = selectionDraft.question.trim();
-    if (!question) return;
-    setSelectionDraft(current => current ? { ...current, creating: true } : current);
+  const submitSelectionAction = async (action: 'comment' | 'side-chat' | 'todo') => {
+    if (!selectionDraft || selectionDraft.creating) return;
+    const note = selectionDraft.note.trim();
+    if (!note) return;
+    const request = { quote: selectionDraft.quote, note, turnIndex };
+    setSelectionDraft(current => current ? { ...current, creating: action } : current);
     try {
-      await onCreateSideChatFromSelection({ quote: selectionDraft.quote, question });
+      if (action === 'side-chat') {
+        if (!onCreateSideChatFromSelection) return;
+        await onCreateSideChatFromSelection({ ...request, question: note });
+      } else if (action === 'todo') {
+        if (!onCreateTodoFromSelection) return;
+        await onCreateTodoFromSelection(request);
+      } else {
+        if (!onCreateReviewCommentFromSelection) return;
+        await onCreateReviewCommentFromSelection(request);
+      }
       window.getSelection()?.removeAllRanges();
       setSelectionDraft(null);
     } catch {
-      setSelectionDraft(current => current ? { ...current, creating: false } : current);
+      setSelectionDraft(current => current ? { ...current, creating: null } : current);
     }
   };
 
@@ -336,7 +353,7 @@ function AssistantMessageFrame({
         onCopy={handleCopy}
         onFork={onFork}
       />
-      {selectionDraft && onCreateSideChatFromSelection && createPortal(
+      {selectionDraft && createPortal(
         <>
           {selectionDraft.highlightRects.map((rect, index) => (
             <span
@@ -356,57 +373,57 @@ function AssistantMessageFrame({
             className="fixed z-[10000]"
             style={{
               left: Math.min(
-                window.innerWidth - (selectionDraft.asking ? 360 : 112),
-                Math.max(12, selectionDraft.rect.left - (selectionDraft.asking ? 348 : 40)),
+                window.innerWidth - 380,
+                Math.max(12, selectionDraft.rect.left - 190 + (selectionDraft.rect.width / 2)),
               ),
-              top: Math.min(window.innerHeight - (selectionDraft.asking ? 96 : 36), Math.max(12, selectionDraft.rect.top - 6)),
+              top: Math.min(window.innerHeight - 148, Math.max(12, selectionDraft.rect.top + selectionDraft.rect.height + 8)),
             }}
             onClick={event => event.stopPropagation()}
           >
-            {!selectionDraft.asking ? (
-              <button
-                type="button"
-                title={t('session.sideChat')}
-                aria-label={t('session.sideChat')}
-                onMouseDown={event => event.preventDefault()}
-                onClick={() => setSelectionDraft(current => current ? { ...current, asking: true } : current)}
-                className="group/selection-side-chat inline-flex h-8 max-w-8 items-center justify-start gap-1.5 overflow-hidden rounded-full border border-edge-h bg-panel px-[9px] text-fg-3 shadow-lg transition-all hover:max-w-[112px] hover:bg-panel-h hover:px-3 hover:text-fg focus-visible:max-w-[112px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
-              >
-                <span className="shrink-0 text-[18px] leading-none">+</span>
-                <span className="whitespace-nowrap text-[11px] font-semibold opacity-0 transition-opacity group-hover/selection-side-chat:opacity-100 group-focus-visible/selection-side-chat:opacity-100">
-                  {t('session.sideChat')}
-                </span>
-              </button>
-            ) : (
-              <div className="w-[340px] rounded-xl border border-edge-h bg-panel p-2 shadow-xl">
-                <div className="mb-2 max-h-[42px] overflow-hidden rounded-lg bg-panel-alt px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">
-                  {selectionDraft.quote}
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    autoFocus
-                    value={selectionDraft.question}
-                    onChange={event => setSelectionDraft(current => current ? { ...current, question: event.target.value } : current)}
-                    onKeyDown={event => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        void submitSelectionSideChat();
-                      }
-                    }}
-                    placeholder={t('session.sideChatSelectionPlaceholder')}
-                    className="h-8 min-w-0 flex-1 rounded-lg border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={!selectionDraft.question.trim() || selectionDraft.creating}
-                    onClick={() => void submitSelectionSideChat()}
-                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge-h bg-panel-h px-3 text-[12px] font-semibold text-fg transition hover:bg-control disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {selectionDraft.creating ? t('session.creatingSideChat') : t('session.createSideChat')}
-                  </button>
-                </div>
+            <div className="w-[360px] rounded-xl border border-edge-h bg-panel p-2 shadow-xl">
+              <div className="mb-2 max-h-[42px] overflow-hidden rounded-lg bg-panel-alt px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">
+                {selectionDraft.quote}
               </div>
-            )}
+              <input
+                autoFocus
+                value={selectionDraft.note}
+                onChange={event => setSelectionDraft(current => current ? { ...current, note: event.target.value } : current)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void submitSelectionAction('side-chat');
+                  }
+                }}
+                placeholder={t('session.selectionActionPlaceholder')}
+                className="h-8 w-full rounded-lg border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
+              />
+              <div className="mt-2 flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateReviewCommentFromSelection}
+                  onClick={() => void submitSelectionAction('comment')}
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-panel-alt px-3 text-[12px] font-semibold text-fg-3 transition hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {selectionDraft.creating === 'comment' ? t('session.savingComment') : t('session.selectionComment')}
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateSideChatFromSelection}
+                  onClick={() => void submitSelectionAction('side-chat')}
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-panel-alt px-3 text-[12px] font-semibold text-fg-3 transition hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {selectionDraft.creating === 'side-chat' ? t('session.creatingSideChat') : t('session.createSideChat')}
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateTodoFromSelection}
+                  onClick={() => void submitSelectionAction('todo')}
+                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge-h bg-panel-h px-3 text-[12px] font-semibold text-fg transition hover:bg-control disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {selectionDraft.creating === 'todo' ? t('session.savingTodo') : t('session.selectionTodo')}
+                </button>
+              </div>
+            </div>
           </div>
         </>,
         document.body,

@@ -8,7 +8,7 @@ import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils
 import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
 import type { InteractionSnapshot, MessageBlock, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
-import { TurnView, UserBubble, TurnDivider, type SelectionSideChatRequest } from './TurnView';
+import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
 import { InputComposer } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
@@ -104,7 +104,7 @@ function bridgePendingImagesIntoHistory(history: TurnHistoryWindow, pendingPromp
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange, onOpenFileLink, onCreateSideChatFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, onSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
@@ -112,6 +112,8 @@ export const SessionPanel = memo(function SessionPanel({
   onSessionChange?: (next: SessionPanelChange) => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
+  onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
    *  Ownership transfers to this panel: we revoke them once the turn completes. */
@@ -1062,6 +1064,8 @@ export const SessionPanel = memo(function SessionPanel({
                   onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
                   onOpenFileLink={onOpenFileLink}
                   onCreateSideChatFromSelection={onCreateSideChatFromSelection}
+                  onCreateTodoFromSelection={onCreateTodoFromSelection}
+                  onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection}
                   workdir={workdir}
                   retryProminent={retryProminent}
                 />

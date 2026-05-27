@@ -23,6 +23,7 @@ import {
   updateProTaskStatus,
   type VerificationResult,
 } from '../../pro/tasks.js';
+import { createTodoItem, listTodoItems } from '../../pro/todos.js';
 
 const app = new Hono();
 
@@ -40,6 +41,40 @@ function parseSessionKey(sessionKey: string | null | undefined): { agent: string
 
 app.get('/api/pro/tasks', (c) => {
   return c.json({ ok: true, tasks: listProTasks() });
+});
+
+app.get('/api/pro/todos', (c) => {
+  return c.json({ ok: true, items: listTodoItems() });
+});
+
+app.post('/api/pro/todos', async (c) => {
+  try {
+    const body = await c.req.json();
+    const item = createTodoItem({
+      kind: body?.kind,
+      title: body?.title,
+      body: body?.body,
+      source: body?.source,
+    });
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/review-comments', async (c) => {
+  try {
+    const body = await c.req.json();
+    const item = createTodoItem({
+      kind: 'review-comment',
+      title: body?.title,
+      body: body?.body,
+      source: { ...(body?.source || {}), type: 'review-comment' },
+    });
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
 });
 
 app.get('/api/pro/tasks/:taskId', (c) => {

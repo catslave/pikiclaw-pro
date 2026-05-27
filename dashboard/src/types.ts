@@ -980,3 +980,31 @@ export interface ProTask {
   exclusiveMode?: boolean;
   events: ProTaskEvent[];
 }
+
+export type TodoItemKind = 'todo' | 'review-comment';
+export type TodoItemStatus = 'open' | 'chat-created' | 'done' | 'archived';
+
+export interface TodoItemSource {
+  type: 'quick-capture' | 'chat-selection' | 'review-comment';
+  workdir?: string;
+  agent?: string;
+  sessionId?: string;
+  turnIndex?: number;
+  quote?: string;
+}
+
+export interface TodoItem {
+  id: string;
+  kind: TodoItemKind;
+  title: string;
+  body?: string;
+  status: TodoItemStatus;
+  createdAt: string;
+  updatedAt: string;
+  source?: TodoItemSource;
+  linkedChat?: {
+    workdir: string;
+    agent: string;
+    sessionId: string;
+  };
+}
