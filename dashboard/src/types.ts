@@ -1037,6 +1037,15 @@ export interface AgentAssistant {
   updatedAt: string;
 }
 
+export interface JiraWorkflowConfig {
+  refinementAssistantId?: string;
+  codingAssistantId?: string;
+  ticketSyncAssistantId?: string;
+  knowledgeAssistantId?: string;
+  runKnowledgeOnRefinement?: boolean;
+  runKnowledgeOnCoding?: boolean;
+}
+
 export interface AutomationRule {
   id: string;
   name: string;

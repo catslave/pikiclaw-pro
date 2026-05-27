@@ -15,6 +15,7 @@ import type {
   GitRemoteBranchUrlResult,
   HostInfo,
   KnowledgeEntry,
+  JiraWorkflowConfig,
   LocalModelsProbeResponse,
   LsDirResult,
   McpCatalogItem,
@@ -671,6 +672,18 @@ export const api = {
     ),
   getProAssistants: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; assistants: AgentAssistant[]; error?: string }>('/api/pro/assistants', opts),
+  getJiraWorkflowConfig: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; config: JiraWorkflowConfig; error?: string }>('/api/pro/jira/config', opts),
+  updateJiraWorkflowConfig: (config: JiraWorkflowConfig, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; config: JiraWorkflowConfig; error?: string }>(
+      '/api/pro/jira/config',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+        ...opts,
+      },
+    ),
   createProAssistant: (
     body: { name: string; responsibility?: string; preferredAgents?: string[] },
     opts?: ApiRequestOptions,

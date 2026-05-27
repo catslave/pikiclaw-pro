@@ -50,13 +50,32 @@ export interface KnowledgeEntry {
   updatedAt: string;
 }
 
+export interface JiraWorkflowConfig {
+  refinementAssistantId?: string;
+  codingAssistantId?: string;
+  ticketSyncAssistantId?: string;
+  knowledgeAssistantId?: string;
+  runKnowledgeOnRefinement?: boolean;
+  runKnowledgeOnCoding?: boolean;
+}
+
 interface WorkflowFile {
   version: 1;
   assistants: AgentAssistant[];
   deletedAssistantIds?: string[];
   automations: AutomationRule[];
   knowledge: KnowledgeEntry[];
+  jira?: JiraWorkflowConfig;
 }
+
+const DEFAULT_JIRA_CONFIG: JiraWorkflowConfig = {
+  refinementAssistantId: 'assistant_refinement',
+  codingAssistantId: 'assistant_coding',
+  ticketSyncAssistantId: 'assistant_ticket_sync',
+  knowledgeAssistantId: 'assistant_knowledge',
+  runKnowledgeOnRefinement: true,
+  runKnowledgeOnCoding: true,
+};
 
 const DEFAULT_ASSISTANTS: AgentAssistant[] = [
   {
@@ -127,6 +146,7 @@ function readFile(): WorkflowFile {
       deletedAssistantIds: Array.isArray(parsed?.deletedAssistantIds) ? parsed.deletedAssistantIds.map(String).filter(Boolean) : [],
       automations: Array.isArray(parsed?.automations) ? parsed.automations.filter(item => item?.id && item?.name) : [],
       knowledge: Array.isArray(parsed?.knowledge) ? parsed.knowledge.filter(item => item?.id && item?.title) : [],
+      jira: parsed?.jira && typeof parsed.jira === 'object' ? parsed.jira : undefined,
     };
   } catch {
     return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], knowledge: [] };
@@ -158,6 +178,26 @@ export function listAgentAssistants(): AgentAssistant[] {
     ...fileAssistants,
     ...DEFAULT_ASSISTANTS.filter(item => !customIds.has(item.id) && !deletedIds.has(item.id)),
   ].map(withAssistantAvatar).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function getJiraWorkflowConfig(): JiraWorkflowConfig {
+  return { ...DEFAULT_JIRA_CONFIG, ...(readFile().jira || {}) };
+}
+
+export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): JiraWorkflowConfig {
+  const file = readFile();
+  const current = { ...DEFAULT_JIRA_CONFIG, ...(file.jira || {}) };
+  const next: JiraWorkflowConfig = {
+    refinementAssistantId: normalizeText(input.refinementAssistantId, 160) || current.refinementAssistantId,
+    codingAssistantId: normalizeText(input.codingAssistantId, 160) || current.codingAssistantId,
+    ticketSyncAssistantId: normalizeText(input.ticketSyncAssistantId, 160) || current.ticketSyncAssistantId,
+    knowledgeAssistantId: normalizeText(input.knowledgeAssistantId, 160) || current.knowledgeAssistantId,
+    runKnowledgeOnRefinement: typeof input.runKnowledgeOnRefinement === 'boolean' ? input.runKnowledgeOnRefinement : current.runKnowledgeOnRefinement,
+    runKnowledgeOnCoding: typeof input.runKnowledgeOnCoding === 'boolean' ? input.runKnowledgeOnCoding : current.runKnowledgeOnCoding,
+  };
+  file.jira = next;
+  writeFile(file);
+  return next;
 }
 
 export function createAgentAssistant(input: { name: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {

@@ -32,11 +32,13 @@ import {
   createAutomationRule,
   createKnowledgeEntry,
   deleteAgentAssistant,
+  getJiraWorkflowConfig,
   listAgentAssistants,
   listAutomationRules,
   listKnowledgeEntries,
   markAutomationRun,
   updateAgentAssistant,
+  updateJiraWorkflowConfig,
 } from '../../pro/workflow.js';
 
 const app = new Hono();
@@ -148,6 +150,26 @@ app.post('/api/pro/review-comments', async (c) => {
 
 app.get('/api/pro/assistants', (c) => {
   return c.json({ ok: true, assistants: listAgentAssistants() });
+});
+
+app.get('/api/pro/jira/config', (c) => {
+  return c.json({ ok: true, config: getJiraWorkflowConfig() });
+});
+
+app.patch('/api/pro/jira/config', async (c) => {
+  try {
+    const body = await c.req.json();
+    return c.json({ ok: true, config: updateJiraWorkflowConfig({
+      refinementAssistantId: body?.refinementAssistantId,
+      codingAssistantId: body?.codingAssistantId,
+      ticketSyncAssistantId: body?.ticketSyncAssistantId,
+      knowledgeAssistantId: body?.knowledgeAssistantId,
+      runKnowledgeOnRefinement: body?.runKnowledgeOnRefinement,
+      runKnowledgeOnCoding: body?.runKnowledgeOnCoding,
+    }) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
 });
 
 app.post('/api/pro/assistants', async (c) => {
@@ -438,11 +460,12 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
     const stage = readString(body?.stage);
     if (!isProTaskStage(stage)) return c.json({ ok: false, error: 'invalid stage' }, 400);
 
+    const assistantId = readString(body?.assistantId) || task.defaultAssistantId || undefined;
+    const assistant = assistantId ? listAgentAssistants().find(item => item.id === assistantId) : undefined;
     const config = loadUserConfig();
     const workdir = readString(body?.workdir) || task.workdir || runtime.getRequestWorkdir(config);
-    const prompt = readString(body?.prompt) || buildDefaultStagePrompt(task, stage);
-    const requestedAgent = readString(body?.agent) || task.defaultAgent || null;
-    const assistantId = readString(body?.assistantId) || task.defaultAssistantId || undefined;
+    const prompt = readString(body?.prompt) || buildDefaultStagePrompt(task, stage, assistant);
+    const requestedAgent = readString(body?.agent) || task.defaultAgent || assistant?.preferredAgents?.[0] || null;
     const queued = await queueDashboardSessionTask({
       workdir,
       agent: requestedAgent,
@@ -466,7 +489,9 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
       session: { workdir, agent: session.agent, sessionId: session.sessionId },
       assistantId,
       selectedAgentReason: requestedAgent
-        ? 'Selected by task default or user stage setting.'
+        ? assistant
+          ? `Selected by ${assistant.name}.`
+          : 'Selected by task default or user stage setting.'
         : 'Selected by Pikiclaw runtime default agent.',
     });
     return c.json({ ok: true, task: updated, queued });
@@ -644,8 +669,9 @@ function fallbackOpenUrl(url: string) {
   execFile(opener, args, () => {});
 }
 
-function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>>, stage: string): string {
+function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>>, stage: string, assistant?: ReturnType<typeof listAgentAssistants>[number]): string {
   const common = [
+    assistant ? `Assistant: ${assistant.name}\nResponsibility:\n${assistant.responsibility}` : '',
     `Task: ${task.title}`,
     task.jiraKey ? `Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
     task.description ? `Description:\n${task.description}` : '',
