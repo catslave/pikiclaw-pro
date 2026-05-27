@@ -423,6 +423,7 @@ export function readTailLines(filePath: string, maxBytes = 256 * 1024): string[]
 }
 
 export function stripInjectedPrompts(text: string): string {
+  text = stripHandoverSeed(text);
   const markers = ['\n[Session Workspace]'];
   for (const m of markers) {
     const idx = text.indexOf(m);
@@ -436,6 +437,22 @@ export function stripInjectedPrompts(text: string): string {
     return '';
   }
   return text;
+}
+
+function stripHandoverSeed(text: string): string {
+  const leadingWhitespace = text.match(/^\s*/)?.[0] || '';
+  const trimmedStart = text.slice(leadingWhitespace.length);
+  const open = trimmedStart.search(/<handover\b/i);
+  if (open < 0) return text;
+  const close = trimmedStart.search(/<\/handover>/i);
+  if (close < open) return `${leadingWhitespace}${trimmedStart.slice(0, open)}`.trim();
+  const beforeOpen = trimmedStart.slice(0, open);
+  const afterClose = trimmedStart.slice(close).replace(/^<\/handover>/i, '');
+  const withoutTrailer = afterClose.replace(
+    /^\s*\[Continuing this conversation\.[^\]]*\]\s*/i,
+    '',
+  );
+  return `${leadingWhitespace}${beforeOpen}${withoutTrailer}`.trim();
 }
 
 export function stripOaiMemoryCitations(text: string): string {

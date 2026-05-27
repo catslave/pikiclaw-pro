@@ -1,16 +1,19 @@
-import { useState, memo, type ReactNode } from 'react';
+import { useState, memo, useRef, type ReactNode } from 'react';
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import { cn, fmtTime, getAgentMeta } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
+import { stripOaiMemoryCitations } from './messageSanitizers';
 import { isContinuationSummary } from './utils';
 import { AssistantMsg, hasRenderableAssistant } from './AssistantContent';
 import type { MessageBlock, RichMessage, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, workdir, retryProminent }: {
+export type SelectionSideChatRequest = { quote: string; question: string };
+
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, workdir, retryProminent }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
    *  agent is currently bound to a Profile. Saved turns lack this in their
@@ -23,6 +26,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   /** When defined, the user-bubble shows a fork action that opens a fork composer scoped to this turn. */
   onFork?: (atTurn: number) => void;
   onOpenFileLink?: OpenFileLinkHandler;
+  onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   workdir?: string;
   retryProminent?: boolean;
 }) {
@@ -54,7 +58,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
           <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={previewMeta ?? turn.assistant?.usage ?? null} />
           {showLiveAssistant
             ? <div className="mb-6">{liveAssistant}</div>
-            : <AssistantMessageFrame message={turn.assistant!} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} workdir={workdir} />}
+            : <AssistantMessageFrame message={turn.assistant!} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} workdir={workdir} />}
         </>
       )}
     </div>
@@ -118,7 +122,7 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
   const [expanded, setExpanded] = useState(false);
   const displayText = !text ? '' : (isLong && !expanded ? previewFromText(text) : text);
   const hasActions = !!(createdAt || text || onResend || onEdit || onFork);
-  const imageBlocks = blocks?.filter(b => b.type === 'image') || [];
+  const imageBlocks = dedupeImageBlocks(blocks?.filter(b => b.type === 'image') || []);
 
   const handleCopy = () => {
     if (!text) return;
@@ -135,7 +139,7 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
     >
-      <div className="max-w-[72%] rounded-md border border-fg-6 bg-panel px-4 py-3 text-[13.5px] leading-[1.72] text-fg shadow-sm">
+      <div className="min-w-0 max-w-[72%] rounded-md border border-fg-6 bg-panel px-4 py-3 text-[13.5px] leading-[1.72] text-fg shadow-sm">
         {text && (
           <div className="whitespace-pre-wrap break-words">
             {displayText}
@@ -152,12 +156,12 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
           </button>
         )}
         {imageBlocks.length > 0 && (
-          <div className={cn('flex flex-wrap gap-2', text && 'mt-2')}>
+          <div className={cn('flex min-w-0 max-w-full flex-wrap gap-2', text && 'mt-2')}>
             {imageBlocks.map((img, i) => (
               <img
                 key={i}
                 src={img.content}
-                className="max-w-[280px] max-h-[200px] rounded border border-fg-6/50 object-cover cursor-zoom-in hover:opacity-90 transition-opacity"
+                className="h-auto w-full max-w-[min(280px,100%)] max-h-[200px] rounded border border-fg-6/50 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
                 onClick={() => setLightboxSrc(img.content)}
               />
             ))}
@@ -186,12 +190,25 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
   );
 }
 
+function dedupeImageBlocks(blocks: MessageBlock[]): MessageBlock[] {
+  const seen = new Set<string>();
+  const out: MessageBlock[] = [];
+  for (const block of blocks) {
+    const key = block.imagePath || block.content;
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(block);
+  }
+  return out;
+}
+
 function AssistantMessageFrame({
   message,
   t,
   startedAt,
   onFork,
   onOpenFileLink,
+  onCreateSideChatFromSelection,
   workdir,
 }: {
   message: RichMessage;
@@ -199,22 +216,105 @@ function AssistantMessageFrame({
   startedAt?: string | null;
   onFork?: () => void;
   onOpenFileLink?: OpenFileLinkHandler;
+  onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   workdir?: string;
 }) {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
-  const copyText = message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n');
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const [selectionDraft, setSelectionDraft] = useState<{
+    quote: string;
+    rect: { left: number; top: number; width: number; height: number };
+    highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
+    asking: boolean;
+    question: string;
+    creating: boolean;
+  } | null>(null);
+  const copyText = stripOaiMemoryCitations(message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n'));
 
   const handleCopy = () => {
     if (!copyText) return;
     navigator.clipboard.writeText(copyText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
   };
 
+  useEffect(() => {
+    if (!selectionDraft) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSelectionDraft(null);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('[data-selection-side-chat-popover]')) return;
+      if (frameRef.current?.contains(target)) return;
+      setSelectionDraft(null);
+    };
+    const clearSelectionDraft = () => {
+      window.getSelection()?.removeAllRanges();
+      setSelectionDraft(null);
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('scroll', clearSelectionDraft, true);
+    window.addEventListener('resize', clearSelectionDraft);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('scroll', clearSelectionDraft, true);
+      window.removeEventListener('resize', clearSelectionDraft);
+    };
+  }, [selectionDraft]);
+
+  const handleSelectionEnd = () => {
+    if (!onCreateSideChatFromSelection || !frameRef.current) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+    const rawQuote = selection.toString().replace(/\s+\n/g, '\n').trim();
+    if (!rawQuote) return;
+    const range = selection.getRangeAt(0);
+    const ancestor = range.commonAncestorContainer;
+    const element = ancestor.nodeType === Node.ELEMENT_NODE
+      ? ancestor as Element
+      : ancestor.parentElement;
+    if (!element || !frameRef.current.contains(element)) return;
+    if (!element.closest('.session-md')) return;
+    const rect = range.getBoundingClientRect();
+    if (!rect.width && !rect.height) return;
+    const highlightRects = Array.from(range.getClientRects())
+      .filter(item => item.width > 0 && item.height > 0)
+      .slice(0, 24)
+      .map(item => ({ left: item.left, top: item.top, width: item.width, height: item.height }));
+    setSelectionDraft({
+      quote: rawQuote.slice(0, 8000),
+      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      highlightRects,
+      asking: false,
+      question: '',
+      creating: false,
+    });
+  };
+
+  const submitSelectionSideChat = async () => {
+    if (!selectionDraft || !onCreateSideChatFromSelection || selectionDraft.creating) return;
+    const question = selectionDraft.question.trim();
+    if (!question) return;
+    setSelectionDraft(current => current ? { ...current, creating: true } : current);
+    try {
+      await onCreateSideChatFromSelection({ quote: selectionDraft.quote, question });
+      window.getSelection()?.removeAllRanges();
+      setSelectionDraft(null);
+    } catch {
+      setSelectionDraft(current => current ? { ...current, creating: false } : current);
+    }
+  };
+
   return (
     <div
+      ref={frameRef}
       className="mb-6 group/assistant"
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
+      onMouseUp={handleSelectionEnd}
+      onKeyUp={handleSelectionEnd}
     >
       <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} />
       <HoverMessageActions
@@ -227,6 +327,81 @@ function AssistantMessageFrame({
         onCopy={handleCopy}
         onFork={onFork}
       />
+      {selectionDraft && onCreateSideChatFromSelection && createPortal(
+        <>
+          {selectionDraft.highlightRects.map((rect, index) => (
+            <span
+              key={index}
+              aria-hidden="true"
+              className="pointer-events-none fixed z-[9998] rounded-[3px] bg-primary/15 ring-1 ring-primary/20"
+              style={{
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+              }}
+            />
+          ))}
+          <div
+            data-selection-side-chat-popover
+            className="fixed z-[10000]"
+            style={{
+              left: Math.min(
+                window.innerWidth - (selectionDraft.asking ? 360 : 112),
+                Math.max(12, selectionDraft.rect.left - (selectionDraft.asking ? 348 : 40)),
+              ),
+              top: Math.min(window.innerHeight - (selectionDraft.asking ? 96 : 36), Math.max(12, selectionDraft.rect.top - 6)),
+            }}
+            onClick={event => event.stopPropagation()}
+          >
+            {!selectionDraft.asking ? (
+              <button
+                type="button"
+                title={t('session.sideChat')}
+                aria-label={t('session.sideChat')}
+                onMouseDown={event => event.preventDefault()}
+                onClick={() => setSelectionDraft(current => current ? { ...current, asking: true } : current)}
+                className="group/selection-side-chat inline-flex h-8 max-w-8 items-center justify-start gap-1.5 overflow-hidden rounded-full border border-edge-h bg-panel px-[9px] text-fg-3 shadow-lg transition-all hover:max-w-[112px] hover:bg-panel-h hover:px-3 hover:text-fg focus-visible:max-w-[112px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+              >
+                <span className="shrink-0 text-[18px] leading-none">+</span>
+                <span className="whitespace-nowrap text-[11px] font-semibold opacity-0 transition-opacity group-hover/selection-side-chat:opacity-100 group-focus-visible/selection-side-chat:opacity-100">
+                  {t('session.sideChat')}
+                </span>
+              </button>
+            ) : (
+              <div className="w-[340px] rounded-xl border border-edge-h bg-panel p-2 shadow-xl">
+                <div className="mb-2 max-h-[42px] overflow-hidden rounded-lg bg-panel-alt px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">
+                  {selectionDraft.quote}
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={selectionDraft.question}
+                    onChange={event => setSelectionDraft(current => current ? { ...current, question: event.target.value } : current)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void submitSelectionSideChat();
+                      }
+                    }}
+                    placeholder={t('session.sideChatSelectionPlaceholder')}
+                    className="h-8 min-w-0 flex-1 rounded-lg border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
+                  />
+                  <button
+                    type="button"
+                    disabled={!selectionDraft.question.trim() || selectionDraft.creating}
+                    onClick={() => void submitSelectionSideChat()}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge-h bg-panel-h px-3 text-[12px] font-semibold text-fg transition hover:bg-control disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {selectionDraft.creating ? t('session.creatingSideChat') : t('session.createSideChat')}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -339,7 +514,9 @@ export function TurnDivider({ agent, meta, model, effort, providerName: provider
   /** Live token / context-window stats — when present, rendered as a trailing chip. */
   previewMeta?: StreamPreviewMeta | null;
 }) {
-  const ctxPct = previewMeta?.contextPercent ?? null;
+  const ctxPct = typeof previewMeta?.contextPercent === 'number' && Number.isFinite(previewMeta.contextPercent)
+    ? Math.max(0, Math.min(100, previewMeta.contextPercent))
+    : null;
   // Use the per-call context occupancy (input + cache_read + cache_creation
   // for the latest LLM call) — NOT the cumulative inputTokens/cachedInputTokens,
   // which double-count the same cached prefix on every tool roundtrip.
@@ -385,10 +562,12 @@ function formatTokens(n: number): string {
 function formatContextTitle(meta: StreamPreviewMeta | null | undefined): string {
   if (!meta) return '';
   const parts: string[] = [];
-  if (meta.contextPercent != null) parts.push(`Context: ${meta.contextPercent.toFixed(1)}%`);
-  if (meta.inputTokens != null) parts.push(`Input: ${meta.inputTokens.toLocaleString()}`);
-  if (meta.outputTokens != null) parts.push(`Output: ${meta.outputTokens.toLocaleString()}`);
-  if (meta.cachedInputTokens != null) parts.push(`Cached: ${meta.cachedInputTokens.toLocaleString()}`);
+  if (typeof meta.contextPercent === 'number' && Number.isFinite(meta.contextPercent)) {
+    parts.push(`Context: ${Math.max(0, Math.min(100, meta.contextPercent)).toFixed(1)}%`);
+  }
+  if (typeof meta.contextUsedTokens === 'number' && Number.isFinite(meta.contextUsedTokens)) {
+    parts.push(`Tokens: ${meta.contextUsedTokens.toLocaleString()}`);
+  }
   return parts.join('  ·  ');
 }
 

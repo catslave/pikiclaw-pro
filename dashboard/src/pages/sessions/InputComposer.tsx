@@ -15,7 +15,7 @@ import {
   parseSessionKey,
   type ComposerAttachment,
 } from './utils';
-import type { SessionInfo, AgentRuntimeStatus, SkillInfo } from '../../types';
+import type { SessionInfo, AgentRuntimeStatus, SkillInfo, StreamPreviewMeta } from '../../types';
 
 type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 
@@ -78,10 +78,19 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
 
 /* ── Draft persistence across session switches ── */
 const draftStore = new Map<string, { text: string; files: File[] }>();
+const activeComposerFocus = { key: '', restoreUntil: 0 };
+const MAX_PERSISTED_DRAFT_IMAGE_BYTES = 5 * 1024 * 1024;
+type PersistedDraftAttachment = {
+  name: string;
+  type: string;
+  lastModified: number;
+  dataUrl: string;
+};
 function draftKey(workdir: string, agent: string, sessionId: string) {
   return `${workdir || 'unknown'}:${agent || 'new'}:${sessionId || 'new'}`;
 }
 function draftStorageKey(key: string) { return `pikiclaw-draft:${key}`; }
+function draftFilesStorageKey(key: string) { return `pikiclaw-draft-files:${key}`; }
 function readDraftText(key: string): string | null {
   const storageKey = draftStorageKey(key);
   try {
@@ -100,6 +109,128 @@ function writeDraftText(key: string, text: string) {
     if (text) sessionStorage.setItem(storageKey, text);
     else sessionStorage.removeItem(storageKey);
   } catch {}
+}
+
+function formatContextChip(meta: StreamPreviewMeta | null | undefined): { percent: number; title: string; tone: 'empty' | 'normal' | 'warn' } {
+  if (!meta) return { percent: 0, title: 'Context unavailable', tone: 'empty' };
+  const pct = typeof meta.contextPercent === 'number' && Number.isFinite(meta.contextPercent)
+    ? Math.max(0, Math.min(100, meta.contextPercent))
+    : null;
+  if (pct == null) return { percent: 0, title: 'Context unavailable', tone: 'empty' };
+  return {
+    percent: pct,
+    title: `${pct.toFixed(1)}%`,
+    tone: pct != null && pct >= 70 ? 'warn' : 'normal',
+  };
+}
+
+function ContextUsageChip({ chip }: { chip: ReturnType<typeof formatContextChip> }) {
+  const ringColor = chip.tone === 'warn'
+    ? 'rgba(180, 83, 9, 0.58)'
+    : chip.tone === 'empty'
+      ? 'rgba(148, 163, 184, 0.18)'
+      : 'rgba(100, 116, 139, 0.42)';
+  const trackColor = chip.tone === 'empty' ? 'rgba(148, 163, 184, 0.14)' : 'rgba(148, 163, 184, 0.16)';
+  return (
+    <span
+      className={cn(
+        'group relative inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center text-[10px] font-mono leading-none',
+      )}
+      aria-label={chip.title}
+    >
+      <span
+        aria-hidden="true"
+        className="h-4 w-4 shrink-0 rounded-full ring-1 ring-slate-400/10"
+        style={{ background: `conic-gradient(${ringColor} ${chip.percent}%, ${trackColor} 0)` }}
+      />
+      <span className="pointer-events-none absolute bottom-full right-0 z-50 mb-2 hidden w-max max-w-[180px] whitespace-normal rounded-md border border-edge/80 bg-dropdown px-2 py-1 text-[10px] font-medium leading-snug text-fg shadow-lg group-hover:block">
+        {chip.title}
+      </span>
+    </span>
+  );
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function writeDraftFiles(key: string, files: File[]) {
+  const storageKey = draftFilesStorageKey(key);
+  const persistable = files.filter(file => isImageFile(file) && file.size <= MAX_PERSISTED_DRAFT_IMAGE_BYTES);
+  if (!persistable.length) {
+    try { localStorage.removeItem(storageKey); } catch {}
+    try { sessionStorage.removeItem(storageKey); } catch {}
+    return;
+  }
+  try {
+    const payload: PersistedDraftAttachment[] = [];
+    for (const file of persistable) {
+      const dataUrl = await fileToDataUrl(file);
+      if (!dataUrl.startsWith('data:image/')) continue;
+      payload.push({
+        name: file.name || 'pasted-image.png',
+        type: file.type || 'image/png',
+        lastModified: file.lastModified || Date.now(),
+        dataUrl,
+      });
+    }
+    const serialized = JSON.stringify(payload);
+    if (payload.length) localStorage.setItem(storageKey, serialized);
+    else localStorage.removeItem(storageKey);
+    try {
+      if (payload.length) sessionStorage.setItem(storageKey, serialized);
+      else sessionStorage.removeItem(storageKey);
+    } catch {}
+  } catch {
+    try { sessionStorage.removeItem(storageKey); } catch {}
+  }
+}
+
+function dataUrlToFile(entry: PersistedDraftAttachment): File | null {
+  try {
+    const match = entry.dataUrl.match(/^data:([^;,]+);base64,(.*)$/);
+    if (!match) return null;
+    const mime = entry.type || match[1] || 'image/png';
+    const binary = atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new File([bytes], entry.name || 'pasted-image.png', {
+      type: mime,
+      lastModified: entry.lastModified || Date.now(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function readDraftFiles(key: string): File[] {
+  const storageKey = draftFilesStorageKey(key);
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(storageKey); } catch {}
+  if (raw == null) {
+    try { raw = sessionStorage.getItem(storageKey); } catch {}
+  }
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(entry => dataUrlToFile(entry as PersistedDraftAttachment))
+      .filter((file): file is File => !!file);
+  } catch {
+    return [];
+  }
+}
+
+function clearDraftFiles(key: string) {
+  const storageKey = draftFilesStorageKey(key);
+  try { localStorage.removeItem(storageKey); } catch {}
+  try { sessionStorage.removeItem(storageKey); } catch {}
 }
 
 /**
@@ -124,18 +255,20 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, onRecall, onSteer, onReorderQueued, onStopAll, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, contextMeta, onRecall, onSteer, onReorderQueued, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
   onSendStart: (prompt: string, imageUrls?: string[]) => void;
   onSendTaskAssigned?: (taskId: string) => void;
+  onSendFailed?: () => void;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
   t: (k: string) => string;
   streamPhase: string | null;
   streamTaskId?: string | null;
   queuedTaskIds?: string[];
   queuedTasks?: Array<{ taskId: string; prompt: string }>;
+  contextMeta?: StreamPreviewMeta | null;
   /** Optimistic fallback for queued sends — used by each queued row while the
    *  server snapshot's `queuedTasks` hasn't yet caught up. `imageUrls` are
    *  blob previews surfaced as inline thumbnails so the user can recognize
@@ -145,10 +278,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
   onReorderQueued?: (taskIds: string[]) => void | Promise<void>;
-  /** Stop the running stream AND cancel every queued task for this session. */
-  onStopAll?: () => void | Promise<void>;
   editDraft?: string | null;
+  editAtTurn?: number | null;
   onEditDraftConsumed?: () => void;
+  onEditSendStart?: (prompt: string, atTurn: number) => void;
 }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -165,6 +298,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const lastSentRef = useRef<{ prompt: string; files: File[] }>({ prompt: '', files: [] });
   const storeAgents = useStore(s => s.agentStatus?.agents ?? null);
   const [agents, setAgents] = useState<AgentRuntimeStatus[]>(storeAgents || []);
+  const contextChip = useMemo(() => formatContextChip(contextMeta), [contextMeta]);
   // User's applied cascade choice for this session. Empty = fall back to runtime
   // default. These are intentionally per-session and never written back to the
   // global runtime prefs — picking a model in the composer must NOT change other
@@ -203,7 +337,6 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [skillMenuIndex, setSkillMenuIndex] = useState(0);
   const skillMenuRef = useRef<HTMLDivElement>(null);
   const refreshAgentStatus = useStore(s => s.refreshAgentStatus);
-
   // Model layer — Providers + Profiles + current bindings. Fetched lazily on
   // cascade open so the dropdown can list "我的模型" (Profile shortcuts) next
   // to the agent's native model catalogue. Kept local to InputComposer since
@@ -245,22 +378,25 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     if (text || snapshotFiles.length) draftStore.set(dkRef.current, { text, files: snapshotFiles });
     else draftStore.delete(dkRef.current);
     writeDraftText(dkRef.current, text);
+    void writeDraftFiles(dkRef.current, snapshotFiles);
   }, []);
 
   useEffect(() => {
     const saved = draftStore.get(dk);
     const storedText = readDraftText(dk);
+    const storedFiles = readDraftFiles(dk);
     if (saved) {
       draftStore.delete(dk);
       const nextText = saved.text || storedText || '';
+      const nextFiles = saved.files.length ? saved.files : storedFiles;
       inputValueRef.current = nextText;
       setInput(nextText);
-      setComposerAttachments(saved.files.length ? saved.files.map(file => makeComposerAttachment(file, 'ready')) : []);
+      setComposerAttachments(nextFiles.length ? nextFiles.map(file => makeComposerAttachment(file, 'ready')) : []);
     } else {
       const nextText = storedText || '';
       inputValueRef.current = nextText;
       setInput(nextText);
-      setComposerAttachments([]);
+      setComposerAttachments(storedFiles.length ? storedFiles.map(file => makeComposerAttachment(file, 'ready')) : []);
     }
     return () => {
       const text = inputValueRef.current;
@@ -272,6 +408,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       if (text || files.length) draftStore.set(dkRef.current, { text, files });
       else draftStore.delete(dkRef.current);
       writeDraftText(dkRef.current, text);
+      void writeDraftFiles(dkRef.current, files);
     };
   }, [dk]);
 
@@ -392,6 +529,40 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     el.style.height = Math.min(el.scrollHeight, 200) + 'px';
   }, [input]);
 
+  useEffect(() => {
+    if (activeComposerFocus.key !== dk || Date.now() > activeComposerFocus.restoreUntil) return;
+    const restore = () => {
+      const el = inputRef.current;
+      if (!el) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) return;
+      el.focus({ preventScroll: true });
+      const pos = el.value.length;
+      el.setSelectionRange(pos, pos);
+    };
+    const frame = requestAnimationFrame(restore);
+    return () => cancelAnimationFrame(frame);
+  }, [dk, input]);
+
+  const rememberComposerFocus = useCallback(() => {
+    activeComposerFocus.key = dkRef.current;
+    activeComposerFocus.restoreUntil = Date.now() + 3000;
+  }, []);
+
+  const handleInputBlur = useCallback(() => {
+    const keyAtBlur = dkRef.current;
+    window.setTimeout(() => {
+      if (activeComposerFocus.key !== keyAtBlur || Date.now() > activeComposerFocus.restoreUntil) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) return;
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+      const pos = el.value.length;
+      el.setSelectionRange(pos, pos);
+    }, 0);
+  }, []);
+
   const addComposerAttachments = useCallback((files: ArrayLike<File> | null | undefined) => {
     const nextFiles = Array.from(files || []).filter(file => file instanceof File);
     if (!nextFiles.length) return;
@@ -471,12 +642,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     setInput('');
     draftStore.delete(dkRef.current);
     writeDraftText(dkRef.current, '');
+    clearDraftFiles(dkRef.current);
     // Create fresh preview URLs before clearing (clearing revokes the originals)
     const previewUrls = attachments.length
       ? attachments.filter(isImageFile).map(f => URL.createObjectURL(f))
       : undefined;
     clearComposerAttachments();
     setUploadingAttachmentCount(attachments.length);
+    if (typeof editAtTurn === 'number') onEditSendStart?.(prompt, editAtTurn);
     onSendStart(prompt, previewUrls);
     onStreamQueued(); // Start polling immediately — don't wait for API response
     api.sendSessionMessage(workdir, targetAgent, targetSessionId, prompt, {
@@ -487,11 +660,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       previousSessionId,
     })
       .then(res => {
+        if (!res.ok) {
+          onSendFailed?.();
+          return;
+        }
         if (res.taskId) {
           setLocalTaskId(res.taskId);
           onSendTaskAssigned?.(res.taskId);
         }
-        if (!res.ok) return;
         const nextSession = typeof res.sessionKey === 'string' ? parseSessionKey(res.sessionKey) : null;
         const switchedSession = !!nextSession
           && (nextSession.agent !== session.agent || nextSession.sessionId !== session.sessionId);
@@ -499,7 +675,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
           onSessionChange?.({ ...nextSession, workdir });
         }
       })
-      .catch(() => {})
+      .catch(() => { onSendFailed?.(); })
       .finally(() => {
         setUploadingAttachmentCount(0);
         setSending(false);
@@ -511,6 +687,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     input,
     onSendStart,
     onSendTaskAssigned,
+    onSendFailed,
+    onEditSendStart,
     onSessionChange,
     onStreamQueued,
     selectedAgent,
@@ -520,12 +698,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     session.agent,
     session.sessionId,
     workdir,
+    editAtTurn,
   ]);
 
   // Task bar state — derived from snapshot + optimistic local state.
   // `effectiveQueuedIds` aggregates every queued task we know about so each one
   // gets its own row (instead of collapsing many queued tasks into one banner).
-  const isActiveStream = streamPhase === 'streaming';
   const effectiveQueuedIds: string[] = (() => {
     const ids: string[] = [];
     if (queuedTaskIds && queuedTaskIds.length) ids.push(...queuedTaskIds);
@@ -646,20 +824,6 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     onRecall?.(taskId);
     if (taskId === localTaskId) setLocalTaskId(null);
   }, [recallingIds, effectiveQueuedId, localTaskId, onRecall, persistDraft]);
-
-  const [stoppingAll, setStoppingAll] = useState(false);
-  // "Stop" means halt the conversation, not "recall this one taskId". We call
-  // the session-scoped stop endpoint so:
-  //   1. queued follow-ups don't keep firing after the user hits stop, and
-  //   2. the button still works in the brief window after a fresh send where
-  //      `streamTaskId` is still null (no WS snapshot yet). The endpoint takes
-  //      (agent, sessionId), which the panel always has.
-  const handleStop = useCallback(async () => {
-    if (stoppingAll || !onStopAll) return;
-    setStoppingAll(true);
-    try { await onStopAll(); }
-    finally { setStoppingAll(false); }
-  }, [stoppingAll, onStopAll]);
 
   const handleSteerQueued = useCallback((taskId: string) => {
     if (steeringIds.has(taskId)) return;
@@ -876,7 +1040,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   ].filter(Boolean).join(' / ');
 
   return (
-    <div className="shrink-0" ref={composerRef}>
+    <div className="composer-shell shrink-0" ref={composerRef}>
       {/* Floating centered input area */}
       <div className="w-full max-w-[860px] mx-auto px-4 pb-4 pt-2 sm:px-3">
         {/* Task control bar — queued follow-ups only. Active streams use the inline stop button near Send. */}
@@ -1181,6 +1345,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             ref={inputRef}
             value={input}
             onChange={e => handleInputChange(e.target.value)}
+            onFocus={rememberComposerFocus}
+            onBlur={handleInputBlur}
             onPaste={onPaste}
             onKeyDown={onKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
@@ -1192,19 +1358,19 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
           />
 
           {/* Bottom bar: cascade selector + send */}
-          <div className="flex items-center gap-1.5 px-2.5 pb-2 pt-1">
+          <div className="composer-bottom-bar flex min-w-0 items-center gap-1.5 overflow-hidden px-2.5 pb-2 pt-1">
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
               title={t('hub.addAttachments')}
               aria-label={t('hub.addAttachments')}
-              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] leading-none text-fg-5/50 transition-colors hover:bg-panel-h/60 hover:text-fg-3"
+              className="composer-attach-button inline-flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] leading-none text-fg-5/50 transition-colors hover:bg-panel-h/60 hover:text-fg-3"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" className="shrink-0">
                 <path d="M12 5v14" />
                 <path d="M5 12h14" />
               </svg>
-              <span className="whitespace-nowrap">{t('hub.addAttachments')}</span>
+              <span className="composer-attach-label truncate whitespace-nowrap">{t('hub.addAttachments')}</span>
             </button>
 
             {/* Cascade config trigger */}
@@ -1214,7 +1380,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               disabled={!agents.length}
               title={agents.length ? cascadeLabel : undefined}
               className={cn(
-                'flex items-center gap-1.5 h-[28px] px-2.5 rounded-lg text-[11px] font-medium transition-all duration-200 select-none',
+                'composer-cascade-trigger flex min-w-0 items-center gap-1.5 h-[28px] px-2.5 rounded-lg text-[11px] font-medium transition-all duration-200 select-none',
                 cascadeStep !== 'closed'
                   ? 'bg-panel-h border border-edge-h text-fg-3'
                   : 'text-fg-5/60 hover:text-fg-4 hover:bg-panel-h/50 border border-transparent',
@@ -1224,7 +1390,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 ? <BrandIcon brand={displayAgent} size={12} />
                 : <Spinner className="h-3 w-3" />}
               {agents.length ? (
-                <span className="flex items-center gap-1 max-w-[460px] min-w-0 truncate">
+                <span className="composer-cascade-label flex items-center gap-1 max-w-[460px] min-w-0 truncate">
                   <span className="shrink-0">{displayMeta.shortLabel}</span>
                   {displayProvider && (
                     <>
@@ -1259,7 +1425,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             {cascadeStep !== 'closed' && cascadePos && createPortal(
               <div
                 id="cascade-portal"
-                className="fixed z-[200] w-[300px] rounded-xl border border-edge/40 bg-[var(--th-dropdown)] backdrop-blur-xl shadow-lg overflow-hidden animate-in"
+                className="fixed z-[200] w-[300px] rounded-xl border border-edge-h/70 bg-dropdown shadow-lg overflow-hidden animate-in"
                 style={{ left: cascadePos.left, bottom: cascadePos.bottom }}
               >
                 {/* Step header */}
@@ -1326,7 +1492,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                         setCascadeStep('model');
                       }}>
                         <BrandIcon brand={a.agent} size={14} />
-                        <span style={{ color: am.color }}>{am.label}</span>
+                        <span>{am.label}</span>
                       </CascadeItem>
                     );
                   })}
@@ -1398,22 +1564,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               document.body,
             )}
 
-            <div className="flex-1" />
+            <div className="min-w-0 flex-1" />
 
-            {isActiveStream && (
-              <button
-                type="button"
-                onClick={handleStop}
-                disabled={stoppingAll}
-                title={t('hub.stopHint')}
-                aria-label={t('hub.stop')}
-                className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg text-fg-5/60 transition-colors hover:bg-err/10 hover:text-err disabled:pointer-events-none disabled:opacity-30"
-              >
-                {stoppingAll
-                  ? <Spinner className="h-3.5 w-3.5" />
-                  : <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" /></svg>}
-              </button>
-            )}
+            <ContextUsageChip chip={contextChip} />
 
             {/* Send button */}
             <button
@@ -1422,7 +1575,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               title={canSend ? t('hub.sendHint') : t('hub.send')}
               aria-label={sending ? (uploadingAttachmentCount > 0 ? t('hub.uploadingAttachments') : t('hub.sending')) : t('hub.send')}
               className={cn(
-                'inline-flex h-[30px] shrink-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] font-medium leading-none transition-all duration-200',
+                'composer-send-button inline-flex h-[30px] shrink-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] font-medium leading-none transition-all duration-200',
                 canSend
                   ? 'bg-primary text-primary-fg hover:brightness-110 shadow-sm'
                   : 'bg-fg/6 text-fg-5/20',
@@ -1432,7 +1585,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 ? <Spinner className="h-3.5 w-3.5" />
                 : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
               }
-              <span className="whitespace-nowrap">
+              <span className="composer-send-label whitespace-nowrap">
                 {sending ? (uploadingAttachmentCount > 0 ? t('hub.uploadingAttachments') : t('hub.sending')) : t('hub.send')}
               </span>
             </button>
@@ -1581,8 +1734,10 @@ export function CascadeItem({ selected, onClick, children }: {
     <button
       onClick={onClick}
       className={cn(
-        'flex items-center gap-2 w-full px-3 py-2 text-[12px] text-left transition-colors',
-        selected ? 'text-fg bg-panel-h font-medium' : 'text-fg-3 hover:bg-panel-alt/50 hover:text-fg-2',
+        'flex items-center gap-2 w-full px-3 py-2 text-[12px] text-left transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:bg-selected-h focus-visible:shadow-[inset_3px_0_0_var(--th-selection-accent)]',
+        selected
+          ? 'bg-selected font-medium text-fg shadow-[inset_3px_0_0_var(--th-selection-accent)] hover:bg-selected-h'
+          : 'text-fg-2 hover:bg-selected hover:text-fg hover:shadow-[inset_3px_0_0_var(--th-selection-border)]',
       )}
     >
       {children}

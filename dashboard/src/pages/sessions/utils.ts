@@ -107,17 +107,24 @@ function stripInternalHandoverMessages(messages: RichMessage[]): RichMessage[] {
 export function stripHandoverSeed(text: string): { handover: boolean; text: string } {
   const leadingWhitespace = text.match(/^\s*/)?.[0] || '';
   const trimmedStart = text.slice(leadingWhitespace.length);
-  if (!/^<handover\b/i.test(trimmedStart)) return { handover: false, text };
+  const open = trimmedStart.search(/<handover\b/i);
+  if (open < 0) return { handover: false, text };
 
   const close = trimmedStart.search(/<\/handover>/i);
-  if (close < 0) return { handover: false, text };
+  if (close < open) {
+    // Codex may persist a truncated first-turn handover without the closing tag.
+    // That seed is internal context, not the user's message, so hide it rather
+    // than rendering a long XML envelope in the chat bubble.
+    return { handover: true, text: trimmedStart.slice(0, open) };
+  }
 
+  const beforeOpen = trimmedStart.slice(0, open);
   const afterClose = trimmedStart.slice(close).replace(/^<\/handover>/i, '');
   const withoutTrailer = afterClose.replace(
     /^\s*\[Continuing this conversation\.[^\]]*\]\s*/i,
     '',
   );
-  return { handover: true, text: withoutTrailer };
+  return { handover: true, text: `${leadingWhitespace}${beforeOpen}${withoutTrailer}` };
 }
 
 /** Top-level XML wrappers Claude Code injects into role=user events for

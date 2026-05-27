@@ -1157,13 +1157,28 @@ export async function deleteAgentSession(opts: DeleteAgentSessionOpts): Promise<
 export async function deleteSideChatSession(opts: DeleteSideChatSessionOpts): Promise<DeleteSideChatSessionResult> {
   const resolvedWorkdir = path.resolve(opts.workdir);
   const beforeIndex = loadSessionIndex(resolvedWorkdir);
-  const wasLinked = beforeIndex.sessions
-    .find(s => s.agent === opts.parentAgent && s.sessionId === opts.parentSessionId)
-    ?.sideChats?.some(ref => ref.agent === opts.agent && ref.sessionId === opts.sessionId) === true;
+  const beforeParent = beforeIndex.sessions.find(s => s.agent === opts.parentAgent && s.sessionId === opts.parentSessionId);
+  const wasLinked = beforeParent?.sideChats?.some(ref => ref.agent === opts.agent && ref.sessionId === opts.sessionId) === true;
+  let sideChatRefRemoved = false;
+
+  if (beforeParent?.sideChats?.length) {
+    const before = beforeParent.sideChats.length;
+    beforeParent.sideChats = beforeParent.sideChats.filter(ref => !(ref.agent === opts.agent && ref.sessionId === opts.sessionId));
+    sideChatRefRemoved = beforeParent.sideChats.length !== before;
+    if (sideChatRefRemoved) {
+      const now = new Date().toISOString();
+      beforeParent.updatedAt = now;
+      writeSessionIndex(resolvedWorkdir, beforeIndex.sessions);
+      writeSessionMeta(beforeParent);
+    }
+  }
 
   const result = await deleteAgentSession(opts);
-  const out: DeleteSideChatSessionResult = { ...result, sideChatRefRemoved: result.refusedReason ? false : wasLinked };
-  if (result.refusedReason) return out;
+  const out: DeleteSideChatSessionResult = { ...result, sideChatRefRemoved: sideChatRefRemoved || wasLinked };
+  if (result.refusedReason) {
+    out.ok = out.sideChatRefRemoved;
+    return out;
+  }
 
   const index = loadSessionIndex(resolvedWorkdir);
   const parent = index.sessions.find(s => s.agent === opts.parentAgent && s.sessionId === opts.parentSessionId);

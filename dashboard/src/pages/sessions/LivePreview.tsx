@@ -3,10 +3,11 @@ import ReactMarkdown from 'react-markdown';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
+import { stripOaiMemoryCitations } from './messageSanitizers';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
-import { WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
-import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
+import { CompletedWorkDisclosure, WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, formatActivityForDisplay, summarizeWorkingActivity } from './WorkingCard';
+import type { StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
 export interface LiveStreamView {
   taskId?: string | null;
@@ -14,6 +15,8 @@ export interface LiveStreamView {
   text: string;
   thinking: string;
   activity?: string;
+  activitySummary?: StreamActivitySummary | null;
+  activityEvents?: StreamActivityEvents | null;
   plan?: StreamPlan | null;
   subAgents?: StreamSubAgent[] | null;
   previewMeta?: StreamPreviewMeta | null;
@@ -44,37 +47,11 @@ export function liveStreamShouldRender(stream: LiveStreamView): boolean {
   return stream.phase === 'done' && !!stream.error;
 }
 
-function deriveWorkingStatus({
-  phase,
-  activityLines,
-  currentPlanStep,
-  thinking,
-  text,
-  previewMeta,
-  t,
-}: {
-  phase: LiveStreamView['phase'];
-  activityLines: string[];
-  currentPlanStep: string;
-  thinking: string;
-  text: string;
-  previewMeta?: StreamPreviewMeta | null;
-  t: (k: string) => string;
-}): string {
-  if (phase === 'done') return t('hub.statusTurnDone');
-  const diagnostics = previewMeta?.diagnostics || [];
-  if (diagnostics.some(line => /error|failed|timeout|rate limit|quota/i.test(line))) return t('hub.statusNeedsAttention');
-  if ((previewMeta?.generatingImages ?? 0) > 0) return t('hub.statusGeneratingImage');
-  const last = activityLines[activityLines.length - 1] || previewMeta?.lastEvent || '';
-  if (/Codex connection|app-server|thread\/(start|resume)|Resuming|Starting/i.test(last)) return t('hub.statusConnecting');
-  if (/^(Read|Open|List|Inspect image)\b/i.test(last)) return t('hub.statusScanningFiles');
-  if (/^(Edit|Write|Updated)\b/i.test(last)) return t('hub.statusEditingFiles');
-  if (/^(Search|Grep|Glob|Find|WebSearch|Search web|Open web page)\b/i.test(last)) return t('hub.statusSearching');
-  if (/^(Bash|Shell|Command)\b/i.test(last) || /\b(npm|pnpm|yarn|pytest|go test|cargo test|mvn|gradle)\b/i.test(last)) return t('hub.statusRunningCommands');
-  if (currentPlanStep) return t('hub.statusFollowingPlan');
-  if (thinking) return t('hub.statusThinking');
-  if (text) return t('hub.statusWritingAnswer');
-  return t('hub.working');
+function cleanWorkingPreview(line: string): string {
+  return formatActivityForDisplay(line)
+    .replace(/\s+/g, ' ')
+    .replace(/\s+done$/i, '')
+    .trim();
 }
 
 /* ── Live streaming preview ── */
@@ -83,14 +60,25 @@ export function LivePreview({
   t,
   onOpenFileLink,
   workdir,
+  onStopAll,
 }: {
   stream: LiveStreamView;
   t: (k: string) => string;
   onOpenFileLink?: OpenFileLinkHandler;
   workdir?: string;
+  onStopAll?: () => void | Promise<void>;
 }) {
+  const [stoppingAll, setStoppingAll] = useState(false);
+  const handleStop = async () => {
+    if (stoppingAll || !onStopAll) return;
+    setStoppingAll(true);
+    try { await onStopAll(); }
+    finally { setStoppingAll(false); }
+  };
   const showPlan = hasPlan(stream.plan);
-  const hasAnyBody = liveStreamHasBody(stream);
+  const visibleText = stripOaiMemoryCitations(stream.text || '');
+  const sanitizedStream = visibleText === stream.text ? stream : { ...stream, text: visibleText };
+  const hasAnyBody = liveStreamHasBody(sanitizedStream);
   // Stream finished with no body — surface the error inline so the user sees
   // *why* the assistant turn is empty instead of a silent phantom.
   const renderEmptyFailure = stream.phase === 'done' && !hasAnyBody;
@@ -106,18 +94,13 @@ export function LivePreview({
     ? (stream.plan.steps.find(step => step.status === 'inProgress') || [...stream.plan.steps].reverse().find(step => step.status === 'completed') || stream.plan.steps[0])?.step
     : '';
   const thinkingPreview = stream.thinking ? lastNLines(stream.thinking, 1) : '';
-  const activitySummary = summarizeWorkingActivity(activityLines, t);
-  const workingPreview = currentPlanStep || thinkingPreview || activitySummary[0] || lastActivity || '';
-  const workingStatus = deriveWorkingStatus({
-    phase: stream.phase,
-    activityLines,
-    currentPlanStep,
-    thinking: stream.thinking || '',
-    text: stream.text || '',
-    previewMeta: stream.previewMeta ?? null,
-    t,
-  });
-  const workingStepCount = (activitySummary.length || activityLines.length)
+  const activitySummary = summarizeWorkingActivity(activityLines, t, stream.activitySummary ?? null);
+  const workingPreview = activitySummary[0] || currentPlanStep || thinkingPreview || cleanWorkingPreview(lastActivity) || '';
+  const structuredStepCount = stream.activitySummary
+    ? stream.activitySummary.files + stream.activitySummary.searches + stream.activitySummary.commands + stream.activitySummary.tools
+    : 0;
+  const workingStepCount = structuredStepCount
+    || activityLines.length
     || (showPlan ? stream.plan.steps.length : 0)
     || (subAgents?.length ?? 0)
     || (stream.thinking ? 1 : 0);
@@ -127,43 +110,81 @@ export function LivePreview({
     || !!(subAgents && subAgents.length)
     || !!stream.previewMeta?.diagnostics?.length
     || activityLines.length > 0
+    || structuredStepCount > 0
   );
 
   return (
     <div className="space-y-3 animate-in">
       {showWorking && (
-        <WorkingCard
-          phase={stream.phase}
-          t={t}
-          resetKey={stream.taskId || null}
-          startedAt={stream.startedAt ?? null}
-          completedAt={stream.completedAt ?? null}
-          updatedAt={stream.updatedAt ?? null}
-          previewMeta={stream.previewMeta ?? null}
-          previewText={workingPreview}
-          stepCount={workingStepCount}
-          statusLabel={workingStatus}
-        >
-          <div className="space-y-3 px-3.5 py-3">
-            <WorkingPlanList plan={stream.plan} t={t} />
-            <WorkingSubAgentList subAgents={subAgents} t={t} />
-            <WorkingThinkingBlock text={stream.thinking || ''} t={t} />
-            <WorkingActivitySummary lines={activityLines} t={t} />
-            <WorkingActivityDetails lines={activityLines} t={t} />
-            <WorkingDiagnostics diagnostics={stream.previewMeta?.diagnostics} t={t} />
-            {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && !stream.text && (
-              <div className="text-[12px] text-fg-5">{t('hub.workingIdle')}</div>
-            )}
-          </div>
-        </WorkingCard>
+        stream.phase === 'streaming' ? (
+          <WorkingCard
+            phase={stream.phase}
+            t={t}
+            resetKey={stream.taskId || null}
+            startedAt={stream.startedAt ?? null}
+            completedAt={stream.completedAt ?? null}
+            updatedAt={stream.updatedAt ?? null}
+            previewMeta={stream.previewMeta ?? null}
+            previewText={workingPreview}
+            stepCount={workingStepCount}
+            error={stream.error ?? null}
+            actions={onStopAll ? (
+              <button
+                type="button"
+                onClick={handleStop}
+                disabled={stoppingAll}
+                title={t('hub.stopHint')}
+                aria-label={t('hub.stop')}
+                className="inline-flex h-[26px] shrink-0 items-center justify-center gap-1.5 rounded-md border border-err/35 bg-err/[0.08] px-2 text-[10.5px] font-semibold leading-none text-err/90 shadow-sm transition-colors hover:border-err/55 hover:bg-err/[0.14] hover:text-err disabled:pointer-events-none disabled:opacity-45"
+              >
+                {stoppingAll
+                  ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-err/30 border-t-err" />
+                  : <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" /></svg>}
+                <span>{t('hub.stop')}</span>
+              </button>
+            ) : null}
+          >
+            <div className="space-y-3 px-3.5 py-3">
+              <WorkingPlanList plan={stream.plan} t={t} />
+              <WorkingSubAgentList subAgents={subAgents} t={t} />
+              <WorkingThinkingBlock text={stream.thinking || ''} t={t} />
+              <WorkingActivitySummary lines={activityLines} activitySummary={stream.activitySummary ?? null} activityEvents={stream.activityEvents ?? null} t={t} />
+              <WorkingActivityDetails lines={activityLines} activityEvents={stream.activityEvents ?? null} t={t} />
+              <WorkingDiagnostics diagnostics={stream.previewMeta?.diagnostics} t={t} />
+              {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && !visibleText && (
+                <div className="text-[12px] text-fg-5">{t('hub.workingIdle')}</div>
+              )}
+            </div>
+          </WorkingCard>
+        ) : (
+          <CompletedWorkDisclosure
+            t={t}
+            startedAt={stream.startedAt ?? null}
+            completedAt={stream.completedAt ?? null}
+            updatedAt={stream.updatedAt ?? null}
+          >
+            <div className="space-y-3 px-3.5 py-3">
+              <WorkingPlanList plan={stream.plan} t={t} />
+              <WorkingSubAgentList subAgents={subAgents} t={t} />
+              <WorkingThinkingBlock text={stream.thinking || ''} t={t} />
+              <WorkingActivitySummary lines={activityLines} activitySummary={stream.activitySummary ?? null} activityEvents={stream.activityEvents ?? null} t={t} />
+              <WorkingActivityDetails lines={activityLines} activityEvents={stream.activityEvents ?? null} t={t} />
+              <WorkingDiagnostics diagnostics={stream.previewMeta?.diagnostics} t={t} />
+            </div>
+          </CompletedWorkDisclosure>
+        )
       )}
 
       {/* Response text with thinking dots */}
-      {stream.text && (
+      {visibleText && (
         <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
-          <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
-            {stream.text}
-          </ReactMarkdown>
+          {stream.phase === 'streaming' ? (
+            <div className="whitespace-pre-wrap break-words">{visibleText}</div>
+          ) : (
+            <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
+              {visibleText}
+            </ReactMarkdown>
+          )}
           {stream.phase === 'streaming' && <ThinkingDots className="ml-1 inline-flex align-text-bottom text-fg-4" />}
         </div>
       )}
@@ -172,7 +193,7 @@ export function LivePreview({
           rendered yet. Inline dots (above) only appear once stream.text exists,
           so this fills the gap when activity / thinking / plan are shown alone
           or when no content has arrived at all. */}
-      {!stream.text && stream.phase === 'streaming' && !showWorking && (
+      {!visibleText && stream.phase === 'streaming' && !showWorking && (
         <div className="py-1">
           <ThinkingDots className="text-fg-5" />
         </div>

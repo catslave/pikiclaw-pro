@@ -7,8 +7,8 @@ import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '.
 import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
 import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { InteractionSnapshot, SessionInfo, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
-import { TurnView, UserBubble, TurnDivider } from './TurnView';
+import type { InteractionSnapshot, MessageBlock, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
+import { TurnView, UserBubble, TurnDivider, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
 import { InputComposer } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
@@ -26,6 +26,7 @@ export type SessionPanelChange = { agent: string; sessionId: string; workdir: st
 const SESSION_PAGE_TURNS = 12;
 const TOP_LOAD_THRESHOLD_PX = 160;
 const BOTTOM_STICK_THRESHOLD_PX = 96;
+const LOCAL_SEND_TASK_ASSIGNMENT_GRACE_MS = 30_000;
 
 /* ── Stale-while-revalidate: persist last-known history across mount/unmount ── */
 const MAX_HISTORY_SNAPSHOTS = 20;
@@ -39,17 +40,78 @@ function saveHistorySnapshot(key: string, h: TurnHistoryWindow) {
   }
 }
 
+type EditReplacement = { fromTurn: number; prompt: string };
+const EDIT_REPLACEMENTS_STORAGE_KEY = 'pikiclaw-session-edit-replacements';
+
+function readEditReplacements(): Record<string, EditReplacement> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(EDIT_REPLACEMENTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function readEditReplacement(agent: string | null | undefined, sessionId: string | null | undefined): EditReplacement | null {
+  if (!agent || !sessionId) return null;
+  const value = readEditReplacements()[snapshotKey(agent, sessionId)];
+  return typeof value?.fromTurn === 'number' && typeof value.prompt === 'string' ? value : null;
+}
+
+function writeEditReplacement(agent: string | null | undefined, sessionId: string | null | undefined, replacement: EditReplacement) {
+  if (typeof window === 'undefined' || !agent || !sessionId) return;
+  const key = snapshotKey(agent, sessionId);
+  const all = readEditReplacements();
+  all[key] = replacement;
+  try { window.localStorage.setItem(EDIT_REPLACEMENTS_STORAGE_KEY, JSON.stringify(all)); } catch {}
+}
+
+function bridgePendingImagesIntoHistory(history: TurnHistoryWindow, pendingPrompt: string | null, imageUrls: string[]): { history: TurnHistoryWindow; transferred: boolean } {
+  if (!imageUrls.length || !history.turns.length) return { history, transferred: false };
+  let turnIndex = -1;
+  for (let i = history.turns.length - 1; i >= 0; i--) {
+    if (history.turns[i].user) {
+      turnIndex = i;
+      break;
+    }
+  }
+  if (turnIndex < 0) return { history, transferred: false };
+  const turn = history.turns[turnIndex];
+  if (!turn.user) return { history, transferred: false };
+
+  const prompt = (pendingPrompt || '').trim();
+  const userText = (turn.user.text || '').trim();
+  if (prompt ? userText !== prompt : !!userText) return { history, transferred: false };
+
+  const serverImageCount = turn.user.blocks.filter(block => block.type === 'image').length;
+  if (serverImageCount >= imageUrls.length) return { history, transferred: false };
+
+  const bridgedImages: MessageBlock[] = imageUrls.slice(serverImageCount).map(url => ({ type: 'image', content: url }));
+  const nextTurns = [...history.turns];
+  nextTurns[turnIndex] = {
+    ...turn,
+    user: {
+      ...turn.user,
+      blocks: [...turn.user.blocks, ...bridgedImages],
+    },
+  };
+  return { history: { ...history, turns: nextTurns }, transferred: true };
+}
+
 /* ═══════════════════════════════════════════════════════════════
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange, onOpenFileLink, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, onSessionChange, onOpenFileLink, onCreateSideChatFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
   onSessionChange?: (next: SessionPanelChange) => void;
   onOpenFileLink?: OpenFileLinkHandler;
+  onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
    *  Ownership transfers to this panel: we revoke them once the turn completes. */
@@ -80,6 +142,8 @@ export const SessionPanel = memo(function SessionPanel({
     text: string;
     thinking: string;
     activity?: string;
+    activitySummary?: StreamActivitySummary | null;
+    activityEvents?: StreamActivityEvents | null;
     plan?: StreamPlan | null;
     startedAt?: number | null;
     completedAt?: number | null;
@@ -95,6 +159,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamPhase, setStreamPhase] = useState<string | null>(null);
   const [streamPollNonce, setStreamPollNonce] = useState(0);
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
+  const [lastContextMeta, setLastContextMeta] = useState<StreamPreviewMeta | null>(null);
   const [queuedTaskIds, setQueuedTaskIds] = useState<string[]>([]);
   const [queuedTasks, setQueuedTasks] = useState<Array<{ taskId: string; prompt: string }>>([]);
   // Active human-in-the-loop prompts attached to this session — driven by the
@@ -110,8 +175,11 @@ export const SessionPanel = memo(function SessionPanel({
   const [pendingCreatedAt, setPendingCreatedAt] = useState<string | null>(hasInitialPending ? (initialPendingCreatedAt || new Date().toISOString()) : null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const [pendingStopped, setPendingStopped] = useState(false);
   const pendingTaskIdRef = useRef<string | null>(null);
   pendingTaskIdRef.current = pendingTaskId;
+  const pendingStoppedRef = useRef(false);
+  pendingStoppedRef.current = pendingStopped;
   // Optimistic state for queued sends — one entry per send made while another
   // task was already streaming. Each entry carries an opaque localId so we can
   // match the API-assigned taskId back to the right entry even if responses
@@ -126,7 +194,8 @@ export const SessionPanel = memo(function SessionPanel({
   // Sends are sequential (InputComposer guards with `sending`), so a single
   // ref is sufficient.
   const lastSendQueuedLocalIdRef = useRef<string | null>(null);
-  const [editDraft, setEditDraft] = useState<string | null>(null);
+  const [editRequest, setEditRequest] = useState<{ atTurn: number | null; text: string; draftPending: boolean } | null>(null);
+  const [editReplacement, setEditReplacement] = useState<EditReplacement | null>(() => readEditReplacement(session.agent, session.sessionId));
   const [forkRequest, setForkRequest] = useState<{ atTurn: number } | null>(null);
   const [forkPrompt, setForkPrompt] = useState('');
   const [forkSubmitting, setForkSubmitting] = useState(false);
@@ -135,8 +204,12 @@ export const SessionPanel = memo(function SessionPanel({
   const pendingImageUrlsRef = useRef<string[]>(initialPendingImageUrls || []);
   const liveStreamRef = useRef(liveStream);
   const streamingRef = useRef(streaming);
+  const streamPhaseRef = useRef(streamPhase);
+  const queuedTaskIdsRef = useRef(queuedTaskIds);
   liveStreamRef.current = liveStream;
   streamingRef.current = streaming;
+  streamPhaseRef.current = streamPhase;
+  queuedTaskIdsRef.current = queuedTaskIds;
   const scrollRef = useRef<HTMLDivElement>(null);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const stickToBottomRef = useRef(true);
@@ -172,12 +245,22 @@ export const SessionPanel = memo(function SessionPanel({
     onPendingPromptConsumed?.();
   }, [hasInitialPending, onPendingPromptConsumed]);
 
-  const clearPending = useCallback(() => {
+  useEffect(() => {
+    setEditRequest(null);
+    setEditReplacement(readEditReplacement(session.agent, session.sessionId));
+  }, [session.agent, session.sessionId]);
+
+  const clearPending = useCallback((opts: { revokeImages?: boolean } = {}) => {
+    const revokeImages = opts.revokeImages !== false;
     setPendingPrompt(null);
     setPendingCreatedAt(null);
-    setPendingImageUrls(prev => { for (const u of prev) URL.revokeObjectURL(u); return []; });
+    setPendingImageUrls(prev => {
+      if (revokeImages) for (const u of prev) URL.revokeObjectURL(u);
+      return [];
+    });
     pendingImageUrlsRef.current = [];
     setPendingTaskId(null);
+    setPendingStopped(false);
   }, []);
 
   const clearPendingQueuedSends = useCallback(() => {
@@ -190,7 +273,12 @@ export const SessionPanel = memo(function SessionPanel({
   }, []);
 
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
-    const willBeQueued = !!liveStreamRef.current || streamingRef.current;
+    const livePhase = liveStreamRef.current?.phase || null;
+    const willBeQueued = streamingRef.current
+      || livePhase === 'streaming'
+      || streamPhaseRef.current === 'streaming'
+      || streamPhaseRef.current === 'queued'
+      || queuedTaskIdsRef.current.length > 0;
     const urls = imageUrls || [];
     const createdAt = new Date().toISOString();
     if (willBeQueued) {
@@ -211,6 +299,7 @@ export const SessionPanel = memo(function SessionPanel({
     setPendingImageUrls(urls);
     pendingImageUrlsRef.current = urls;
     setPendingTaskId(null);
+    setPendingStopped(false);
   }, []);
 
   const handleSendTaskAssigned = useCallback((taskId: string) => {
@@ -228,6 +317,29 @@ export const SessionPanel = memo(function SessionPanel({
     }
     setPendingTaskId(taskId);
   }, []);
+
+  const handleSendFailed = useCallback(() => {
+    localStreamPendingRef.current = false;
+    const queuedLocalId = lastSendQueuedLocalIdRef.current;
+    if (queuedLocalId) {
+      lastSendQueuedLocalIdRef.current = null;
+      setPendingQueuedSends(prev => {
+        let changed = false;
+        const next: PendingQueuedSend[] = [];
+        for (const send of prev) {
+          if (send.localId === queuedLocalId) {
+            for (const url of send.imageUrls) URL.revokeObjectURL(url);
+            changed = true;
+          } else {
+            next.push(send);
+          }
+        }
+        return changed ? next : prev;
+      });
+      return;
+    }
+    clearPending();
+  }, [clearPending]);
 
   const submitFork = useCallback(async () => {
     if (!forkRequest) return;
@@ -290,8 +402,13 @@ export const SessionPanel = memo(function SessionPanel({
     if (loadingLatestRef.current === callSessionId) return false;
     loadingLatestRef.current = callSessionId;
     try {
-      const next = await fetchTurnWindow({ turnOffset: 0, turnLimit: SESSION_PAGE_TURNS }, { force });
-      if (!next) return false;
+      const fetched = await fetchTurnWindow({ turnOffset: 0, turnLimit: SESSION_PAGE_TURNS }, { force });
+      if (!fetched) return false;
+      const { history: next, transferred: transferredPendingImages } = bridgePendingImagesIntoHistory(
+        fetched,
+        pendingPrompt,
+        pendingImageUrlsRef.current,
+      );
       // Drop stale results: if the panel's session id has rotated since this
       // call started (e.g. promotion happened while we were awaiting), the
       // response belongs to the old session and must not clobber the new
@@ -310,7 +427,7 @@ export const SessionPanel = memo(function SessionPanel({
       // React batches all updates into a single render (avoids flash/scroll jump)
       if (clearPendingOnLoadRef.current) {
         clearPendingOnLoadRef.current = false;
-        clearPending();
+        clearPending({ revokeImages: !transferredPendingImages });
       }
       if (clearLiveStreamOnLoadRef.current) {
         const pending = clearLiveStreamOnLoadRef.current;
@@ -332,7 +449,7 @@ export const SessionPanel = memo(function SessionPanel({
         loadingLatestRef.current = null;
       }
     }
-  }, [fetchTurnWindow, clearPending, session.sessionId]);
+  }, [fetchTurnWindow, clearPending, pendingPrompt, session.sessionId]);
 
   const loadOlderTurns = useCallback(async () => {
     if (!history?.hasOlder || loadingOlderRef.current) return;
@@ -379,7 +496,7 @@ export const SessionPanel = memo(function SessionPanel({
         setLiveStream(null);
       }
       if (prev === 'done') {
-        clearPending();
+        if (!pendingStoppedRef.current) clearPending();
         clearPendingQueuedSends();
       } else if (prev === null && localStreamPendingRef.current) {
         // Do NOT clear pending here — for slow uploads (e.g. images via FormData),
@@ -421,6 +538,8 @@ export const SessionPanel = memo(function SessionPanel({
           text: state.text || '',
           thinking: state.thinking || '',
           activity: state.activity,
+          activitySummary: state.activitySummary ?? null,
+          activityEvents: state.activityEvents ?? null,
           plan: state.plan ?? null,
           startedAt: state.startedAt ?? null,
           completedAt: state.completedAt ?? null,
@@ -474,8 +593,12 @@ export const SessionPanel = memo(function SessionPanel({
         previewMeta: state.previewMeta ?? prev.previewMeta ?? null,
       } : prev);
       const hasMoreQueued = !!state.queuedTaskIds?.length;
+      const stoppedOrIncomplete = !!state.incomplete || /stopped by user/i.test(String(state.error || ''));
+      if (stoppedOrIncomplete && (pendingPrompt || pendingImageUrlsRef.current.length > 0)) {
+        setPendingStopped(true);
+      }
       if (prevPhaseRef.current !== 'done') {
-        if (!hasMoreQueued) clearPendingOnLoadRef.current = true;
+        if (!hasMoreQueued && !stoppedOrIncomplete) clearPendingOnLoadRef.current = true;
         // Scope the pending clear to the finishing task so a steer handoff can
         // start a new task's stream without losing its preview when the history
         // fetch resolves.
@@ -506,7 +629,7 @@ export const SessionPanel = memo(function SessionPanel({
       return changed ? next : prev;
     });
     prevPhaseRef.current = state.phase;
-  }, [clearPending, clearPendingQueuedSends, loadLatestTurns, session.sessionId, session.agent, onSessionChange, workdir]);
+  }, [clearPending, clearPendingQueuedSends, loadLatestTurns, pendingPrompt, session.sessionId, session.agent, onSessionChange, workdir]);
 
   const requestStreamPolling = useCallback(() => {
     localStreamPendingRef.current = true;
@@ -577,6 +700,21 @@ export const SessionPanel = memo(function SessionPanel({
       await api.stopSession(session.agent || '', session.sessionId);
     } catch { /* server-side already logged */ }
   }, [session.agent, session.sessionId]);
+
+  const handleResendText = useCallback((txt: string) => {
+    scrollToBottomRef.current = true;
+    handleSendStart(txt);
+    requestStreamPolling();
+    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt)
+      .then((res) => {
+        if (!res.ok) {
+          handleSendFailed();
+          return;
+        }
+        if (res.taskId) handleSendTaskAssigned(res.taskId);
+      })
+      .catch(() => { handleSendFailed(); });
+  }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, requestStreamPolling, session.agent, session.sessionId, workdir]);
 
   const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
@@ -680,13 +818,28 @@ export const SessionPanel = memo(function SessionPanel({
   // would clear pendingPrompt and "lose" the optimistic bubble for the queued
   // message until loadLatestTurns later picks it up as a persisted turn.
   useEffect(() => {
+    const pendingAwaitingTask = !!(pendingPrompt || pendingImageUrls.length > 0) && !pendingTaskId;
+    const pendingCreatedAtMs = pendingCreatedAt ? Date.parse(pendingCreatedAt) : NaN;
+    const pendingAgeMs = Number.isFinite(pendingCreatedAtMs) ? Date.now() - pendingCreatedAtMs : Infinity;
+    const queuedAssignmentGraceActive = pendingQueuedSends.some(send => {
+      if (send.taskId) return false;
+      const createdAtMs = Date.parse(send.createdAt);
+      const ageMs = Number.isFinite(createdAtMs) ? Date.now() - createdAtMs : Infinity;
+      return ageMs < LOCAL_SEND_TASK_ASSIGNMENT_GRACE_MS;
+    });
+    const pendingAssignmentGraceActive =
+      (pendingAwaitingTask && pendingAgeMs < LOCAL_SEND_TASK_ASSIGNMENT_GRACE_MS)
+      || queuedAssignmentGraceActive;
     if (displayState !== 'running' && !streaming && !liveStream
-        && !streamPhase && queuedTaskIds.length === 0) {
+        && !streamPhase && queuedTaskIds.length === 0
+        && !localStreamPendingRef.current
+        && !pendingStopped
+        && !pendingAssignmentGraceActive) {
       clearPending();
       clearPendingQueuedSends();
       localStreamPendingRef.current = false;
     }
-  }, [displayState, streaming, liveStream, streamPhase, queuedTaskIds.length, clearPending, clearPendingQueuedSends]);
+  }, [displayState, streaming, liveStream, streamPhase, queuedTaskIds.length, pendingPrompt, pendingImageUrls.length, pendingTaskId, pendingCreatedAt, pendingQueuedSends, pendingStopped, clearPending, clearPendingQueuedSends]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -708,12 +861,15 @@ export const SessionPanel = memo(function SessionPanel({
     });
   }, [history, liveStream]);
 
-  // Scroll to bottom when a pending prompt appears
+  // Scroll to bottom when the running task's pending prompt appears.
+  // Queued follow-ups stay in the task bar and should not move the transcript.
   useLayoutEffect(() => {
     if (!pendingPrompt) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [pendingPrompt]);
+
+  const hasActiveTurn = !!(liveStream || streaming || streamPhase || pendingPrompt);
 
   useEffect(() => {
     if (!history?.hasOlder || loading || loadingOlder) return;
@@ -746,25 +902,33 @@ export const SessionPanel = memo(function SessionPanel({
   // the same response twice (once in TurnView, once in LivePreview).
   // BUT: when there's a pending follow-up prompt whose turn hasn't appeared in history
   // yet, the liveStream is for the NEW turn — don't strip the previous turn's response.
-  // True when the server's last-turn user matches the optimistic pending message
-  // by text but lacks the images we're holding. Claude persists user image blocks
-  // only after the turn settles, so text matches mid-stream while images are still
-  // missing — without this guard, the dedup would hide the optimistic bubble (with
-  // images) and let the server-rendered turn (no images) take over until 'done'.
+  const pendingMatchesLastServerUser = useMemo(() => {
+    if (!pendingPrompt || !rawTurns.length) return false;
+    const last = rawTurns[rawTurns.length - 1];
+    return (last.user?.text?.trim() || '') === pendingPrompt.trim();
+  }, [rawTurns, pendingPrompt]);
+  // The optimistic user bubble is the stable source of truth for the just-sent
+  // message until the pending slot is cleared. Do not depend on stream flags
+  // here: after send, the server can echo the user turn before streamPhase /
+  // liveStream has reached this panel. If we hide pending in that window, the
+  // user message disappears while the Working card is already visible.
+  const pendingOwnsVisibleUser = !!(pendingPrompt || pendingImageUrls.length)
+    && pendingMatchesLastServerUser;
+  // True when the server's matching user lacks the images we're holding.
   const optimisticBridgesImages = useMemo(() => {
-    if (!pendingImageUrls.length || !rawTurns.length) return false;
+    if (!pendingImageUrls.length || !pendingMatchesLastServerUser || !rawTurns.length) return false;
     const last = rawTurns[rawTurns.length - 1];
     if (!last.user) return false;
-    if ((last.user.text?.trim() || '') !== (pendingPrompt || '').trim()) return false;
     const serverImages = last.user.blocks.filter(b => b.type === 'image').length;
     return serverImages < pendingImageUrls.length;
-  }, [rawTurns, pendingPrompt, pendingImageUrls.length]);
+  }, [rawTurns, pendingMatchesLastServerUser, pendingImageUrls.length]);
 
   const turns = useMemo(() => {
     let result = rawTurns;
-    // Drop the duplicate user from history while the optimistic bubble is bridging
-    // missing server-side images. We keep the assistant — only the user is doubled.
-    if (optimisticBridgesImages) {
+    // Drop the duplicate user from history while the optimistic bubble owns the
+    // in-flight prompt. We keep the assistant so live/history output can continue
+    // rendering underneath the stable pending user bubble.
+    if (pendingOwnsVisibleUser || optimisticBridgesImages) {
       const last = result[result.length - 1];
       result = [...result.slice(0, -1), { ...last, user: null }];
     }
@@ -775,8 +939,41 @@ export const SessionPanel = memo(function SessionPanel({
     // the live stream is for a new follow-up turn, not the last one in history.
     if (pendingPrompt && last.user?.text?.trim() !== pendingPrompt.trim()) return result;
     return [...result.slice(0, -1), { ...last, assistant: null }];
-  }, [rawTurns, liveStream, pendingPrompt, optimisticBridgesImages]);
+  }, [rawTurns, liveStream, pendingPrompt, pendingOwnsVisibleUser, optimisticBridgesImages]);
+  const displayTurnItems = useMemo(() => {
+    const normalizedReplacementPrompt = editReplacement?.prompt.trim();
+    const replacementSourceIndex = editReplacement && normalizedReplacementPrompt
+      ? turns.findIndex((turn, sourceIndex) => {
+        const absoluteTurnIndex = (history?.startTurn || 0) + sourceIndex;
+        return absoluteTurnIndex > editReplacement.fromTurn
+          && turn.user?.text?.trim() === normalizedReplacementPrompt;
+      })
+      : -1;
+    return turns
+      .map((turn, index) => ({ turn, sourceIndex: index }))
+      .filter(({ sourceIndex }) => {
+        if (!editReplacement) return true;
+        const absoluteTurnIndex = (history?.startTurn || 0) + sourceIndex;
+        if (absoluteTurnIndex < editReplacement.fromTurn) return true;
+        return replacementSourceIndex >= 0 && sourceIndex >= replacementSourceIndex;
+      });
+  }, [editReplacement, history?.startTurn, turns]);
   const liveStreamVisible = !!liveStream && liveStreamShouldRender(liveStream);
+  const pendingBubble = (pendingPrompt || pendingImageUrls.length > 0)
+    ? (
+      <UserBubble
+        text={pendingPrompt || ''}
+        blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))}
+        createdAt={pendingCreatedAt}
+        t={t}
+        onResend={pendingStopped ? handleResendText : undefined}
+        onEdit={pendingStopped ? (txt) => setEditRequest({ atTurn: null, text: txt, draftPending: true }) : undefined}
+        retryProminent={pendingStopped}
+      />
+    )
+    : null;
+  const showStandalonePending = !!pendingBubble
+    && (!pendingMatchesLastServerUser || pendingOwnsVisibleUser || optimisticBridgesImages);
   const liveStreamAttachIndex = useMemo(() => {
     if (!liveStreamVisible || !turns.length) return -1;
     const index = turns.length - 1;
@@ -785,18 +982,32 @@ export const SessionPanel = memo(function SessionPanel({
     if (pendingPrompt && last.user.text?.trim() !== pendingPrompt.trim()) return -1;
     return index;
   }, [liveStreamVisible, pendingPrompt, turns]);
+  const latestContextMeta = useMemo(() => {
+    const liveMeta = liveStream?.previewMeta;
+    if (liveMeta?.contextPercent != null || liveMeta?.contextUsedTokens != null) return liveMeta;
+    for (let i = rawTurns.length - 1; i >= 0; i -= 1) {
+      const usage = rawTurns[i].assistant?.usage;
+      if (usage?.contextPercent != null || usage?.contextUsedTokens != null) return usage;
+    }
+    return null;
+  }, [liveStream?.previewMeta, rawTurns]);
+  useEffect(() => {
+    if (latestContextMeta) setLastContextMeta(latestContextMeta);
+  }, [latestContextMeta]);
+  const composerContextMeta = latestContextMeta ?? lastContextMeta;
+  const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || liveStream);
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-[var(--th-session-bg)]">
       {/* ── Messages ── */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
-        {loading ? (
+        {loading && !hasImmediateMessageContent ? (
           <div className="flex items-center justify-center py-20"><Spinner className="h-5 w-5 text-fg-4" /></div>
         ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !liveStream ? (
           <div className="py-20 text-center text-[13px] text-fg-5">{t('hub.noMessages')}</div>
         ) : (
           <div className="max-w-[860px] mx-auto px-6 py-6 space-y-0">
-            {(history?.hasOlder || loadingOlder) && (
+            {(history?.hasOlder || loadingOlder) && !hasActiveTurn && (
               <div className="mb-4 flex items-center justify-center gap-2 text-[11px] text-fg-5">
                 {loadingOlder ? <Spinner className="h-3 w-3 text-fg-5" /> : <span className="h-1.5 w-1.5 rounded-full bg-fg-5/35" />}
                 <span>{loadingOlder ? t('hub.loadingOlderTurns') : t('hub.loadOlderTurnsHint')}</span>
@@ -824,9 +1035,9 @@ export const SessionPanel = memo(function SessionPanel({
                 )}
               </button>
             )}
-            {turns.map((turn, i) => {
-              const absoluteTurnIndex = (history?.startTurn || 0) + i;
-              const isLatestVisibleTurn = i === turns.length - 1;
+            {displayTurnItems.map(({ turn, sourceIndex }) => {
+              const absoluteTurnIndex = (history?.startTurn || 0) + sourceIndex;
+              const isLatestVisibleTurn = sourceIndex === turns.length - 1;
               const retryProminent = isLatestVisibleTurn
                 && displayState === 'incomplete'
                 && !streaming
@@ -834,22 +1045,17 @@ export const SessionPanel = memo(function SessionPanel({
                 && !streamPhase
                 && !!turn.user?.text;
               return (
-                <TurnView key={`${history?.startTurn || 0}:${i}`}
+                <TurnView key={`${history?.startTurn || 0}:${sourceIndex}`}
                   turn={turn}
                   turnIndex={absoluteTurnIndex}
                   agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
-                  previewMeta={i === liveStreamAttachIndex ? liveStream?.previewMeta ?? null : undefined}
-                  liveAssistant={i === liveStreamAttachIndex && liveStream ? <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} /> : undefined}
-                  onResend={(txt) => {
-                    scrollToBottomRef.current = true;
-                    handleSendStart(txt);
-                    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt)
-                      .then((res) => { if (res.ok) requestStreamPolling(); })
-                      .catch(() => { clearPending(); });
-                  }}
-                  onEdit={(txt) => setEditDraft(txt)}
+                  previewMeta={sourceIndex === liveStreamAttachIndex ? liveStream?.previewMeta ?? null : undefined}
+                  liveAssistant={sourceIndex === liveStreamAttachIndex && liveStream ? <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} /> : undefined}
+                  onResend={handleResendText}
+                  onEdit={(txt) => setEditRequest({ atTurn: absoluteTurnIndex, text: txt, draftPending: true })}
                   onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
                   onOpenFileLink={onOpenFileLink}
+                  onCreateSideChatFromSelection={onCreateSideChatFromSelection}
                   workdir={workdir}
                   retryProminent={retryProminent}
                 />
@@ -869,25 +1075,30 @@ export const SessionPanel = memo(function SessionPanel({
                 setLiveStream(null) inside loadLatestTurns. Hiding here would
                 create a gap between 'done' and fetch completion where neither
                 the optimistic bubble nor the server turn is visible. */}
-            {(pendingPrompt || pendingImageUrls.length > 0)
-              && (optimisticBridgesImages
-                  || !(pendingPrompt && rawTurns.length > 0
-                       && rawTurns[rawTurns.length - 1]?.user?.text?.trim() === pendingPrompt.trim())) && (
+            {showStandalonePending && (
               <div className="session-turn">
-                <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} createdAt={pendingCreatedAt} t={t} />
-                {!liveStream && (
-                  <div className="mt-3 mb-5 animate-in">
-                    <ThinkingDots className="text-fg-5" />
-                  </div>
-                )}
+                {pendingBubble}
+                {liveStreamVisible && liveStreamAttachIndex < 0 && liveStream
+                  ? (
+                    <>
+                      <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta ?? null} />
+                      <div className="mb-6">
+                        <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
+                      </div>
+                    </>
+                  ) : !liveStream && !pendingStopped && (
+                    <div className="mt-3 mb-5 animate-in">
+                      <ThinkingDots className="text-fg-5" />
+                    </div>
+                  )}
               </div>
             )}
             {/* Live stream preview — skip entirely when the stream has nothing to show
                 (no body, no error). Prevents a phantom header above an empty body. */}
-            {liveStreamVisible && liveStreamAttachIndex < 0 && liveStream && (
+            {liveStreamVisible && liveStreamAttachIndex < 0 && !showStandalonePending && liveStream && (
               <div className="mb-6">
                 <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta} />
-                <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} />
+                <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
               </div>
             )}
             <div className="h-4" />
@@ -902,6 +1113,7 @@ export const SessionPanel = memo(function SessionPanel({
         onStreamQueued={requestStreamPolling}
         onSendStart={handleSendStart}
         onSendTaskAssigned={handleSendTaskAssigned}
+        onSendFailed={handleSendFailed}
         onSessionChange={onSessionChange}
         t={t}
         streamPhase={streamPhase}
@@ -909,12 +1121,19 @@ export const SessionPanel = memo(function SessionPanel({
         queuedTaskIds={queuedTaskIds}
         queuedTasks={queuedTasks}
         pendingQueuedSends={pendingQueuedSends}
+        contextMeta={composerContextMeta}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}
         onReorderQueued={handleReorderQueuedTasks}
-        onStopAll={handleStopAll}
-        editDraft={editDraft}
-        onEditDraftConsumed={() => setEditDraft(null)}
+        editDraft={editRequest?.draftPending ? editRequest.text : null}
+        editAtTurn={editRequest?.atTurn ?? null}
+        onEditDraftConsumed={() => setEditRequest(current => current ? { ...current, draftPending: false } : current)}
+        onEditSendStart={(prompt, atTurn) => {
+          const replacement = { fromTurn: atTurn, prompt };
+          setEditReplacement(replacement);
+          writeEditReplacement(session.agent, session.sessionId, replacement);
+          setEditRequest(null);
+        }}
       />
 
       {/* ── Fork composer modal ── */}

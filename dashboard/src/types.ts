@@ -504,6 +504,35 @@ export interface StreamPreviewMeta {
   generatingImages?: number;
 }
 
+export type StreamActivityKind = 'file' | 'search' | 'command' | 'tool';
+
+export interface StreamActivityCurrent {
+  kind: StreamActivityKind;
+  label: string;
+}
+
+export interface StreamActivitySummary {
+  files: number;
+  searches: number;
+  commands: number;
+  tools: number;
+  current?: StreamActivityCurrent | null;
+}
+
+export interface StreamActivityEvent {
+  kind: StreamActivityKind;
+  label: string;
+  action?: string | null;
+  target?: string | null;
+}
+
+export interface StreamActivityEvents {
+  files: StreamActivityEvent[];
+  searches: StreamActivityEvent[];
+  commands: StreamActivityEvent[];
+  tools: StreamActivityEvent[];
+}
+
 export interface StreamSubAgent {
   id: string;
   kind: string | null;
@@ -825,3 +854,75 @@ export type CliAuthStreamEvent =
   | { type: 'status'; status: CliStatus }
   | { type: 'error'; message: string }
   | { type: 'done'; ok: boolean; exitCode: number | null };
+
+// ---------------------------------------------------------------------------
+// Pikiclaw Pro task workflow
+// ---------------------------------------------------------------------------
+
+export type ProTaskKind = 'manual' | 'todo' | 'jira-ticket' | 'jira-bug' | 'jira-epic' | 'automation';
+export type ProTaskStatus = 'backlog' | 'refinement' | 'coding' | 'resolved' | 'done';
+export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 'demo' | 'bugfix' | 'knowledge';
+export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
+
+export interface TaskEstimate {
+  codingMinutes?: number;
+  userUnderstandingMinutes?: number;
+  reviewMinutes?: number;
+  verificationMinutes?: number;
+  totalMinutes?: number;
+  confidence?: 'low' | 'medium' | 'high';
+  assumptions?: string[];
+}
+
+export interface StageSessionRef {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+}
+
+export interface StageRun {
+  id: string;
+  taskId: string;
+  stage: ProTaskStage;
+  status: ProStageRunStatus;
+  assistantId?: string;
+  selectedAgent?: string;
+  selectedAgentReason?: string;
+  session: StageSessionRef;
+  prompt: string;
+  startedAt?: string;
+  completedAt?: string;
+  output?: {
+    summary?: string;
+    estimate?: TaskEstimate;
+    branch?: string;
+    testResultId?: string;
+    knowledgeRefs?: string[];
+  };
+}
+
+export interface ProTaskEvent {
+  id: string;
+  taskId: string;
+  type: string;
+  createdAt: string;
+  actor: 'user' | 'system' | 'assistant';
+  summary: string;
+  diff?: unknown;
+}
+
+export interface ProTask {
+  id: string;
+  title: string;
+  description?: string;
+  kind: ProTaskKind;
+  status: ProTaskStatus;
+  workdir?: string;
+  jiraKey?: string;
+  jiraUrl?: string;
+  sprint?: string;
+  createdAt: string;
+  updatedAt: string;
+  stageRuns: StageRun[];
+  events: ProTaskEvent[];
+}

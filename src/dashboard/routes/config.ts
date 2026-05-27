@@ -75,6 +75,16 @@ function isOpenTarget(value: unknown): value is OpenTarget {
     || value === 'default';
 }
 
+function countLiveSessionTasks(botRef: NonNullable<ReturnType<typeof runtime.getBotRef>>): number {
+  const ids = new Set<string>();
+  for (const session of botRef.sessionStates.values()) {
+    for (const taskId of session.runningTaskIds) {
+      if (botRef.activeTasks.has(taskId)) ids.add(taskId);
+    }
+  }
+  return ids.size;
+}
+
 function runOpenCommand(command: string, args: string[]) {
   const result = spawnSync(command, args, {
     encoding: 'utf8',
@@ -193,6 +203,7 @@ app.get('/api/state', async (c) => {
   const setupState = await runtime.buildValidatedSetupState(config);
   const permissions = checkPermissions();
   const botRef = runtime.getBotRef();
+  const activeTasks = botRef ? countLiveSessionTasks(botRef) : 0;
   return c.json({
     version: VERSION,
     ready: isSetupReady(setupState),
@@ -211,7 +222,7 @@ app.get('/api/state', async (c) => {
       uptime: Date.now() - botRef.startedAt,
       connected: botRef.connected,
       stats: botRef.stats,
-      activeTasks: botRef.activeTasks.size,
+      activeTasks,
       sessions: botRef.sessionStates.size,
     } : null,
   });
@@ -383,6 +394,15 @@ app.post('/api/open-preferences', async (c) => {
 
 // Restart process
 app.post('/api/restart', (c) => {
+  const botRef = runtime.getBotRef();
+  const activeTasks = botRef ? countLiveSessionTasks(botRef) : 0;
+  if (activeTasks > 0) {
+    return c.json({
+      ok: false,
+      error: `Cannot restart while ${activeTasks} task${activeTasks === 1 ? '' : 's'} are active. Wait for the current task to finish, then retry.`,
+      activeTasks,
+    }, 409);
+  }
   setTimeout(() => {
     void requestProcessRestart({ log: message => runtime.log(message) });
   }, 50);

@@ -349,7 +349,19 @@ app.patch('/api/workspaces', async (c) => {
     const body = await c.req.json();
     const wsPath = typeof body?.path === 'string' ? body.path.trim() : '';
     if (!wsPath) return c.json({ ok: false, error: 'path is required' }, 400);
-    const updated = updateWorkspace(wsPath, body);
+    let updated = updateWorkspace(wsPath, body);
+    // The active runtime workdir is shown in GET /api/workspaces even before it
+    // has been explicitly saved. Allow renaming it by first registering it, then
+    // applying the same patch so the custom name becomes durable.
+    if (!updated) {
+      const config = loadUserConfig();
+      const runtimeWorkdir = runtime.getRuntimeWorkdir(config);
+      if (runtimeWorkdir && path.resolve(wsPath) === path.resolve(runtimeWorkdir)) {
+        addWorkspace(wsPath, typeof body?.name === 'string' ? body.name : undefined);
+        updated = updateWorkspace(wsPath, body);
+      }
+    }
+    if (!updated) return c.json({ ok: false, error: 'workspace not found' }, 404);
     return c.json({ ok: true, workspace: updated });
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
@@ -542,7 +554,7 @@ app.post('/api/session-hub/session/side-chat/delete', async (c) => {
       parentSessionId,
       purgeNative,
     });
-    if (result.refusedReason === 'session-running') {
+    if (result.refusedReason === 'session-running' && !result.sideChatRefRemoved) {
       return c.json({ ok: false, error: 'session is still running — stop it first' }, 409);
     }
     return c.json({
@@ -587,7 +599,7 @@ app.post('/api/session-hub/session/messages', async (c) => {
       turnLimit: Number.isFinite(turnLimit) ? turnLimit : undefined,
       rich,
     });
-    return c.json(rewriteSessionImagesForDashboard(result, agent, sessionId));
+    return c.json(rewriteSessionImagesForDashboard(result, agent, sessionId, workdir));
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }
@@ -599,11 +611,12 @@ function rewriteSessionImagesForDashboard(
   result: SessionMessagesResult,
   agent: string,
   sessionId: string,
+  workdir?: string | null,
 ): SessionMessagesResult {
   if (!result.richMessages?.length) return result;
   const richMessages: RichMessage[] = result.richMessages.map(message => ({
     ...message,
-    blocks: rewriteImageBlocksForTransport(message.blocks, { agent, sessionId }),
+    blocks: rewriteImageBlocksForTransport(message.blocks, { agent, sessionId, workdir }),
   }));
   return { ...result, richMessages };
 }
@@ -629,7 +642,13 @@ app.get('/api/sessions/:agent/:id/attachment', async (c) => {
   // images generated under the project tree resolve cleanly.
   const config = loadUserConfig();
   const fallbackWorkdir = runtime.getRequestWorkdir(config);
-  const managed = findPikiclawSession(fallbackWorkdir, agent, sessionId);
+  let managed = findPikiclawSession(fallbackWorkdir, agent, sessionId);
+  if (!managed) {
+    for (const workspace of loadWorkspaces()) {
+      managed = findPikiclawSession(workspace.path, agent, sessionId);
+      if (managed) break;
+    }
+  }
   const workdir = managed?.workdir || fallbackWorkdir;
 
   const resolved = resolveAllowedAttachmentPath(requestedPath, workdir);

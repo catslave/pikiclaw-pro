@@ -19,6 +19,7 @@ export function CollapsibleCard({
   label,
   preview,
   badge,
+  actions,
   collapsedContent,
   children,
   className,
@@ -29,6 +30,7 @@ export function CollapsibleCard({
   label: string;
   preview?: ReactNode;
   badge?: ReactNode;
+  actions?: ReactNode;
   collapsedContent?: ReactNode;
   children?: ReactNode;
   className?: string;
@@ -39,24 +41,27 @@ export function CollapsibleCard({
       'shadow-[0_2px_8px_rgba(0,0,0,0.06)]',
       className,
     )}>
-      <button
-        onClick={onToggle}
-        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-panel-h/40 transition-colors"
-      >
-        {dot && (
-          <span className={cn(
-            'h-[7px] w-[7px] shrink-0 rounded-full',
-            dot.color,
-            dot.pulse && 'animate-pulse',
-          )} />
-        )}
-        <span className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-fg-5">
-          {label}
-        </span>
-        <span className="flex-1 min-w-0 overflow-hidden">{preview}</span>
-        {badge}
-        <ChevronIcon open={open} />
-      </button>
+      <div className="flex items-center gap-1.5 hover:bg-panel-h/40 transition-colors">
+        <button
+          onClick={onToggle}
+          className="min-w-0 flex-1 flex items-center gap-2.5 px-3.5 py-2.5 text-left"
+        >
+          {dot && (
+            <span className={cn(
+              'h-[7px] w-[7px] shrink-0 rounded-full',
+              dot.color,
+              dot.pulse && 'animate-pulse',
+            )} />
+          )}
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-fg-5">
+            {label}
+          </span>
+          <span className="flex-1 min-w-0 overflow-hidden">{preview}</span>
+          {badge}
+          <ChevronIcon open={open} />
+        </button>
+        {actions && <div className="shrink-0 pr-3.5">{actions}</div>}
+      </div>
       {!open && collapsedContent}
       {open && children && (
         <div className="border-t border-edge">

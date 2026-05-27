@@ -7,7 +7,10 @@ export default defineConfig({
   root: __dirname,
   build: {
     outDir: 'dist',
-    emptyOutDir: true,
+    // Keep old hashed chunks available for already-open dashboard pages.
+    // The app lazy-loads heavy renderers like Mermaid; deleting old assets on
+    // every rebuild makes those dynamic imports fail until the user refreshes.
+    emptyOutDir: false,
     rollupOptions: {
       output: {
         manualChunks(id) {

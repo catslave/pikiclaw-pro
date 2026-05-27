@@ -18,6 +18,7 @@ import cliRoutes from './routes/cli.js';
 import platformSkillsRoutes from './routes/platform-skills.js';
 import modelsRoutes from './routes/models.js';
 import localModelsRoutes from './routes/local-models.js';
+import proRoutes from './routes/pro.js';
 import { runtime, type DashboardEvent } from './runtime.js';
 import { registerProcessRuntime } from '../core/process-control.js';
 import { VERSION } from '../core/version.js';
@@ -139,6 +140,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
   app.route('/', platformSkillsRoutes);
   app.route('/', modelsRoutes);
   app.route('/', localModelsRoutes);
+  app.route('/', proRoutes);
 
   // -- Static files: serve dashboard build output --
   // Resolve path relative to this file's location (src/ or dist/)

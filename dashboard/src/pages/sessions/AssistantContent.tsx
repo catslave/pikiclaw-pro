@@ -4,9 +4,10 @@ import { cn } from '../../utils';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
+import { stripOaiMemoryCitations } from './messageSanitizers';
 import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
-import { WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, summarizeWorkingActivity } from './WorkingCard';
+import { CompletedWorkDisclosure, WorkingActivityDetails, WorkingActivitySummary, WorkingDiagnostics, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock } from './WorkingCard';
 import type { RichMessage, MessageBlock } from '../../types';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -30,49 +31,31 @@ export function AssistantMsg({
   const { activityBlocks, thinkingBlocks, narrativeBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
   const narrativeText = narrativeBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
+  const fallbackNarrativeToOutput = outputBlocks.length === 0 && narrativeBlocks.length > 0;
+  const renderedOutputBlocks = outputBlocks.length > 0 ? outputBlocks : narrativeBlocks;
+  const workingNarrativeText = fallbackNarrativeToOutput ? '' : narrativeText;
   const thinkingText = thinkingBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
   const subAgents = subAgentBlocks.map(block => block.subAgent).filter(Boolean) as NonNullable<MessageBlock['subAgent']>[];
-  const toolUseBlocks = activityBlocks.filter(block => block.type === 'tool_use');
   const activitySummarySource = activityBlocks
     .filter(block => block.type === 'tool_use')
     .map(block => summarizeToolUse(block));
   const activityDetailLines = activityBlocks.map(block => (
     block.type === 'tool_use' ? summarizeToolUse(block) : summarizeToolResult(block)
   ));
-  const activitySummary = summarizeWorkingActivity(activitySummarySource, t);
-  const planSteps = latestPlan?.plan?.steps || [];
-  const currentPlanStep = planSteps.find(step => step.status === 'inProgress')
-    || [...planSteps].reverse().find(step => step.status === 'completed')
-    || planSteps[0]
-    || null;
-  const workingPreview = currentPlanStep?.step
-    || (narrativeText ? lastNLines(narrativeText, 1) : '')
-    || (thinkingText ? lastNLines(thinkingText, 1) : '')
-    || activitySummary[0]
-    || (toolUseBlocks.length ? summarizeToolUse(toolUseBlocks[toolUseBlocks.length - 1]) : '');
-  const workingStepCount = toolUseBlocks.length
-    || planSteps.length
-    || subAgents.length
-    || narrativeBlocks.length
-    || thinkingBlocks.length;
-  const hasWorking = activityBlocks.length > 0 || subAgents.length > 0 || !!latestPlan?.plan || !!thinkingText || !!narrativeText;
+  const hasWorking = activityBlocks.length > 0 || subAgents.length > 0 || !!latestPlan?.plan || !!thinkingText || !!workingNarrativeText;
   const hasContent = activityBlocks.length > 0 || subAgentBlocks.length > 0 || !!latestPlan?.plan || thinkingBlocks.length > 0 || narrativeBlocks.length > 0 || outputBlocks.length > 0 || noticeBlocks.length > 0;
   if (!hasContent) return null;
   return (
     <div className="space-y-3">
       {hasWorking && (
-        <WorkingCard
-          phase="done"
+        <CompletedWorkDisclosure
           t={t}
           defaultOpen={false}
           startedAt={startedAt ?? null}
           completedAt={completedAt ?? message.createdAt ?? null}
-          previewMeta={message.usage ?? null}
-          previewText={workingPreview}
-          stepCount={workingStepCount}
         >
           <div className="space-y-3 px-3.5 py-3">
-            <WorkingNarrativeBlock text={narrativeText} t={t} />
+            <WorkingNarrativeBlock text={workingNarrativeText} t={t} />
             <WorkingPlanList plan={latestPlan?.plan} t={t} />
             <WorkingSubAgentList subAgents={subAgents} t={t} />
             <WorkingThinkingBlock text={thinkingText} t={t} />
@@ -80,9 +63,9 @@ export function AssistantMsg({
             <WorkingActivityDetails lines={activityDetailLines} t={t} />
             <WorkingDiagnostics diagnostics={message.usage?.diagnostics} t={t} />
           </div>
-        </WorkingCard>
+        </CompletedWorkDisclosure>
       )}
-      {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} />}
+      {renderedOutputBlocks.length > 0 && <OutputBlock blocks={renderedOutputBlocks} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} />}
       {noticeBlocks.length > 0 && <SystemNoticeSection blocks={noticeBlocks} t={t} />}
     </div>
   );
@@ -108,14 +91,19 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   outputBlocks: MessageBlock[];
   noticeBlocks: MessageBlock[];
 } {
-  const normalized = blocks.filter(block =>
-    block.type === 'plan'
-    || block.type === 'tool_use'
-    || block.type === 'tool_result'
-    || block.type === 'image'
-    || block.type === 'sub_agent'
-    || !!block.content.trim(),
-  );
+  const normalized = blocks
+    .map(block => {
+      if (!block.content.includes('<oai-mem-citation>')) return block;
+      return { ...block, content: stripOaiMemoryCitations(block.content) };
+    })
+    .filter(block =>
+      block.type === 'plan'
+      || block.type === 'tool_use'
+      || block.type === 'tool_result'
+      || block.type === 'image'
+      || block.type === 'sub_agent'
+      || !!block.content.trim(),
+    );
   return {
     activityBlocks: normalized.filter(b => b.type === 'tool_use' || b.type === 'tool_result'),
     thinkingBlocks: normalized.filter(b => b.type === 'thinking'),
@@ -258,11 +246,11 @@ function ImageFigure({
   const caption = block.imageCaption?.trim() || '';
   const [showPrompt, setShowPrompt] = useState(false);
   return (
-    <figure className="flex flex-col gap-1.5 max-w-[400px]">
+    <figure className="flex w-full max-w-[400px] min-w-0 flex-col gap-1.5">
       <img
         src={block.content}
         alt={caption || ''}
-        className="max-w-[400px] max-h-[300px] rounded-md border border-fg-6/50 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
+        className="h-auto max-h-[300px] w-full max-w-full rounded-md border border-fg-6/50 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
         onClick={() => onLightbox(block.content)}
       />
       {caption && (
@@ -284,7 +272,7 @@ function ImageFigure({
             <span>{t('hub.imagePrompt')}</span>
           </button>
           {showPrompt && (
-            <div className="rounded-md border border-fg-6/30 bg-fg-6/[0.05] px-3 py-2 max-w-[400px] max-h-[260px] overflow-y-auto">
+            <div className="w-full max-w-full rounded-md border border-fg-6/30 bg-fg-6/[0.05] px-3 py-2 max-h-[260px] overflow-y-auto">
               <div className="text-[11.5px] leading-[1.65] text-fg-3 whitespace-pre-wrap break-words">
                 {caption}
               </div>
@@ -313,7 +301,7 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
         </div>
       )}
       {imageBlocks.length > 0 && (
-        <div className="flex flex-wrap gap-3 mt-2">
+        <div className="flex min-w-0 max-w-full flex-wrap gap-3 mt-2">
           {imageBlocks.map((img, i) => (
             <ImageFigure key={i} block={img} onLightbox={setLightboxSrc} t={t} />
           ))}

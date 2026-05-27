@@ -2422,24 +2422,12 @@ async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<Sessi
           for (const item of (turn.items ?? [])) {
             const createdAt = codexMessageCreatedAt(item, turn);
             if (item.type === 'userMessage') {
-              const parts: string[] = [];
-              const blocks: MessageBlock[] = [];
-              for (const c of (item.content ?? [])) {
-                if (c.type === 'text' && c.text) parts.push(c.text);
-                else if (c.type === 'localImage' && c.path) {
-                  // Read the image file if it still exists
-                  try {
-                    if (fs.existsSync(c.path) && fs.statSync(c.path).size <= 4 * 1024 * 1024) {
-                      const ext = path.extname(c.path).toLowerCase();
-                      const data = fs.readFileSync(c.path).toString('base64');
-                      blocks.push({ type: 'image', content: `data:${mimeForExt(ext)};base64,${data}` });
-                    }
-                  } catch { /* skip unreadable images */ }
-                }
-              }
-              if (parts.length || blocks.length) {
-                const text = stripInjectedPrompts(parts.join('\n'));
-                if (text) blocks.unshift({ type: 'text', content: text });
+              const user = codexUserContentToRich(item.content ?? []);
+              if (user.text || user.imageBlocks.length) {
+                const blocks: MessageBlock[] = user.text
+                  ? [{ type: 'text', content: user.text }, ...user.imageBlocks]
+                  : [...user.imageBlocks];
+                const text = user.text;
                 allMsgs.push({ role: 'user', text });
                 richMsgs.push({ role: 'user', text, blocks, createdAt });
               }
@@ -2469,6 +2457,95 @@ async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<Sessi
 
   // Fallback: read full rollout file
   return getCodexSessionMessagesFromRollout(opts);
+}
+
+function imageBlockFromCodexImageUrl(rawUrl: unknown): MessageBlock | null {
+  const imageUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!imageUrl) return null;
+
+  const dataMatch = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
+  if (dataMatch) {
+    return { type: 'image', content: imageUrl, imageMime: dataMatch[1].toLowerCase() };
+  }
+
+  if (imageUrl.startsWith('file://')) {
+    const filePath = imageUrl.slice('file://'.length);
+    return attachAgentImage({ imagePath: filePath }) || { type: 'image', content: imageUrl, imagePath: filePath };
+  }
+
+  if (/^https?:\/\//i.test(imageUrl)) {
+    return { type: 'image', content: imageUrl };
+  }
+
+  return null;
+}
+
+function imageBlocksFromCodexLocalImages(value: unknown): MessageBlock[] {
+  const paths = Array.isArray(value) ? value : [];
+  const blocks: MessageBlock[] = [];
+  for (const entry of paths) {
+    const imagePath = typeof entry === 'string'
+      ? entry
+      : typeof entry?.path === 'string'
+        ? entry.path
+        : '';
+    if (!imagePath) continue;
+    const block = attachAgentImage({ imagePath });
+    if (block) blocks.push(block);
+  }
+  return blocks;
+}
+
+function imageBlocksFromCodexImages(value: unknown): MessageBlock[] {
+  const images = Array.isArray(value) ? value : [];
+  const blocks: MessageBlock[] = [];
+  for (const entry of images) {
+    const rawUrl = typeof entry === 'string'
+      ? entry
+      : entry?.image_url ?? entry?.url ?? entry?.data ?? null;
+    const block = imageBlockFromCodexImageUrl(rawUrl);
+    if (block) blocks.push(block);
+  }
+  return blocks;
+}
+
+function dedupeImageBlocks(blocks: MessageBlock[]): MessageBlock[] {
+  const seen = new Set<string>();
+  const out: MessageBlock[] = [];
+  for (const block of blocks) {
+    if (block.type !== 'image') {
+      out.push(block);
+      continue;
+    }
+    const key = block.imagePath || block.content;
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(block);
+  }
+  return out;
+}
+
+function codexUserContentToRich(content: unknown[]): { text: string; imageBlocks: MessageBlock[] } {
+  const parts: string[] = [];
+  const imageBlocks: MessageBlock[] = [];
+  for (const item of content) {
+    const block = item as any;
+    if (!block || typeof block !== 'object') continue;
+    if ((block.type === 'text' || block.type === 'input_text') && typeof block.text === 'string') {
+      parts.push(block.text);
+      continue;
+    }
+    if (block.type === 'localImage' && typeof block.path === 'string') {
+      const image = attachAgentImage({ imagePath: block.path });
+      if (image) imageBlocks.push(image);
+      continue;
+    }
+    if (block.type === 'input_image' || block.type === 'image_url') {
+      const image = imageBlockFromCodexImageUrl(block.image_url ?? block.url);
+      if (image) imageBlocks.push(image);
+    }
+  }
+  return { text: stripInjectedPrompts(parts.join('\n')).trim(), imageBlocks: dedupeImageBlocks(imageBlocks) };
 }
 
 function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionMessagesResult {
@@ -2519,12 +2596,19 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
         if (ev.payload.type === 'user_message' && typeof ev.payload.message === 'string') {
           flushAssistant();
           const text = stripInjectedPrompts(ev.payload.message).trim();
-          if (!text) continue;
+          const imageBlocks = dedupeImageBlocks([
+            ...imageBlocksFromCodexLocalImages(ev.payload.local_images),
+            ...imageBlocksFromCodexImages(ev.payload.images),
+          ]);
+          if (!text && imageBlocks.length === 0) continue;
           const userMessage: TailMessage = { role: 'user', text };
+          const blocks: MessageBlock[] = text
+            ? [{ type: 'text', content: text }, ...imageBlocks]
+            : imageBlocks;
           fallbackMsgs.push(userMessage);
-          fallbackRichMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }], createdAt });
+          fallbackRichMsgs.push({ role: 'user', text, blocks, createdAt });
           allMsgs.push(userMessage);
-          richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }], createdAt });
+          richMsgs.push({ role: 'user', text, blocks, createdAt });
         } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
           const text = stripOaiMemoryCitations(ev.payload.message).trim();
           if (text) {

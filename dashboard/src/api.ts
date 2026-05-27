@@ -20,11 +20,17 @@ import type {
   McpServerConfig,
   PermissionRequestResult,
   PlatformSkillInfo,
+  ProTask,
+  ProTaskKind,
+  ProTaskStage,
+  ProTaskStatus,
   SkillCatalogItem,
   RemoteSkillInfo,
   SessionHubResult,
   SessionMessagesResult,
   SkillInfo,
+  StreamActivityEvents,
+  StreamActivitySummary,
   StreamPlan,
   StreamPreviewMeta,
   SessionTailMessage,
@@ -185,7 +191,7 @@ export const api = {
       opts,
     ),
   requestPermission: (permission: string) => post<PermissionRequestResult>('/api/open-preferences', { permission }),
-  restart: () => post<{ ok: boolean; error?: string | null }>('/api/restart', {}),
+  restart: () => post<{ ok: boolean; error?: string | null; activeTasks?: number }>('/api/restart', {}),
   switchWorkdir: (path: string) => post<{ ok: boolean; workdir?: string; error?: string }>('/api/switch-workdir', { path }),
   lsDir: (dir?: string, includeFiles?: boolean, includeHidden?: boolean) => {
     const params = new URLSearchParams();
@@ -617,6 +623,52 @@ export const api = {
       { timeoutMs: 5_000, ...opts },
     ),
 
+  // Pikiclaw Pro task workflow
+  getProTasks: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; tasks: ProTask[]; error?: string }>('/api/pro/tasks', opts),
+  createProTask: (
+    task: {
+      title: string;
+      description?: string;
+      kind?: ProTaskKind;
+      status?: ProTaskStatus;
+      workdir?: string;
+      jiraKey?: string;
+      jiraUrl?: string;
+      sprint?: string;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; task?: ProTask; error?: string }>('/api/pro/tasks', task, opts),
+  updateProTaskStatus: (taskId: string, status: ProTaskStatus, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/status`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+        ...opts,
+      },
+    ),
+  startProTaskStage: (
+    taskId: string,
+    stage: ProTaskStage,
+    options: { prompt?: string; agent?: string | null; model?: string | null; effort?: string | null; workdir?: string | null } = {},
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; task?: ProTask; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/stage-runs`,
+      {
+        stage,
+        ...(options.prompt ? { prompt: options.prompt } : {}),
+        ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.effort ? { effort: options.effort } : {}),
+        ...(options.workdir ? { workdir: options.workdir } : {}),
+      },
+      { timeoutMs: 30_000, ...opts },
+    ),
+
   // Human-in-the-loop interaction (im_ask_user / Codex requestUserInput)
   /** Pick a predefined option as the answer to the current question. */
   interactionSelectOption: (
@@ -668,6 +720,8 @@ export interface StreamSnapshot {
   text?: string;
   thinking?: string;
   activity?: string;
+  activitySummary?: StreamActivitySummary | null;
+  activityEvents?: StreamActivityEvents | null;
   plan?: StreamPlan | null;
   previewMeta?: StreamPreviewMeta | null;
   sessionId?: string | null;

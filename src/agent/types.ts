@@ -333,6 +333,35 @@ export interface StreamResult {
 // Session management types
 // ---------------------------------------------------------------------------
 
+export type StreamActivityKind = 'file' | 'search' | 'command' | 'tool';
+
+export interface StreamActivityCurrent {
+  kind: StreamActivityKind;
+  label: string;
+}
+
+export interface StreamActivitySummary {
+  files: number;
+  searches: number;
+  commands: number;
+  tools: number;
+  current?: StreamActivityCurrent | null;
+}
+
+export interface StreamActivityEvent {
+  kind: StreamActivityKind;
+  label: string;
+  action?: string | null;
+  target?: string | null;
+}
+
+export interface StreamActivityEvents {
+  files: StreamActivityEvent[];
+  searches: StreamActivityEvent[];
+  commands: StreamActivityEvent[];
+  tools: StreamActivityEvent[];
+}
+
 /** Persistent record for a pikiclaw-managed session stored in the session index. */
 export type SessionTitleSource = 'prompt' | 'agent' | 'user';
 

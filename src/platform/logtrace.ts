@@ -49,7 +49,7 @@ function tokenize(input: string): string[] {
   return tokens;
 }
 
-function parseLogTraceArgs(rawArgs: string): ParsedLogTraceArgs {
+export function parseLogTraceArgs(rawArgs: string): ParsedLogTraceArgs {
   const parsed: ParsedLogTraceArgs = {
     id: '',
     env: 'lab',
@@ -80,6 +80,19 @@ function parseLogTraceArgs(rawArgs: string): ParsedLogTraceArgs {
   }
 
   return parsed;
+}
+
+function summarizeTraceFailure(trace: { code: number | null; stderr: string; timedOut: boolean }): string | undefined {
+  if (trace.timedOut) return 'iva-logtracer timed out';
+  const stderr = trace.stderr.trim();
+  if (!stderr) return undefined;
+  const explicitError = stderr.match(/(?:❌\s*)?Error:\s*(.+)/);
+  const message = explicitError?.[1]?.trim() || stderr.split(/\r?\n/).map(line => line.trim()).find(Boolean);
+  if (!message) return undefined;
+  if (message.includes("unknown url type: '/login'")) {
+    return `${message}. Check the selected iva-logtracer env file; KIBANA_ES_URL is likely missing or invalid.`;
+  }
+  return message;
 }
 
 function hasExecutableOnPath(bin: string): boolean {
@@ -292,11 +305,14 @@ export async function runLogTraceSkill(req: LogTraceRequest): Promise<LogTraceRe
   });
   fs.writeFileSync(artifactPath, prompt, 'utf-8');
 
+  const failureSummary = summarizeTraceFailure(trace);
   return {
     ok: trace.code === 0 && !trace.timedOut,
     prompt,
     artifactPath,
     traceOutputDir: outputDir || undefined,
-    error: trace.code === 0 && !trace.timedOut ? undefined : `iva-logtracer exited with ${trace.code ?? 'unknown'}${trace.timedOut ? ' after timeout' : ''}`,
+    error: trace.code === 0 && !trace.timedOut
+      ? undefined
+      : `iva-logtracer exited with ${trace.code ?? 'unknown'}${trace.timedOut ? ' after timeout' : ''}${failureSummary ? `: ${failureSummary}` : ''}`,
   };
 }

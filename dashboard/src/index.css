@@ -94,6 +94,8 @@
   --th-code-symbol: rgba(226,232,240,0.82);
   --th-code-property: #c4b5fd;
   --th-code-type: #67e8f9;
+  --th-code-block-bg: rgba(255,255,255,0.075);
+  --th-code-block-header: rgba(255,255,255,0.095);
 }
 
 /* ── Light theme overrides ── */
@@ -178,6 +180,8 @@
   --th-code-symbol: rgba(30,41,59,0.76);
   --th-code-property: #7c3aed;
   --th-code-type: #0e7490;
+  --th-code-block-bg: #f6f7f9;
+  --th-code-block-header: #eef0f3;
 
   --th-inset-hl: rgba(255,255,255,0.72);
   --th-selected-bg: rgba(15,23,42,0.06);
@@ -266,6 +270,36 @@ button:disabled { cursor: not-allowed; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--th-fg-6); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--th-edge-h); }
+
+.composer-shell {
+  container-type: inline-size;
+}
+
+@container (max-width: 430px) {
+  .composer-bottom-bar {
+    gap: 4px;
+  }
+
+  .composer-attach-button,
+  .composer-send-button {
+    width: 30px;
+    padding-inline: 0;
+  }
+
+  .composer-attach-label,
+  .composer-send-label {
+    display: none;
+  }
+
+  .composer-cascade-trigger {
+    flex: 1 1 auto;
+    padding-inline: 8px;
+  }
+
+  .composer-cascade-label {
+    max-width: none;
+  }
+}
 
 /* ── Animations ── */
 @keyframes fade-in {

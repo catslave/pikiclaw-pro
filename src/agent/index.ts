@@ -28,6 +28,7 @@ export type {
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
+  StreamActivityKind, StreamActivityCurrent, StreamActivitySummary, StreamActivityEvent, StreamActivityEvents,
   StreamOpts, StreamResult,
   ManagedSessionRecord, SessionOrigin, SessionOriginChannel, SessionRunState, SessionClassification,
   SessionInfo, SessionListResult, SessionListOpts,

@@ -1,8 +1,8 @@
-import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { Routes, Route, useLocation, Navigate, useNavigate } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
-import { Sidebar, type RestartPhase } from './components/Sidebar';
+import type { RestartPhase } from './components/Sidebar';
 import { Spinner, Toasts } from './components/ui';
 import { api } from './api';
 import { getDashboardTabMeta, type DashboardTab } from './tabs';
@@ -11,6 +11,7 @@ import { cn } from './utils';
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
+const JiraTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).JiraTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SkillsTab = lazy(async () => ({ default: (await import('./pages/skills/SkillsTab')).SkillsTab }));
@@ -43,6 +44,7 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/dashboard': 'dashboard',
+    '/jira': 'jira',
     '/usage': 'usage',
     '/archive': 'system',
     '/im': 'im',
@@ -59,7 +61,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/') return '/';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
-  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
+  if (['/dashboard', '/jira', '/usage', '/im', '/agents', '/extensions', '/skills', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -115,7 +117,12 @@ export function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const tab = locationToTab(location.pathname);
-  const sessionShellActive = tab === 'sessions' || tab === 'dashboard';
+  const sessionShellActive = normalizeDashboardPath(location.pathname) !== null;
+  const sessionWorkspaceMode = tab === 'dashboard'
+    ? 'dashboard'
+    : tab === 'sessions'
+      ? 'workspace'
+      : 'settings';
   const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
   const initialPathRestoreCheckedRef = useRef(false);
 
@@ -172,6 +179,11 @@ export function App() {
 
   const onRestartClick = useCallback(() => {
     if (restartPhase === 'restarting' || restartPhase === 'reconnecting') return;
+    if ((state?.bot?.activeTasks || 0) > 0) {
+      toast(t('modal.restartBlockedByTasks'), false);
+      setRestartPhase(null);
+      return;
+    }
     if (restartPhase === 'confirm') {
       // Confirmed — fire restart
       setRestartPhase('restarting');
@@ -179,7 +191,7 @@ export function App() {
         try {
           const result = await api.restart();
           if (!result.ok) {
-            toast(result.error || t('modal.restartFailed'), false);
+            toast(result.activeTasks ? t('modal.restartBlockedByTasks') : (result.error || t('modal.restartFailed')), false);
             setRestartPhase(null);
             return;
           }
@@ -204,9 +216,60 @@ export function App() {
       setRestartPhase('confirm');
       setTimeout(() => setRestartPhase(p => (p === 'confirm' ? null : p)), 3000);
     }
-  }, [restartPhase, toast, t, reload]);
+  }, [restartPhase, state?.bot?.activeTasks, toast, t, reload]);
 
   const tabMeta = getDashboardTabMeta(tab, t);
+  const settingsContent: ReactNode = tab === 'sessions' || tab === 'dashboard'
+    ? null
+    : (
+      <Routes>
+        <Route path="/im" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <IMAccessTab
+              onOpenWeixin={() => setModal({ type: 'weixin' })}
+              onOpenTelegram={() => setModal({ type: 'telegram' })}
+              onOpenFeishu={() => setModal({ type: 'feishu' })}
+              onOpenSlack={() => setModal({ type: 'slack' })}
+              onOpenDiscord={() => setModal({ type: 'discord' })}
+              onOpenDingtalk={() => setModal({ type: 'dingtalk' })}
+              onOpenWeCom={() => setModal({ type: 'wecom' })}
+            />
+          </PageWrapper>
+        } />
+        <Route path="/agents" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <AgentTab />
+          </PageWrapper>
+        } />
+        <Route path="/usage" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <UsageTab />
+          </PageWrapper>
+        } />
+        <Route path="/jira" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <JiraTab />
+          </PageWrapper>
+        } />
+        <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
+        <Route path="/permissions" element={<Navigate to="/system" replace />} />
+        <Route path="/extensions" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} />
+          </PageWrapper>
+        } />
+        <Route path="/skills" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <SkillsTab />
+          </PageWrapper>
+        } />
+        <Route path="/system" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />
+          </PageWrapper>
+        } />
+      </Routes>
+    );
 
   return (
     <div className="noise-overlay">
@@ -216,71 +279,26 @@ export function App() {
         <div className="absolute -bottom-40 -left-20 h-[360px] w-[360px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb2), transparent 74%)', animation: 'drift 28s ease-in-out infinite reverse', willChange: 'transform' }} />
       </div>
 
-      <div className="relative h-screen flex flex-col overflow-hidden">
-        <Sidebar
-          version={version}
-          restartPhase={restartPhase}
-          onRestartClick={onRestartClick}
-        />
-
-        <main className="flex-1 overflow-hidden">
+      <div className="relative h-screen overflow-hidden">
+        <main className="h-full overflow-hidden">
           {sessionsTabReady && (
             <Suspense fallback={<RouteFallback />}>
               <div
                 className={cn('h-full', !sessionShellActive && 'hidden')}
                 aria-hidden={!sessionShellActive}
               >
-                <SessionsTab active={sessionShellActive} mode={tab === 'dashboard' ? 'dashboard' : 'workspace'} />
+                <SessionsTab
+                  active={sessionShellActive}
+                  mode={sessionWorkspaceMode}
+                  settingsContent={settingsContent}
+                  version={version}
+                  restartPhase={restartPhase}
+                  onRestartClick={onRestartClick}
+                />
               </div>
             </Suspense>
           )}
 
-          {!sessionShellActive && (
-            <Suspense fallback={<RouteFallback />}>
-              <Routes>
-                <Route path="/im" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <IMAccessTab
-                      onOpenWeixin={() => setModal({ type: 'weixin' })}
-                      onOpenTelegram={() => setModal({ type: 'telegram' })}
-                      onOpenFeishu={() => setModal({ type: 'feishu' })}
-                      onOpenSlack={() => setModal({ type: 'slack' })}
-                      onOpenDiscord={() => setModal({ type: 'discord' })}
-                      onOpenDingtalk={() => setModal({ type: 'dingtalk' })}
-                      onOpenWeCom={() => setModal({ type: 'wecom' })}
-                    />
-                  </PageWrapper>
-                } />
-                <Route path="/agents" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <AgentTab />
-                  </PageWrapper>
-                } />
-                <Route path="/usage" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <UsageTab />
-                  </PageWrapper>
-                } />
-                <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
-                <Route path="/permissions" element={<Navigate to="/system" replace />} />
-                <Route path="/extensions" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} />
-                  </PageWrapper>
-                } />
-                <Route path="/skills" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <SkillsTab />
-                  </PageWrapper>
-                } />
-                <Route path="/system" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />
-                  </PageWrapper>
-                } />
-              </Routes>
-            </Suspense>
-          )}
         </main>
       </div>
 

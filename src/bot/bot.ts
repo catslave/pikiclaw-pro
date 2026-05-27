@@ -15,7 +15,7 @@ import {
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
   setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
   getClaudeNativeGoal, buildClaudeSetGoalPrompt, buildClaudeClearGoalPrompt,
-  type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult,
+  type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type StreamActivityEvents, type StreamActivityKind, type StreamActivitySummary, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
@@ -200,7 +200,7 @@ export interface InteractionSnapshot {
 
 export type StreamEvent =
   | { type: 'start'; taskId: string; agent: string; sessionId: string | null; model: string | null; effort: string | null }
-  | { type: 'text'; text: string; thinking: string; activity?: string; plan?: StreamPreviewPlan | null; previewMeta?: StreamPreviewMeta | null }
+  | { type: 'text'; text: string; thinking: string; activity?: string; activitySummary?: StreamActivitySummary | null; activityEvents?: StreamActivityEvents | null; plan?: StreamPreviewPlan | null; previewMeta?: StreamPreviewMeta | null }
   | { type: 'done'; taskId: string; sessionId: string | null; error?: string; incomplete?: boolean }
   | { type: 'queued'; taskId: string; position: number }
   | { type: 'cancelled'; taskId: string }
@@ -232,6 +232,8 @@ export interface StreamSnapshot {
   text?: string;
   thinking?: string;
   activity?: string;
+  activitySummary?: StreamActivitySummary | null;
+  activityEvents?: StreamActivityEvents | null;
   plan?: StreamPreviewPlan | null;
   sessionId?: string | null;
   /** Resolved model id used for the active turn (sticky across the snapshot's lifetime). */
@@ -527,6 +529,8 @@ export class Bot {
       delete snap.text;
       delete snap.thinking;
       delete snap.activity;
+      delete snap.activitySummary;
+      delete snap.activityEvents;
       delete snap.plan;
       delete snap.previewMeta;
     } else {
@@ -665,6 +669,7 @@ export class Bot {
   private streamPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private streamPushPending = new Map<string, boolean>();
   private streamTextDebugState = new Map<string, { loggedAt: number; textBytes: number; thinkingBytes: number; phase: string }>();
+  private streamMetaEmitState = new Map<string, { emittedAt: number; meta: StreamPreviewMeta | null }>();
 
   /** Called by the dashboard layer to subscribe to stream snapshot changes. */
   onStreamSnapshot(cb: (sessionKey: string, snapshot: StreamSnapshot | null) => void): void {
@@ -749,6 +754,8 @@ export class Bot {
           snap.text = event.text;
           snap.thinking = event.thinking;
           snap.activity = event.activity;
+          snap.activitySummary = event.activitySummary ?? null;
+          snap.activityEvents = event.activityEvents ?? null;
           snap.plan = event.plan?.steps?.length ? event.plan : null;
           if (event.previewMeta) snap.previewMeta = event.previewMeta;
           snap.updatedAt = now;
@@ -767,6 +774,8 @@ export class Bot {
           text: prev?.text || '',
           thinking: prev?.thinking || '',
           activity: prev?.activity || '',
+          activitySummary: prev?.activitySummary ?? null,
+          activityEvents: prev?.activityEvents ?? null,
           error: event.error,
           plan: prev?.plan ?? null,
           model: prev?.model ?? null,
@@ -874,19 +883,144 @@ export class Bot {
       this.debug(`[stream-lifecycle] text task=${taskId} key=${key} bytes=${text.length}/${thinking.length} snap=${phase}`);
     }
     const normalizedActivity = this.normalizeStreamActivity(activity);
+    const structuredActivity = this.buildStreamActivity(normalizedActivity);
     const nextPlan = plan ?? null;
     const nextMeta = meta ?? null;
-    if (snap?.phase === 'streaming'
-      && snap.text === text
-      && snap.thinking === thinking
-      && (snap.activity || '') === normalizedActivity
-      && JSON.stringify(snap.plan ?? null) === JSON.stringify(nextPlan)
-      && JSON.stringify(snap.previewMeta ?? null) === JSON.stringify(nextMeta)) {
-      return;
+    if (snap?.phase === 'streaming') {
+      const bodyUnchanged = snap.text === text
+        && snap.thinking === thinking
+        && (snap.activity || '') === normalizedActivity
+        && JSON.stringify(snap.activitySummary ?? null) === JSON.stringify(structuredActivity.summary)
+        && JSON.stringify(snap.activityEvents ?? null) === JSON.stringify(structuredActivity.events)
+        && JSON.stringify(snap.plan ?? null) === JSON.stringify(nextPlan);
+      const metaUnchanged = JSON.stringify(snap.previewMeta ?? null) === JSON.stringify(nextMeta);
+      if (bodyUnchanged && metaUnchanged) return;
+      if (bodyUnchanged && !this.shouldEmitStreamMeta(taskId, snap.previewMeta ?? null, nextMeta)) return;
     }
+    this.recordStreamMetaEmission(taskId, nextMeta);
     this.emitStream(key, {
-      type: 'text', text, thinking, activity: normalizedActivity, plan: nextPlan, previewMeta: nextMeta,
+      type: 'text',
+      text,
+      thinking,
+      activity: normalizedActivity,
+      activitySummary: structuredActivity.summary,
+      activityEvents: structuredActivity.events,
+      plan: nextPlan,
+      previewMeta: nextMeta,
     });
+  }
+
+  private buildStreamActivity(activity: string): { summary: StreamActivitySummary | null; events: StreamActivityEvents | null } {
+    const events: StreamActivityEvents = { files: [], searches: [], commands: [], tools: [] };
+    const seen = new Set<string>();
+    let current: StreamActivitySummary['current'] = null;
+    for (const raw of activity.split('\n')) {
+      const line = raw.replace(/\s+/g, ' ').replace(/\s+done$/i, '').trim();
+      if (!line || seen.has(line) || /^Result:/i.test(line) || /^Executed\s+\d+\s+command/i.test(line)) continue;
+      seen.add(line);
+      const event = this.classifyStreamActivityLine(line);
+      events[event.bucket].push(event.item);
+      current = { kind: event.item.kind, label: event.item.label };
+    }
+    const summary: StreamActivitySummary = {
+      files: events.files.length,
+      searches: events.searches.length,
+      commands: events.commands.length,
+      tools: events.tools.length,
+    };
+    if (current) summary.current = current;
+    const all = [...events.files, ...events.searches, ...events.commands, ...events.tools];
+    return all.length ? { summary, events } : { summary: null, events: null };
+  }
+
+  private classifyStreamActivityLine(line: string): { bucket: keyof StreamActivityEvents; item: { kind: StreamActivityKind; label: string; action?: string | null; target?: string | null } } {
+    if (/^(Bash|Shell|Command|Run shell)\b/i.test(line)) {
+      const command = line.replace(/^(?:Bash|Shell|Command|Run shell)\s*:?\s*/i, '');
+      return { bucket: 'commands', item: { kind: 'command', label: this.humanizeStreamCommand(command), action: 'run', target: command } };
+    }
+    if (/^(Search|Grep|Glob|Find|WebSearch|Search web|Open web page)\b/i.test(line)) {
+      const target = line.replace(/^(?:Search web|Open web page|WebSearch|Search|Grep|Glob|Find)\s*:?\s*/i, '').trim();
+      return { bucket: 'searches', item: { kind: 'search', label: target ? `Search: ${target}` : 'Search', action: 'search', target: target || null } };
+    }
+    if (/^(Read|Open|Edit|Write|List|Updated|Inspect image)\b/i.test(line) || /\b[A-Za-z0-9_.-]+\.(tsx?|jsx?|css|json|md|py|go|java|kt|rs|yaml|yml|xml)\b/.test(line)) {
+      const action = line.split(/\s+/, 1)[0] || 'File';
+      return { bucket: 'files', item: { kind: 'file', label: line, action: action.toLowerCase(), target: line } };
+    }
+    return { bucket: 'tools', item: { kind: 'tool', label: line.replace(/^Use\s+/i, ''), action: 'tool', target: line } };
+  }
+
+  private humanizeStreamCommand(command: string): string {
+    const cleaned = this.stripShellWrapper(command);
+    const gitAdd = cleaned.match(/^git\s+add\s+(.+)$/i);
+    if (gitAdd) {
+      const files = this.summarizeStreamPaths(gitAdd[1]);
+      return files ? `Stage files: ${files}` : 'Stage files';
+    }
+    if (/^git\s+status\b/i.test(cleaned)) return 'Check git status';
+    if (/^git\s+diff\b/i.test(cleaned)) return 'Inspect git diff';
+    if (/^(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b/i.test(cleaned)) return 'Run build';
+    if (/^(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b/i.test(cleaned)) return 'Run tests';
+    if (/^(?:pytest|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test)\b/i.test(cleaned)) return 'Run tests';
+    return cleaned ? `Run command: ${cleaned}` : 'Run command';
+  }
+
+  private stripShellWrapper(command: string): string {
+    let output = command.trim();
+    for (let i = 0; i < 3; i += 1) {
+      const next = output.replace(/^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/i, (_m, inner) => this.unquoteShellArg(inner));
+      if (next === output) break;
+      output = next.trim();
+    }
+    return output;
+  }
+
+  private unquoteShellArg(value: string): string {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) return trimmed.slice(1, -1);
+    return trimmed;
+  }
+
+  private summarizeStreamPaths(raw: string): string {
+    const files = raw.split(/\s+/).map(part => this.unquoteShellArg(part)).filter(part => part && part !== '--' && !part.startsWith('-')).map(part => this.compactStreamPath(part));
+    const visible = files.slice(0, 3);
+    const hidden = files.length - visible.length;
+    return hidden > 0 ? `${visible.join(', ')} +${hidden}` : visible.join(', ');
+  }
+
+  private compactStreamPath(raw: string): string {
+    const normalized = raw.replace(/\\/g, '/').trim();
+    const parts = normalized.split('/').filter(Boolean);
+    const compact = parts.length >= 2 ? parts.slice(-2).join('/') : normalized;
+    return compact.length > 44 ? `...${compact.slice(-41)}` : compact;
+  }
+
+  private shouldEmitStreamMeta(taskId: string, previous: StreamPreviewMeta | null, next: StreamPreviewMeta | null): boolean {
+    const state = this.streamMetaEmitState.get(taskId);
+    if (!state) return true;
+    if (!previous && next) return true;
+    if (previous && !next) return true;
+    if (!next) return false;
+    if (JSON.stringify(previous?.diagnostics ?? []) !== JSON.stringify(next.diagnostics ?? [])) return true;
+    if (JSON.stringify(previous?.subAgents ?? []) !== JSON.stringify(next.subAgents ?? [])) return true;
+    if ((previous?.generatingImages ?? 0) !== (next.generatingImages ?? 0)) return true;
+    if ((previous?.lastEvent ?? null) !== (next.lastEvent ?? null)) return true;
+    const now = Date.now();
+    if (now - state.emittedAt >= 1000) return true;
+    const prevPct = previous?.contextPercent ?? null;
+    const nextPct = next.contextPercent ?? null;
+    if (prevPct == null !== (nextPct == null)) return true;
+    if (prevPct != null && nextPct != null && Math.abs(nextPct - prevPct) >= 0.1) return true;
+    const prevCtx = previous?.contextUsedTokens ?? null;
+    const nextCtx = next.contextUsedTokens ?? null;
+    if (prevCtx == null !== (nextCtx == null)) return true;
+    if (prevCtx != null && nextCtx != null && Math.abs(nextCtx - prevCtx) >= 512) return true;
+    const prevTurnTokens = (previous?.inputTokens ?? 0) + (previous?.outputTokens ?? 0);
+    const nextTurnTokens = (next.inputTokens ?? 0) + (next.outputTokens ?? 0);
+    return Math.abs(nextTurnTokens - prevTurnTokens) >= 512;
+  }
+
+  private recordStreamMetaEmission(taskId: string, meta: StreamPreviewMeta | null): void {
+    this.streamMetaEmitState.set(taskId, { emittedAt: Date.now(), meta });
   }
 
   private normalizeStreamActivity(activity = ''): string {
@@ -921,6 +1055,7 @@ export class Bot {
   protected emitStreamDone(taskId: string, fallbackKey: string, opts: { sessionId: string | null; incomplete: boolean; error?: string }) {
     const key = this.liveSessionKey(taskId, fallbackKey);
     this.streamTextDebugState.delete(taskId);
+    this.streamMetaEmitState.delete(taskId);
     this.debug(`[stream-lifecycle] done task=${taskId} key=${key} sessionId=${opts.sessionId || '(none)'} incomplete=${opts.incomplete}`);
     this.emitStream(key, {
       type: 'done', taskId,
@@ -932,6 +1067,7 @@ export class Bot {
 
   protected emitStreamCancelled(taskId: string, fallbackKey: string) {
     this.streamTextDebugState.delete(taskId);
+    this.streamMetaEmitState.delete(taskId);
     this.emitStream(this.liveSessionKey(taskId, fallbackKey), { type: 'cancelled', taskId });
   }
 
@@ -2084,7 +2220,8 @@ export class Bot {
           this.debug(`[goal-continuation] enqueue failed: ${err?.message || err}`);
         }
       } catch (error: any) {
-        const errMsg = error?.message || String(error);
+        const stoppedByUser = !!task?.cancelled || abortController.signal.aborted;
+        const errMsg = stoppedByUser ? 'Stopped by user.' : (error?.message || String(error));
         this.emitStreamDone(taskId, session.key, {
           sessionId: session.sessionId,
           incomplete: true,

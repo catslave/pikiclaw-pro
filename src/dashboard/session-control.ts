@@ -142,6 +142,14 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       `artifact=${logTrace.artifactPath || 'none'} traceDir=${logTrace.traceOutputDir || 'none'} ` +
       `error=${logTrace.error || 'none'}`,
     );
+    if (!logTrace.ok) {
+      return {
+        ok: false as const,
+        error: `/logtrace failed: ${logTrace.error || 'unknown error'}`,
+        artifactPath: logTrace.artifactPath,
+        traceOutputDir: logTrace.traceOutputDir,
+      };
+    }
   }
 
   // /goal — route directly to the goal bridge (claude native slash, codex RPC,

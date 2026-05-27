@@ -143,8 +143,8 @@ function MermaidBlock({ text }: { text: string }) {
   }, [text]);
 
   return (
-    <div className="rounded-lg overflow-hidden border border-edge/30 bg-[rgba(0,0,0,0.12)] my-3 not-prose">
-      <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-edge/15 bg-[rgba(0,0,0,0.08)]">
+    <div className="rounded-lg overflow-hidden border border-edge/30 bg-[var(--th-code-block-bg)] my-3 not-prose">
+      <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-edge/15 bg-[var(--th-code-block-header)]">
         <span className="text-[10px] font-mono text-fg-5/60">mermaid</span>
         <CopyButton text={text} />
       </div>
@@ -250,7 +250,7 @@ export function createMdComponents({ onOpenFileLink, workdir }: { onOpenFileLink
       <span className="flex-1">{children}</span>
     </li>
   ),
-  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-fg-5/30 pl-3 my-2 text-fg-4 italic">{children}</blockquote>,
+  blockquote: ({ children }: any) => <blockquote className="rounded-md bg-[var(--th-code-block-bg)] px-3 py-2 my-2 text-fg-4 italic">{children}</blockquote>,
   hr: () => <hr className="border-edge/30 my-4" />,
   code: ({ className, children, ...props }: any) => {
     const text = String(children).replace(/\n$/, '');
@@ -287,8 +287,8 @@ export function createMdComponents({ onOpenFileLink, workdir }: { onOpenFileLink
     }
 
     return (
-      <div className="rounded-lg overflow-hidden border border-edge/30 bg-[rgba(0,0,0,0.25)] my-3 not-prose">
-        <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-edge/15 bg-[rgba(0,0,0,0.12)]">
+      <div className="rounded-lg overflow-hidden border border-edge/30 bg-[var(--th-code-block-bg)] my-3 not-prose">
+        <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-edge/15 bg-[var(--th-code-block-header)]">
           <span className="text-[10px] font-mono text-fg-5/50">{lang || 'text'}</span>
           <CopyButton text={text} />
         </div>

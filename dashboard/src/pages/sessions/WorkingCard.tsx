@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { cn, shortenModel } from '../../utils';
 import { ChevronIcon, CollapsibleCard } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
+import type { StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
 function replaceVars(template: string, vars: Record<string, string>): string {
   let output = template;
@@ -48,21 +48,25 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function tokenSummary(meta: StreamPreviewMeta | null | undefined): { label: string; title: string } | null {
+function tokenSummary(meta: StreamPreviewMeta | null | undefined): { label: string; suffix: string; title: string } | null {
   if (!meta) return null;
   const input = meta.inputTokens ?? 0;
   const output = meta.outputTokens ?? 0;
-  const cached = meta.cachedInputTokens ?? 0;
   const total = input + output;
-  if (total <= 0 && cached <= 0) return null;
+  if (total <= 0) return null;
   const parts: string[] = [];
   if (meta.inputTokens != null) parts.push(`input ${meta.inputTokens.toLocaleString()}`);
   if (meta.outputTokens != null) parts.push(`output ${meta.outputTokens.toLocaleString()}`);
   if (meta.cachedInputTokens != null) parts.push(`cached ${meta.cachedInputTokens.toLocaleString()}`);
   return {
-    label: `${formatTokens(total || cached)} tok`,
+    label: formatTokens(total),
+    suffix: 'turn tok',
     title: parts.join(' · '),
   };
+}
+
+function isStoppedError(error: string | null | undefined): boolean {
+  return !!error && /\b(abort|aborted|cancel|cancelled|canceled|interrupt|interrupted|stop|stopped|terminated)\b/i.test(error);
 }
 
 function Badge({ children, title }: { children: ReactNode; title?: string }) {
@@ -77,8 +81,70 @@ function normalizeActivityLine(line: string): string {
   return line.replace(/\s+/g, ' ').trim();
 }
 
+function unquoteShellArg(value: string): string {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function stripShellWrapper(command: string): string {
+  let output = command.trim();
+  for (let i = 0; i < 3; i += 1) {
+    const next = output.replace(/^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/i, (_m, inner) => unquoteShellArg(inner));
+    if (next === output) break;
+    output = next.trim();
+  }
+  return output;
+}
+
+function compactDisplayPath(path: string, max = 44): string {
+  const normalized = path.replace(/\\/g, '/').trim();
+  const parts = normalized.split('/').filter(Boolean);
+  const compact = parts.length >= 2 ? parts.slice(-2).join('/') : normalized;
+  return compact.length > max ? `...${compact.slice(-(max - 3))}` : compact;
+}
+
+function summarizePathList(raw: string, maxItems = 3): string {
+  const files = raw
+    .split(/\s+/)
+    .map(part => unquoteShellArg(part))
+    .filter(part => part && part !== '--' && !part.startsWith('-'))
+    .map(part => compactDisplayPath(part));
+  if (!files.length) return '';
+  const visible = files.slice(0, maxItems);
+  const hidden = files.length - visible.length;
+  return hidden > 0 ? `${visible.join(', ')} +${hidden}` : visible.join(', ');
+}
+
+function humanizeShellCommand(command: string): string {
+  const cleaned = stripShellWrapper(command);
+  const gitAdd = cleaned.match(/^git\s+add\s+(.+)$/i);
+  if (gitAdd) {
+    const files = summarizePathList(gitAdd[1]);
+    return files ? `Stage files: ${files}` : 'Stage files';
+  }
+  if (/^git\s+status\b/i.test(cleaned)) return 'Check git status';
+  if (/^git\s+diff\b/i.test(cleaned)) return 'Inspect git diff';
+  if (/^git\s+(?:show|log)\b/i.test(cleaned)) return 'Inspect git history';
+  if (/^(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b/i.test(cleaned)) return 'Run build';
+  if (/^(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b/i.test(cleaned)) return 'Run tests';
+  if (/^(?:pytest|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test)\b/i.test(cleaned)) return 'Run tests';
+  const rg = cleaned.match(/^(?:rg|grep)\b(?:\s+-[^\s]+)*\s+(.+)$/i);
+  if (rg) return `Search: ${unquoteShellArg(rg[1]).slice(0, 80)}`;
+  return cleaned ? `Run command: ${cleaned}` : 'Run command';
+}
+
+export function formatActivityForDisplay(line: string): string {
+  const normalized = normalizeActivityLine(line).replace(/\s+done$/i, '').trim();
+  const command = normalized.match(/^(?:Bash|Shell|Command|Run shell)\s*:\s*([\s\S]+)$/i);
+  if (command) return humanizeShellCommand(command[1]);
+  return normalized;
+}
+
 function cleanActivityDetail(line: string): string {
-  return normalizeActivityLine(line)
+  return formatActivityForDisplay(line)
     .replace(/\.\.\.$/, '')
     .replace(/\s+done$/i, '')
     .trim();
@@ -146,7 +212,7 @@ function collectActivityDetails(lines: string[]): ActivityDetailBuckets {
       continue;
     }
 
-    if (!/^(Waiting for|Human input|Applied steer input)$/i.test(line)) {
+    if (/^(Generating image|Run multiple tools)\b/i.test(line)) {
       pushUnique(tools, line, 120);
     }
   }
@@ -191,7 +257,21 @@ function activityCommandHighlights(lines: string[], t: (key: string) => string):
   return hidden > 0 ? [...visible, replaceVars(t('hub.activityMore'), { n: String(hidden) })] : visible;
 }
 
-function workingActivityLabels(lines: string[], t: (key: string) => string): string[] {
+function activityLabelsFromSummary(summary: StreamActivitySummary, t: (key: string) => string): string[] {
+  const labels: string[] = [];
+  if (summary.files > 0 && summary.searches > 0) {
+    labels.push(replaceVars(t('hub.activityExploredFilesSearches'), { files: String(summary.files), searches: String(summary.searches) }));
+  } else {
+    if (summary.files > 0) labels.push(replaceVars(t('hub.activityExploredFiles'), { files: String(summary.files) }));
+    if (summary.searches > 0) labels.push(replaceVars(t('hub.activitySearches'), { searches: String(summary.searches) }));
+  }
+  if (summary.commands > 0) labels.push(replaceVars(t('hub.activityRanCommands'), { n: String(summary.commands) }));
+  if (summary.tools > 0) labels.push(replaceVars(t('hub.activityUsedTools'), { n: String(summary.tools) }));
+  return labels;
+}
+
+function workingActivityLabels(lines: string[], t: (key: string) => string, activitySummary?: StreamActivitySummary | null): string[] {
+  if (activitySummary) return activityLabelsFromSummary(activitySummary, t);
   const seen = new Set<string>();
   let files = 0;
   let searches = 0;
@@ -219,7 +299,7 @@ function workingActivityLabels(lines: string[], t: (key: string) => string): str
       searches += 1;
       continue;
     }
-    if (!/^(result|ok|done)$/i.test(line)) tools += 1;
+    if (/^Use\s+/i.test(line) || /^(Generating image|Run multiple tools)\b/i.test(line)) tools += 1;
   }
 
   const labels: string[] = [];
@@ -234,8 +314,8 @@ function workingActivityLabels(lines: string[], t: (key: string) => string): str
   return labels;
 }
 
-export function summarizeWorkingActivity(lines: string[], t: (key: string) => string): string[] {
-  return workingActivityLabels(lines, t);
+export function summarizeWorkingActivity(lines: string[], t: (key: string) => string, activitySummary?: StreamActivitySummary | null): string[] {
+  return workingActivityLabels(lines, t, activitySummary);
 }
 
 export function WorkingCard({
@@ -249,8 +329,8 @@ export function WorkingCard({
   completedAt,
   updatedAt,
   previewMeta,
-  stepCount,
-  statusLabel,
+  error,
+  actions,
   children,
   className,
 }: {
@@ -265,7 +345,8 @@ export function WorkingCard({
   updatedAt?: number | null;
   previewMeta?: StreamPreviewMeta | null;
   stepCount?: number;
-  statusLabel?: string | null;
+  error?: string | null;
+  actions?: ReactNode;
   children?: ReactNode;
   className?: string;
 }) {
@@ -282,49 +363,41 @@ export function WorkingCard({
     ? formatDuration(Math.max(0, (phase === 'streaming' ? now : (doneMs ?? now)) - startMs))
     : null;
   const tokens = tokenSummary(previewMeta);
-  const idleMs = phase === 'streaming' && updatedAt
-    ? Math.max(0, now - updatedAt)
-    : null;
-  const idleLabel = idleMs != null && idleMs >= 15_000
-    ? replaceVars(t('hub.workingIdleFor'), { time: formatDuration(idleMs) })
-    : null;
-  const countLabel = stepCount && stepCount > 0
-    ? replaceVars(t('hub.workingStepCount'), { n: String(stepCount) })
-    : null;
-  const hasBadges = !!(elapsedLabel || idleLabel || tokens || countLabel);
+  const hasBadges = !!(elapsedLabel || tokens);
   const fallbackPreview = previewText?.trim() || t('hub.workingIdle');
-  const phaseLabel = statusLabel?.trim() && statusLabel.trim() !== t('hub.working')
-    ? statusLabel.trim()
+  const previewNode = phase === 'streaming'
+    ? (preview ?? <span className="text-[12px] text-fg-4 truncate">{fallbackPreview}</span>)
     : null;
-  const previewNode = preview ?? (
-    <span className="flex min-w-0 items-center gap-2 text-[12px] text-fg-4">
-      {phaseLabel && (
-        <span className="shrink-0 rounded-md border border-edge/70 bg-inset px-1.5 py-0.5 text-[10px] leading-none font-mono text-fg-5/80">
-          {phaseLabel}
-        </span>
-      )}
-      <span className="min-w-0 truncate">{fallbackPreview}</span>
-    </span>
-  );
   const dot = phase === 'streaming'
     ? { color: 'bg-emerald-400/70', pulse: true }
-    : { color: 'bg-fg-5/35' };
+    : error
+      ? { color: isStoppedError(error) ? 'bg-amber-400/70' : 'bg-rose-400/70' }
+      : { color: 'bg-fg-5/35' };
+  const label = phase === 'streaming'
+    ? t('hub.working')
+    : error
+      ? (isStoppedError(error) ? t('hub.statusStopped') : t('hub.statusFailed'))
+      : t('hub.statusTurnDone');
 
   return (
     <CollapsibleCard
       open={open}
       onToggle={() => setOpen(v => !v)}
       dot={dot}
-      label={t('hub.working')}
+      label={label}
       preview={previewNode}
       badge={hasBadges ? (
         <span className="flex shrink-0 items-center gap-1 overflow-hidden">
           {elapsedLabel && <Badge title={t('hub.workingElapsed')}>{elapsedLabel}</Badge>}
-          {idleLabel && <Badge title={t('hub.workingNoRecentUpdate')}>{idleLabel}</Badge>}
-          {tokens && <Badge title={tokens.title}>{tokens.label}</Badge>}
-          {countLabel && <Badge>{countLabel}</Badge>}
+          {tokens && (
+            <Badge title={tokens.title}>
+              {tokens.label}
+              <span className="max-[760px]:hidden">&nbsp;{tokens.suffix}</span>
+            </Badge>
+          )}
         </span>
       ) : undefined}
+      actions={actions}
       className={className}
     >
       {children || (
@@ -336,17 +409,63 @@ export function WorkingCard({
   );
 }
 
+export function CompletedWorkDisclosure({
+  t,
+  startedAt,
+  completedAt,
+  updatedAt,
+  defaultOpen = false,
+  children,
+}: {
+  t: (key: string) => string;
+  startedAt?: number | string | null;
+  completedAt?: number | string | null;
+  updatedAt?: number | string | null;
+  defaultOpen?: boolean;
+  children?: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const startMs = toMs(startedAt);
+  const doneMs = toMs(completedAt) ?? toMs(updatedAt) ?? null;
+  const duration = startMs != null && doneMs != null
+    ? formatDuration(Math.max(0, doneMs - startMs))
+    : null;
+  const label = duration
+    ? replaceVars(t('hub.workedFor'), { time: duration })
+    : t('hub.executionRecord');
+
+  return (
+    <section className="border-b border-edge/50 pb-2">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 py-0.5 text-left text-[13px] leading-none text-fg-5/85 transition-colors hover:text-fg-3"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+      >
+        <span>{label}</span>
+        <ChevronIcon open={open} className="h-3.5 w-3.5" />
+      </button>
+      {open && children && (
+        <div className="pt-3 pb-1">
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function WorkingSection({
   label,
   children,
   defaultOpen = true,
 }: {
   label?: string;
-  children: ReactNode;
+  children: ReactNode | (() => ReactNode);
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const collapsible = label && !defaultOpen;
+  const content = () => (typeof children === 'function' ? children() : children);
 
   if (collapsible) {
     return (
@@ -360,7 +479,7 @@ export function WorkingSection({
           <ChevronIcon open={open} className="h-3 w-3" />
           <span>{label}</span>
         </button>
-        {open && children}
+        {open && content()}
       </section>
     );
   }
@@ -368,7 +487,7 @@ export function WorkingSection({
   return (
     <section className="space-y-1.5">
       {label && <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5/75">{label}</div>}
-      {children}
+      {content()}
     </section>
   );
 }
@@ -445,10 +564,18 @@ export function WorkingNarrativeBlock({ text, t }: { text: string; t: (key: stri
   );
 }
 
-export function WorkingActivitySummary({ lines, t }: { lines: string[]; t: (key: string) => string }) {
-  const labels = workingActivityLabels(lines, t);
-  const files = activityFileHighlights(lines, t);
-  const commands = activityCommandHighlights(lines, t);
+function eventHighlights(events: StreamActivityEvents[keyof StreamActivityEvents] | undefined, t: (key: string) => string, max: number): string[] {
+  const items = (events || []).map(event => event.label).filter(Boolean);
+  if (!items.length) return [];
+  const visible = items.slice(-max);
+  const hidden = items.length - visible.length;
+  return hidden > 0 ? [...visible, replaceVars(t('hub.activityMore'), { n: String(hidden) })] : visible;
+}
+
+export function WorkingActivitySummary({ lines, activitySummary, activityEvents, t }: { lines: string[]; activitySummary?: StreamActivitySummary | null; activityEvents?: StreamActivityEvents | null; t: (key: string) => string }) {
+  const labels = workingActivityLabels(lines, t, activitySummary);
+  const files = activityEvents ? eventHighlights(activityEvents.files, t, 4) : activityFileHighlights(lines, t);
+  const commands = activityEvents ? eventHighlights(activityEvents.commands, t, 3) : activityCommandHighlights(lines, t);
   if (!labels.length && !files.length && !commands.length) return null;
   return (
     <WorkingSection label={t('hub.activitySummary')}>
@@ -490,41 +617,57 @@ export function WorkingActivitySummary({ lines, t }: { lines: string[]; t: (key:
   );
 }
 
-export function WorkingActivityDetails({ lines, t }: { lines: string[]; t: (key: string) => string }) {
-  const groups = summarizeActivityDetails(lines, t);
-  if (!groups.length) return null;
+export function WorkingActivityDetails({ lines, activityEvents, t }: { lines: string[]; activityEvents?: StreamActivityEvents | null; t: (key: string) => string }) {
+  if (!activityEvents && !lines.some(line => cleanActivityDetail(line))) return null;
   return (
     <WorkingSection label={t('hub.activityDetails')} defaultOpen={false}>
-      <div className="space-y-3 rounded-md bg-inset px-3 py-2">
-        {groups.map(group => (
-          <div key={group.label} className="space-y-1">
-            <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-fg-5/70">{group.label}</div>
-            {group.items.map((line, index) => (
-              <div key={`${group.label}:${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
-                <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
-                <span className="min-w-0 break-words">{line}</span>
+      {() => {
+        const groups = activityEvents
+          ? [
+              { label: t('hub.activityFiles'), items: activityEvents.files.map(event => event.label) },
+              { label: t('hub.activitySearchesDetail'), items: activityEvents.searches.map(event => event.label) },
+              { label: t('hub.activityCommands'), items: activityEvents.commands.map(event => event.label) },
+              { label: t('hub.activityOtherTools'), items: activityEvents.tools.map(event => event.label) },
+            ].filter(group => group.items.length)
+          : summarizeActivityDetails(lines, t);
+        if (!groups.length) return null;
+        return (
+          <div className="space-y-3 rounded-md bg-inset px-3 py-2">
+            {groups.map(group => (
+              <div key={group.label} className="space-y-1">
+                <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-fg-5/70">{group.label}</div>
+                {group.items.map((line, index) => (
+                  <div key={`${group.label}:${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-fg-5">
+                    <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-fg-5/35" />
+                    <span className="min-w-0 break-words">{line}</span>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
-        ))}
-      </div>
+        );
+      }}
     </WorkingSection>
   );
 }
 
 export function WorkingDiagnostics({ diagnostics, t }: { diagnostics?: string[] | null; t: (key: string) => string }) {
-  const items = (diagnostics || []).map(normalizeActivityLine).filter(Boolean).slice(-6);
-  if (!items.length) return null;
+  if (!diagnostics?.some(line => normalizeActivityLine(line))) return null;
   return (
     <WorkingSection label={t('hub.diagnostics')} defaultOpen={false}>
-      <div className="space-y-1 rounded-md border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2">
-        {items.map((line, index) => (
-          <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-amber-200/85">
-            <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-amber-300/65" />
-            <span className="min-w-0 break-words">{line}</span>
+      {() => {
+        const items = (diagnostics || []).map(normalizeActivityLine).filter(Boolean).slice(-6);
+        return (
+          <div className="space-y-1 rounded-md border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2">
+            {items.map((line, index) => (
+              <div key={`${index}:${line}`} className="flex gap-2 text-[11px] leading-[1.55] text-amber-200/85">
+                <span className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-amber-300/65" />
+                <span className="min-w-0 break-words">{line}</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        );
+      }}
     </WorkingSection>
   );
 }
