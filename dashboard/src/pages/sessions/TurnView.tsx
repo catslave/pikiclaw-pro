@@ -253,6 +253,11 @@ function AssistantMessageFrame({
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest('[data-selection-side-chat-popover]')) return;
+      if (target?.closest('.session-md')) {
+        window.getSelection()?.removeAllRanges();
+        setSelectionDraft(null);
+        return;
+      }
       if (frameRef.current?.contains(target)) return;
       setSelectionDraft(null);
     };

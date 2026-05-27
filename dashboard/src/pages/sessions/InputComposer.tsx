@@ -31,6 +31,13 @@ type ComposerCommandOption =
   | ({ kind: 'builtin' } & BuiltinComposerCommand)
   | { kind: 'skill'; command: string; skill: SkillInfo };
 
+export type PendingReviewComment = {
+  id: string;
+  quote: string;
+  note: string;
+  turnIndex?: number;
+};
+
 const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
   {
     command: 'goal',
@@ -75,6 +82,18 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     aliases: ['logs', 'trace', 'kibana', '日志', '排查'],
   },
 ];
+
+function formatPendingReviewComments(comments: PendingReviewComment[]): string {
+  if (!comments.length) return '';
+  const lines = ['Review comments to address:'];
+  comments.forEach((comment, index) => {
+    lines.push(`${index + 1}. ${comment.note}`);
+    if (typeof comment.turnIndex === 'number') lines.push(`   Turn: ${comment.turnIndex + 1}`);
+    lines.push('   Quote:');
+    for (const line of comment.quote.split('\n')) lines.push(`   > ${line}`);
+  });
+  return lines.join('\n');
+}
 
 /* ── Draft persistence across session switches ── */
 const draftStore = new Map<string, { text: string; files: File[] }>();
@@ -255,7 +274,7 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, contextMeta, onRecall, onSteer, onReorderQueued, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onReorderQueued, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -268,6 +287,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   streamTaskId?: string | null;
   queuedTaskIds?: string[];
   queuedTasks?: Array<{ taskId: string; prompt: string }>;
+  pendingReviewComments?: PendingReviewComment[];
+  onRemovePendingReviewComment?: (id: string) => void;
+  onClearPendingReviewComments?: () => void;
   contextMeta?: StreamPreviewMeta | null;
   /** Optimistic fallback for queued sends — used by each queued row while the
    *  server snapshot's `queuedTasks` hasn't yet caught up. `imageUrls` are
@@ -610,7 +632,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   }, [persistDraft]);
 
   const handleSend = useCallback(() => {
-    const prompt = input.trim();
+    const body = input.trim();
+    const commentBlock = formatPendingReviewComments(pendingReviewComments);
+    const prompt = [commentBlock, body].filter(Boolean).join('\n\n');
     if (composerAttachments.some(item => item.status !== 'ready')) return;
     const attachments = composerAttachments.map(item => item.file);
     if ((!prompt && attachments.length === 0) || sending) return;
@@ -640,6 +664,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     lastSentRef.current = { prompt, files: attachments };
     inputValueRef.current = '';
     setInput('');
+    onClearPendingReviewComments?.();
     draftStore.delete(dkRef.current);
     writeDraftText(dkRef.current, '');
     clearDraftFiles(dkRef.current);
@@ -685,6 +710,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     clearComposerAttachments,
     composerAttachments,
     input,
+    pendingReviewComments,
+    onClearPendingReviewComments,
     onSendStart,
     onSendTaskAssigned,
     onSendFailed,
@@ -961,7 +988,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       : null;
   const hasPendingAttachments = composerAttachments.some(item => item.status === 'adding');
   const hasFailedAttachments = composerAttachments.some(item => item.status === 'failed');
-  const canSend = (!!input.trim() || composerAttachments.length > 0) && !sending && !!effectiveAgent && !hasPendingAttachments && !hasFailedAttachments;
+  const canSend = (!!input.trim() || pendingReviewComments.length > 0 || composerAttachments.length > 0) && !sending && !!effectiveAgent && !hasPendingAttachments && !hasFailedAttachments;
 
   const resetCascade = () => {
     setPendingAgent(null);
@@ -1336,6 +1363,42 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                     </button>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {pendingReviewComments.length > 0 && (
+            <div className="mx-2.5 mt-2 rounded-lg border border-edge bg-panel-alt/70 px-2 py-1.5">
+              <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-semibold text-fg-4">
+                <span>{t('session.pendingComments').replace('{count}', String(pendingReviewComments.length))}</span>
+                <button
+                  type="button"
+                  onClick={onClearPendingReviewComments}
+                  className="rounded px-1.5 py-0.5 text-[10px] font-medium text-fg-5 transition hover:bg-panel-h hover:text-fg-2"
+                >
+                  {t('session.clearComments')}
+                </button>
+              </div>
+              <div className="flex max-h-[74px] flex-col gap-1 overflow-y-auto">
+                {pendingReviewComments.map((comment, index) => (
+                  <div key={comment.id} className="group/comment flex min-w-0 items-start gap-2 rounded-md bg-control/60 px-2 py-1">
+                    <span className="mt-0.5 shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                      #{index + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[11px] font-medium text-fg-3">{comment.note}</div>
+                      <div className="truncate text-[10px] text-fg-5">{comment.quote}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemovePendingReviewComment?.(comment.id)}
+                      className="shrink-0 rounded px-1 text-[13px] leading-5 text-fg-5 opacity-70 transition hover:bg-panel-h hover:text-fg group-hover/comment:opacity-100"
+                      aria-label={t('session.removeComment')}
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           )}

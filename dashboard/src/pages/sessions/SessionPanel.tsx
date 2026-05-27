@@ -10,7 +10,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import type { InteractionSnapshot, MessageBlock, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
-import { InputComposer } from './InputComposer';
+import { InputComposer, type PendingReviewComment } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
 import type { OpenFileLinkHandler } from './markdown';
 import {
@@ -138,6 +138,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [history, setHistory] = useState<TurnHistoryWindow | null>(null);
   const [loading, setLoading] = useState(!hasInitialPending);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [pendingReviewComments, setPendingReviewComments] = useState<PendingReviewComment[]>([]);
   const [liveStream, setLiveStream] = useState<{
     taskId: string | null;
     phase: 'streaming' | 'done';
@@ -302,6 +303,19 @@ export const SessionPanel = memo(function SessionPanel({
     pendingImageUrlsRef.current = urls;
     setPendingTaskId(null);
     setPendingStopped(false);
+  }, []);
+
+  const handleAppendReviewCommentFromSelection = useCallback(async (request: SelectionActionRequest) => {
+    if (!request.quote.trim() || !request.note.trim()) return;
+    setPendingReviewComments(prev => [
+      ...prev,
+      {
+        id: `comment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        quote: request.quote,
+        note: request.note,
+        turnIndex: request.turnIndex,
+      },
+    ]);
   }, []);
 
   const handleSendTaskAssigned = useCallback((taskId: string) => {
@@ -1065,7 +1079,7 @@ export const SessionPanel = memo(function SessionPanel({
                   onOpenFileLink={onOpenFileLink}
                   onCreateSideChatFromSelection={onCreateSideChatFromSelection}
                   onCreateTodoFromSelection={onCreateTodoFromSelection}
-                  onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection}
+                  onCreateReviewCommentFromSelection={handleAppendReviewCommentFromSelection}
                   workdir={workdir}
                   retryProminent={retryProminent}
                 />
@@ -1131,6 +1145,9 @@ export const SessionPanel = memo(function SessionPanel({
         queuedTaskIds={queuedTaskIds}
         queuedTasks={queuedTasks}
         pendingQueuedSends={pendingQueuedSends}
+        pendingReviewComments={pendingReviewComments}
+        onRemovePendingReviewComment={(id) => setPendingReviewComments(prev => prev.filter(comment => comment.id !== id))}
+        onClearPendingReviewComments={() => setPendingReviewComments([])}
         contextMeta={composerContextMeta}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}
