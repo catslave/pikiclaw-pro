@@ -27,6 +27,7 @@ import type {
   ProTaskKind,
   ProTaskStage,
   ProTaskStatus,
+  ProSubtaskStatus,
   TodoItem,
   TodoItemKind,
   TodoItemSource,
@@ -803,6 +804,31 @@ export const api = {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
+        ...opts,
+      },
+    ),
+  createProSubtask: (
+    taskId: string,
+    body: { title: string; description?: string; status?: ProSubtaskStatus; assignedAgent?: string | null; assistantId?: string | null; workdir?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/subtasks`,
+      body,
+      opts,
+    ),
+  updateProSubtask: (
+    taskId: string,
+    subtaskId: string,
+    body: { title?: string; description?: string; status?: ProSubtaskStatus; assignedAgent?: string | null; assistantId?: string | null; workdir?: string | null; stageRunId?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/subtasks/${encodeURIComponent(subtaskId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
         ...opts,
       },
     ),

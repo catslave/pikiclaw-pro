@@ -4,12 +4,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
 import {
   addStageRun,
+  createSubtask,
   finishVerificationRun,
   listProTasks,
   setExclusiveMode,
   startVerificationRun,
   syncJiraTask,
   updateStageRun,
+  updateSubtask,
 } from '../src/pro/tasks.ts';
 
 let tmpDir: string;
@@ -84,6 +86,23 @@ describe('Pro task store', () => {
     expect(completedFocus.stageRuns[0].completedAt).toBeTruthy();
     expect(completedFocus.stageRuns[0].output?.estimate?.estimatePoint).toBe(2);
     expect(completedFocus.stageRuns[0].output?.estimate?.totalMinutes).toBe(85);
+
+    const withSubtask = createSubtask(synced.id, {
+      title: 'Update web app login guard',
+      assignedAgent: 'codex',
+      assistantId: 'assistant_coding',
+      workdir: '/repo/app',
+    });
+    expect(withSubtask.subTasks).toHaveLength(1);
+    expect(withSubtask.subTasks[0].status).toBe('todo');
+    expect(withSubtask.events[0].type).toBe('subtask-created');
+
+    const updatedSubtask = updateSubtask(synced.id, withSubtask.subTasks[0].id, {
+      status: 'done',
+      stageRunId: focusRun.id,
+    });
+    expect(updatedSubtask.subTasks[0].status).toBe('done');
+    expect(updatedSubtask.subTasks[0].stageRunIds).toContain(focusRun.id);
 
     const coded = updateStageRun(synced.id, focusRun.id, {
       branch: 'feature/pro-123',

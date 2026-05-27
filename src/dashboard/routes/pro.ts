@@ -10,16 +10,19 @@ import { queueDashboardSessionTask } from '../session-control.js';
 import { getManagedBrowserStatus } from '../../browser-profile.js';
 import {
   addStageRun,
+  createSubtask,
   createProTask,
   finishVerificationRun,
   getProTask,
   isProTaskStage,
   isProTaskStatus,
+  isProSubtaskStatus,
   listProTasks,
   setExclusiveMode,
   startVerificationRun,
   syncJiraTask,
   updateStageRun,
+  updateSubtask,
   updateProTaskStatus,
   type VerificationResult,
 } from '../../pro/tasks.js';
@@ -457,6 +460,45 @@ app.patch('/api/pro/tasks/:taskId/stage-runs/:stageRunId', async (c) => {
   }
 });
 
+app.post('/api/pro/tasks/:taskId/subtasks', async (c) => {
+  try {
+    const body = await c.req.json();
+    const task = createSubtask(c.req.param('taskId'), {
+      title: body?.title,
+      description: body?.description,
+      status: body?.status,
+      assignedAgent: body?.assignedAgent,
+      assistantId: body?.assistantId,
+      workdir: body?.workdir,
+    });
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/tasks/:taskId/subtasks/:subtaskId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const rawStatus = readString(body?.status);
+    if (rawStatus && !isProSubtaskStatus(rawStatus)) return c.json({ ok: false, error: 'invalid subtask status' }, 400);
+    const task = updateSubtask(c.req.param('taskId'), c.req.param('subtaskId'), {
+      title: body?.title,
+      description: body?.description,
+      status: body?.status,
+      assignedAgent: body?.assignedAgent,
+      assistantId: body?.assistantId,
+      workdir: body?.workdir,
+      stageRunId: body?.stageRunId,
+    });
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.post('/api/pro/tasks/:taskId/verification-runs', async (c) => {
   try {
     const body = await c.req.json();
@@ -570,6 +612,9 @@ function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>
     `Task: ${task.title}`,
     task.jiraKey ? `Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
     task.description ? `Description:\n${task.description}` : '',
+    task.subTasks?.length
+      ? `Subtasks:\n${task.subTasks.map((subtask, index) => `${index + 1}. [${subtask.status}] ${subtask.title}${subtask.assignedAgent ? ` (agent: ${subtask.assignedAgent})` : ''}`).join('\n')}`
+      : 'Subtasks: none yet. If the work naturally spans multiple projects or independent streams, propose subtasks with title, scope, recommended agent/assistant, and dependencies.',
   ].filter(Boolean).join('\n\n');
 
   if (stage === 'focus') {

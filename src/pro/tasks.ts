@@ -16,6 +16,7 @@ export type ProTaskStatus = 'backlog' | 'refinement' | 'coding' | 'resolved' | '
 export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 'demo' | 'bugfix' | 'knowledge';
 export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
 export type VerificationResult = 'passed' | 'failed' | 'blocked' | 'not-run';
+export type ProSubtaskStatus = 'todo' | 'running' | 'review' | 'done' | 'blocked';
 
 export interface TaskEstimate {
   estimatePoint?: number;
@@ -121,11 +122,27 @@ export interface ProTaskEvent {
     | 'deployment-linked'
     | 'focus-started'
     | 'focus-finished'
-    | 'exclusive-mode-changed';
+    | 'exclusive-mode-changed'
+    | 'subtask-created'
+    | 'subtask-updated';
   createdAt: string;
   actor: 'user' | 'system' | 'assistant';
   summary: string;
   diff?: unknown;
+}
+
+export interface ProSubtask {
+  id: string;
+  taskId: string;
+  title: string;
+  description?: string;
+  status: ProSubtaskStatus;
+  assignedAgent?: string;
+  assistantId?: string;
+  workdir?: string;
+  createdAt: string;
+  updatedAt: string;
+  stageRunIds: string[];
 }
 
 export interface ProTask {
@@ -144,6 +161,7 @@ export interface ProTask {
   updatedAt: string;
   stageRuns: StageRun[];
   verificationRuns: VerificationRun[];
+  subTasks: ProSubtask[];
   exclusiveMode?: boolean;
   events: ProTaskEvent[];
 }
@@ -205,9 +223,29 @@ export interface StartVerificationInput {
   stageRunId?: string;
 }
 
+export interface CreateSubtaskInput {
+  title: unknown;
+  description?: unknown;
+  status?: unknown;
+  assignedAgent?: unknown;
+  assistantId?: unknown;
+  workdir?: unknown;
+}
+
+export interface UpdateSubtaskInput {
+  title?: unknown;
+  description?: unknown;
+  status?: unknown;
+  assignedAgent?: unknown;
+  assistantId?: unknown;
+  workdir?: unknown;
+  stageRunId?: unknown;
+}
+
 const VALID_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const VALID_KINDS: ProTaskKind[] = ['manual', 'todo', 'jira-ticket', 'jira-bug', 'jira-epic', 'automation'];
 const VALID_STAGES: ProTaskStage[] = ['refinement', 'focus', 'coding', 'verification', 'demo', 'bugfix', 'knowledge'];
+const VALID_SUBTASK_STATUSES: ProSubtaskStatus[] = ['todo', 'running', 'review', 'done', 'blocked'];
 
 function taskFilePath() {
   return process.env.PIKICLAW_PRO_TASK_FILE || path.join(os.homedir(), '.pikiclaw', 'pro', 'tasks.json');
@@ -232,7 +270,15 @@ function readFile(): ProTaskFile {
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.tasks)) return { version: 1, tasks: [] };
     return {
       version: 1,
-      tasks: parsed.tasks.filter(task => task && typeof task.id === 'string' && typeof task.title === 'string'),
+      tasks: parsed.tasks
+        .filter(task => task && typeof task.id === 'string' && typeof task.title === 'string')
+        .map(task => ({
+          ...task,
+          subTasks: Array.isArray((task as any).subTasks) ? (task as any).subTasks : [],
+          stageRuns: Array.isArray(task.stageRuns) ? task.stageRuns : [],
+          verificationRuns: Array.isArray(task.verificationRuns) ? task.verificationRuns : [],
+          events: Array.isArray(task.events) ? task.events : [],
+        })),
     };
   } catch {
     return { version: 1, tasks: [] };
@@ -292,6 +338,10 @@ export function isProTaskStage(value: string): value is ProTaskStage {
   return VALID_STAGES.includes(value as ProTaskStage);
 }
 
+export function isProSubtaskStatus(value: string): value is ProSubtaskStatus {
+  return VALID_SUBTASK_STATUSES.includes(value as ProSubtaskStatus);
+}
+
 export function listProTasks(): ProTask[] {
   return readFile().tasks.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
@@ -322,6 +372,7 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     updatedAt: now,
     stageRuns: [],
     verificationRuns: [],
+    subTasks: [],
     exclusiveMode: false,
     events: [],
   };
@@ -381,6 +432,7 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     updatedAt: now,
     stageRuns: [],
     verificationRuns: [],
+    subTasks: [],
     exclusiveMode: false,
     events: [],
   };
@@ -464,6 +516,75 @@ export function updateStageRun(taskId: string, stageRunId: string, input: Update
     type: run.stage === 'focus' && input.status === 'completed' ? 'focus-finished' : 'assistant-run',
     actor: 'user',
     summary: `${run.stage} stage updated${input.status ? ` to ${input.status}` : ''}.`,
+  });
+  writeFile(file);
+  return task;
+}
+
+export function createSubtask(taskId: string, input: CreateSubtaskInput): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const title = normalizeText(input.title, 240);
+  if (!title) throw new Error('title is required');
+  const now = new Date().toISOString();
+  const rawStatus = normalizeText(input.status, 40);
+  const subtask: ProSubtask = {
+    id: newId('subtask'),
+    taskId: task.id,
+    title,
+    description: normalizeText(input.description) || undefined,
+    status: isProSubtaskStatus(rawStatus) ? rawStatus : 'todo',
+    assignedAgent: normalizeText(input.assignedAgent, 80) || task.defaultAgent || undefined,
+    assistantId: normalizeText(input.assistantId, 160) || task.defaultAssistantId || undefined,
+    workdir: normalizeText(input.workdir, 2048) || task.workdir || undefined,
+    createdAt: now,
+    updatedAt: now,
+    stageRunIds: [],
+  };
+  task.subTasks.unshift(subtask);
+  task.updatedAt = now;
+  appendEvent(task, {
+    type: 'subtask-created',
+    actor: 'user',
+    summary: `Subtask created: ${title}.`,
+    diff: { subtaskId: subtask.id },
+  });
+  writeFile(file);
+  return task;
+}
+
+export function updateSubtask(taskId: string, subtaskId: string, input: UpdateSubtaskInput): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const subtask = task.subTasks.find(candidate => candidate.id === subtaskId);
+  if (!subtask) throw new Error('subtask not found');
+  const previousStatus = subtask.status;
+  const title = normalizeText(input.title, 240);
+  const description = normalizeText(input.description);
+  const status = normalizeText(input.status, 40);
+  if (title) subtask.title = title;
+  if (description) subtask.description = description;
+  if (isProSubtaskStatus(status)) subtask.status = status;
+  const assignedAgent = normalizeText(input.assignedAgent, 80);
+  if (assignedAgent) subtask.assignedAgent = assignedAgent;
+  const assistantId = normalizeText(input.assistantId, 160);
+  if (assistantId) subtask.assistantId = assistantId;
+  const workdir = normalizeText(input.workdir, 2048);
+  if (workdir) subtask.workdir = workdir;
+  const stageRunId = normalizeText(input.stageRunId, 120);
+  if (stageRunId && !subtask.stageRunIds.includes(stageRunId)) subtask.stageRunIds.unshift(stageRunId);
+  const now = new Date().toISOString();
+  subtask.updatedAt = now;
+  task.updatedAt = now;
+  appendEvent(task, {
+    type: 'subtask-updated',
+    actor: 'user',
+    summary: previousStatus !== subtask.status
+      ? `Subtask ${subtask.title} moved from ${previousStatus} to ${subtask.status}.`
+      : `Subtask updated: ${subtask.title}.`,
+    diff: { subtaskId: subtask.id },
   });
   writeFile(file);
   return task;

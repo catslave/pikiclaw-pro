@@ -3,7 +3,7 @@ import { api } from '../../api';
 import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { AgentAssistant, ProTask, ProTaskStage, ProTaskStatus, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
+import type { AgentAssistant, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
@@ -37,6 +37,13 @@ const STAGE_LABEL: Record<ProTaskStage, string> = {
 };
 
 const VERIFY_RESULTS: VerificationResult[] = ['passed', 'failed', 'blocked'];
+const SUBTASK_STATUSES: ProSubtaskStatus[] = ['todo', 'running', 'review', 'done', 'blocked'];
+
+function subtaskProgress(task: ProTask): { done: number; total: number } {
+  const total = task.subTasks?.length || 0;
+  const done = (task.subTasks || []).filter(item => item.status === 'done').length;
+  return { done, total };
+}
 
 function formatTime(value: string | null | undefined): string {
   if (!value) return '--';
@@ -75,6 +82,7 @@ function TaskCard({
   onStartStage: (task: ProTask, stage: ProTaskStage) => void;
 }) {
   const latestRun = task.stageRuns[0];
+  const progress = subtaskProgress(task);
   return (
     <button
       type="button"
@@ -96,6 +104,15 @@ function TaskCard({
         <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
       </div>
       {task.description && <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-fg-4">{task.description}</div>}
+      {progress.total > 0 && (
+        <div className="mt-2 flex items-center gap-2 rounded-md border border-edge bg-panel-alt px-2 py-1.5 text-[11px] text-fg-4">
+          <span className="font-semibold text-fg-3">Subtasks</span>
+          <span>{progress.done}/{progress.total}</span>
+          <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-inset">
+            <div className="h-full rounded-full bg-primary" style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }} />
+          </div>
+        </div>
+      )}
       {latestRun && (
         <div className="mt-2 rounded-md border border-edge bg-panel-alt px-2 py-1.5 text-[11px] text-fg-4">
           Latest: {STAGE_LABEL[latestRun.stage]} · {latestRun.session.agent}:{latestRun.session.sessionId.slice(0, 8)}
@@ -254,6 +271,10 @@ function TaskDetail({
   task,
   verifyDraft,
   onVerifyDraft,
+  subtaskDraft,
+  onSubtaskDraft,
+  onCreateSubtask,
+  onUpdateSubtaskStatus,
   onStartVerification,
   onFinishVerification,
   onCompleteStage,
@@ -262,6 +283,10 @@ function TaskDetail({
   task: ProTask | null;
   verifyDraft: { environment: string; url: string; notes: string };
   onVerifyDraft: (patch: Partial<{ environment: string; url: string; notes: string }>) => void;
+  subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
+  onSubtaskDraft: (patch: Partial<{ title: string; description: string; assignedAgent: string; assistantId: string }>) => void;
+  onCreateSubtask: (task: ProTask) => void;
+  onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartVerification: (task: ProTask) => void;
   onFinishVerification: (task: ProTask, run: VerificationRun, result: VerificationResult) => void;
   onCompleteStage: (task: ProTask, run: StageRun) => void;
@@ -274,6 +299,7 @@ function TaskDetail({
       </div>
     );
   }
+  const progress = subtaskProgress(task);
   return (
     <div className="h-full overflow-y-auto rounded-md border border-edge bg-panel">
       <div className="border-b border-edge px-4 py-3">
@@ -300,6 +326,54 @@ function TaskDetail({
             <Button variant={task.exclusiveMode ? 'secondary' : 'outline'} onClick={() => onExclusiveMode(task, !task.exclusiveMode)}>
               {task.exclusiveMode ? 'Disable Exclusive' : 'Enable Exclusive'}
             </Button>
+          </div>
+        </section>
+        <section>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Subtasks</div>
+            <div className="text-[12px] text-fg-5">{progress.total ? `${progress.done}/${progress.total} done` : 'No subtasks'}</div>
+          </div>
+          <div className="rounded-md border border-edge bg-panel-alt px-3 py-3">
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_120px_120px_auto]">
+              <Input value={subtaskDraft.title} onChange={event => onSubtaskDraft({ title: event.target.value })} placeholder="Subtask title" />
+              <Input value={subtaskDraft.assignedAgent} onChange={event => onSubtaskDraft({ assignedAgent: event.target.value })} placeholder="agent" />
+              <Input value={subtaskDraft.assistantId} onChange={event => onSubtaskDraft({ assistantId: event.target.value })} placeholder="assistant" />
+              <Button variant="secondary" disabled={!subtaskDraft.title.trim()} onClick={() => onCreateSubtask(task)}>Add</Button>
+            </div>
+            <textarea
+              value={subtaskDraft.description}
+              onChange={event => onSubtaskDraft({ description: event.target.value })}
+              placeholder="Optional scope / repo / dependency"
+              className="mt-2 min-h-14 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[12px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+            />
+            <div className="mt-3 space-y-2">
+              {(task.subTasks || []).length === 0 ? (
+                <div className="rounded-md border border-dashed border-edge px-3 py-5 text-center text-[12px] text-fg-5">
+                  Use subtasks only when this task splits across projects, repos, or independent work streams.
+                </div>
+              ) : task.subTasks.map(subtask => (
+                <div key={subtask.id} className="rounded-md border border-edge bg-inset px-3 py-2">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-[13px] text-fg">{subtask.title}</div>
+                      {subtask.description && <div className="mt-1 text-[12px] text-fg-4">{subtask.description}</div>}
+                      <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-fg-5">
+                        {subtask.assignedAgent && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">agent: {subtask.assignedAgent}</span>}
+                        {subtask.assistantId && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">assistant: {subtask.assistantId}</span>}
+                        {!!subtask.stageRunIds.length && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">{subtask.stageRunIds.length} run link{subtask.stageRunIds.length === 1 ? '' : 's'}</span>}
+                      </div>
+                    </div>
+                    <select
+                      value={subtask.status}
+                      onChange={event => onUpdateSubtaskStatus(task, subtask.id, event.target.value as ProSubtaskStatus)}
+                      className="h-8 rounded-md border border-edge bg-panel px-2 text-[12px] text-fg outline-none focus:border-primary/40"
+                    >
+                      {SUBTASK_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
+                    </select>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
         {task.description && (
@@ -454,6 +528,7 @@ export function JiraTab() {
   const [remoteSync, setRemoteSync] = useState({ baseUrl: '', email: '', token: '', jql: 'assignee = currentUser() ORDER BY updated DESC' });
   const [selectedSprint, setSelectedSprint] = useState<string>('all');
   const [verifyDraft, setVerifyDraft] = useState({ environment: 'cnlab03', url: '', notes: '' });
+  const [subtaskDraft, setSubtaskDraft] = useState({ title: '', description: '', assignedAgent: '', assistantId: '' });
   const canSync = !!syncDraft.trim() || !!(remoteSync.baseUrl.trim() && remoteSync.token.trim());
 
   const sprintOptions = useMemo(() => {
@@ -627,6 +702,35 @@ export function JiraTab() {
     }
   }, [toast, upsertTask]);
 
+  const createSubtask = useCallback(async (task: ProTask) => {
+    const title = subtaskDraft.title.trim();
+    if (!title) return;
+    try {
+      const result = await api.createProSubtask(task.id, {
+        title,
+        description: subtaskDraft.description,
+        assignedAgent: subtaskDraft.assignedAgent || task.defaultAgent || null,
+        assistantId: subtaskDraft.assistantId || task.defaultAssistantId || null,
+        workdir: task.workdir || state?.runtimeWorkdir,
+      });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to create subtask');
+      upsertTask(result.task);
+      setSubtaskDraft({ title: '', description: '', assignedAgent: '', assistantId: '' });
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create subtask', false);
+    }
+  }, [state?.runtimeWorkdir, subtaskDraft, toast, upsertTask]);
+
+  const updateSubtaskStatus = useCallback(async (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => {
+    try {
+      const result = await api.updateProSubtask(task.id, subtaskId, { status });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to update subtask');
+      upsertTask(result.task);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to update subtask', false);
+    }
+  }, [toast, upsertTask]);
+
   const startVerification = useCallback(async (task: ProTask) => {
     try {
       const result = await api.startVerificationRun(task.id, {
@@ -746,6 +850,10 @@ export function JiraTab() {
             task={selectedTask}
             verifyDraft={verifyDraft}
             onVerifyDraft={(patch) => setVerifyDraft(prev => ({ ...prev, ...patch }))}
+            subtaskDraft={subtaskDraft}
+            onSubtaskDraft={(patch) => setSubtaskDraft(prev => ({ ...prev, ...patch }))}
+            onCreateSubtask={createSubtask}
+            onUpdateSubtaskStatus={updateSubtaskStatus}
             onStartVerification={startVerification}
             onFinishVerification={finishVerification}
             onCompleteStage={completeStage}

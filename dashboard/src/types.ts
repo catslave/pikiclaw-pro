@@ -862,6 +862,7 @@ export type CliAuthStreamEvent =
 export type ProTaskKind = 'manual' | 'todo' | 'jira-ticket' | 'jira-bug' | 'jira-epic' | 'automation';
 export type ProTaskStatus = 'backlog' | 'refinement' | 'coding' | 'resolved' | 'done';
 export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 'demo' | 'bugfix' | 'knowledge';
+export type ProSubtaskStatus = 'todo' | 'running' | 'review' | 'done' | 'blocked';
 export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
 export type VerificationResult = 'passed' | 'failed' | 'blocked' | 'not-run';
 
@@ -963,6 +964,20 @@ export interface ProTaskEvent {
   diff?: unknown;
 }
 
+export interface ProSubtask {
+  id: string;
+  taskId: string;
+  title: string;
+  description?: string;
+  status: ProSubtaskStatus;
+  assignedAgent?: string;
+  assistantId?: string;
+  workdir?: string;
+  createdAt: string;
+  updatedAt: string;
+  stageRunIds: string[];
+}
+
 export interface ProTask {
   id: string;
   title: string;
@@ -979,6 +994,7 @@ export interface ProTask {
   updatedAt: string;
   stageRuns: StageRun[];
   verificationRuns: VerificationRun[];
+  subTasks: ProSubtask[];
   exclusiveMode?: boolean;
   events: ProTaskEvent[];
 }
