@@ -95,6 +95,12 @@ export function listTodoItems(): TodoItem[] {
   return readFile().items.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
+export function getTodoItems(todoIds: string[]): TodoItem[] {
+  const wanted = new Set(todoIds.map(id => normalizeText(id, 160)).filter(Boolean));
+  if (!wanted.size) return [];
+  return readFile().items.filter(item => wanted.has(item.id));
+}
+
 export function createTodoItem(input: CreateTodoInput): TodoItem {
   const kind: TodoItemKind = input.kind === 'review-comment' ? 'review-comment' : 'todo';
   const body = normalizeText(input.body);

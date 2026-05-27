@@ -1008,3 +1008,42 @@ export interface TodoItem {
     sessionId: string;
   };
 }
+
+export interface AgentAssistant {
+  id: string;
+  name: string;
+  responsibility: string;
+  preferredAgents: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationRule {
+  id: string;
+  name: string;
+  schedule: string;
+  prompt: string;
+  workdir?: string;
+  agent?: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
+  lastSessionKey?: string;
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  title: string;
+  body: string;
+  source?: {
+    type: 'manual' | 'chat' | 'task';
+    workdir?: string;
+    agent?: string;
+    sessionId?: string;
+    taskId?: string;
+  };
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}

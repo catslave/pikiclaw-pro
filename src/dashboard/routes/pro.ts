@@ -23,7 +23,16 @@ import {
   updateProTaskStatus,
   type VerificationResult,
 } from '../../pro/tasks.js';
-import { createTodoItem, listTodoItems } from '../../pro/todos.js';
+import { createTodoItem, getTodoItems, linkTodoChat, listTodoItems } from '../../pro/todos.js';
+import {
+  createAgentAssistant,
+  createAutomationRule,
+  createKnowledgeEntry,
+  listAgentAssistants,
+  listAutomationRules,
+  listKnowledgeEntries,
+  markAutomationRun,
+} from '../../pro/workflow.js';
 
 const app = new Hono();
 
@@ -62,6 +71,51 @@ app.post('/api/pro/todos', async (c) => {
   }
 });
 
+app.post('/api/pro/todos/chat', async (c) => {
+  try {
+    const body = await c.req.json();
+    const todoIds = Array.isArray(body?.todoIds) ? body.todoIds.map(String) : [];
+    const items = getTodoItems(todoIds);
+    if (!items.length) return c.json({ ok: false, error: 'todoIds are required' }, 400);
+    const config = loadUserConfig();
+    const workdir = readString(body?.workdir) || items.find(item => item.source?.workdir)?.source?.workdir || runtime.getRequestWorkdir(config);
+    const userPrompt = readString(body?.prompt);
+    const prompt = [
+      'Please start a focused chat for the following captured todo/review items.',
+      '',
+      ...items.map((item, index) => [
+        `Item ${index + 1}: ${item.title}`,
+        item.body ? `Note: ${item.body}` : '',
+        item.source?.quote ? `Quoted context:\n${item.source.quote}` : '',
+        item.source?.agent && item.source?.sessionId ? `Source session: ${item.source.agent}:${item.source.sessionId}${typeof item.source.turnIndex === 'number' ? ` turn ${item.source.turnIndex}` : ''}` : '',
+      ].filter(Boolean).join('\n')),
+      userPrompt ? `\nUser instruction:\n${userPrompt}` : '',
+    ].join('\n\n');
+    const queued = await queueDashboardSessionTask({
+      workdir,
+      agent: readString(body?.agent) || null,
+      sessionId: '',
+      prompt,
+      model: readString(body?.model) || null,
+      effort: readString(body?.effort) || null,
+      attachments: [],
+    });
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+    const session = parseSessionKey(queued.sessionKey);
+    if (session) {
+      for (const item of items) {
+        linkTodoChat(item.id, { workdir, agent: session.agent, sessionId: session.sessionId });
+      }
+    }
+    return c.json({ ok: true, queued, items: getTodoItems(items.map(item => item.id)) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
 app.post('/api/pro/review-comments', async (c) => {
   try {
     const body = await c.req.json();
@@ -74,6 +128,124 @@ app.post('/api/pro/review-comments', async (c) => {
     return c.json({ ok: true, item });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.get('/api/pro/assistants', (c) => {
+  return c.json({ ok: true, assistants: listAgentAssistants() });
+});
+
+app.post('/api/pro/assistants', async (c) => {
+  try {
+    const body = await c.req.json();
+    const assistant = createAgentAssistant({
+      name: body?.name,
+      responsibility: body?.responsibility,
+      preferredAgents: body?.preferredAgents,
+    });
+    return c.json({ ok: true, assistant });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.get('/api/pro/automations', (c) => {
+  return c.json({ ok: true, automations: listAutomationRules() });
+});
+
+app.post('/api/pro/automations', async (c) => {
+  try {
+    const body = await c.req.json();
+    const config = loadUserConfig();
+    const automation = createAutomationRule({
+      name: body?.name,
+      schedule: body?.schedule,
+      prompt: body?.prompt,
+      workdir: body?.workdir || runtime.getRequestWorkdir(config),
+      agent: body?.agent,
+      enabled: body?.enabled,
+    });
+    return c.json({ ok: true, automation });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/automations/:automationId/run', async (c) => {
+  try {
+    const automation = listAutomationRules().find(item => item.id === c.req.param('automationId'));
+    if (!automation) return c.json({ ok: false, error: 'automation not found' }, 404);
+    const config = loadUserConfig();
+    const queued = await queueDashboardSessionTask({
+      workdir: automation.workdir || runtime.getRequestWorkdir(config),
+      agent: automation.agent || null,
+      sessionId: '',
+      prompt: automation.prompt,
+      attachments: [],
+    });
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+    const updated = markAutomationRun(automation.id, queued.sessionKey);
+    return c.json({ ok: true, automation: updated, queued });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.get('/api/pro/knowledge', (c) => {
+  return c.json({ ok: true, knowledge: listKnowledgeEntries() });
+});
+
+app.post('/api/pro/knowledge', async (c) => {
+  try {
+    const body = await c.req.json();
+    const entry = createKnowledgeEntry({
+      title: body?.title,
+      body: body?.body,
+      source: body?.source,
+      tags: body?.tags,
+    });
+    return c.json({ ok: true, entry });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/skill-quick-setup', async (c) => {
+  try {
+    const body = await c.req.json();
+    const repo = readString(body?.repo);
+    if (!repo) return c.json({ ok: false, error: 'repo is required' }, 400);
+    const config = loadUserConfig();
+    const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
+    const prompt = [
+      'Quick setup this GitHub project for me.',
+      '',
+      `Repository: ${repo}`,
+      '',
+      'Requirements:',
+      '- Inspect the repository README and install/setup docs.',
+      '- Clone or use the repository as appropriate inside this workspace.',
+      '- Install required dependencies with the safest package manager implied by the repo.',
+      '- Run the documented validation command or the closest local smoke test.',
+      '- Report exact commands executed, files changed, and anything that still needs manual credentials.',
+    ].join('\n');
+    const queued = await queueDashboardSessionTask({
+      workdir,
+      agent: readString(body?.agent) || null,
+      sessionId: '',
+      prompt,
+      attachments: [],
+    });
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+    return c.json({ ok: true, queued });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
   }
 });
 

@@ -1,0 +1,173 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+export interface AgentAssistant {
+  id: string;
+  name: string;
+  responsibility: string;
+  preferredAgents: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationRule {
+  id: string;
+  name: string;
+  schedule: string;
+  prompt: string;
+  workdir?: string;
+  agent?: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
+  lastSessionKey?: string;
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  title: string;
+  body: string;
+  source?: {
+    type: 'manual' | 'chat' | 'task';
+    workdir?: string;
+    agent?: string;
+    sessionId?: string;
+    taskId?: string;
+  };
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface WorkflowFile {
+  version: 1;
+  assistants: AgentAssistant[];
+  automations: AutomationRule[];
+  knowledge: KnowledgeEntry[];
+}
+
+function workflowFilePath() {
+  return process.env.PIKICLAW_PRO_WORKFLOW_FILE || path.join(os.homedir(), '.pikiclaw', 'pro', 'workflow.json');
+}
+
+function newId(prefix: string) {
+  return `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function normalizeText(value: unknown, max = 16_000): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text.length > max ? text.slice(0, max).trimEnd() : text;
+}
+
+function readFile(): WorkflowFile {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(workflowFilePath(), 'utf-8')) as WorkflowFile;
+    return {
+      version: 1,
+      assistants: Array.isArray(parsed?.assistants) ? parsed.assistants.filter(item => item?.id && item?.name) : [],
+      automations: Array.isArray(parsed?.automations) ? parsed.automations.filter(item => item?.id && item?.name) : [],
+      knowledge: Array.isArray(parsed?.knowledge) ? parsed.knowledge.filter(item => item?.id && item?.title) : [],
+    };
+  } catch {
+    return { version: 1, assistants: [], automations: [], knowledge: [] };
+  }
+}
+
+function writeFile(file: WorkflowFile) {
+  const filePath = workflowFilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(file, null, 2));
+  fs.renameSync(tmpPath, filePath);
+}
+
+export function listAgentAssistants(): AgentAssistant[] {
+  return readFile().assistants.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function createAgentAssistant(input: { name: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {
+  const name = normalizeText(input.name, 120);
+  if (!name) throw new Error('name is required');
+  const now = new Date().toISOString();
+  const assistant: AgentAssistant = {
+    id: newId('assistant'),
+    name,
+    responsibility: normalizeText(input.responsibility) || 'Handle a specific workflow when assigned.',
+    preferredAgents: Array.isArray(input.preferredAgents)
+      ? input.preferredAgents.map(agent => normalizeText(agent, 60)).filter(Boolean).slice(0, 8)
+      : [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  const file = readFile();
+  file.assistants.unshift(assistant);
+  writeFile(file);
+  return assistant;
+}
+
+export function listAutomationRules(): AutomationRule[] {
+  return readFile().automations.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function createAutomationRule(input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; enabled?: unknown }): AutomationRule {
+  const name = normalizeText(input.name, 160);
+  const prompt = normalizeText(input.prompt, 24_000);
+  if (!name) throw new Error('name is required');
+  if (!prompt) throw new Error('prompt is required');
+  const now = new Date().toISOString();
+  const rule: AutomationRule = {
+    id: newId('automation'),
+    name,
+    schedule: normalizeText(input.schedule, 160) || 'manual',
+    prompt,
+    workdir: normalizeText(input.workdir, 2048) || undefined,
+    agent: normalizeText(input.agent, 80) || undefined,
+    enabled: input.enabled !== false,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const file = readFile();
+  file.automations.unshift(rule);
+  writeFile(file);
+  return rule;
+}
+
+export function markAutomationRun(id: string, sessionKey: string | undefined): AutomationRule {
+  const file = readFile();
+  const rule = file.automations.find(item => item.id === id);
+  if (!rule) throw new Error('automation not found');
+  const now = new Date().toISOString();
+  rule.lastRunAt = now;
+  rule.lastSessionKey = sessionKey;
+  rule.updatedAt = now;
+  writeFile(file);
+  return rule;
+}
+
+export function listKnowledgeEntries(): KnowledgeEntry[] {
+  return readFile().knowledge.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function createKnowledgeEntry(input: { title: unknown; body?: unknown; source?: KnowledgeEntry['source']; tags?: unknown }): KnowledgeEntry {
+  const title = normalizeText(input.title, 200);
+  const body = normalizeText(input.body, 48_000);
+  if (!title) throw new Error('title is required');
+  if (!body) throw new Error('body is required');
+  const now = new Date().toISOString();
+  const entry: KnowledgeEntry = {
+    id: newId('knowledge'),
+    title,
+    body,
+    source: input.source,
+    tags: Array.isArray(input.tags) ? input.tags.map(tag => normalizeText(tag, 60)).filter(Boolean).slice(0, 12) : [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  const file = readFile();
+  file.knowledge.unshift(entry);
+  writeFile(file);
+  return entry;
+}

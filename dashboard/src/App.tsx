@@ -12,6 +12,7 @@ const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const JiraTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).JiraTab }));
+const ProDashboardView = lazy(async () => ({ default: (await import('./pages/pro/ProDashboardView')).ProDashboardView }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SkillsTab = lazy(async () => ({ default: (await import('./pages/skills/SkillsTab')).SkillsTab }));
@@ -293,6 +294,7 @@ export function App() {
                   mode={sessionWorkspaceMode}
                   settingsContent={settingsContent}
                   dashboardJiraContent={<JiraTab />}
+                  dashboardProContent={(view) => <ProDashboardView view={view} />}
                   version={version}
                   restartPhase={restartPhase}
                   onRestartClick={onRestartClick}

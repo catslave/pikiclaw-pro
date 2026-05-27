@@ -17,9 +17,12 @@ function categoryLabel(category: PlatformSkillInfo['category']) {
 
 export function SkillsTab() {
   const toast = useStore(s => s.toast);
+  const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? '');
   const [skills, setSkills] = useState<PlatformSkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [quickRepo, setQuickRepo] = useState('');
+  const [quickRunning, setQuickRunning] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +55,22 @@ export function SkillsTab() {
     }
   };
 
+  const runQuickSetup = async () => {
+    const repo = quickRepo.trim();
+    if (!repo || quickRunning) return;
+    setQuickRunning(true);
+    try {
+      const res = await api.runSkillQuickSetup({ repo, workdir: runtimeWorkdir });
+      if (!res.ok) throw new Error(res.error || 'Quick setup failed');
+      toast('Quick setup queued');
+      setQuickRepo('');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Quick setup failed', false);
+    } finally {
+      setQuickRunning(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex min-h-40 items-center justify-center text-sm text-fg-4">
@@ -67,6 +86,28 @@ export function SkillsTab() {
 
   return (
     <div className="space-y-3">
+      <div className="rounded-lg border border-edge bg-panel p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-fg">Quick setup</h3>
+            <p className="mt-1 text-sm text-fg-4">Paste a GitHub repo and Pikiclaw will start an agent session to inspect, install dependencies, and validate it.</p>
+          </div>
+          <span className="rounded border border-edge bg-control px-2 py-1 text-[11px] text-fg-5">Agent workflow</span>
+        </div>
+        <div className="mt-3 flex flex-col gap-2 lg:flex-row">
+          <input
+            value={quickRepo}
+            onChange={event => setQuickRepo(event.target.value)}
+            placeholder="https://github.com/org/repo or org/repo"
+            className="h-9 min-w-0 flex-1 rounded-md border border-control-border bg-control px-3 text-[13px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+          <Button variant="primary" disabled={!quickRepo.trim() || quickRunning} onClick={() => void runQuickSetup()}>
+            {quickRunning ? <Spinner /> : null}
+            Start setup
+          </Button>
+        </div>
+      </div>
+
       <div className="rounded-md border border-edge bg-panel-alt px-3 py-2 text-sm text-fg-3">
         Platform skills are Pikiclaw-owned workflows. They can use controlled backend tools before handing evidence to the selected agent for analysis.
       </div>

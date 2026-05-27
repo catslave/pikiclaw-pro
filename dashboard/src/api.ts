@@ -1,6 +1,8 @@
 import type {
   AgentStatusResponse,
+  AgentAssistant,
   AppState,
+  AutomationRule,
   BrowserSetupResponse,
   BrowserStatusResponse,
   CliCatalogItem,
@@ -12,6 +14,7 @@ import type {
   GitDiffContentResult,
   GitRemoteBranchUrlResult,
   HostInfo,
+  KnowledgeEntry,
   LocalModelsProbeResponse,
   LsDirResult,
   McpCatalogItem,
@@ -651,6 +654,51 @@ export const api = {
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; item?: TodoItem; error?: string }>('/api/pro/review-comments', item, opts),
+  createProTodoChat: (
+    body: { todoIds: string[]; prompt?: string; workdir?: string; agent?: string | null; model?: string | null; effort?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; items?: TodoItem[]; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      '/api/pro/todos/chat',
+      body,
+      { timeoutMs: 30_000, ...opts },
+    ),
+  getProAssistants: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; assistants: AgentAssistant[]; error?: string }>('/api/pro/assistants', opts),
+  createProAssistant: (
+    body: { name: string; responsibility?: string; preferredAgents?: string[] },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; assistant?: AgentAssistant; error?: string }>('/api/pro/assistants', body, opts),
+  getProAutomations: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; automations: AutomationRule[]; error?: string }>('/api/pro/automations', opts),
+  createProAutomation: (
+    body: { name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; enabled?: boolean },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; automation?: AutomationRule; error?: string }>('/api/pro/automations', body, opts),
+  runProAutomation: (automationId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; automation?: AutomationRule; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      `/api/pro/automations/${encodeURIComponent(automationId)}/run`,
+      {},
+      { timeoutMs: 30_000, ...opts },
+    ),
+  getProKnowledge: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; knowledge: KnowledgeEntry[]; error?: string }>('/api/pro/knowledge', opts),
+  createProKnowledge: (
+    body: { title: string; body: string; tags?: string[]; source?: KnowledgeEntry['source'] },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; entry?: KnowledgeEntry; error?: string }>('/api/pro/knowledge', body, opts),
+  runSkillQuickSetup: (
+    body: { repo: string; workdir?: string; agent?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      '/api/pro/skill-quick-setup',
+      body,
+      { timeoutMs: 30_000, ...opts },
+    ),
   createProTask: (
     task: {
       title: string;
