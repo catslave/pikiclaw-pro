@@ -135,3 +135,14 @@ export function linkTodoChat(todoId: string, linkedChat: TodoItem['linkedChat'])
   writeFile(file);
   return item;
 }
+
+export function deleteTodoItem(todoId: string): TodoItem {
+  const id = normalizeText(todoId, 160);
+  if (!id) throw new Error('todo id is required');
+  const file = readFile();
+  const index = file.items.findIndex(item => item.id === id);
+  if (index < 0) throw new Error('todo not found');
+  const [item] = file.items.splice(index, 1);
+  writeFile(file);
+  return item;
+}

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
-import { createTodoItem, listTodoItems } from '../src/pro/todos.ts';
+import { createTodoItem, deleteTodoItem, listTodoItems } from '../src/pro/todos.ts';
 
 let tmpDir: string;
 let previousTodoFile: string | undefined;
@@ -46,5 +46,15 @@ describe('Pro todo store', () => {
     expect(comment.kind).toBe('review-comment');
     expect(comment.source?.quote).toContain('swallows');
     expect(listTodoItems().map(item => item.id)).toEqual([comment.id, todo.id]);
+  });
+
+  it('deletes todo items', () => {
+    const todo = createTodoItem({ body: 'Remove this captured follow-up.' });
+    expect(listTodoItems()).toHaveLength(1);
+
+    const deleted = deleteTodoItem(todo.id);
+
+    expect(deleted.id).toBe(todo.id);
+    expect(listTodoItems()).toHaveLength(0);
   });
 });

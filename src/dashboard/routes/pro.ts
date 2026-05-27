@@ -26,7 +26,7 @@ import {
   updateProTaskStatus,
   type VerificationResult,
 } from '../../pro/tasks.js';
-import { createTodoItem, getTodoItems, linkTodoChat, listTodoItems } from '../../pro/todos.js';
+import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems } from '../../pro/todos.js';
 import {
   createAgentAssistant,
   createAutomationRule,
@@ -72,6 +72,16 @@ app.post('/api/pro/todos', async (c) => {
     return c.json({ ok: true, item });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.delete('/api/pro/todos/:todoId', (c) => {
+  try {
+    const item = deleteTodoItem(c.req.param('todoId'));
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    const status = e?.message === 'todo not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
   }
 });
 

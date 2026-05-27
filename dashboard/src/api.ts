@@ -646,6 +646,11 @@ export const api = {
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; item?: TodoItem; error?: string }>('/api/pro/todos', item, opts),
+  deleteProTodo: (todoId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; item?: TodoItem; error?: string }>(
+      `/api/pro/todos/${encodeURIComponent(todoId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   createProReviewComment: (
     item: {
       title?: string;
