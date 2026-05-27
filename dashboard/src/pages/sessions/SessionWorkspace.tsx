@@ -1141,11 +1141,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [dashboardPendingPrompt, setDashboardPendingPrompt] = useState<string | null>(null);
   const [dashboardPendingImageUrls, setDashboardPendingImageUrls] = useState<string[]>([]);
   const [dashboardPendingCreatedAt, setDashboardPendingCreatedAt] = useState<string | null>(null);
-  const [createTaskPickerOpen, setCreateTaskPickerOpen] = useState(false);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [quickTodoText, setQuickTodoText] = useState('');
   const [quickTodoSaving, setQuickTodoSaving] = useState(false);
-  const [createTaskWorkdir, setCreateTaskWorkdir] = useState('');
   const deferredSearch = useDeferredValue(search);
   const initializedRef = useRef(false);
   const inflightLoadsRef = useRef<Record<string, boolean>>({});
@@ -2692,12 +2690,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (dashboardScope !== 'all' && !workspaces.some(ws => ws.path === dashboardScope)) {
       setDashboardScope('all');
     }
-    const preferred = dashboardScope !== 'all'
-      ? dashboardScope
-      : runtimeWorkdir || workspaces[0]?.path || '';
-    setCreateTaskWorkdir(prev => (
-      prev && workspaces.some(ws => ws.path === prev) ? prev : preferred
-    ));
   }, [dashboardScope, runtimeWorkdir, workspaces]);
 
   const dashboardItems = useMemo<DashboardSessionItem[]>(() => {
@@ -2752,18 +2744,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       toastSession(t('dashboard.chooseWorkspace'), false);
       return;
     }
-    setCreateTaskPickerOpen(false);
     setDashboardFocusedSlot(null);
     setDashboardCreateTaskWorkdir(workdir);
   }, [t, toastSession]);
 
   const handleDashboardCreateTask = useCallback(() => {
-    if (dashboardScope !== 'all') {
-      startDashboardTask(dashboardScope);
-      return;
-    }
-    setCreateTaskPickerOpen(true);
-  }, [dashboardScope, startDashboardTask]);
+    const preferred = dashboardScope !== 'all'
+      ? dashboardScope
+      : runtimeWorkdir || workspaces[0]?.path || '';
+    startDashboardTask(preferred);
+  }, [dashboardScope, runtimeWorkdir, startDashboardTask, workspaces]);
 
   const handleOpenDashboardSession = useCallback((item: DashboardSessionItem) => {
     const agent = item.session.agent || '';
@@ -3929,33 +3919,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         t={t}
       />
 
-      {/* Dashboard create task workspace picker */}
-      <Modal open={createTaskPickerOpen} onClose={() => setCreateTaskPickerOpen(false)}>
-        <ModalHeader title={t('dashboard.createTask')} onClose={() => setCreateTaskPickerOpen(false)} />
-        <div className="text-[13px] text-fg-3 leading-relaxed">
-          {t('dashboard.chooseWorkspaceHint')}
-        </div>
-        <select
-          value={createTaskWorkdir}
-          onChange={e => setCreateTaskWorkdir(e.target.value)}
-          className="mt-3 w-full rounded-md border border-edge bg-inset px-3 py-2 text-[13px] text-fg outline-none focus:border-primary/40"
-        >
-          {workspaces.map(ws => (
-            <option key={ws.path} value={ws.path}>
-              {ws.name || workspaceBaseName(ws.path)}
-            </option>
-          ))}
-        </select>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setCreateTaskPickerOpen(false)}>
-            {t('modal.cancel')}
-          </Button>
-          <Button variant="primary" onClick={() => startDashboardTask(createTaskWorkdir)} disabled={!createTaskWorkdir}>
-            {t('dashboard.createTask')}
-          </Button>
-        </div>
-      </Modal>
-
       {/* Confirm remove workspace modal */}
       <Modal open={!!confirmRemove} onClose={() => !removing && setConfirmRemove(null)}>
         <ModalHeader title={t('hub.removeWorkspace')} onClose={() => !removing && setConfirmRemove(null)} />
@@ -4507,6 +4470,59 @@ function DashboardCreateTaskModal({
   onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => void;
   t: (key: string) => string;
 }) {
+  const state = useStore(s => s.state);
+  const toast = useStore(s => s.toast);
+  const [selectedWorkdir, setSelectedWorkdir] = useState(workdir);
+  const [agent, setAgent] = useState(state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex');
+  const [taskText, setTaskText] = useState('');
+  const [creating, setCreating] = useState(false);
+  const workspaceChoices = useMemo(() => {
+    const byPath = new Map<string, WorkspaceEntry>();
+    for (const ws of workspaces) byPath.set(ws.path, ws);
+    if (selectedWorkdir && !byPath.has(selectedWorkdir)) {
+      byPath.set(selectedWorkdir, { path: selectedWorkdir, name: workspaceName || workspaceBaseName(selectedWorkdir) });
+    }
+    return Array.from(byPath.values());
+  }, [selectedWorkdir, workspaceName, workspaces]);
+
+  useEffect(() => setSelectedWorkdir(workdir), [workdir]);
+
+  const generatedTitle = useMemo(() => {
+    const firstLine = taskText.trim().split('\n').find(Boolean) || '';
+    const normalized = firstLine.replace(/\s+/g, ' ');
+    return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
+  }, [taskText]);
+
+  const createTask = useCallback(async () => {
+    const body = taskText.trim();
+    if (!body || creating) return;
+    setCreating(true);
+    const title = generatedTitle || 'New task';
+    const createdAt = new Date().toISOString();
+    const prompt = [
+      `Task: ${title}`,
+      '',
+      body,
+      '',
+      'Please start by clarifying the goal, boundary, and acceptance points, then proceed with the task when ready.',
+    ].join('\n');
+    try {
+      const result = await api.sendSessionMessage(selectedWorkdir, agent, '', prompt);
+      if (!result.ok) throw new Error(result.error || 'Failed to create task');
+      onSessionCreated(
+        { agent, sessionId: result.sessionKey || result.taskId || '', workdir: selectedWorkdir },
+        prompt,
+        undefined,
+        createdAt,
+      );
+      onClose();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create task', false);
+    } finally {
+      setCreating(false);
+    }
+  }, [agent, creating, generatedTitle, onClose, onSessionCreated, selectedWorkdir, taskText, toast]);
+
   return (
     <>
       <div
@@ -4518,16 +4534,56 @@ function DashboardCreateTaskModal({
         role="dialog"
         aria-modal="true"
         aria-label={t('dashboard.createTask')}
-        className="fixed inset-y-4 left-1/2 z-[70] flex w-[calc(100vw-24px)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border border-primary/50 bg-panel shadow-[0_24px_80px_rgba(0,0,0,0.35)] ring-[4px] ring-primary/[0.10] sm:w-[min(900px,calc(100vw-48px))] md:inset-y-8"
+        className="fixed left-1/2 top-16 z-[70] flex w-[calc(100vw-24px)] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-primary/50 bg-panel shadow-[0_24px_80px_rgba(0,0,0,0.35)] ring-[4px] ring-primary/[0.10] sm:w-[min(620px,calc(100vw-48px))]"
       >
-        <NewSessionView
-          workdir={workdir}
-          workspaceName={workspaceName}
-          workspaces={workspaces}
-          onSessionCreated={onSessionCreated}
-          onClose={onClose}
-          t={t}
-        />
+        <div className="border-b border-edge px-4 py-3">
+          <div className="text-[15px] font-semibold text-fg">{t('dashboard.createTask')}</div>
+          <div className="mt-1 text-[12px] text-fg-5">{t('dashboard.createTaskHint')}</div>
+        </div>
+        <div className="space-y-3 px-4 py-4">
+          <textarea
+            autoFocus
+            value={taskText}
+            onChange={event => setTaskText(event.target.value)}
+            placeholder={t('dashboard.createTaskPlaceholder')}
+            className="min-h-32 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+          <div className="rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-4">
+            <span className="text-fg-5">{t('dashboard.generatedTitle')}: </span>
+            <span className="font-medium text-fg-2">{generatedTitle || '--'}</span>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2">
+            <label className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{t('dashboard.defaultWorkspace')}</div>
+              <select
+                value={selectedWorkdir}
+                onChange={event => setSelectedWorkdir(event.target.value)}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+              >
+                {workspaceChoices.map(ws => (
+                  <option key={ws.path} value={ws.path}>{ws.name || workspaceBaseName(ws.path)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{t('dashboard.defaultAgent')}</div>
+              <select
+                value={agent}
+                onChange={event => setAgent(event.target.value)}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+              >
+                {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(item => <option key={item} value={item}>{item}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-edge px-4 py-3">
+          <Button variant="ghost" onClick={onClose} disabled={creating}>{t('modal.cancel')}</Button>
+          <Button variant="primary" onClick={() => void createTask()} disabled={!taskText.trim() || creating}>
+            {creating ? <Spinner /> : null}
+            {t('dashboard.createTask')}
+          </Button>
+        </div>
       </div>
     </>
   );

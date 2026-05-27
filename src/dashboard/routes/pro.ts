@@ -163,6 +163,7 @@ app.post('/api/pro/automations', async (c) => {
       prompt: body?.prompt,
       workdir: body?.workdir || runtime.getRequestWorkdir(config),
       agent: body?.agent,
+      assistantId: body?.assistantId,
       enabled: body?.enabled,
     });
     return c.json({ ok: true, automation });
@@ -312,6 +313,8 @@ app.post('/api/pro/tasks', async (c) => {
       kind: body?.kind,
       status: body?.status,
       workdir: body?.workdir || runtime.getRequestWorkdir(config),
+      defaultAgent: body?.defaultAgent,
+      defaultAssistantId: body?.defaultAssistantId,
       jiraKey: body?.jiraKey,
       jiraUrl: body?.jiraUrl,
       sprint: body?.sprint,
@@ -398,9 +401,11 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
     const config = loadUserConfig();
     const workdir = readString(body?.workdir) || task.workdir || runtime.getRequestWorkdir(config);
     const prompt = readString(body?.prompt) || buildDefaultStagePrompt(task, stage);
+    const requestedAgent = readString(body?.agent) || task.defaultAgent || null;
+    const assistantId = readString(body?.assistantId) || task.defaultAssistantId || undefined;
     const queued = await queueDashboardSessionTask({
       workdir,
-      agent: readString(body?.agent) || null,
+      agent: requestedAgent,
       sessionId: '',
       prompt,
       model: readString(body?.model) || null,
@@ -419,9 +424,9 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
       stage,
       prompt,
       session: { workdir, agent: session.agent, sessionId: session.sessionId },
-      assistantId: readString(body?.assistantId) || undefined,
-      selectedAgentReason: readString(body?.agent)
-        ? 'Selected by user for this stage.'
+      assistantId,
+      selectedAgentReason: requestedAgent
+        ? 'Selected by task default or user stage setting.'
         : 'Selected by Pikiclaw runtime default agent.',
     });
     return c.json({ ok: true, task: updated, queued });

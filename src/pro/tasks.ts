@@ -135,6 +135,8 @@ export interface ProTask {
   kind: ProTaskKind;
   status: ProTaskStatus;
   workdir?: string;
+  defaultAgent?: string;
+  defaultAssistantId?: string;
   jiraKey?: string;
   jiraUrl?: string;
   sprint?: string;
@@ -157,6 +159,8 @@ export interface CreateProTaskInput {
   kind?: ProTaskKind;
   status?: ProTaskStatus;
   workdir?: string;
+  defaultAgent?: string;
+  defaultAssistantId?: string;
   jiraKey?: string;
   jiraUrl?: string;
   sprint?: string;
@@ -309,6 +313,8 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     kind,
     status,
     workdir: normalizeText(input.workdir, 2048) || undefined,
+    defaultAgent: normalizeText(input.defaultAgent, 80) || undefined,
+    defaultAssistantId: normalizeText(input.defaultAssistantId, 120) || undefined,
     jiraKey: normalizeText(input.jiraKey, 80) || undefined,
     jiraUrl: normalizeText(input.jiraUrl, 2048) || undefined,
     sprint: normalizeText(input.sprint, 120) || undefined,

@@ -20,7 +20,7 @@ export function ProAgentWorkflowSection() {
   const [assistants, setAssistants] = useState<AgentAssistant[]>([]);
   const [automations, setAutomations] = useState<AutomationRule[]>([]);
   const [assistantDraft, setAssistantDraft] = useState({ name: '', responsibility: '', preferredAgents: 'codex,claude' });
-  const [automationDraft, setAutomationDraft] = useState({ name: '', schedule: 'manual', prompt: '' });
+  const [automationDraft, setAutomationDraft] = useState({ name: '', schedule: 'manual', prompt: '', agent: '', assistantId: '' });
   const [busy, setBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -55,10 +55,17 @@ export function ProAgentWorkflowSection() {
   const createAutomation = useCallback(async () => {
     setBusy('automation');
     try {
-      const res = await api.createProAutomation({ ...automationDraft, workdir: runtimeWorkdir });
+      const res = await api.createProAutomation({
+        name: automationDraft.name,
+        schedule: automationDraft.schedule,
+        prompt: automationDraft.prompt,
+        workdir: runtimeWorkdir,
+        agent: automationDraft.agent || null,
+        assistantId: automationDraft.assistantId || null,
+      });
       if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to create automation');
       setAutomations(prev => [res.automation!, ...prev]);
-      setAutomationDraft({ name: '', schedule: 'manual', prompt: '' });
+      setAutomationDraft({ name: '', schedule: 'manual', prompt: '', agent: '', assistantId: '' });
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to create automation', false);
     } finally {
@@ -115,14 +122,35 @@ export function ProAgentWorkflowSection() {
         </div>
 
         <div className="space-y-3 rounded-lg border border-edge bg-panel p-3">
-          <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Automation</div>
-          <div className="grid gap-2 lg:grid-cols-[150px_120px_1fr_auto]">
-            <Input value={automationDraft.name} onChange={event => setAutomationDraft(prev => ({ ...prev, name: event.target.value }))} placeholder="Name" />
+          <div>
+            <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Scheduled jobs</div>
+            <div className="mt-1 text-[12px] text-fg-4">Jobs are assistant-owned automation: describe the work, pick schedule, agent or assistant, then review run history.</div>
+          </div>
+          <div className="grid gap-2 lg:grid-cols-[150px_120px_1fr]">
+            <Input value={automationDraft.name} onChange={event => setAutomationDraft(prev => ({ ...prev, name: event.target.value }))} placeholder="Job name" />
             <Input value={automationDraft.schedule} onChange={event => setAutomationDraft(prev => ({ ...prev, schedule: event.target.value }))} placeholder="Schedule" />
-            <Input value={automationDraft.prompt} onChange={event => setAutomationDraft(prev => ({ ...prev, prompt: event.target.value }))} placeholder="Agent action prompt" />
+            <Input value={automationDraft.prompt} onChange={event => setAutomationDraft(prev => ({ ...prev, prompt: event.target.value }))} placeholder="What should the agent do?" />
+          </div>
+          <div className="grid gap-2 lg:grid-cols-[1fr_1fr_auto]">
+            <select
+              value={automationDraft.agent}
+              onChange={event => setAutomationDraft(prev => ({ ...prev, agent: event.target.value }))}
+              className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+            >
+              <option value="">Runtime default agent</option>
+              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
+            </select>
+            <select
+              value={automationDraft.assistantId}
+              onChange={event => setAutomationDraft(prev => ({ ...prev, assistantId: event.target.value }))}
+              className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+            >
+              <option value="">No assistant binding</option>
+              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+            </select>
             <Button variant="primary" disabled={!automationDraft.name || !automationDraft.prompt || busy === 'automation'} onClick={() => void createAutomation()}>
               {busy === 'automation' ? <Spinner /> : null}
-              Create
+              Create job
             </Button>
           </div>
           {!automations.length ? <Empty label="No automation rules yet." /> : (
@@ -134,6 +162,21 @@ export function ProAgentWorkflowSection() {
                       <div className="font-semibold text-fg">{item.name}</div>
                       <div className="mt-1 text-xs text-fg-5">{item.schedule} · last run {fmt(item.lastRunAt)}</div>
                       <div className="mt-2 text-sm text-fg-4">{item.prompt}</div>
+                      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-fg-5">
+                        {item.agent && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">agent: {item.agent}</span>}
+                        {item.assistantId && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">assistant: {assistants.find(a => a.id === item.assistantId)?.name || item.assistantId}</span>}
+                      </div>
+                      {!!item.runHistory?.length && (
+                        <div className="mt-2 rounded-md border border-edge bg-inset px-2 py-1.5">
+                          <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Runs</div>
+                          {item.runHistory.slice(0, 5).map(run => (
+                            <div key={run.id} className="flex items-center justify-between gap-2 text-[11px] text-fg-4">
+                              <span>{fmt(run.ranAt)}</span>
+                              <span className="font-mono">{run.sessionKey || run.status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => void runAutomation(item)}>
                       {busy === item.id ? <Spinner /> : null}

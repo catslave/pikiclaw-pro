@@ -673,7 +673,7 @@ export const api = {
   getProAutomations: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; automations: AutomationRule[]; error?: string }>('/api/pro/automations', opts),
   createProAutomation: (
-    body: { name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; enabled?: boolean },
+    body: { name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; assistantId?: string | null; enabled?: boolean },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; automation?: AutomationRule; error?: string }>('/api/pro/automations', body, opts),
@@ -715,6 +715,8 @@ export const api = {
       kind?: ProTaskKind;
       status?: ProTaskStatus;
       workdir?: string;
+      defaultAgent?: string | null;
+      defaultAssistantId?: string | null;
       jiraKey?: string;
       jiraUrl?: string;
       sprint?: string;
@@ -763,7 +765,7 @@ export const api = {
   startProTaskStage: (
     taskId: string,
     stage: ProTaskStage,
-    options: { prompt?: string; agent?: string | null; model?: string | null; effort?: string | null; workdir?: string | null } = {},
+    options: { prompt?: string; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null } = {},
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; task?: ProTask; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
@@ -772,6 +774,7 @@ export const api = {
         stage,
         ...(options.prompt ? { prompt: options.prompt } : {}),
         ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.assistantId ? { assistantId: options.assistantId } : {}),
         ...(options.model ? { model: options.model } : {}),
         ...(options.effort ? { effort: options.effort } : {}),
         ...(options.workdir ? { workdir: options.workdir } : {}),

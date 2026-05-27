@@ -970,6 +970,8 @@ export interface ProTask {
   kind: ProTaskKind;
   status: ProTaskStatus;
   workdir?: string;
+  defaultAgent?: string;
+  defaultAssistantId?: string;
   jiraKey?: string;
   jiraUrl?: string;
   sprint?: string;
@@ -1025,11 +1027,18 @@ export interface AutomationRule {
   prompt: string;
   workdir?: string;
   agent?: string;
+  assistantId?: string;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string;
   lastSessionKey?: string;
+  runHistory?: Array<{
+    id: string;
+    ranAt: string;
+    sessionKey?: string;
+    status: 'queued' | 'failed';
+  }>;
 }
 
 export interface KnowledgeEntry {

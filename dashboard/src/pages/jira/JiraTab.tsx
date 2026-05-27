@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
-import { Badge, Button, Input, Spinner } from '../../components/ui';
+import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { ProTask, ProTaskStage, ProTaskStatus, StageRun, VerificationResult, VerificationRun } from '../../types';
+import type { AgentAssistant, ProTask, ProTaskStage, ProTaskStatus, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const STAGES: ProTaskStage[] = ['focus', 'refinement', 'coding', 'verification', 'demo', 'bugfix'];
+type JiraColumnKey = 'backlog' | 'running' | 'incomplete' | 'review' | 'done';
+
+const JIRA_COLUMNS: Array<{ key: JiraColumnKey; label: string; hint: string }> = [
+  { key: 'backlog', label: 'Backlog', hint: 'Synced or planned' },
+  { key: 'running', label: 'Running', hint: 'Refinement or coding' },
+  { key: 'incomplete', label: 'Incomplete', hint: 'Failed or blocked' },
+  { key: 'review', label: 'To review', hint: 'Resolved, needs validation' },
+  { key: 'done', label: 'Done', hint: 'Closed work' },
+];
 
 const STATUS_LABEL: Record<ProTaskStatus, string> = {
   backlog: 'Backlog',
@@ -125,6 +134,97 @@ function TaskCard({
         ))}
       </div>
     </button>
+  );
+}
+
+function jiraColumnForTask(task: ProTask): JiraColumnKey {
+  if (task.status === 'done') return 'done';
+  const latest = task.stageRuns[0];
+  if (latest?.status === 'failed' || latest?.status === 'cancelled') return 'incomplete';
+  if (task.status === 'resolved') return 'review';
+  if (task.status === 'refinement' || task.status === 'coding') return 'running';
+  return 'backlog';
+}
+
+function CreateJiraTaskModal({
+  open,
+  creating,
+  workspaces,
+  assistants,
+  defaultWorkdir,
+  defaultAgent,
+  onClose,
+  onCreate,
+}: {
+  open: boolean;
+  creating: boolean;
+  workspaces: WorkspaceEntry[];
+  assistants: AgentAssistant[];
+  defaultWorkdir: string;
+  defaultAgent: string;
+  onClose: () => void;
+  onCreate: (draft: { title: string; description: string; workdir: string; defaultAgent: string; defaultAssistantId: string }) => void;
+}) {
+  const [draft, setDraft] = useState({
+    title: '',
+    description: '',
+    workdir: defaultWorkdir,
+    defaultAgent,
+    defaultAssistantId: assistants.find(item => item.id === 'assistant_refinement')?.id || '',
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    setDraft(prev => ({
+      ...prev,
+      workdir: prev.workdir || defaultWorkdir,
+      defaultAgent: prev.defaultAgent || defaultAgent,
+      defaultAssistantId: prev.defaultAssistantId || assistants.find(item => item.id === 'assistant_refinement')?.id || '',
+    }));
+  }, [assistants, defaultAgent, defaultWorkdir, open]);
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title="Create Jira task" onClose={onClose} />
+      <div className="space-y-3">
+        <Input value={draft.title} onChange={event => setDraft(prev => ({ ...prev, title: event.target.value }))} placeholder="Title" />
+        <textarea
+          autoFocus
+          value={draft.description}
+          onChange={event => setDraft(prev => ({ ...prev, description: event.target.value }))}
+          placeholder="Description"
+          className="min-h-28 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+        />
+        <div className="grid gap-2 md:grid-cols-3">
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Workspace</div>
+            <select value={draft.workdir} onChange={event => setDraft(prev => ({ ...prev, workdir: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              {workspaces.map(ws => <option key={ws.path} value={ws.path}>{ws.name || ws.path.split('/').pop() || ws.path}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agent</div>
+            <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</div>
+            <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              <option value="">Runtime default</option>
+              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={creating}>Cancel</Button>
+        <Button variant="primary" disabled={!draft.title.trim() || creating} onClick={() => onCreate(draft)}>
+          {creating ? <Spinner /> : null}
+          Create
+        </Button>
+      </div>
+    </Modal>
   );
 }
 
@@ -341,12 +441,15 @@ export function JiraTab() {
   const t = useMemo(() => createT(locale), [locale]);
 
   const [tasks, setTasks] = useState<ProTask[]>([]);
+  const [assistants, setAssistants] = useState<AgentAssistant[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
-  const [draft, setDraft] = useState({ title: '', jiraKey: '', sprint: '', description: '' });
+  const [draft, setDraft] = useState({ sprint: '' });
   const [syncDraft, setSyncDraft] = useState('');
   const [remoteSync, setRemoteSync] = useState({ baseUrl: '', email: '', token: '', jql: 'assignee = currentUser() ORDER BY updated DESC' });
   const [selectedSprint, setSelectedSprint] = useState<string>('all');
@@ -363,9 +466,9 @@ export function JiraTab() {
   }, [selectedSprint, tasks]);
   const selectedTask = visibleTasks.find(task => task.id === selectedId) || visibleTasks[0] || null;
   const byStatus = useMemo(() => {
-    const grouped = new Map<ProTaskStatus, ProTask[]>();
-    for (const status of STATUSES) grouped.set(status, []);
-    for (const task of visibleTasks) grouped.get(task.status)?.push(task);
+    const grouped = new Map<JiraColumnKey, ProTask[]>();
+    for (const column of JIRA_COLUMNS) grouped.set(column.key, []);
+    for (const task of visibleTasks) grouped.get(jiraColumnForTask(task))?.push(task);
     return grouped;
   }, [visibleTasks]);
 
@@ -376,9 +479,15 @@ export function JiraTab() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await api.getProTasks();
+      const [result, assistantsResult, workspacesResult] = await Promise.all([
+        api.getProTasks(),
+        api.getProAssistants(),
+        api.getWorkspaces(),
+      ]);
       if (!result.ok) throw new Error(result.error || 'Failed to load Jira tasks');
       setTasks(result.tasks);
+      if (assistantsResult.ok) setAssistants(assistantsResult.assistants || []);
+      if (workspacesResult.ok) setWorkspaces(workspacesResult.workspaces || []);
       setSelectedId(current => current || result.tasks[0]?.id || null);
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to load Jira tasks', false);
@@ -398,22 +507,23 @@ export function JiraTab() {
     setSelectedId(task.id);
   }, []);
 
-  const createTask = useCallback(async () => {
-    const title = draft.title.trim();
+  const createTask = useCallback(async (taskDraft: { title: string; description: string; workdir: string; defaultAgent: string; defaultAssistantId: string }) => {
+    const title = taskDraft.title.trim();
     if (!title) return;
     setCreating(true);
     try {
       const result = await api.createProTask({
         title,
-        description: draft.description,
-        jiraKey: draft.jiraKey,
+        description: taskDraft.description,
         sprint: draft.sprint,
         kind: 'jira-ticket',
-        workdir: state?.runtimeWorkdir,
+        workdir: taskDraft.workdir || state?.runtimeWorkdir,
+        defaultAgent: taskDraft.defaultAgent || null,
+        defaultAssistantId: taskDraft.defaultAssistantId || null,
       });
       if (!result.ok || !result.task) throw new Error(result.error || 'Failed to create task');
       upsertTask(result.task);
-      setDraft({ title: '', jiraKey: '', sprint: '', description: '' });
+      setCreateOpen(false);
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to create task', false);
     } finally {
@@ -546,36 +656,6 @@ export function JiraTab() {
   return (
     <div className="space-y-4">
       <div className="rounded-md border border-edge bg-panel px-4 py-3">
-        <div className="grid gap-2 lg:grid-cols-[1fr_150px_120px_auto]">
-          <Input
-            value={draft.title}
-            onChange={event => setDraft(prev => ({ ...prev, title: event.target.value }))}
-            placeholder="Task title"
-          />
-          <Input
-            value={draft.jiraKey}
-            onChange={event => setDraft(prev => ({ ...prev, jiraKey: event.target.value }))}
-            placeholder="Jira key"
-          />
-          <Input
-            value={draft.sprint}
-            onChange={event => setDraft(prev => ({ ...prev, sprint: event.target.value }))}
-            placeholder="Sprint"
-          />
-          <Button variant="primary" disabled={!draft.title.trim() || creating} onClick={createTask}>
-            {creating ? <Spinner /> : null}
-            Create
-          </Button>
-        </div>
-        <textarea
-          value={draft.description}
-          onChange={event => setDraft(prev => ({ ...prev, description: event.target.value }))}
-          placeholder="Description"
-          className="mt-2 min-h-20 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
-        />
-      </div>
-
-      <div className="rounded-md border border-edge bg-panel px-4 py-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Jira Sync MVP</div>
@@ -621,6 +701,11 @@ export function JiraTab() {
             </Button>
           ))}
           {sprintOptions.length === 0 && <span className="text-[12px] text-fg-5">No sprint labels yet.</span>}
+          <div className="min-w-0 flex-1" />
+          <Input value={draft.sprint} onChange={event => setDraft({ sprint: event.target.value })} placeholder="Default sprint" className="max-w-[150px]" />
+          <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
+            Create task
+          </Button>
         </div>
       </div>
 
@@ -629,14 +714,17 @@ export function JiraTab() {
       ) : (
         <div className="grid min-h-[560px] gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
           <div className="grid gap-3 lg:grid-cols-5">
-            {STATUSES.map(status => (
-              <section key={status} className="min-w-0 rounded-md border border-edge bg-panel-alt p-2">
+            {JIRA_COLUMNS.map(column => (
+              <section key={column.key} className="min-w-0 rounded-md border border-edge bg-panel-alt p-2">
                 <div className="mb-2 flex items-center justify-between px-1">
-                  <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">{STATUS_LABEL[status]}</div>
-                  <Badge variant="muted">{byStatus.get(status)?.length || 0}</Badge>
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">{column.label}</div>
+                    <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
+                  </div>
+                  <Badge variant="muted">{byStatus.get(column.key)?.length || 0}</Badge>
                 </div>
                 <div className="space-y-2">
-                  {(byStatus.get(status) || []).map(task => (
+                  {(byStatus.get(column.key) || []).map(task => (
                     <TaskCard
                       key={task.id}
                       task={task}
@@ -647,7 +735,7 @@ export function JiraTab() {
                       onStartStage={startStage}
                     />
                   ))}
-                  {(byStatus.get(status) || []).length === 0 && (
+                  {(byStatus.get(column.key) || []).length === 0 && (
                     <div className="rounded-md border border-dashed border-edge px-3 py-6 text-center text-[12px] text-fg-5">No tasks</div>
                   )}
                 </div>
@@ -665,6 +753,16 @@ export function JiraTab() {
           />
         </div>
       )}
+      <CreateJiraTaskModal
+        open={createOpen}
+        creating={creating}
+        workspaces={workspaces.length ? workspaces : [{ path: state?.runtimeWorkdir || '', name: state?.runtimeWorkdir || 'Workspace' }]}
+        assistants={assistants}
+        defaultWorkdir={state?.runtimeWorkdir || workspaces[0]?.path || ''}
+        defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
+        onClose={() => setCreateOpen(false)}
+        onCreate={createTask}
+      />
     </div>
   );
 }

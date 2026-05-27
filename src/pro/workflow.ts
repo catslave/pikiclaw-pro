@@ -24,6 +24,13 @@ export interface AutomationRule {
   updatedAt: string;
   lastRunAt?: string;
   lastSessionKey?: string;
+  assistantId?: string;
+  runHistory?: Array<{
+    id: string;
+    ranAt: string;
+    sessionKey?: string;
+    status: 'queued' | 'failed';
+  }>;
 }
 
 export interface KnowledgeEntry {
@@ -152,7 +159,7 @@ export function listAutomationRules(): AutomationRule[] {
   return readFile().automations.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
-export function createAutomationRule(input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; enabled?: unknown }): AutomationRule {
+export function createAutomationRule(input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
   const name = normalizeText(input.name, 160);
   const prompt = normalizeText(input.prompt, 24_000);
   if (!name) throw new Error('name is required');
@@ -165,6 +172,7 @@ export function createAutomationRule(input: { name: unknown; schedule?: unknown;
     prompt,
     workdir: normalizeText(input.workdir, 2048) || undefined,
     agent: normalizeText(input.agent, 80) || undefined,
+    assistantId: normalizeText(input.assistantId, 120) || undefined,
     enabled: input.enabled !== false,
     createdAt: now,
     updatedAt: now,
@@ -182,6 +190,11 @@ export function markAutomationRun(id: string, sessionKey: string | undefined): A
   const now = new Date().toISOString();
   rule.lastRunAt = now;
   rule.lastSessionKey = sessionKey;
+  const status: 'queued' | 'failed' = sessionKey ? 'queued' : 'failed';
+  rule.runHistory = [
+    { id: newId('run'), ranAt: now, sessionKey, status },
+    ...(rule.runHistory || []),
+  ].slice(0, 20);
   rule.updatedAt = now;
   writeFile(file);
   return rule;
