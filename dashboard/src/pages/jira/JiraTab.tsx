@@ -535,7 +535,6 @@ export function JiraTab() {
       ? tasks
       : tasks.filter(task => task.sprint === selectedSprint);
   }, [selectedSprint, tasks]);
-  const selectedTask = visibleTasks.find(task => task.id === selectedId) || visibleTasks[0] || null;
   const byStatus = useMemo(() => {
     const grouped = new Map<JiraColumnKey, ProTask[]>();
     for (const column of JIRA_COLUMNS) grouped.set(column.key, []);
@@ -708,31 +707,28 @@ export function JiraTab() {
   }, [toast, upsertTask, verifyDraft.notes]);
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-md border border-edge bg-panel px-4 py-3">
+    <div className="flex h-full min-h-[640px] flex-col rounded-xl border border-edge bg-panel" style={{ boxShadow: 'var(--th-card-shadow)' }}>
+      <div className="shrink-0 border-b border-edge/40 px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="mr-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Sprint View</div>
-          <Button
-            size="sm"
-            variant={selectedSprint === 'all' ? 'secondary' : 'ghost'}
-            onClick={() => setSelectedSprint('all')}
+          <div className="min-w-0 flex-1">
+            <div className="text-[14px] font-semibold text-fg">Jira Dashboard</div>
+            <div className="mt-0.5 text-[11px] text-fg-5">Track Jira-backed tasks with the same lightweight board layout as Workspace.</div>
+          </div>
+          <select
+            value={selectedSprint}
+            onChange={event => setSelectedSprint(event.target.value || 'all')}
+            className="h-8 min-w-[150px] rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
           >
-            All
-          </Button>
-          {sprintOptions.map(sprint => (
-            <Button
-              key={sprint}
-              size="sm"
-              variant={selectedSprint === sprint ? 'secondary' : 'ghost'}
-              onClick={() => setSelectedSprint(sprint)}
-            >
-              {sprint}
-            </Button>
-          ))}
-          {sprintOptions.length === 0 && <span className="text-[12px] text-fg-5">No sprint labels yet.</span>}
-          <div className="min-w-0 flex-1" />
-          <Input value={draft.sprint} onChange={event => setDraft({ sprint: event.target.value })} placeholder="Default sprint" className="max-w-[150px]" />
+            <option value="all">All sprints</option>
+            {sprintOptions.map(sprint => (
+              <option key={sprint} value={sprint}>{sprint}</option>
+            ))}
+          </select>
+          <Input value={draft.sprint} onChange={event => setDraft({ sprint: event.target.value })} placeholder="Default sprint" className="max-w-[140px]" />
           <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
             Create task
           </Button>
         </div>
@@ -741,49 +737,41 @@ export function JiraTab() {
       {loading ? (
         <div className="flex h-48 items-center justify-center text-sm text-fg-4"><Spinner /> {t('sessions.loading')}</div>
       ) : (
-        <div className="grid min-h-[560px] gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
-          <div className="grid gap-3 lg:grid-cols-5">
+        <div className="min-h-0 flex-1 overflow-hidden p-3">
+          <div className="grid h-full min-h-0 grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-5">
             {JIRA_COLUMNS.map(column => (
-              <section key={column.key} className="min-w-0 rounded-md border border-edge bg-panel-alt p-2">
-                <div className="mb-2 flex items-center justify-between px-1">
-                  <div className="min-w-0">
-                    <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">{column.label}</div>
-                    <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
+              <section key={column.key} className="min-h-0 rounded-lg border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden">
+                <div className="shrink-0 border-b border-edge/30 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="muted" className="h-5 px-2 text-[10px]">{byStatus.get(column.key)?.length || 0}</Badge>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] font-semibold text-fg-2">{column.label}</div>
+                      <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
+                    </div>
                   </div>
-                  <Badge variant="muted">{byStatus.get(column.key)?.length || 0}</Badge>
                 </div>
-                <div className="space-y-2">
-                  {(byStatus.get(column.key) || []).map(task => (
-                    <TaskCard
-                      key={task.id}
-                      task={task}
-                      selected={selectedTask?.id === task.id}
-                      busyStage={busy?.taskId === task.id ? busy.stage : null}
-                      onSelect={(next) => setSelectedId(next.id)}
-                      onStatus={updateStatus}
-                      onStartStage={startStage}
-                    />
-                  ))}
-                  {(byStatus.get(column.key) || []).length === 0 && (
-                    <div className="rounded-md border border-dashed border-edge px-3 py-6 text-center text-[12px] text-fg-5">No tasks</div>
+                <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                  {(byStatus.get(column.key) || []).length === 0 ? (
+                    <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-edge/40 text-[11px] text-fg-5/60">No tasks</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {(byStatus.get(column.key) || []).map(task => (
+                        <TaskCard
+                          key={task.id}
+                          task={task}
+                          selected={false}
+                          busyStage={busy?.taskId === task.id ? busy.stage : null}
+                          onSelect={(next) => setSelectedId(next.id)}
+                          onStatus={updateStatus}
+                          onStartStage={startStage}
+                        />
+                      ))}
+                    </div>
                   )}
                 </div>
               </section>
             ))}
           </div>
-          <TaskDetail
-            task={selectedTask}
-            verifyDraft={verifyDraft}
-            onVerifyDraft={(patch) => setVerifyDraft(prev => ({ ...prev, ...patch }))}
-            subtaskDraft={subtaskDraft}
-            onSubtaskDraft={(patch) => setSubtaskDraft(prev => ({ ...prev, ...patch }))}
-            onCreateSubtask={createSubtask}
-            onUpdateSubtaskStatus={updateSubtaskStatus}
-            onStartVerification={startVerification}
-            onFinishVerification={finishVerification}
-            onCompleteStage={completeStage}
-            onExclusiveMode={toggleExclusiveMode}
-          />
         </div>
       )}
       <CreateJiraTaskModal
