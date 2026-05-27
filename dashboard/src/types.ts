@@ -863,8 +863,10 @@ export type ProTaskKind = 'manual' | 'todo' | 'jira-ticket' | 'jira-bug' | 'jira
 export type ProTaskStatus = 'backlog' | 'refinement' | 'coding' | 'resolved' | 'done';
 export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 'demo' | 'bugfix' | 'knowledge';
 export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
+export type VerificationResult = 'passed' | 'failed' | 'blocked' | 'not-run';
 
 export interface TaskEstimate {
+  estimatePoint?: number;
   codingMinutes?: number;
   userUnderstandingMinutes?: number;
   reviewMinutes?: number;
@@ -880,6 +882,52 @@ export interface StageSessionRef {
   sessionId: string;
 }
 
+export interface MindMapNode {
+  id: string;
+  label: string;
+  kind: 'goal' | 'scope' | 'constraint' | 'risk' | 'acceptance' | 'plan' | 'question';
+  parentId?: string;
+  status?: 'open' | 'confirmed' | 'risk' | 'done';
+}
+
+export interface FocusQuestion {
+  id: string;
+  topic: 'goal' | 'boundary' | 'acceptance' | 'risk' | 'dependency' | 'estimate';
+  question: string;
+  answer?: string;
+  status: 'open' | 'answered' | 'skipped';
+}
+
+export interface FocusSessionState {
+  mindMap: MindMapNode[];
+  questions: FocusQuestion[];
+  confirmed?: boolean;
+}
+
+export interface VerificationRun {
+  id: string;
+  taskId: string;
+  stageRunId?: string;
+  environment: string;
+  pipeline?: {
+    provider?: 'gitlab' | 'github' | 'jenkins' | 'manual';
+    pipelineId?: string;
+    url?: string;
+    status?: 'unknown' | 'running' | 'success' | 'failed';
+    commit?: string;
+    branch?: string;
+  };
+  browserSession?: {
+    url: string;
+    profile: 'pikiclaw-managed';
+    loginStatus?: 'auto-login-ok' | 'manual-required' | 'failed';
+  };
+  result?: VerificationResult;
+  notes?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
 export interface StageRun {
   id: string;
   taskId: string;
@@ -892,10 +940,14 @@ export interface StageRun {
   prompt: string;
   startedAt?: string;
   completedAt?: string;
+  focus?: FocusSessionState;
+  verificationRunId?: string;
   output?: {
     summary?: string;
     estimate?: TaskEstimate;
     branch?: string;
+    diffSummary?: string;
+    changedFiles?: string[];
     testResultId?: string;
     knowledgeRefs?: string[];
   };
@@ -924,5 +976,7 @@ export interface ProTask {
   createdAt: string;
   updatedAt: string;
   stageRuns: StageRun[];
+  verificationRuns: VerificationRun[];
+  exclusiveMode?: boolean;
   events: ProTaskEvent[];
 }

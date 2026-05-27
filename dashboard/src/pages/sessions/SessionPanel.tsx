@@ -421,6 +421,12 @@ export const SessionPanel = memo(function SessionPanel({
       if (scrollToBottom) scrollToBottomRef.current = true;
       setHistory(current => {
         if (!current || !keepOlder) return next;
+        const hasPendingLocalTurn = !!(pendingPrompt || pendingImageUrlsRef.current.length || localStreamPendingRef.current);
+        if (hasPendingLocalTurn && current.turns.length > 0) {
+          const staleOrShrunkWindow = next.totalTurns < current.totalTurns
+            || (next.endTurn <= current.endTurn && next.turns.length < current.turns.length);
+          if (staleOrShrunkWindow) return current;
+        }
         return mergeLatestHistory(current, next);
       });
       // Clear pending + liveStream in the same synchronous block as setHistory so

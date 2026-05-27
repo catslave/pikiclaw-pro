@@ -1106,6 +1106,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const workspaceSettingsItems = useMemo(() => [
     { to: '/', label: t('tab.sessions') },
     { to: '/dashboard', label: t('tab.dashboard') },
+    { to: '/jira', label: t('tab.jira') },
     { to: '/usage', label: t('tab.usage') },
     { to: '/im', label: t('tab.im') },
     { to: '/agents', label: t('tab.agent') },

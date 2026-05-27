@@ -1,4 +1,4 @@
-import { useState, memo, useRef, type ReactNode } from 'react';
+import { useState, memo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
@@ -293,6 +293,14 @@ function AssistantMessageFrame({
     });
   };
 
+  const handleSelectionStart = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!selectionDraft) return;
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest('.session-md')) return;
+    window.getSelection()?.removeAllRanges();
+    setSelectionDraft(null);
+  };
+
   const submitSelectionSideChat = async () => {
     if (!selectionDraft || !onCreateSideChatFromSelection || selectionDraft.creating) return;
     const question = selectionDraft.question.trim();
@@ -313,6 +321,7 @@ function AssistantMessageFrame({
       className="mb-6 group/assistant"
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
+      onMouseDown={handleSelectionStart}
       onMouseUp={handleSelectionEnd}
       onKeyUp={handleSelectionEnd}
     >

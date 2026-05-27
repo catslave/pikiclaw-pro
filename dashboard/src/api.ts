@@ -24,6 +24,7 @@ import type {
   ProTaskKind,
   ProTaskStage,
   ProTaskStatus,
+  VerificationResult,
   SkillCatalogItem,
   RemoteSkillInfo,
   SessionHubResult,
@@ -640,6 +641,24 @@ export const api = {
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; task?: ProTask; error?: string }>('/api/pro/tasks', task, opts),
+  syncJiraTasks: (
+    issues: Array<{
+      title: string;
+      description?: string;
+      issueType?: string;
+      jiraKey?: string;
+      jiraUrl?: string;
+      sprint?: string;
+      workdir?: string;
+    }>,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; tasks?: ProTask[]; error?: string }>('/api/pro/jira/sync', { issues }, opts),
+  syncJiraFromRemote: (
+    config: { baseUrl: string; token: string; email?: string; jql?: string; sprint?: string; workdir?: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; tasks?: ProTask[]; error?: string }>('/api/pro/jira/sync', config, { timeoutMs: 60_000, ...opts }),
   updateProTaskStatus: (taskId: string, status: ProTaskStatus, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
       `/api/pro/tasks/${encodeURIComponent(taskId)}/status`,
@@ -647,6 +666,16 @@ export const api = {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
+        ...opts,
+      },
+    ),
+  setProTaskExclusiveMode: (taskId: string, enabled: boolean, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/exclusive-mode`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
         ...opts,
       },
     ),
@@ -667,6 +696,57 @@ export const api = {
         ...(options.workdir ? { workdir: options.workdir } : {}),
       },
       { timeoutMs: 30_000, ...opts },
+    ),
+  updateProTaskStageRun: (
+    taskId: string,
+    stageRunId: string,
+    patch: {
+      status?: string;
+      summary?: string;
+      estimate?: unknown;
+      branch?: string;
+      diffSummary?: string;
+      changedFiles?: string[];
+      testResultId?: string;
+      focus?: unknown;
+      knowledgeRefs?: string[];
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/stage-runs/${encodeURIComponent(stageRunId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+        ...opts,
+      },
+    ),
+  startVerificationRun: (
+    taskId: string,
+    body: { environment: string; url: string; stageRunId?: string; pipeline?: unknown },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; task?: ProTask; verificationRun?: unknown; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/verification-runs`,
+      body,
+      opts,
+    ),
+  finishVerificationRun: (
+    taskId: string,
+    verificationRunId: string,
+    result: VerificationResult,
+    notes?: string,
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/verification-runs/${encodeURIComponent(verificationRunId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ result, notes }),
+        ...opts,
+      },
     ),
 
   // Human-in-the-loop interaction (im_ask_user / Codex requestUserInput)

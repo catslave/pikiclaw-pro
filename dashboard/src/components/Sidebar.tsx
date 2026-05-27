@@ -41,6 +41,7 @@ function PikiclawLogo() {
 const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
   dashboard: '/dashboard',
+  jira: '/jira',
   usage: '/usage',
   im: '/im',
   agents: '/agents',
@@ -70,6 +71,7 @@ export function Sidebar({
   const navItems = useMemo(() => [
     { key: 'sessions', to: TAB_ROUTES.sessions, label: t('tab.sessions'), exact: true, primary: true },
     { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('tab.dashboard'), primary: true },
+    { key: 'jira', to: TAB_ROUTES.jira, label: t('tab.jira'), primary: true },
     { key: 'usage', to: TAB_ROUTES.usage, label: t('tab.usage'), primary: true },
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im') },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('tab.agent') },
