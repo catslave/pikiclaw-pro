@@ -155,6 +155,29 @@ export function createAgentAssistant(input: { name: unknown; responsibility?: un
   return assistant;
 }
 
+export function updateAgentAssistant(id: string, input: { name?: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {
+  const assistantId = normalizeText(id, 160);
+  if (!assistantId) throw new Error('assistant id is required');
+  const file = readFile();
+  let assistant = file.assistants.find(item => item.id === assistantId);
+  if (!assistant) {
+    const builtin = DEFAULT_ASSISTANTS.find(item => item.id === assistantId);
+    if (!builtin) throw new Error('assistant not found');
+    assistant = { ...builtin };
+    file.assistants.unshift(assistant);
+  }
+  const name = normalizeText(input.name, 120);
+  if (name) assistant.name = name;
+  const responsibility = normalizeText(input.responsibility);
+  if (responsibility) assistant.responsibility = responsibility;
+  if (Array.isArray(input.preferredAgents)) {
+    assistant.preferredAgents = input.preferredAgents.map(agent => normalizeText(agent, 60)).filter(Boolean).slice(0, 8);
+  }
+  assistant.updatedAt = new Date().toISOString();
+  writeFile(file);
+  return assistant;
+}
+
 export function listAutomationRules(): AutomationRule[] {
   return readFile().automations.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }

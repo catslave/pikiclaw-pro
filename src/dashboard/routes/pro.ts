@@ -35,6 +35,7 @@ import {
   listAutomationRules,
   listKnowledgeEntries,
   markAutomationRun,
+  updateAgentAssistant,
 } from '../../pro/workflow.js';
 
 const app = new Hono();
@@ -149,6 +150,21 @@ app.post('/api/pro/assistants', async (c) => {
     return c.json({ ok: true, assistant });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/assistants/:assistantId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const assistant = updateAgentAssistant(c.req.param('assistantId'), {
+      name: body?.name,
+      responsibility: body?.responsibility,
+      preferredAgents: body?.preferredAgents,
+    });
+    return c.json({ ok: true, assistant });
+  } catch (e: any) {
+    const status = e?.message === 'assistant not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
   }
 });
 

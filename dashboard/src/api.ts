@@ -671,6 +671,20 @@ export const api = {
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; assistant?: AgentAssistant; error?: string }>('/api/pro/assistants', body, opts),
+  updateProAssistant: (
+    assistantId: string,
+    body: { name?: string; responsibility?: string; preferredAgents?: string[] },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; assistant?: AgentAssistant; error?: string }>(
+      `/api/pro/assistants/${encodeURIComponent(assistantId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        ...opts,
+      },
+    ),
   getProAutomations: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; automations: AutomationRule[]; error?: string }>('/api/pro/automations', opts),
   createProAutomation: (
