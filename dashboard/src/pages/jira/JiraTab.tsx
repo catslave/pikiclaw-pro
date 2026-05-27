@@ -66,24 +66,36 @@ function stageTone(stage: ProTaskStage): 'ok' | 'warn' | 'muted' | 'accent' {
   return 'muted';
 }
 
+function taskCardColor(status: ProTaskStatus): string {
+  if (status === 'refinement') return 'border-l-cyan-400 bg-cyan-400/[0.055] hover:bg-cyan-400/[0.09]';
+  if (status === 'coding') return 'border-l-amber-400 bg-amber-400/[0.065] hover:bg-amber-400/[0.10]';
+  if (status === 'resolved') return 'border-l-sky-400 bg-sky-400/[0.055] hover:bg-sky-400/[0.09]';
+  if (status === 'done') return 'border-l-emerald-400 bg-emerald-400/[0.055] hover:bg-emerald-400/[0.09]';
+  return 'border-l-slate-400 bg-panel hover:bg-panel-h';
+}
+
 function TaskCard({
   task,
   selected,
   busyStage,
   draggable,
+  isDragging,
   onSelect,
   onStatus,
   onStartStage,
   onDragStart,
+  onDragEnd,
 }: {
   task: ProTask;
   selected: boolean;
   busyStage: ProTaskStage | null;
   draggable?: boolean;
+  isDragging?: boolean;
   onSelect: (task: ProTask) => void;
   onStatus?: (task: ProTask, status: ProTaskStatus) => void;
   onStartStage?: (task: ProTask, stage: ProTaskStage) => void;
   onDragStart?: (task: ProTask, event: ReactDragEvent<HTMLButtonElement>) => void;
+  onDragEnd?: () => void;
 }) {
   const latestRun = task.stageRuns[0];
   const progress = subtaskProgress(task);
@@ -97,8 +109,12 @@ function TaskCard({
         event.dataTransfer.setData('text/plain', task.id);
         onDragStart?.(task, event);
       }}
+      onDragEnd={onDragEnd}
       className={cn(
-        'w-full rounded-md border bg-panel px-3 py-2.5 text-left shadow-sm transition hover:border-edge-h hover:bg-panel-h',
+        'w-full rounded-md border border-l-4 px-3 py-2.5 text-left shadow-sm transition duration-150',
+        draggable && 'cursor-grab active:cursor-grabbing',
+        taskCardColor(task.status),
+        isDragging && 'scale-[0.98] opacity-35 shadow-none',
         selected ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]' : 'border-edge',
       )}
     >
@@ -649,6 +665,7 @@ export function JiraTab() {
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<JiraColumnKey | null>(null);
   const [jiraConfig, setJiraConfig] = useState<JiraWorkflowConfig>(DEFAULT_JIRA_ASSISTANT_CONFIG);
   const [selectedSprint, setSelectedSprint] = useState<string>('all');
@@ -670,6 +687,7 @@ export function JiraTab() {
     return grouped;
   }, [visibleTasks]);
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedId) || null, [selectedId, tasks]);
+  const draggingTask = useMemo(() => tasks.find(task => task.id === draggingTaskId) || null, [draggingTaskId, tasks]);
 
   useEffect(() => {
     if (selectedSprint !== 'all' && !sprintOptions.includes(selectedSprint)) setSelectedSprint('all');
@@ -824,6 +842,7 @@ export function JiraTab() {
 
   const handleDropTask = useCallback(async (taskId: string, column: JiraColumnKey) => {
     setDragOverColumn(null);
+    setDraggingTaskId(null);
     const task = tasks.find(item => item.id === taskId);
     if (!task) return;
     await moveTaskToStatus(task, jiraStatusForColumn(column));
@@ -961,7 +980,7 @@ export function JiraTab() {
                 }}
                 className={cn(
                   'min-h-0 rounded-lg border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden transition',
-                  dragOverColumn === column.key ? 'border-primary/45 bg-[var(--th-selection-bg)]' : '',
+                  dragOverColumn === column.key ? 'border-primary/45 bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]' : '',
                 )}
               >
                 <div className="shrink-0 border-b border-edge/30 px-3 py-2">
@@ -974,8 +993,18 @@ export function JiraTab() {
                   </div>
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                  {dragOverColumn === column.key && draggingTask && jiraColumnForTask(draggingTask) !== column.key && (
+                    <div className="mb-2 flex h-[76px] items-center justify-center rounded-md border border-dashed border-primary/45 bg-primary/[0.055] text-[11px] font-medium text-primary">
+                      Drop to move to {column.label}
+                    </div>
+                  )}
                   {(byStatus.get(column.key) || []).length === 0 ? (
-                    <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-edge/40 text-[11px] text-fg-5/60">No tasks</div>
+                    <div className={cn(
+                      'flex h-24 items-center justify-center rounded-md border border-dashed text-[11px]',
+                      dragOverColumn === column.key
+                        ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
+                        : 'border-edge/40 text-fg-5/60',
+                    )}>No tasks</div>
                   ) : (
                     <div className="space-y-2">
                       {(byStatus.get(column.key) || []).map(task => (
@@ -985,7 +1014,13 @@ export function JiraTab() {
                           selected={false}
                           busyStage={busy?.taskId === task.id ? busy.stage : null}
                           draggable
+                          isDragging={draggingTaskId === task.id}
                           onSelect={openTaskDetail}
+                          onDragStart={(next) => setDraggingTaskId(next.id)}
+                          onDragEnd={() => {
+                            setDraggingTaskId(null);
+                            setDragOverColumn(null);
+                          }}
                         />
                       ))}
                     </div>
