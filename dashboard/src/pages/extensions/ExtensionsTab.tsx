@@ -564,11 +564,18 @@ function JiraSyncDialog({
   const [assistantId, setAssistantId] = useState('');
   const [busy, setBusy] = useState(false);
   const [activeRun, setActiveRun] = useState<JiraSyncRun | null>(null);
+  const [syncRuns, setSyncRuns] = useState<JiraSyncRun[]>([]);
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [assistantRes, automationRes] = await Promise.all([api.getProAssistants(), api.getProAutomations()]);
+    const [assistantRes, automationRes, runsRes] = await Promise.all([
+      api.getProAssistants(),
+      api.getProAutomations(),
+      api.getJiraMcpSyncRuns(),
+    ]);
     const nextAssistants = assistantRes.ok ? assistantRes.assistants || [] : [];
     const nextJobs = automationRes.ok ? automationRes.automations || [] : [];
+    if (runsRes.ok) setSyncRuns(runsRes.runs || []);
     const existing = nextJobs.find(job => job.key === 'jira-mcp-sync');
     setAssistants(nextAssistants);
     setJobs(nextJobs);
@@ -593,10 +600,14 @@ function JiraSyncDialog({
     if (activeRun.status === 'completed' || activeRun.status === 'failed') return;
     const timer = window.setInterval(async () => {
       const res = await api.getJiraMcpSyncRun(activeRun.id).catch(() => null);
-      if (res?.ok && res.run) setActiveRun(res.run);
+      if (res?.ok && res.run) {
+        setActiveRun(res.run);
+        setSyncRuns(prev => [res.run!, ...prev.filter(run => run.id !== res.run!.id)]);
+        if (res.run.status === 'completed' || res.run.status === 'failed') void refresh();
+      }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [activeRun?.id, activeRun?.status, open]);
+  }, [activeRun?.id, activeRun?.status, open, refresh]);
 
   const existingJob = jobs.find(job => job.key === 'jira-mcp-sync');
   const schedule = cadence === 'daily'
@@ -612,7 +623,10 @@ function JiraSyncDialog({
       if (mode === 'once') {
         const res = await api.runJiraMcpSync({ assistantId, workdir: workdir || runtimeWorkdir });
         if (!res.ok) throw new Error(res.error || 'Failed to queue Jira sync');
-        if (res.run) setActiveRun(res.run);
+        if (res.run) {
+          setActiveRun(res.run);
+          setSyncRuns(prev => [res.run!, ...prev.filter(run => run.id !== res.run!.id)]);
+        }
         toast(L(locale, 'Jira 同步已启动', 'Jira sync queued'), true);
         return;
       }
@@ -676,6 +690,56 @@ function JiraSyncDialog({
             {L(locale, '当前自动同步', 'Current auto sync')}: {existingJob.schedule} · {L(locale, '上次运行', 'last run')} {existingJob.lastRunAt ? new Date(existingJob.lastRunAt).toLocaleString() : '--'}
           </div>
         )}
+        <div className="rounded-lg border border-edge bg-panel-alt p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="text-[13px] font-semibold text-fg">{L(locale, '同步历史', 'Sync history')}</div>
+            <Button size="sm" variant="ghost" onClick={() => void refresh()}>{L(locale, '刷新', 'Refresh')}</Button>
+          </div>
+          {syncRuns.length === 0 ? (
+            <div className="rounded border border-dashed border-edge px-3 py-4 text-center text-[12px] text-fg-5">
+              {L(locale, '还没有同步记录', 'No sync history yet')}
+            </div>
+          ) : (
+            <div className="max-h-56 space-y-2 overflow-auto pr-1">
+              {syncRuns.slice(0, 12).map(run => {
+                const expanded = expandedRunId === run.id;
+                return (
+                  <div key={run.id} className="rounded-md border border-edge bg-panel px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedRunId(current => current === run.id ? null : run.id)}
+                      className="flex w-full items-center gap-2 text-left"
+                    >
+                      <Badge variant={run.status === 'completed' ? 'ok' : run.status === 'failed' ? 'err' : 'warn'}>{run.status}</Badge>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12px] font-medium text-fg">
+                          {run.ticketCount ?? '--'} tickets · {run.taskCount ?? '--'} tasks
+                        </div>
+                        <div className="truncate text-[11px] text-fg-5">
+                          {new Date(run.startedAt).toLocaleString()} · {run.assistantName || run.assistantId || '--'} · {run.agent || '--'}
+                        </div>
+                      </div>
+                    </button>
+                    {expanded && (
+                      <div className="mt-2 space-y-1 border-t border-edge pt-2">
+                        {run.events.map(event => (
+                          <div key={event.id} className="rounded bg-panel-alt px-2 py-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[11px] font-medium text-fg-3">{event.label}</span>
+                              <span className="text-[10px] text-fg-5">{new Date(event.at).toLocaleTimeString()}</span>
+                            </div>
+                            {event.detail && <div className="mt-0.5 text-[10px] text-fg-5">{event.detail}</div>}
+                          </div>
+                        ))}
+                        {run.error && <div className="rounded bg-err/10 px-2 py-1 text-[11px] text-err">{run.error}</div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <button className={cn('h-9 rounded-md border text-[13px]', mode === 'once' ? 'border-primary bg-primary/10 text-primary' : 'border-edge bg-panel text-fg-4')} onClick={() => setMode('once')}>
             {L(locale, '同步一次', 'Sync once')}

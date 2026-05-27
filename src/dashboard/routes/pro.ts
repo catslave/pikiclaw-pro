@@ -12,6 +12,7 @@ import {
   addStageRun,
   createSubtask,
   createProTask,
+  deleteProTask,
   finishVerificationRun,
   getProTask,
   isProTaskStage,
@@ -591,6 +592,16 @@ app.get('/api/pro/tasks/:taskId', (c) => {
   const task = getProTask(c.req.param('taskId'));
   if (!task) return c.json({ ok: false, error: 'task not found' }, 404);
   return c.json({ ok: true, task });
+});
+
+app.delete('/api/pro/tasks/:taskId', (c) => {
+  try {
+    const task = deleteProTask(c.req.param('taskId'));
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
 });
 
 app.post('/api/pro/tasks', async (c) => {

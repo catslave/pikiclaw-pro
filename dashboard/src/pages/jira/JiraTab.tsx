@@ -81,8 +81,8 @@ function TaskCard({
   busyStage: ProTaskStage | null;
   draggable?: boolean;
   onSelect: (task: ProTask) => void;
-  onStatus: (task: ProTask, status: ProTaskStatus) => void;
-  onStartStage: (task: ProTask, stage: ProTaskStage) => void;
+  onStatus?: (task: ProTask, status: ProTaskStatus) => void;
+  onStartStage?: (task: ProTask, stage: ProTaskStage) => void;
   onDragStart?: (task: ProTask, event: ReactDragEvent<HTMLButtonElement>) => void;
 }) {
   const latestRun = task.stageRuns[0];
@@ -128,38 +128,6 @@ function TaskCard({
           Latest: {STAGE_LABEL[latestRun.stage]} · {latestRun.session.agent}:{latestRun.session.sessionId.slice(0, 8)}
         </div>
       )}
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {STAGES.map(stage => (
-          <Button
-            key={stage}
-            size="sm"
-            variant={stage === 'coding' ? 'secondary' : 'ghost'}
-            disabled={!!busyStage}
-            onClick={(event) => {
-              event.stopPropagation();
-              onStartStage(task, stage);
-            }}
-          >
-            {busyStage === stage ? <Spinner /> : null}
-            {STAGE_LABEL[stage]}
-          </Button>
-        ))}
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {STATUSES.filter(status => status !== task.status).map(status => (
-          <Button
-            key={status}
-            size="sm"
-            variant="ghost"
-            onClick={(event) => {
-              event.stopPropagation();
-              onStatus(task, status);
-            }}
-          >
-            Move {STATUS_LABEL[status]}
-          </Button>
-        ))}
-      </div>
     </button>
   );
 }
@@ -391,6 +359,11 @@ function TaskDetail({
   onFinishVerification,
   onCompleteStage,
   onExclusiveMode,
+  onStatus,
+  onStartStage,
+  onDelete,
+  deleting,
+  busyStage,
 }: {
   task: ProTask | null;
   verifyDraft: { environment: string; url: string; notes: string };
@@ -403,6 +376,11 @@ function TaskDetail({
   onFinishVerification: (task: ProTask, run: VerificationRun, result: VerificationResult) => void;
   onCompleteStage: (task: ProTask, run: StageRun) => void;
   onExclusiveMode: (task: ProTask, enabled: boolean) => void;
+  onStatus: (task: ProTask, status: ProTaskStatus) => void;
+  onStartStage: (task: ProTask, stage: ProTaskStage) => void;
+  onDelete: (task: ProTask) => void;
+  deleting?: boolean;
+  busyStage?: ProTaskStage | null;
 }) {
   if (!task) {
     return (
@@ -424,6 +402,39 @@ function TaskDetail({
           {task.jiraKey && <span className="font-mono">{task.jiraKey}</span>}
           {task.jiraUrl && <a className="text-primary hover:underline" href={task.jiraUrl} target="_blank" rel="noreferrer">Open Jira</a>}
           {task.workdir && <span className="truncate">{task.workdir}</span>}
+        </div>
+        <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Status</div>
+            <select
+              value={task.status}
+              onChange={event => onStatus(task, event.target.value as ProTaskStatus)}
+              className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+            >
+              {STATUSES.map(status => <option key={status} value={status}>{STATUS_LABEL[status]}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Start stage</div>
+            <select
+              value=""
+              disabled={!!busyStage}
+              onChange={event => {
+                const stage = event.target.value as ProTaskStage;
+                if (stage) onStartStage(task, stage);
+              }}
+              className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
+            >
+              <option value="">Choose stage...</option>
+              {STAGES.map(stage => <option key={stage} value={stage}>{STAGE_LABEL[stage]}</option>)}
+            </select>
+          </label>
+          <div className="flex items-end">
+            <Button variant="ghost" disabled={deleting} onClick={() => onDelete(task)}>
+              {deleting ? <Spinner /> : null}
+              Delete
+            </Button>
+          </div>
         </div>
       </div>
       <div className="space-y-4 px-4 py-3">
@@ -634,6 +645,8 @@ export function JiraTab() {
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<JiraColumnKey | null>(null);
@@ -656,6 +669,7 @@ export function JiraTab() {
     for (const task of visibleTasks) grouped.get(jiraColumnForTask(task))?.push(task);
     return grouped;
   }, [visibleTasks]);
+  const selectedTask = useMemo(() => tasks.find(task => task.id === selectedId) || null, [selectedId, tasks]);
 
   useEffect(() => {
     if (selectedSprint !== 'all' && !sprintOptions.includes(selectedSprint)) setSelectedSprint('all');
@@ -694,6 +708,11 @@ export function JiraTab() {
     setSelectedId(task.id);
   }, []);
 
+  const openTaskDetail = useCallback((task: ProTask) => {
+    setSelectedId(task.id);
+    setDetailOpen(true);
+  }, []);
+
   const createTask = useCallback(async (taskDraft: { title: string; description: string; workdir: string; defaultAgent: string; defaultAssistantId: string }) => {
     const title = taskDraft.title.trim();
     if (!title) return;
@@ -729,6 +748,24 @@ export function JiraTab() {
       return null;
     }
   }, [toast, upsertTask]);
+
+  const deleteTask = useCallback(async (task: ProTask) => {
+    if (deletingTaskId) return;
+    if (typeof window !== 'undefined' && !window.confirm(`Delete Jira task "${task.title}" from Pikiclaw?`)) return;
+    setDeletingTaskId(task.id);
+    try {
+      const result = await api.deleteProTask(task.id);
+      if (!result.ok) throw new Error(result.error || 'Failed to delete task');
+      setTasks(prev => prev.filter(item => item.id !== task.id));
+      setSelectedId(current => current === task.id ? null : current);
+      setDetailOpen(false);
+      toast('Jira task deleted');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to delete task', false);
+    } finally {
+      setDeletingTaskId(null);
+    }
+  }, [deletingTaskId, toast]);
 
   const startStage = useCallback(async (task: ProTask, stage: ProTaskStage, assistantId?: string): Promise<ProTask | null> => {
     setBusy({ taskId: task.id, stage });
@@ -948,9 +985,7 @@ export function JiraTab() {
                           selected={false}
                           busyStage={busy?.taskId === task.id ? busy.stage : null}
                           draggable
-                          onSelect={(next) => setSelectedId(next.id)}
-                          onStatus={moveTaskToStatus}
-                          onStartStage={startStage}
+                          onSelect={openTaskDetail}
                         />
                       ))}
                     </div>
@@ -979,6 +1014,34 @@ export function JiraTab() {
         onClose={() => setSettingsOpen(false)}
         onSave={saveJiraConfig}
       />
+      <Modal
+        open={detailOpen && !!selectedTask}
+        onClose={() => setDetailOpen(false)}
+        wide
+        panelStyle={{ maxWidth: 'min(960px, calc(100vw - 32px))' }}
+      >
+        <ModalHeader title="Jira task detail" onClose={() => setDetailOpen(false)} />
+        <div className="h-[min(72vh,760px)]">
+          <TaskDetail
+            task={selectedTask}
+            verifyDraft={verifyDraft}
+            onVerifyDraft={(patch) => setVerifyDraft(prev => ({ ...prev, ...patch }))}
+            subtaskDraft={subtaskDraft}
+            onSubtaskDraft={(patch) => setSubtaskDraft(prev => ({ ...prev, ...patch }))}
+            onCreateSubtask={createSubtask}
+            onUpdateSubtaskStatus={updateSubtaskStatus}
+            onStartVerification={startVerification}
+            onFinishVerification={finishVerification}
+            onCompleteStage={completeStage}
+            onExclusiveMode={toggleExclusiveMode}
+            onStatus={(task, status) => { void moveTaskToStatus(task, status); }}
+            onStartStage={(task, stage) => { void startStage(task, stage); }}
+            onDelete={(task) => { void deleteTask(task); }}
+            deleting={!!selectedTask && deletingTaskId === selectedTask.id}
+            busyStage={selectedTask && busy?.taskId === selectedTask.id ? busy.stage : null}
+          />
+        </div>
+      </Modal>
     </div>
   );
 }

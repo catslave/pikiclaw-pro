@@ -350,6 +350,15 @@ export function getProTask(taskId: string): ProTask | null {
   return readFile().tasks.find(task => task.id === taskId) || null;
 }
 
+export function deleteProTask(taskId: string): ProTask {
+  const file = readFile();
+  const index = file.tasks.findIndex(task => task.id === taskId);
+  if (index < 0) throw new Error('task not found');
+  const [task] = file.tasks.splice(index, 1);
+  writeFile(file);
+  return task;
+}
+
 export function createProTask(input: CreateProTaskInput): ProTask {
   const now = new Date().toISOString();
   const title = normalizeText(input.title, 240);

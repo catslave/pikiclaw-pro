@@ -822,6 +822,11 @@ export const api = {
         ...opts,
       },
     ),
+  deleteProTask: (taskId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   setProTaskExclusiveMode: (taskId: string, enabled: boolean, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
       `/api/pro/tasks/${encodeURIComponent(taskId)}/exclusive-mode`,

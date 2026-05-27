@@ -106,6 +106,7 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
 
   const tasks = [];
   const errors = [];
+  const counts = { created: 0, updated: 0, unchanged: 0 };
   for (const raw of issues.slice(0, 100)) {
     const issue = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     try {
@@ -124,6 +125,13 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         sprint: text(issueField(issue, 'sprint', 'sprintName'), 120),
         workdir: text(issueField(issue, 'workdir'), 2048) || workdir,
       });
+      const latestEvent = task.events?.[0];
+      const action = latestEvent?.type === 'jira-updated'
+        ? 'updated'
+        : latestEvent?.summary?.includes('no field changes')
+          ? 'unchanged'
+          : 'created';
+      counts[action]++;
       tasks.push({
         id: task.id,
         title: task.title,
@@ -132,6 +140,7 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         jiraKey: task.jiraKey,
         sprint: task.sprint,
         updatedAt: task.updatedAt,
+        syncAction: action,
       });
     } catch (e: any) {
       errors.push(e?.message || String(e));
@@ -148,12 +157,14 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         error: errors.join('; ') || undefined,
         event: {
           label: errors.length ? 'Jira task sync failed' : `Synced ${tasks.length} Pikiclaw task${tasks.length === 1 ? '' : 's'}`,
-          detail: errors.length ? errors.join('; ') : tasks.map(task => task.jiraKey || task.title).filter(Boolean).join(', '),
+          detail: errors.length
+            ? errors.join('; ')
+            : `created=${counts.created}, updated=${counts.updated}, unchanged=${counts.unchanged}. ${tasks.map(task => task.jiraKey || task.title).filter(Boolean).join(', ')}`,
         },
       });
     } catch { /* progress is best effort */ }
   }
-  return toolResult(JSON.stringify({ ok: errors.length === 0, synced: tasks.length, tasks, errors }, null, 2), errors.length > 0 && tasks.length === 0);
+  return toolResult(JSON.stringify({ ok: errors.length === 0, synced: tasks.length, counts, tasks, errors }, null, 2), errors.length > 0 && tasks.length === 0);
 }
 
 function handleReportProgress(args: Record<string, unknown>): ToolResult {
