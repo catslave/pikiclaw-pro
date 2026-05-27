@@ -40,12 +40,139 @@ import {
   markAutomationRun,
   updateAgentAssistant,
   updateJiraWorkflowConfig,
+  upsertAutomationRuleByKey,
+  type AgentAssistant,
+  type AutomationRule,
 } from '../../pro/workflow.js';
 
 const app = new Hono();
+const JIRA_MCP_SYNC_AUTOMATION_KEY = 'jira-mcp-sync';
 
 function readString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function pickAssistantAgent(assistant?: AgentAssistant, fallbackAgent?: string | null): string | null {
+  const explicit = readString(fallbackAgent);
+  if (explicit) return explicit;
+  const preferred = assistant?.preferredAgents?.find(agent => readString(agent));
+  return preferred || null;
+}
+
+function buildAssistantPrompt(prompt: string, assistant?: AgentAssistant): string {
+  if (!assistant) return prompt;
+  return [
+    `You are running as Pikiclaw Assistant: ${assistant.name}`,
+    '',
+    'Assistant responsibility:',
+    assistant.responsibility,
+    '',
+    'Task:',
+    prompt,
+  ].join('\n');
+}
+
+function buildJiraMcpSyncPrompt(): string {
+  return [
+    'Sync Jira through the configured Jira/Atlassian MCP server.',
+    '',
+    'Requirements:',
+    '- Use the Jira MCP tools to find issues assigned to me and recently updated issues relevant to my active work.',
+    '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint/status, and changed remote notes.',
+    '- Append remote updates as new notes instead of overwriting existing local task context.',
+    '- Mark newly assigned tickets and changed tickets clearly.',
+    '- Summarize what was synced, what changed, and anything that needs manual attention.',
+  ].join('\n');
+}
+
+async function queueAutomationRule(rule: AutomationRule) {
+  const config = loadUserConfig();
+  const assistant = rule.assistantId ? listAgentAssistants().find(item => item.id === rule.assistantId) : undefined;
+  const queued = await queueDashboardSessionTask({
+    workdir: rule.workdir || runtime.getRequestWorkdir(config),
+    agent: pickAssistantAgent(assistant, rule.agent),
+    sessionId: '',
+    prompt: buildAssistantPrompt(rule.prompt, assistant),
+    attachments: [],
+  });
+  if (!queued.ok) return { queued, updated: markAutomationRun(rule.id, undefined) };
+  return { queued, updated: markAutomationRun(rule.id, queued.sessionKey) };
+}
+
+function parseSchedule(schedule: string): { cadence: string; time: string; weekday?: number; day?: number } | null {
+  const raw = readString(schedule);
+  if (!raw || raw === 'manual' || raw === 'one-time') return null;
+  if (raw === 'daily') return { cadence: 'daily', time: '09:00' };
+  if (raw === 'weekly') return { cadence: 'weekly', weekday: 1, time: '09:00' };
+  if (raw === 'biweekly') return { cadence: 'biweekly', weekday: 1, time: '09:00' };
+  if (raw === 'monthly') return { cadence: 'monthly', day: 1, time: '09:00' };
+  const parts = raw.split('@');
+  const cadence = parts[0] || '';
+  const time = parts[parts.length - 1] || '';
+  if (!/^\d{2}:\d{2}$/.test(time)) return null;
+  if (cadence === 'daily') return { cadence, time };
+  if (cadence === 'weekly' || cadence === 'biweekly') {
+    const weekday = Number(parts[1] ?? 1);
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) return null;
+    return { cadence, weekday, time };
+  }
+  if (cadence === 'monthly') {
+    const day = Number(parts[1] ?? 1);
+    if (!Number.isInteger(day) || day < 1 || day > 31) return null;
+    return { cadence, day, time };
+  }
+  return null;
+}
+
+function automationDueSlot(rule: AutomationRule, now = new Date()): string | null {
+  if (!rule.enabled) return null;
+  const parsed = parseSchedule(rule.schedule);
+  if (!parsed) return null;
+  const [hour, minute] = parsed.time.split(':').map(Number);
+  if (now.getHours() !== hour || now.getMinutes() !== minute) return null;
+  const dateKey = now.toISOString().slice(0, 10);
+  if (parsed.cadence === 'daily') return `${rule.id}:${dateKey}:${parsed.time}`;
+  if (parsed.cadence === 'weekly') {
+    if (now.getDay() !== parsed.weekday) return null;
+    return `${rule.id}:week:${dateKey}:${parsed.time}`;
+  }
+  if (parsed.cadence === 'biweekly') {
+    if (now.getDay() !== parsed.weekday) return null;
+    const week = Math.floor(now.getTime() / (7 * 24 * 60 * 60 * 1000));
+    if (week % 2 !== 0) return null;
+    return `${rule.id}:biweek:${dateKey}:${parsed.time}`;
+  }
+  if (parsed.cadence === 'monthly') {
+    if (now.getDate() !== parsed.day) return null;
+    return `${rule.id}:month:${dateKey}:${parsed.time}`;
+  }
+  return null;
+}
+
+const runningScheduleSlots = new Set<string>();
+
+async function runDueAutomations() {
+  for (const rule of listAutomationRules()) {
+    const slot = automationDueSlot(rule);
+    if (!slot || runningScheduleSlots.has(slot)) continue;
+    const lastRunKey = rule.lastRunAt ? automationDueSlot({ ...rule, lastRunAt: undefined }, new Date(rule.lastRunAt)) : null;
+    if (lastRunKey === slot) continue;
+    runningScheduleSlots.add(slot);
+    void queueAutomationRule(rule).finally(() => {
+      setTimeout(() => runningScheduleSlots.delete(slot), 70_000);
+    });
+  }
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __pikiclawProAutomationSchedulerStarted: boolean | undefined;
+}
+
+if (!globalThis.__pikiclawProAutomationSchedulerStarted) {
+  globalThis.__pikiclawProAutomationSchedulerStarted = true;
+  setInterval(() => { void runDueAutomations(); }, 60_000).unref?.();
+  setTimeout(() => { void runDueAutomations(); }, 5_000).unref?.();
 }
 
 function parseSessionKey(sessionKey: string | null | undefined): { agent: string; sessionId: string } | null {
@@ -229,6 +356,7 @@ app.post('/api/pro/automations', async (c) => {
     const body = await c.req.json();
     const config = loadUserConfig();
     const automation = createAutomationRule({
+      key: body?.key,
       name: body?.name,
       schedule: body?.schedule,
       prompt: body?.prompt,
@@ -247,22 +375,58 @@ app.post('/api/pro/automations/:automationId/run', async (c) => {
   try {
     const automation = listAutomationRules().find(item => item.id === c.req.param('automationId'));
     if (!automation) return c.json({ ok: false, error: 'automation not found' }, 404);
+    const { queued, updated } = await queueAutomationRule(automation);
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+    return c.json({ ok: true, automation: updated, queued });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/jira/mcp-sync/run', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
     const config = loadUserConfig();
+    const assistantId = readString(body?.assistantId) || getJiraWorkflowConfig().ticketSyncAssistantId;
+    const assistant = assistantId ? listAgentAssistants().find(item => item.id === assistantId) : undefined;
     const queued = await queueDashboardSessionTask({
-      workdir: automation.workdir || runtime.getRequestWorkdir(config),
-      agent: automation.agent || null,
+      workdir: readString(body?.workdir) || runtime.getRequestWorkdir(config),
+      agent: pickAssistantAgent(assistant, readString(body?.agent) || null),
       sessionId: '',
-      prompt: automation.prompt,
+      prompt: buildAssistantPrompt(buildJiraMcpSyncPrompt(), assistant),
       attachments: [],
     });
     if (!queued.ok) {
       const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
       return c.json(queued, statusCode);
     }
-    const updated = markAutomationRun(automation.id, queued.sessionKey);
-    return c.json({ ok: true, automation: updated, queued });
+    return c.json({ ok: true, queued });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/jira/mcp-sync/schedule', async (c) => {
+  try {
+    const body = await c.req.json();
+    const config = loadUserConfig();
+    const schedule = readString(body?.schedule);
+    if (!schedule || !parseSchedule(schedule)) return c.json({ ok: false, error: 'valid schedule is required' }, 400);
+    const assistantId = readString(body?.assistantId) || getJiraWorkflowConfig().ticketSyncAssistantId;
+    const automation = upsertAutomationRuleByKey(JIRA_MCP_SYNC_AUTOMATION_KEY, {
+      name: 'Jira MCP sync',
+      schedule,
+      prompt: buildJiraMcpSyncPrompt(),
+      workdir: readString(body?.workdir) || runtime.getRequestWorkdir(config),
+      assistantId,
+      enabled: body?.enabled !== false,
+    });
+    return c.json({ ok: true, automation });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
   }
 });
 

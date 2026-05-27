@@ -15,6 +15,7 @@ export interface AgentAssistant {
 
 export interface AutomationRule {
   id: string;
+  key?: string;
   name: string;
   schedule: string;
   prompt: string;
@@ -266,13 +267,15 @@ export function listAutomationRules(): AutomationRule[] {
   return readFile().automations.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
-export function createAutomationRule(input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
+export function createAutomationRule(input: { key?: unknown; name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
   const prompt = normalizeText(input.prompt, 24_000);
   if (!prompt) throw new Error('prompt is required');
   const name = normalizeText(input.name, 160) || titleFromPrompt(prompt);
+  const key = normalizeText(input.key, 160) || undefined;
   const now = new Date().toISOString();
   const rule: AutomationRule = {
     id: newId('automation'),
+    key,
     name,
     schedule: normalizeText(input.schedule, 160) || 'manual',
     prompt,
@@ -285,6 +288,43 @@ export function createAutomationRule(input: { name: unknown; schedule?: unknown;
   };
   const file = readFile();
   file.automations.unshift(rule);
+  writeFile(file);
+  return rule;
+}
+
+export function upsertAutomationRuleByKey(keyInput: string, input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
+  const key = normalizeText(keyInput, 160);
+  if (!key) throw new Error('automation key is required');
+  const prompt = normalizeText(input.prompt, 24_000);
+  if (!prompt) throw new Error('prompt is required');
+  const file = readFile();
+  const now = new Date().toISOString();
+  let rule = file.automations.find(item => item.key === key);
+  if (!rule) {
+    rule = {
+      id: newId('automation'),
+      key,
+      name: normalizeText(input.name, 160) || titleFromPrompt(prompt),
+      schedule: normalizeText(input.schedule, 160) || 'manual',
+      prompt,
+      workdir: normalizeText(input.workdir, 2048) || undefined,
+      agent: normalizeText(input.agent, 80) || undefined,
+      assistantId: normalizeText(input.assistantId, 120) || undefined,
+      enabled: input.enabled !== false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    file.automations.unshift(rule);
+  } else {
+    rule.name = normalizeText(input.name, 160) || rule.name;
+    rule.schedule = normalizeText(input.schedule, 160) || rule.schedule;
+    rule.prompt = prompt;
+    rule.workdir = normalizeText(input.workdir, 2048) || undefined;
+    rule.agent = normalizeText(input.agent, 80) || undefined;
+    rule.assistantId = normalizeText(input.assistantId, 120) || undefined;
+    rule.enabled = input.enabled !== false;
+    rule.updatedAt = now;
+  }
   writeFile(file);
   return rule;
 }

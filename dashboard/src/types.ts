@@ -1120,6 +1120,7 @@ export interface JiraWorkflowConfig {
 
 export interface AutomationRule {
   id: string;
+  key?: string;
   name: string;
   schedule: string;
   prompt: string;

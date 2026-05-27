@@ -717,7 +717,7 @@ export const api = {
   getProAutomations: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; automations: AutomationRule[]; error?: string }>('/api/pro/automations', opts),
   createProAutomation: (
-    body: { name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; assistantId?: string | null; enabled?: boolean },
+    body: { key?: string; name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; assistantId?: string | null; enabled?: boolean },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; automation?: AutomationRule; error?: string }>('/api/pro/automations', body, opts),
@@ -726,6 +726,24 @@ export const api = {
       `/api/pro/automations/${encodeURIComponent(automationId)}/run`,
       {},
       { timeoutMs: 30_000, ...opts },
+    ),
+  runJiraMcpSync: (
+    body: { assistantId?: string | null; workdir?: string; agent?: string | null } = {},
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      '/api/pro/jira/mcp-sync/run',
+      body,
+      { timeoutMs: 30_000, ...opts },
+    ),
+  scheduleJiraMcpSync: (
+    body: { schedule: string; assistantId?: string | null; workdir?: string; enabled?: boolean },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; automation?: AutomationRule; error?: string }>(
+      '/api/pro/jira/mcp-sync/schedule',
+      body,
+      opts,
     ),
   getProKnowledge: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; knowledge: KnowledgeEntry[]; error?: string }>('/api/pro/knowledge', opts),

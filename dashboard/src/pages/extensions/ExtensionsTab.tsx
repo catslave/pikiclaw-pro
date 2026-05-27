@@ -17,6 +17,8 @@ import type { CSSProperties, ReactNode } from 'react';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import type {
+  AgentAssistant,
+  AutomationRule,
   CliCatalogItem,
   McpAuthSpec,
   McpCatalogItem,
@@ -541,6 +543,148 @@ function CredentialsDialog({
   );
 }
 
+function JiraSyncDialog({
+  open, onClose, locale, workdir,
+}: {
+  open: boolean;
+  onClose: () => void;
+  locale: string;
+  workdir?: string;
+}) {
+  const toast = useStore(s => s.toast);
+  const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? '');
+  const [assistants, setAssistants] = useState<AgentAssistant[]>([]);
+  const [jobs, setJobs] = useState<AutomationRule[]>([]);
+  const [mode, setMode] = useState<'once' | 'auto'>('once');
+  const [cadence, setCadence] = useState<'daily' | 'weekly' | 'biweekly' | 'monthly'>('daily');
+  const [time, setTime] = useState('09:00');
+  const [weekday, setWeekday] = useState('1');
+  const [monthDay, setMonthDay] = useState('1');
+  const [assistantId, setAssistantId] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const [assistantRes, automationRes] = await Promise.all([api.getProAssistants(), api.getProAutomations()]);
+    const nextAssistants = assistantRes.ok ? assistantRes.assistants || [] : [];
+    const nextJobs = automationRes.ok ? automationRes.automations || [] : [];
+    const existing = nextJobs.find(job => job.key === 'jira-mcp-sync');
+    setAssistants(nextAssistants);
+    setJobs(nextJobs);
+    setAssistantId(prev => prev || existing?.assistantId || nextAssistants.find(a => a.id === 'assistant_ticket_sync')?.id || nextAssistants[0]?.id || '');
+    if (existing?.schedule) {
+      const parts = existing.schedule.split('@');
+      if (parts[0] === 'daily' || parts[0] === 'weekly' || parts[0] === 'biweekly' || parts[0] === 'monthly') {
+        setCadence(parts[0]);
+        setTime(parts[parts.length - 1] || '09:00');
+        if (parts[0] === 'weekly' || parts[0] === 'biweekly') setWeekday(parts[1] || '1');
+        if (parts[0] === 'monthly') setMonthDay(parts[1] || '1');
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) void refresh();
+  }, [open, refresh]);
+
+  const existingJob = jobs.find(job => job.key === 'jira-mcp-sync');
+  const schedule = cadence === 'daily'
+    ? `daily@${time}`
+    : cadence === 'monthly'
+      ? `monthly@${monthDay}@${time}`
+      : `${cadence}@${weekday}@${time}`;
+
+  const run = async () => {
+    if (!assistantId || busy) return;
+    setBusy(true);
+    try {
+      if (mode === 'once') {
+        const res = await api.runJiraMcpSync({ assistantId, workdir: workdir || runtimeWorkdir });
+        if (!res.ok) throw new Error(res.error || 'Failed to queue Jira sync');
+        toast(L(locale, 'Jira 同步已启动', 'Jira sync queued'), true);
+        onClose();
+        return;
+      }
+      const res = await api.scheduleJiraMcpSync({
+        schedule,
+        assistantId,
+        workdir: workdir || runtimeWorkdir,
+        enabled: true,
+      });
+      if (!res.ok) throw new Error(res.error || 'Failed to save schedule');
+      toast(L(locale, 'Jira 自动同步已保存', 'Jira auto sync saved'), true);
+      onClose();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed', false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader
+        title={L(locale, 'Jira 同步', 'Jira Sync')}
+        description={L(locale, '启动一次同步，或配置后台自动同步任务。', 'Run sync once, or configure a background scheduled sync job.')}
+        onClose={onClose}
+      />
+      <div className="space-y-3">
+        {existingJob && (
+          <div className="rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-4">
+            {L(locale, '当前自动同步', 'Current auto sync')}: {existingJob.schedule} · {L(locale, '上次运行', 'last run')} {existingJob.lastRunAt ? new Date(existingJob.lastRunAt).toLocaleString() : '--'}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          <button className={cn('h-9 rounded-md border text-[13px]', mode === 'once' ? 'border-primary bg-primary/10 text-primary' : 'border-edge bg-panel text-fg-4')} onClick={() => setMode('once')}>
+            {L(locale, '同步一次', 'Sync once')}
+          </button>
+          <button className={cn('h-9 rounded-md border text-[13px]', mode === 'auto' ? 'border-primary bg-primary/10 text-primary' : 'border-edge bg-panel text-fg-4')} onClick={() => setMode('auto')}>
+            {L(locale, '自动同步', 'Auto sync')}
+          </button>
+        </div>
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</div>
+          <select value={assistantId} onChange={event => setAssistantId(event.target.value)} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+            <option value="">{L(locale, '选择 Assistant', 'Select assistant')}</option>
+            {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+          </select>
+        </div>
+        {mode === 'auto' && (
+          <div className="grid gap-2 md:grid-cols-2">
+            <select value={cadence} onChange={event => setCadence(event.target.value as typeof cadence)} className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              <option value="daily">{L(locale, '每天', 'Daily')}</option>
+              <option value="weekly">{L(locale, '每周', 'Weekly')}</option>
+              <option value="biweekly">{L(locale, '双周', 'Biweekly')}</option>
+              <option value="monthly">{L(locale, '每月', 'Monthly')}</option>
+            </select>
+            <Input type="time" value={time} onChange={event => setTime(event.target.value || '09:00')} />
+            {(cadence === 'weekly' || cadence === 'biweekly') && (
+              <select value={weekday} onChange={event => setWeekday(event.target.value)} className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+                <option value="1">{L(locale, '周一', 'Monday')}</option>
+                <option value="2">{L(locale, '周二', 'Tuesday')}</option>
+                <option value="3">{L(locale, '周三', 'Wednesday')}</option>
+                <option value="4">{L(locale, '周四', 'Thursday')}</option>
+                <option value="5">{L(locale, '周五', 'Friday')}</option>
+                <option value="6">{L(locale, '周六', 'Saturday')}</option>
+                <option value="0">{L(locale, '周日', 'Sunday')}</option>
+              </select>
+            )}
+            {cadence === 'monthly' && (
+              <Input type="number" min={1} max={31} value={monthDay} onChange={event => setMonthDay(event.target.value || '1')} />
+            )}
+          </div>
+        )}
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>{L(locale, '取消', 'Cancel')}</Button>
+        <Button variant="primary" disabled={busy || !assistantId || (mode === 'auto' && !time)} onClick={() => void run()}>
+          {busy ? <Spinner /> : null}
+          {mode === 'once' ? L(locale, '开始同步', 'Start sync') : L(locale, '保存自动同步', 'Save auto sync')}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Custom MCP Dialog
 // ---------------------------------------------------------------------------
@@ -778,7 +922,7 @@ function openOAuthPopup(authUrl: string, expectedState: string): Promise<boolean
 
 function ConnectedCard({
   item, locale, busy, index,
-  onPrimary, onRemove, onReauth, onReconfigure,
+  onPrimary, onRemove, onReauth, onReconfigure, onSync,
 }: {
   item: McpCatalogItem;
   locale: string;
@@ -788,6 +932,7 @@ function ConnectedCard({
   onRemove?: () => void;
   onReauth?: () => void;
   onReconfigure?: () => void;
+  onSync?: () => void;
 }) {
   const { hex } = brandInfo(item.iconSlug, item.name);
   const primaryLabel = (() => {
@@ -855,6 +1000,11 @@ function ConnectedCard({
           {item.installed && item.state !== 'needs_auth' && onReconfigure && (
             <Button variant="ghost" size="sm" onClick={onReconfigure} disabled={busy}>
               {L(locale, '编辑', 'Edit')}
+            </Button>
+          )}
+          {item.installed && item.state === 'ready' && onSync && (
+            <Button variant="secondary" size="sm" onClick={onSync} disabled={busy}>
+              Sync
             </Button>
           )}
           <Button
@@ -1441,6 +1591,7 @@ function McpCatalogSection({
 
   const [search, setSearch] = useState('');
   const [credsTarget, setCredsTarget] = useState<McpCatalogItem | null>(null);
+  const [syncTarget, setSyncTarget] = useState<McpCatalogItem | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -1658,6 +1809,7 @@ function McpCatalogSection({
                     onRemove={() => void runRemove(item)}
                     onReauth={item.auth.type === 'mcp-oauth' ? () => void runOAuth(item) : undefined}
                     onReconfigure={item.auth.type === 'credentials' ? () => setCredsTarget(item) : undefined}
+                    onSync={item.id === 'atlassian' ? () => setSyncTarget(item) : undefined}
                   />
                 ))}
               </div>
@@ -1719,6 +1871,12 @@ function McpCatalogSection({
         item={credsTarget}
         initial={credsTarget?.config?.env || credsTarget?.config?.headers}
         onSubmit={runCredentialsSubmit}
+      />
+      <JiraSyncDialog
+        open={!!syncTarget}
+        onClose={() => setSyncTarget(null)}
+        locale={locale}
+        workdir={workdir}
       />
       <CustomMcpDialog
         open={customOpen}
