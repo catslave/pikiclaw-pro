@@ -91,6 +91,14 @@ const DEFAULT_ASSISTANTS: AgentAssistant[] = [
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
+  {
+    id: 'assistant_idea_guide',
+    name: 'Idea Guide Assistant',
+    responsibility: 'Guide the user from a rough intent to a clear idea. First research mainstream related products, implementations, patterns, and pitfalls; then ask step-by-step questions about goal, audience, boundary, workflow, constraints, risks, and acceptance points; finally synthesize a structured idea with options, tradeoffs, and next steps.',
+    preferredAgents: ['codex', 'claude'],
+    createdAt: '2026-05-27T00:00:00.000Z',
+    updatedAt: '2026-05-27T00:00:00.000Z',
+  },
 ];
 
 function workflowFilePath() {
