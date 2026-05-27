@@ -732,13 +732,15 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   // ── Register MCP server with the agent ──
   const supplementalServers = buildSupplementalMcpServers(gui, { cdpEndpoint: browserCdpEndpoint });
   const servers: RegisteredMcpServer[] = [...supplementalServers];
+  const extServers = getGlobalExtensionsAsServers(opts.workdir);
 
-  // Register the pikiclaw stdio MCP server when any in-process tool needs the
-  // callback channel. `MCP_TOOLS_AVAILABLE` tells the server which tool
-  // families to advertise.
-  if (port && (sendFile || needsAskUserCallback)) {
+  // Register the pikiclaw stdio MCP server when any in-process tool is useful.
+  // `MCP_TOOLS_AVAILABLE` tells the server which tool families to advertise.
+  // Pro tools are callback-free but must be available for scheduled sync jobs
+  // so agents can persist pulled Jira issues as Pikiclaw tasks.
+  {
     const { command, args } = resolveMcpServerCommand();
-    const enabledTools: string[] = [];
+    const enabledTools: string[] = ['pro'];
     if (sendFile) enabledTools.push('workspace');
     // Codex has native user-input via JSON-RPC; don't expose `im_ask_user`.
     if (onInteraction && opts.agent !== 'codex') enabledTools.push('ask-user');
@@ -752,8 +754,8 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
         MCP_WORKDIR: opts.workdir || '',
         MCP_AGENT: opts.agent || '',
         MCP_STAGED_FILES: JSON.stringify(stagedFiles),
-        MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
-        MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
+        MCP_CALLBACK_URL: port ? `http://127.0.0.1:${port}` : '',
+        MCP_LOG_URL: port ? `http://127.0.0.1:${port}/log` : '',
         MCP_TOOLS_AVAILABLE: enabledTools.join(','),
       };
       servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
@@ -761,7 +763,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   }
 
   // Nothing to register — skip bridge entirely
-  if (!servers.length) {
+  if (!servers.length && !extServers.length) {
     if (callbackServer) await new Promise<void>(resolve => callbackServer!.close(() => resolve()));
     return null;
   }
@@ -775,7 +777,6 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   if (opts.agent === 'codex') {
     // Codex: register MCP servers via `codex mcp add/remove`
     // Include global + workspace extensions alongside built-in servers
-    const extServers = getGlobalExtensionsAsServers(opts.workdir);
     const allServers = [...extServers, ...servers];
     for (const server of allServers) {
       const codexArgs = ['mcp', 'add'];
@@ -807,7 +808,6 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   } else if (opts.agent === 'gemini') {
     // Gemini CLI 0.32+ loads MCP servers from settings.json rather than --mcp-config.
     // Include global + workspace extensions alongside built-in servers
-    const extServers = getGlobalExtensionsAsServers(opts.workdir);
     const allServers = [...extServers, ...servers];
     configPath = path.join(sessionDir, 'gemini-system-settings.json');
     const config = buildGeminiMcpConfig(allServers);

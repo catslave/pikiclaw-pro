@@ -78,6 +78,8 @@ function buildJiraMcpSyncPrompt(): string {
     '',
     'Requirements:',
     '- Use the Jira MCP tools to find issues assigned to me and recently updated issues relevant to my active work.',
+    '- After pulling Jira issues, call the `pikiclaw_pro_sync_jira_issues` MCP tool with an `issues` array so Pikiclaw creates or updates task cards.',
+    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, and sprint when available.',
     '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint/status, and changed remote notes.',
     '- Append remote updates as new notes instead of overwriting existing local task context.',
     '- Mark newly assigned tickets and changed tickets clearly.',
