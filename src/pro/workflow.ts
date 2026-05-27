@@ -8,6 +8,7 @@ export interface AgentAssistant {
   name: string;
   responsibility: string;
   preferredAgents: string[];
+  avatarSeed?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -52,6 +53,7 @@ export interface KnowledgeEntry {
 interface WorkflowFile {
   version: 1;
   assistants: AgentAssistant[];
+  deletedAssistantIds?: string[];
   automations: AutomationRule[];
   knowledge: KnowledgeEntry[];
 }
@@ -99,6 +101,10 @@ function newId(prefix: string) {
   return `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
 }
 
+function newAvatarSeed() {
+  return crypto.randomBytes(6).toString('hex');
+}
+
 function normalizeText(value: unknown, max = 16_000): string {
   const text = typeof value === 'string' ? value.trim() : '';
   return text.length > max ? text.slice(0, max).trimEnd() : text;
@@ -110,12 +116,21 @@ function readFile(): WorkflowFile {
     return {
       version: 1,
       assistants: Array.isArray(parsed?.assistants) ? parsed.assistants.filter(item => item?.id && item?.name) : [],
+      deletedAssistantIds: Array.isArray(parsed?.deletedAssistantIds) ? parsed.deletedAssistantIds.map(String).filter(Boolean) : [],
       automations: Array.isArray(parsed?.automations) ? parsed.automations.filter(item => item?.id && item?.name) : [],
       knowledge: Array.isArray(parsed?.knowledge) ? parsed.knowledge.filter(item => item?.id && item?.title) : [],
     };
   } catch {
-    return { version: 1, assistants: [], automations: [], knowledge: [] };
+    return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], knowledge: [] };
   }
+}
+
+function withAssistantAvatar(assistant: AgentAssistant): AgentAssistant {
+  return assistant.avatarSeed ? assistant : { ...assistant, avatarSeed: assistant.id };
+}
+
+function titleFromPrompt(prompt: string): string {
+  return prompt.split(/\s+/).filter(Boolean).slice(0, 10).join(' ').slice(0, 120) || 'Automation job';
 }
 
 function writeFile(file: WorkflowFile) {
@@ -127,12 +142,14 @@ function writeFile(file: WorkflowFile) {
 }
 
 export function listAgentAssistants(): AgentAssistant[] {
-  const fileAssistants = readFile().assistants;
+  const file = readFile();
+  const fileAssistants = file.assistants;
   const customIds = new Set(fileAssistants.map(item => item.id));
+  const deletedIds = new Set(file.deletedAssistantIds || []);
   return [
     ...fileAssistants,
-    ...DEFAULT_ASSISTANTS.filter(item => !customIds.has(item.id)),
-  ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    ...DEFAULT_ASSISTANTS.filter(item => !customIds.has(item.id) && !deletedIds.has(item.id)),
+  ].map(withAssistantAvatar).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 export function createAgentAssistant(input: { name: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {
@@ -146,6 +163,7 @@ export function createAgentAssistant(input: { name: unknown; responsibility?: un
     preferredAgents: Array.isArray(input.preferredAgents)
       ? input.preferredAgents.map(agent => normalizeText(agent, 60)).filter(Boolean).slice(0, 8)
       : [],
+    avatarSeed: newAvatarSeed(),
     createdAt: now,
     updatedAt: now,
   };
@@ -163,8 +181,9 @@ export function updateAgentAssistant(id: string, input: { name?: unknown; respon
   if (!assistant) {
     const builtin = DEFAULT_ASSISTANTS.find(item => item.id === assistantId);
     if (!builtin) throw new Error('assistant not found');
-    assistant = { ...builtin };
+    assistant = { ...builtin, avatarSeed: builtin.avatarSeed || assistantId };
     file.assistants.unshift(assistant);
+    file.deletedAssistantIds = (file.deletedAssistantIds || []).filter(item => item !== assistantId);
   }
   const name = normalizeText(input.name, 120);
   if (name) assistant.name = name;
@@ -175,7 +194,24 @@ export function updateAgentAssistant(id: string, input: { name?: unknown; respon
   }
   assistant.updatedAt = new Date().toISOString();
   writeFile(file);
-  return assistant;
+  return withAssistantAvatar(assistant);
+}
+
+export function deleteAgentAssistant(id: string): AgentAssistant {
+  const assistantId = normalizeText(id, 160);
+  if (!assistantId) throw new Error('assistant id is required');
+  const file = readFile();
+  const index = file.assistants.findIndex(item => item.id === assistantId);
+  const existing = index >= 0 ? file.assistants[index] : DEFAULT_ASSISTANTS.find(item => item.id === assistantId);
+  if (!existing) throw new Error('assistant not found');
+  if (index >= 0) file.assistants.splice(index, 1);
+  if (DEFAULT_ASSISTANTS.some(item => item.id === assistantId)) {
+    const deleted = new Set(file.deletedAssistantIds || []);
+    deleted.add(assistantId);
+    file.deletedAssistantIds = [...deleted];
+  }
+  writeFile(file);
+  return withAssistantAvatar(existing);
 }
 
 export function listAutomationRules(): AutomationRule[] {
@@ -183,10 +219,9 @@ export function listAutomationRules(): AutomationRule[] {
 }
 
 export function createAutomationRule(input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
-  const name = normalizeText(input.name, 160);
   const prompt = normalizeText(input.prompt, 24_000);
-  if (!name) throw new Error('name is required');
   if (!prompt) throw new Error('prompt is required');
+  const name = normalizeText(input.name, 160) || titleFromPrompt(prompt);
   const now = new Date().toISOString();
   const rule: AutomationRule = {
     id: newId('automation'),

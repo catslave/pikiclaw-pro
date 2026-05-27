@@ -1032,6 +1032,7 @@ export interface AgentAssistant {
   name: string;
   responsibility: string;
   preferredAgents: string[];
+  avatarSeed?: string;
   createdAt: string;
   updatedAt: string;
 }

@@ -690,6 +690,11 @@ export const api = {
         ...opts,
       },
     ),
+  deleteProAssistant: (assistantId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; assistant?: AgentAssistant; error?: string }>(
+      `/api/pro/assistants/${encodeURIComponent(assistantId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   getProAutomations: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; automations: AutomationRule[]; error?: string }>('/api/pro/automations', opts),
   createProAutomation: (

@@ -14,19 +14,67 @@ function Empty({ label }: { label: string }) {
   return <div className="rounded-md border border-edge bg-panel-alt px-3 py-6 text-center text-sm text-fg-5">{label}</div>;
 }
 
-function splitAgents(value: string) {
-  return value.split(',').map(item => item.trim()).filter(Boolean);
+const FALLBACK_AGENTS = ['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'];
+const SCHEDULE_PRESETS = [
+  { value: 'one-time', label: 'One time' },
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'biweekly', label: 'Biweekly' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'custom', label: 'Custom' },
+];
+const defaultAssistantDraft = { name: '', responsibility: '', preferredAgents: [] as string[] };
+const defaultJobDraft = { prompt: '', scheduleType: 'one-time', customSchedule: '', assistantId: '' };
+
+function PixelAvatar({ seed, label }: { seed?: string; label: string }) {
+  const source = seed || label;
+  let hash = 0;
+  for (let i = 0; i < source.length; i += 1) hash = (hash * 31 + source.charCodeAt(i)) >>> 0;
+  const hue = hash % 360;
+  const cells = Array.from({ length: 25 }, (_, index) => {
+    const x = index % 5;
+    const y = Math.floor(index / 5);
+    const mirrorX = x > 2 ? 4 - x : x;
+    const bit = (hash >> ((mirrorX + y * 3) % 24)) & 1;
+    return bit || (x === 2 && y === 2);
+  });
+  return (
+    <div
+      className="grid h-10 w-10 shrink-0 grid-cols-5 gap-[2px] rounded-lg border border-edge bg-panel-alt p-1 shadow-inner"
+      style={{ backgroundColor: `hsl(${hue} 62% 92% / 0.55)` }}
+      aria-label={`${label} avatar`}
+    >
+      {cells.map((on, index) => (
+        <span
+          key={index}
+          className="rounded-[1px]"
+          style={{ backgroundColor: on ? `hsl(${hue} 68% 45%)` : `hsl(${hue} 34% 82% / 0.4)` }}
+        />
+      ))}
+    </div>
+  );
 }
 
-const defaultAssistantDraft = { name: '', responsibility: '', preferredAgents: 'codex,claude' };
+function scheduleLabel(draft: typeof defaultJobDraft) {
+  return draft.scheduleType === 'custom' ? draft.customSchedule.trim() : draft.scheduleType;
+}
 
 export function ProAssistantsSection() {
   const toast = useStore(s => s.toast);
+  const agentStatus = useStore(s => s.agentStatus);
   const [assistants, setAssistants] = useState<AgentAssistant[]>([]);
   const [editing, setEditing] = useState<AgentAssistant | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [draft, setDraft] = useState(defaultAssistantDraft);
   const [busy, setBusy] = useState(false);
+
+  const agentOptions = useMemo(() => {
+    const agents = agentStatus?.agents?.length ? agentStatus.agents : [];
+    const source = agents.length ? agents : FALLBACK_AGENTS.map(agent => ({ agent, label: agent, installed: true }));
+    return source
+      .filter(agent => agent.installed !== false)
+      .map(agent => ({ value: agent.agent, label: agent.label || agent.agent }));
+  }, [agentStatus]);
 
   const refresh = useCallback(async () => {
     const res = await api.getProAssistants();
@@ -46,7 +94,7 @@ export function ProAssistantsSection() {
     setDraft({
       name: assistant.name,
       responsibility: assistant.responsibility,
-      preferredAgents: assistant.preferredAgents.join(','),
+      preferredAgents: assistant.preferredAgents,
     });
     setModalOpen(true);
   }, []);
@@ -65,7 +113,7 @@ export function ProAssistantsSection() {
       const payload = {
         name: draft.name,
         responsibility: draft.responsibility,
-        preferredAgents: splitAgents(draft.preferredAgents),
+        preferredAgents: draft.preferredAgents,
       };
       const res = editing
         ? await api.updateProAssistant(editing.id, payload)
@@ -85,6 +133,35 @@ export function ProAssistantsSection() {
     }
   }, [busy, draft, editing, toast]);
 
+  const deleteAssistant = useCallback(async () => {
+    if (!editing || busy) return;
+    setBusy(true);
+    try {
+      const res = await api.deleteProAssistant(editing.id);
+      if (!res.ok) throw new Error(res.error || 'Failed to delete assistant');
+      setAssistants(prev => prev.filter(item => item.id !== editing.id));
+      setModalOpen(false);
+      setEditing(null);
+      setDraft(defaultAssistantDraft);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to delete assistant', false);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, editing, toast]);
+
+  const toggleDraftAgent = useCallback((agent: string) => {
+    setDraft(prev => {
+      const exists = prev.preferredAgents.includes(agent);
+      return {
+        ...prev,
+        preferredAgents: exists
+          ? prev.preferredAgents.filter(item => item !== agent)
+          : [...prev.preferredAgents, agent],
+      };
+    });
+  }, []);
+
   return (
     <section className="space-y-3 border-t border-edge pt-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -100,25 +177,23 @@ export function ProAssistantsSection() {
       {!assistants.length ? <Empty label="No assistants yet." /> : (
         <div className="grid gap-3 lg:grid-cols-2">
           {assistants.map(item => (
-            <button
+            <div
               key={item.id}
-              type="button"
-              onClick={() => openEdit(item)}
               className="rounded-lg border border-edge bg-panel p-3 text-left shadow-sm transition hover:border-edge-h hover:bg-panel-h"
             >
-              <div className="flex items-start justify-between gap-3">
+              <button type="button" onClick={() => openEdit(item)} className="flex w-full items-start gap-3 text-left">
+                <PixelAvatar seed={item.avatarSeed || item.id} label={item.name} />
                 <div className="min-w-0">
                   <div className="font-semibold text-fg">{item.name}</div>
                   <div className="mt-1 line-clamp-3 text-sm leading-relaxed text-fg-4">{item.responsibility}</div>
                 </div>
-                <span className="rounded border border-edge bg-control px-2 py-1 text-[11px] text-fg-5">Edit</span>
-              </div>
+              </button>
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {(item.preferredAgents.length ? item.preferredAgents : ['runtime default']).map(agent => (
                   <span key={agent} className="rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[11px] text-fg-5">{agent}</span>
                 ))}
               </div>
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -131,11 +206,32 @@ export function ProAssistantsSection() {
             value={draft.responsibility}
             onChange={event => setDraft(prev => ({ ...prev, responsibility: event.target.value }))}
             placeholder="Responsibility, boundaries, expected output, and when it should be used"
-            className="min-h-28 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+            className="min-h-40 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
           />
-          <Input value={draft.preferredAgents} onChange={event => setDraft(prev => ({ ...prev, preferredAgents: event.target.value }))} placeholder="codex,claude" />
+          <div className="rounded-md border border-edge bg-panel-alt p-2">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agents</div>
+            <div className="flex flex-wrap gap-2">
+              {agentOptions.map(agent => (
+                <label key={agent.value} className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-edge bg-control px-2 py-1 text-[12px] text-fg-3 transition hover:bg-control-h">
+                  <input
+                    type="checkbox"
+                    checked={draft.preferredAgents.includes(agent.value)}
+                    onChange={() => toggleDraftAgent(agent.value)}
+                    className="h-3.5 w-3.5"
+                  />
+                  {agent.label}
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
         <div className="mt-4 flex justify-end gap-2">
+          {editing && (
+            <Button variant="secondary" onClick={() => void deleteAssistant()} disabled={busy} className="text-red-500 hover:border-red-500/40 hover:bg-red-500/10">
+              Delete
+            </Button>
+          )}
+          <div className="min-w-0 flex-1" />
           <Button variant="ghost" onClick={closeModal} disabled={busy}>Cancel</Button>
           <Button variant="primary" disabled={!draft.name.trim() || busy} onClick={() => void saveAssistant()}>
             {busy ? <Spinner /> : null}
@@ -152,7 +248,7 @@ export function ProAutomationSection() {
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? '');
   const [assistants, setAssistants] = useState<AgentAssistant[]>([]);
   const [jobs, setJobs] = useState<AutomationRule[]>([]);
-  const [draft, setDraft] = useState({ name: '', schedule: 'manual', prompt: '', agent: '', assistantId: '' });
+  const [draft, setDraft] = useState(defaultJobDraft);
   const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -168,27 +264,27 @@ export function ProAutomationSection() {
     .sort((a, b) => Date.parse(b.ranAt) - Date.parse(a.ranAt)), [jobs]);
 
   const createJob = useCallback(async () => {
-    if (!draft.name.trim() || !draft.prompt.trim() || busy) return;
+    const schedule = scheduleLabel(draft);
+    if (!draft.prompt.trim() || !draft.assistantId || !schedule || busy) return;
     setBusy('create');
     try {
       const res = await api.createProAutomation({
-        name: draft.name,
-        schedule: draft.schedule,
+        name: '',
+        schedule,
         prompt: draft.prompt,
         workdir: runtimeWorkdir,
-        agent: draft.agent || null,
-        assistantId: draft.assistantId || null,
+        assistantId: draft.assistantId,
       });
       if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to create job');
       setJobs(prev => [res.automation!, ...prev]);
-      setDraft({ name: '', schedule: 'manual', prompt: '', agent: '', assistantId: '' });
+      setDraft({ ...defaultJobDraft, assistantId: assistants[0]?.id || '' });
       setCreateOpen(false);
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to create job', false);
     } finally {
       setBusy(null);
     }
-  }, [busy, draft, runtimeWorkdir, toast]);
+  }, [assistants, busy, draft, runtimeWorkdir, toast]);
 
   const runJob = useCallback(async (job: AutomationRule) => {
     setBusy(job.id);
@@ -213,7 +309,16 @@ export function ProAutomationSection() {
             Assistant-owned scheduled jobs. Configure what should run, then review execution history separately.
           </div>
         </div>
-        <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>Create job</Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => {
+            setDraft({ ...defaultJobDraft, assistantId: assistants[0]?.id || '' });
+            setCreateOpen(true);
+          }}
+        >
+          Create job
+        </Button>
       </div>
 
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
@@ -262,30 +367,28 @@ export function ProAutomationSection() {
       <Modal open={createOpen} onClose={() => setCreateOpen(false)}>
         <ModalHeader title="Create automation job" onClose={() => setCreateOpen(false)} />
         <div className="space-y-3">
-          <div className="grid gap-2 md:grid-cols-[1fr_150px]">
-            <Input value={draft.name} onChange={event => setDraft(prev => ({ ...prev, name: event.target.value }))} placeholder="Job name" />
-            <Input value={draft.schedule} onChange={event => setDraft(prev => ({ ...prev, schedule: event.target.value }))} placeholder="manual / daily 9am" />
-          </div>
           <textarea
             value={draft.prompt}
             onChange={event => setDraft(prev => ({ ...prev, prompt: event.target.value }))}
-            placeholder="What should the assistant do when this job runs?"
-            className="min-h-28 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+            placeholder="What should the assistant do?"
+            className="min-h-32 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
           />
           <div className="grid gap-2 md:grid-cols-2">
-            <select value={draft.agent} onChange={event => setDraft(prev => ({ ...prev, agent: event.target.value }))} className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              <option value="">Runtime default agent</option>
-              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
-            </select>
             <select value={draft.assistantId} onChange={event => setDraft(prev => ({ ...prev, assistantId: event.target.value }))} className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              <option value="">No assistant binding</option>
+              <option value="">Select assistant</option>
               {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
             </select>
+            <select value={draft.scheduleType} onChange={event => setDraft(prev => ({ ...prev, scheduleType: event.target.value }))} className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              {SCHEDULE_PRESETS.map(preset => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
+            </select>
           </div>
+          {draft.scheduleType === 'custom' && (
+            <Input value={draft.customSchedule} onChange={event => setDraft(prev => ({ ...prev, customSchedule: event.target.value }))} placeholder="Custom schedule, e.g. every weekday at 9am" />
+          )}
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setCreateOpen(false)} disabled={busy === 'create'}>Cancel</Button>
-          <Button variant="primary" disabled={!draft.name.trim() || !draft.prompt.trim() || busy === 'create'} onClick={() => void createJob()}>
+          <Button variant="primary" disabled={!draft.prompt.trim() || !draft.assistantId || !scheduleLabel(draft) || busy === 'create'} onClick={() => void createJob()}>
             {busy === 'create' ? <Spinner /> : null}
             Create
           </Button>

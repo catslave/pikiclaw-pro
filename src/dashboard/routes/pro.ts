@@ -31,6 +31,7 @@ import {
   createAgentAssistant,
   createAutomationRule,
   createKnowledgeEntry,
+  deleteAgentAssistant,
   listAgentAssistants,
   listAutomationRules,
   listKnowledgeEntries,
@@ -171,6 +172,16 @@ app.patch('/api/pro/assistants/:assistantId', async (c) => {
       responsibility: body?.responsibility,
       preferredAgents: body?.preferredAgents,
     });
+    return c.json({ ok: true, assistant });
+  } catch (e: any) {
+    const status = e?.message === 'assistant not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/assistants/:assistantId', (c) => {
+  try {
+    const assistant = deleteAgentAssistant(c.req.param('assistantId'));
     return c.json({ ok: true, assistant });
   } catch (e: any) {
     const status = e?.message === 'assistant not found' ? 404 : 400;
