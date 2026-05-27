@@ -100,6 +100,19 @@ function PikiclawLogo() {
   );
 }
 
+function TodoGlyph({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M9 6h11" />
+      <path d="M9 12h11" />
+      <path d="M9 18h11" />
+      <path d="m4 6 .8.8L6.5 5" />
+      <path d="m4 12 .8.8 1.7-1.8" />
+      <path d="m4 18 .8.8 1.7-1.8" />
+    </svg>
+  );
+}
+
 function sideChatDisplayTitle(fallbackIndex: number, sideChatLabel: string): string {
   return `${sideChatLabel} ${fallbackIndex + 1}`;
 }
@@ -1149,7 +1162,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [quickTodoText, setQuickTodoText] = useState('');
   const [quickTodoSaving, setQuickTodoSaving] = useState(false);
-  const [todoPanelOpen, setTodoPanelOpen] = useState(true);
+  const [todoModalOpen, setTodoModalOpen] = useState(false);
   const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
   const [todoLoading, setTodoLoading] = useState(false);
   const [todoCreating, setTodoCreating] = useState(false);
@@ -3103,7 +3116,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       <div
         className={cn(
           'relative h-full shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out',
-          workspaceSidebarCollapsed ? 'w-8' : 'w-[280px]',
+          workspaceSidebarCollapsed ? 'w-10' : 'w-[280px]',
           focusedSlotIndex != null && 'pointer-events-none opacity-0',
         )}
       >
@@ -3111,7 +3124,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           type="button"
           onClick={() => setWorkspaceSidebarCollapsed(false)}
           className={cn(
-            'group absolute left-0 top-3 z-40 flex h-12 w-8 items-center justify-center overflow-hidden rounded-r-xl border border-l-0 border-edge/65 bg-panel/92 text-fg-5 shadow-[0_6px_18px_rgba(15,23,42,0.12)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-9 hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
+            'group absolute left-0 top-3 z-40 flex h-12 w-10 items-center justify-center overflow-hidden rounded-r-xl border border-l-0 border-edge/65 bg-panel/92 text-fg-5 shadow-[0_6px_18px_rgba(15,23,42,0.12)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-11 hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
             workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-150' : '-translate-x-2 opacity-0 pointer-events-none',
           )}
           title={t('hub.showWorkspaceSidebar')}
@@ -3120,6 +3133,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           <span className="-translate-x-1 rotate-[-13deg] scale-90 transition-transform duration-200 group-hover:translate-x-0 group-hover:rotate-0 group-hover:scale-100" aria-hidden="true">
             <PikiclawLogo />
           </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setQuickTodoOpen(true)}
+          className={cn(
+            'group absolute left-0 top-[68px] z-40 flex h-9 w-8 items-center justify-center overflow-hidden border border-l-0 border-edge/60 bg-panel/92 text-fg-5 shadow-[0_6px_16px_rgba(15,23,42,0.10)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-9 hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
+            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-200' : '-translate-x-2 opacity-0 pointer-events-none',
+          )}
+          style={{ borderTopRightRadius: 10, borderBottomRightRadius: 14, clipPath: 'polygon(0 0, 100% 8%, 100% 92%, 0 100%)' }}
+          title={t('todo.quickAdd')}
+          aria-label={t('todo.quickAdd')}
+        >
+          <TodoGlyph className="h-3.5 w-3.5 transition-transform duration-200 group-hover:scale-110" />
         </button>
       <div
         className={cn(
@@ -3170,6 +3196,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setTodoModalOpen(true)}
+              title={t('todo.workspaceTitle')}
+              aria-label={t('todo.workspaceTitle')}
+              className="relative h-8 w-8 shrink-0"
+            >
+              <TodoGlyph className="h-3.5 w-3.5" />
+              {todoItems.some(item => item.status === 'open') && (
+                <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_0_2px_var(--th-panel)]" />
+              )}
+            </Button>
           </div>
         </div>
 
@@ -3210,20 +3249,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   onWorkspaceDragEnd={handleWorkspaceDragEnd}
                   t={t}
                 />
-                {ws.path === runtimeWorkdir && (
-                  <WorkspaceTodoPanel
-                    items={todoItems}
-                    loading={todoLoading}
-                    creating={todoCreating}
-                    open={todoPanelOpen}
-                    onOpenChange={setTodoPanelOpen}
-                    onCreateTodo={() => setQuickTodoOpen(true)}
-                    onCreateChat={(id) => void handleCreateTodoChat([id])}
-                    onDelete={(id) => void handleDeleteTodo(id)}
-                    onRefresh={() => void refreshTodos()}
-                    t={t}
-                  />
-                )}
               </Fragment>
             ))
           )}
@@ -3264,9 +3289,22 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               ))}
             </div>
           ), document.body)}
+          {todoModalOpen && createPortal((
+            <TodoCenterModal
+              items={todoItems}
+              loading={todoLoading}
+              creating={todoCreating}
+              onClose={() => setTodoModalOpen(false)}
+              onCreateTodo={() => setQuickTodoOpen(true)}
+              onCreateChat={(ids) => void handleCreateTodoChat(ids)}
+              onDelete={(id) => void handleDeleteTodo(id)}
+              onRefresh={() => void refreshTodos()}
+              t={t}
+            />
+          ), document.body)}
           {quickTodoOpen && createPortal((
             <div
-              className="fixed inset-0 z-[230] flex items-start justify-center bg-black/20 px-4 pt-24 backdrop-blur-[2px]"
+              className="fixed inset-0 z-[240] flex items-center justify-center bg-black/20 px-4 py-10 backdrop-blur-[2px]"
               onMouseDown={() => setQuickTodoOpen(false)}
             >
               <div
@@ -4661,12 +4699,11 @@ function DashboardCreateTaskModal({
   );
 }
 
-function WorkspaceTodoPanel({
+function TodoCenterModal({
   items,
   loading,
   creating,
-  open,
-  onOpenChange,
+  onClose,
   onCreateTodo,
   onCreateChat,
   onDelete,
@@ -4676,72 +4713,112 @@ function WorkspaceTodoPanel({
   items: TodoItem[];
   loading: boolean;
   creating: boolean;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
   onCreateTodo: () => void;
-  onCreateChat: (todoId: string) => void;
+  onCreateChat: (todoIds: string[]) => void;
   onDelete: (todoId: string) => void;
   onRefresh: () => void;
   t: (key: string) => string;
 }) {
-  const [menu, setMenu] = useState<null | { kind: 'group' | 'item'; itemId?: string; anchor: DOMRect }>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [menu, setMenu] = useState<null | { itemId: string; anchor: DOMRect }>(null);
   const activeItems = items.filter(item => item.status === 'open' || item.status === 'chat-created');
   const closeMenu = useCallback(() => setMenu(null), []);
-  const openMenu = useCallback((kind: 'group' | 'item', event: ReactMouseEvent<HTMLButtonElement>, itemId?: string) => {
+  const openMenu = useCallback((event: ReactMouseEvent<HTMLButtonElement>, itemId: string) => {
     event.stopPropagation();
-    setMenu({ kind, itemId, anchor: event.currentTarget.getBoundingClientRect() });
+    setMenu({ itemId, anchor: event.currentTarget.getBoundingClientRect() });
   }, []);
   const runMenuAction = useCallback((action: () => void) => {
     closeMenu();
     action();
   }, [closeMenu]);
+  const toggleSelected = useCallback((todoId: string) => {
+    setSelectedIds(prev => prev.includes(todoId) ? prev.filter(id => id !== todoId) : [...prev, todoId]);
+  }, []);
+  const selectedActiveIds = selectedIds.filter(id => activeItems.some(item => item.id === id));
+  const startChatIds = selectedActiveIds.length ? selectedActiveIds : activeItems.slice(0, 1).map(item => item.id);
 
   return (
-    <div className="border-y border-edge/20 bg-panel/45">
-      <div className="group flex w-full items-center gap-2 px-3 py-2 transition hover:bg-panel-h/60">
-        <button
-          type="button"
-          onClick={() => onOpenChange(!open)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={cn('text-fg-5 transition-transform', open && 'rotate-90')} aria-hidden="true">
-            <path d="m9 18 6-6-6-6" />
-          </svg>
-          <div className="min-w-0 flex-1 text-[12px] font-semibold text-fg-3">{t('todo.workspaceTitle')}</div>
-        </button>
-        <Badge variant="muted" className="h-5 px-1.5 text-[10px]">{activeItems.length}</Badge>
-        <button
-          type="button"
-          onClick={event => openMenu('group', event)}
-          className="inline-flex h-6 w-6 items-center justify-center rounded text-fg-5 opacity-70 transition hover:bg-panel-h hover:text-fg group-hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
-          aria-label={t('session.openActions')}
-          aria-haspopup="menu"
-        >
-          ...
-        </button>
-      </div>
-      {open && (
-        <div className="px-3 pb-3">
-          <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
+    <div className="fixed inset-0 z-[230] flex items-center justify-center bg-black/24 px-4 py-8 backdrop-blur-[2px]" onMouseDown={onClose}>
+      <div
+        className="flex max-h-[min(720px,calc(100vh-64px))] w-full max-w-[720px] flex-col overflow-hidden rounded-2xl border border-edge-h bg-panel shadow-[0_24px_72px_rgba(15,23,42,0.24)]"
+        onMouseDown={event => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('todo.workspaceTitle')}
+      >
+        <div className="shrink-0 border-b border-edge/45 px-4 py-3">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-edge bg-panel-alt text-fg-3">
+              <TodoGlyph className="h-4 w-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <div className="text-[15px] font-semibold text-fg">{t('todo.workspaceTitle')}</div>
+                <Badge variant="muted" className="h-5 px-1.5 text-[10px]">{activeItems.length}</Badge>
+              </div>
+              <div className="mt-0.5 text-[12px] text-fg-5">{t('todo.modalSubtitle')}</div>
+            </div>
+            <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-fg-5 transition hover:bg-panel-h hover:text-fg" aria-label={t('common.close')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={onRefresh} disabled={loading}>
+              {loading ? <Spinner className="h-3 w-3" /> : null}
+              {t('hub.refresh')}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={onCreateTodo}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              {t('todo.createTodo')}
+            </Button>
+            <Button variant="primary" size="sm" disabled={!startChatIds.length || creating} onClick={() => onCreateChat(startChatIds)}>
+              {creating ? <Spinner className="h-3 w-3" /> : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+                </svg>
+              )}
+              {selectedActiveIds.length > 1 ? t('todo.startSelectedChat') : t('todo.createChat')}
+            </Button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <div className="space-y-2">
             {loading && !activeItems.length ? (
-              <div className="flex h-16 items-center justify-center"><Spinner className="h-3.5 w-3.5 text-fg-5" /></div>
+              <div className="flex h-32 items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>
             ) : activeItems.length === 0 ? (
-              <div className="rounded-md border border-dashed border-edge/45 px-2 py-4 text-center text-[11px] text-fg-5">{t('todo.empty')}</div>
+              <div className="rounded-xl border border-dashed border-edge/45 px-4 py-12 text-center text-[13px] text-fg-5">{t('todo.empty')}</div>
             ) : activeItems.map(item => (
-              <div key={item.id} className="group rounded-md border border-edge/45 bg-panel-alt/55 px-2 py-1.5 transition hover:border-edge/80 hover:bg-panel-alt">
-                <div className="flex items-start gap-2">
+              <div key={item.id} className={cn(
+                'group rounded-lg border px-3 py-2.5 transition hover:border-edge/80 hover:bg-panel-alt',
+                selectedIds.includes(item.id) ? 'border-primary/45 bg-primary/5' : 'border-edge/45 bg-panel-alt/55',
+              )}>
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(item.id)}
+                    onChange={() => toggleSelected(item.id)}
+                    className="mt-1 h-4 w-4 shrink-0 rounded border-edge"
+                    aria-label={item.title}
+                  />
                   <div className="min-w-0 flex-1 text-left">
-                    <div className="truncate text-[12px] font-medium text-fg-3 group-hover:text-fg">{item.title}</div>
-                    {item.source?.quote && <div className="mt-1 line-clamp-2 rounded bg-inset px-1.5 py-1 text-[10px] leading-relaxed text-fg-5">{item.source.quote}</div>}
-                    <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-fg-5">
+                    <div className="truncate text-[13px] font-medium text-fg-3 group-hover:text-fg">{item.title}</div>
+                    {item.source?.quote && <div className="mt-1.5 line-clamp-3 rounded-md bg-inset px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">{item.source.quote}</div>}
+                    <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-fg-5">
                       <span>{item.kind}</span>
                       <span>{item.status}</span>
+                      <span>{fmtRelative(item.createdAt || item.updatedAt)}</span>
                     </div>
                   </div>
                   <button
                     type="button"
-                    onClick={event => openMenu('item', event, item.id)}
-                    className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5 opacity-0 transition hover:bg-panel-h hover:text-fg group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+                    onClick={event => openMenu(event, item.id)}
+                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-5 opacity-70 transition hover:bg-panel-h hover:text-fg group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
                     aria-label={t('session.openActions')}
                     aria-haspopup="menu"
                   >
@@ -4752,51 +4829,28 @@ function WorkspaceTodoPanel({
             ))}
           </div>
         </div>
-      )}
+      </div>
+
       {menu && (() => {
         const MENU_WIDTH = 156;
         const left = Math.max(8, Math.min(menu.anchor.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
         const top = Math.min(menu.anchor.bottom + 4, window.innerHeight - 96);
         return createPortal((
-          <div
-            className="fixed z-[220] min-w-[156px] rounded-md border border-edge bg-panel/95 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.18),0_2px_6px_rgba(0,0,0,0.10)] backdrop-blur-md"
-            style={{ left, top }}
-            onMouseDown={event => event.stopPropagation()}
-            role="menu"
-          >
-            {menu.kind === 'group' ? (
-              <>
-                <button type="button" role="menuitem" onClick={() => runMenuAction(onCreateTodo)} className={menuItemClass('primary')}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
-                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                  </svg>
-                  {t('todo.createTodo')}
-                </button>
-                <button type="button" role="menuitem" onClick={() => runMenuAction(onRefresh)} className={menuItemClass()}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0">
-                    <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                  </svg>
-                  {loading ? <Spinner className="h-3 w-3" /> : t('hub.refresh')}
-                </button>
-              </>
-            ) : (
-              <>
-                <button type="button" role="menuitem" disabled={creating} onClick={() => menu.itemId && runMenuAction(() => onCreateChat(menu.itemId!))} className={cn(menuItemClass('primary'), 'disabled:cursor-not-allowed disabled:opacity-45')}>
-                  {creating ? <Spinner className="h-3 w-3" /> : (
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                      <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
-                    </svg>
-                  )}
-                  {t('todo.createChat')}
-                </button>
-                <button type="button" role="menuitem" onClick={() => menu.itemId && runMenuAction(() => onDelete(menu.itemId!))} className={menuItemClass('danger')}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                    <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
-                  </svg>
-                  {t('todo.delete')}
-                </button>
-              </>
-            )}
+          <div className="fixed z-[250] min-w-[156px] rounded-md border border-edge bg-panel/95 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.18),0_2px_6px_rgba(0,0,0,0.10)] backdrop-blur-md" style={{ left, top }} onMouseDown={event => event.stopPropagation()} role="menu">
+            <button type="button" role="menuitem" disabled={creating} onClick={() => runMenuAction(() => onCreateChat([menu.itemId]))} className={cn(menuItemClass('primary'), 'disabled:cursor-not-allowed disabled:opacity-45')}>
+              {creating ? <Spinner className="h-3 w-3" /> : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+                </svg>
+              )}
+              {t('todo.createChat')}
+            </button>
+            <button type="button" role="menuitem" onClick={() => runMenuAction(() => onDelete(menu.itemId))} className={menuItemClass('danger')}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+              </svg>
+              {t('todo.delete')}
+            </button>
           </div>
         ), document.body);
       })()}
