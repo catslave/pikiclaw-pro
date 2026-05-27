@@ -521,15 +521,11 @@ export function JiraTab() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
   const [draft, setDraft] = useState({ sprint: '' });
-  const [syncDraft, setSyncDraft] = useState('');
-  const [remoteSync, setRemoteSync] = useState({ baseUrl: '', email: '', token: '', jql: 'assignee = currentUser() ORDER BY updated DESC' });
   const [selectedSprint, setSelectedSprint] = useState<string>('all');
   const [verifyDraft, setVerifyDraft] = useState({ environment: 'cnlab03', url: '', notes: '' });
   const [subtaskDraft, setSubtaskDraft] = useState({ title: '', description: '', assignedAgent: '', assistantId: '' });
-  const canSync = !!syncDraft.trim() || !!(remoteSync.baseUrl.trim() && remoteSync.token.trim());
 
   const sprintOptions = useMemo(() => {
     return Array.from(new Set(tasks.map(task => task.sprint).filter((sprint): sprint is string => !!sprint))).sort();
@@ -605,52 +601,6 @@ export function JiraTab() {
       setCreating(false);
     }
   }, [draft, state?.runtimeWorkdir, toast, upsertTask]);
-
-  const syncTasks = useCallback(async () => {
-    const raw = syncDraft.trim();
-    const hasRemote = remoteSync.baseUrl.trim() && remoteSync.token.trim();
-    if (!raw && !hasRemote) return;
-    setSyncing(true);
-    try {
-      let result: { ok: boolean; tasks?: ProTask[]; error?: string };
-      if (hasRemote) {
-        result = await api.syncJiraFromRemote({
-          ...remoteSync,
-          sprint: draft.sprint,
-          workdir: state?.runtimeWorkdir,
-        });
-      } else {
-        let issues: Array<{ title: string; description?: string; jiraKey?: string; jiraUrl?: string; sprint?: string; issueType?: string; workdir?: string }>;
-        if (raw.startsWith('[') || raw.startsWith('{')) {
-          const parsed = JSON.parse(raw);
-          issues = Array.isArray(parsed) ? parsed : [parsed];
-        } else {
-          issues = raw.split('\n')
-            .map(line => line.trim())
-            .filter(Boolean)
-            .map(line => {
-              const match = line.match(/^([A-Z][A-Z0-9]+-\d+)\s+(.+)$/);
-              return match
-                ? { jiraKey: match[1], title: match[2], sprint: draft.sprint, workdir: state?.runtimeWorkdir }
-                : { title: line, sprint: draft.sprint, workdir: state?.runtimeWorkdir };
-            });
-        }
-        result = await api.syncJiraTasks(issues);
-      }
-      if (!result.ok || !result.tasks) throw new Error(result.error || 'Failed to sync Jira tasks');
-      setTasks(prev => {
-        const byId = new Map(prev.map(task => [task.id, task] as const));
-        for (const task of result.tasks || []) byId.set(task.id, task);
-        return [...byId.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-      });
-      setSelectedId(result.tasks[0]?.id || selectedId);
-      toast(`Synced ${result.tasks.length} Jira task${result.tasks.length === 1 ? '' : 's'}`);
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Failed to sync Jira tasks', false);
-    } finally {
-      setSyncing(false);
-    }
-  }, [draft.sprint, remoteSync, selectedId, state?.runtimeWorkdir, syncDraft, toast]);
 
   const updateStatus = useCallback(async (task: ProTask, status: ProTaskStatus) => {
     try {
@@ -759,31 +709,6 @@ export function JiraTab() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-md border border-edge bg-panel px-4 py-3">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Jira Sync MVP</div>
-            <div className="mt-1 text-[12px] text-fg-4">Paste JSON issues or one line per ticket, for example: IVAS-1234 Fix greeting timeout.</div>
-          </div>
-          <Button variant="secondary" disabled={!canSync || syncing} onClick={syncTasks}>
-            {syncing ? <Spinner /> : null}
-            Sync
-          </Button>
-        </div>
-        <div className="mb-2 grid gap-2 lg:grid-cols-[minmax(0,1fr)_160px_180px_minmax(0,1.2fr)]">
-          <Input value={remoteSync.baseUrl} onChange={event => setRemoteSync(prev => ({ ...prev, baseUrl: event.target.value }))} placeholder="Jira base URL" />
-          <Input value={remoteSync.email} onChange={event => setRemoteSync(prev => ({ ...prev, email: event.target.value }))} placeholder="Email (Cloud)" />
-          <Input value={remoteSync.token} onChange={event => setRemoteSync(prev => ({ ...prev, token: event.target.value }))} placeholder="Token" type="password" />
-          <Input value={remoteSync.jql} onChange={event => setRemoteSync(prev => ({ ...prev, jql: event.target.value }))} placeholder="JQL" />
-        </div>
-        <textarea
-          value={syncDraft}
-          onChange={event => setSyncDraft(event.target.value)}
-          placeholder={'IVAS-1234 Fix greeting timeout\\nIVAS-1235 Analyze timeout boundary'}
-          className="min-h-20 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[12px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
-        />
-      </div>
-
       <div className="rounded-md border border-edge bg-panel px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="mr-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Sprint View</div>
