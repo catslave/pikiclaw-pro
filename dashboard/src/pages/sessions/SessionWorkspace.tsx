@@ -23,7 +23,7 @@ import {
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
-import type { AppState, SessionInfo, WorkspaceEntry, DirEntry, GitChange, OpenTarget } from '../../types';
+import type { AppState, SessionInfo, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget } from '../../types';
 import { InputComposer } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
@@ -531,6 +531,13 @@ function targetLabelKey(target: OpenTarget) {
     default:
       return 'hub.openTargetVsCode';
   }
+}
+
+function parseSessionKeyValue(sessionKey: string | null | undefined): { agent: string; sessionId: string } | null {
+  if (!sessionKey) return null;
+  const index = sessionKey.indexOf(':');
+  if (index <= 0 || index >= sessionKey.length - 1) return null;
+  return { agent: sessionKey.slice(0, index), sessionId: sessionKey.slice(index + 1) };
 }
 
 function statusTimestampMs(session: SessionInfo): number | null {
@@ -1120,7 +1127,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const workspaceSettingsItems = useMemo(() => [
     { to: '/', label: t('tab.sessions') },
     { to: '/dashboard', label: t('tab.dashboard') },
-    { to: '/inbox', label: t('tab.inbox') },
     { to: '/usage', label: t('tab.usage') },
     { to: '/im', label: t('tab.im') },
     { to: '/agents', label: t('tab.agent') },
@@ -1144,6 +1150,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [quickTodoText, setQuickTodoText] = useState('');
   const [quickTodoSaving, setQuickTodoSaving] = useState(false);
+  const [todoPanelOpen, setTodoPanelOpen] = useState(true);
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
+  const [todoSelected, setTodoSelected] = useState<Set<string>>(new Set());
+  const [todoPrompt, setTodoPrompt] = useState('');
+  const [todoLoading, setTodoLoading] = useState(false);
+  const [todoCreating, setTodoCreating] = useState(false);
   const deferredSearch = useDeferredValue(search);
   const initializedRef = useRef(false);
   const inflightLoadsRef = useRef<Record<string, boolean>>({});
@@ -1976,6 +1988,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [newSessionPendingImageUrls, setNewSessionPendingImageUrls] = useState<string[]>([]);
   const [newSessionPendingCreatedAt, setNewSessionPendingCreatedAt] = useState<string | null>(null);
 
+  const refreshTodos = useCallback(async () => {
+    setTodoLoading(true);
+    try {
+      const res = await api.getProTodos();
+      if (!res.ok) throw new Error(res.error || 'Failed to load todos');
+      setTodoItems(res.items || []);
+    } catch (err: any) {
+      toastSession(err?.message || 'Failed to load todos', false);
+    } finally {
+      setTodoLoading(false);
+    }
+  }, [toastSession]);
+
+  useEffect(() => {
+    if (active) void refreshTodos();
+  }, [active, refreshTodos]);
+
   const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
     const createdAt = pendingCreatedAt || new Date().toISOString();
@@ -2020,6 +2049,39 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setShowNewSession(wsPath);
     setActiveSlotIndex(openSessionsRef.current.length);
   }, [setActiveSlotIndex, setShowNewSession]);
+
+  const handleCreateTodoChat = useCallback(async (todoIds: string[]) => {
+    const ids = Array.from(new Set(todoIds.filter(Boolean)));
+    if (!ids.length || todoCreating) return;
+    setTodoCreating(true);
+    try {
+      const res = await api.createProTodoChat({
+        todoIds: ids,
+        prompt: todoPrompt,
+        workdir: todoItems.find(item => ids.includes(item.id) && item.source?.workdir)?.source?.workdir || runtimeWorkdir,
+      });
+      if (!res.ok) throw new Error(res.error || 'Failed to create todo chat');
+      if (res.items) setTodoItems(res.items.concat(todoItems.filter(item => !res.items?.some(updated => updated.id === item.id))));
+      const session = parseSessionKeyValue(res.queued?.sessionKey);
+      if (session) {
+        const workdir = todoItems.find(item => ids.includes(item.id) && item.source?.workdir)?.source?.workdir || runtimeWorkdir;
+        handleNewSessionCreated(
+          { agent: session.agent, sessionId: session.sessionId, workdir },
+          todoPrompt || undefined,
+          undefined,
+          new Date().toISOString(),
+        );
+      }
+      setTodoSelected(new Set());
+      setTodoPrompt('');
+      toastSession(t('todo.chatCreated'));
+      void refreshTodos();
+    } catch (err: any) {
+      toastSession(err?.message || 'Failed to create todo chat', false);
+    } finally {
+      setTodoCreating(false);
+    }
+  }, [handleNewSessionCreated, refreshTodos, runtimeWorkdir, t, toastSession, todoCreating, todoItems, todoPrompt]);
 
   const markSessionReadOnOpen = useCallback((session: SessionInfo, workdir: string) => {
     const agent = session.agent || '';
@@ -2293,7 +2355,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
     if (!result.ok) throw new Error(result.error || t('session.todoSaveFailed'));
     toastSession(t('session.todoSaved'));
-  }, [t, toastSession]);
+    void refreshTodos();
+  }, [refreshTodos, t, toastSession]);
 
   const handleCreateReviewCommentFromSelection = useCallback(async (slot: SessionSlot, request: SelectionActionRequest) => {
     if (!request.quote.trim() || !request.note.trim()) return;
@@ -2331,12 +2394,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setQuickTodoText('');
       setQuickTodoOpen(false);
       toastSession(t('session.todoSaved'));
+      void refreshTodos();
     } catch (e: any) {
       toastSession(e?.message || t('session.todoSaveFailed'));
     } finally {
       setQuickTodoSaving(false);
     }
-  }, [quickTodoSaving, quickTodoText, runtimeWorkdir, t, toastSession]);
+  }, [quickTodoSaving, quickTodoText, refreshTodos, runtimeWorkdir, t, toastSession]);
 
   const handleDeleteSideChat = useCallback(async (parentSlot: SessionSlot, sideSlot: SessionSlot) => {
     if (!sideSlot.agent || !sideSlot.sessionId) return;
@@ -3156,6 +3220,21 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             ))
           )}
         </div>
+
+        <WorkspaceTodoPanel
+          items={todoItems}
+          selected={todoSelected}
+          prompt={todoPrompt}
+          loading={todoLoading}
+          creating={todoCreating}
+          open={todoPanelOpen}
+          onOpenChange={setTodoPanelOpen}
+          onSelectedChange={setTodoSelected}
+          onPromptChange={setTodoPrompt}
+          onCreateChat={(ids) => void handleCreateTodoChat(ids)}
+          onRefresh={() => void refreshTodos()}
+          t={t}
+        />
 
         {/* Footer */}
         <div className="relative shrink-0 border-t border-edge/20 px-3 py-2">
@@ -4586,6 +4665,106 @@ function DashboardCreateTaskModal({
         </div>
       </div>
     </>
+  );
+}
+
+function WorkspaceTodoPanel({
+  items,
+  selected,
+  prompt,
+  loading,
+  creating,
+  open,
+  onOpenChange,
+  onSelectedChange,
+  onPromptChange,
+  onCreateChat,
+  onRefresh,
+  t,
+}: {
+  items: TodoItem[];
+  selected: Set<string>;
+  prompt: string;
+  loading: boolean;
+  creating: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSelectedChange: (next: Set<string>) => void;
+  onPromptChange: (value: string) => void;
+  onCreateChat: (todoIds: string[]) => void;
+  onRefresh: () => void;
+  t: (key: string) => string;
+}) {
+  const activeItems = items.filter(item => item.status === 'open' || item.status === 'chat-created');
+  const selectedCount = selected.size;
+  const toggleItem = useCallback((id: string, checked: boolean) => {
+    onSelectedChange(new Set(checked ? [...selected, id] : [...selected].filter(item => item !== id)));
+  }, [onSelectedChange, selected]);
+
+  return (
+    <div className="border-t border-edge/20 bg-panel/70">
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-panel-h/60"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={cn('text-fg-5 transition-transform', open && 'rotate-90')} aria-hidden="true">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
+        <div className="min-w-0 flex-1 text-[12px] font-semibold text-fg-3">{t('todo.workspaceTitle')}</div>
+        <Badge variant="muted" className="h-5 px-1.5 text-[10px]">{activeItems.length}</Badge>
+      </button>
+      {open && (
+        <div className="space-y-2 px-3 pb-3">
+          <div className="flex gap-1.5">
+            <input
+              value={prompt}
+              onChange={event => onPromptChange(event.target.value)}
+              placeholder={t('todo.chatPromptPlaceholder')}
+              className="min-w-0 flex-1 rounded-md border border-control-border bg-control px-2 py-1 text-[11px] text-fg outline-none transition placeholder:text-fg-5/45 focus:border-control-border-h focus:bg-control-h"
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!selectedCount || creating}
+              onClick={() => onCreateChat([...selected])}
+            >
+              {creating ? <Spinner /> : null}
+              {t('todo.createChat')} {selectedCount ? `(${selectedCount})` : ''}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={loading} onClick={onRefresh}>
+              {loading ? <Spinner /> : null}
+            </Button>
+          </div>
+          <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
+            {loading && !activeItems.length ? (
+              <div className="flex h-16 items-center justify-center"><Spinner className="h-3.5 w-3.5 text-fg-5" /></div>
+            ) : activeItems.length === 0 ? (
+              <div className="rounded-md border border-dashed border-edge/45 px-2 py-4 text-center text-[11px] text-fg-5">{t('todo.empty')}</div>
+            ) : activeItems.map(item => (
+              <div key={item.id} className="group rounded-md border border-edge/45 bg-panel-alt/55 px-2 py-1.5">
+                <div className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.id)}
+                    onChange={event => toggleItem(item.id, event.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <button type="button" onClick={() => onCreateChat([item.id])} className="min-w-0 flex-1 text-left">
+                    <div className="truncate text-[12px] font-medium text-fg-3 group-hover:text-fg">{item.title}</div>
+                    {item.source?.quote && <div className="mt-1 line-clamp-2 rounded bg-inset px-1.5 py-1 text-[10px] leading-relaxed text-fg-5">{item.source.quote}</div>}
+                    <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-fg-5">
+                      <span>{item.kind}</span>
+                      <span>{item.status}</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
