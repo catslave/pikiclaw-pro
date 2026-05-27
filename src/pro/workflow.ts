@@ -35,6 +35,30 @@ export interface AutomationRule {
   }>;
 }
 
+export interface JiraSyncRunEvent {
+  id: string;
+  at: string;
+  label: string;
+  detail?: string;
+}
+
+export interface JiraSyncRun {
+  id: string;
+  status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed';
+  assistantId?: string;
+  assistantName?: string;
+  agent?: string;
+  workdir?: string;
+  sessionKey?: string;
+  ticketCount?: number;
+  taskCount?: number;
+  error?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  events: JiraSyncRunEvent[];
+}
+
 export interface KnowledgeEntry {
   id: string;
   title: string;
@@ -65,6 +89,7 @@ interface WorkflowFile {
   assistants: AgentAssistant[];
   deletedAssistantIds?: string[];
   automations: AutomationRule[];
+  jiraSyncRuns?: JiraSyncRun[];
   knowledge: KnowledgeEntry[];
   jira?: JiraWorkflowConfig;
 }
@@ -146,11 +171,12 @@ function readFile(): WorkflowFile {
       assistants: Array.isArray(parsed?.assistants) ? parsed.assistants.filter(item => item?.id && item?.name) : [],
       deletedAssistantIds: Array.isArray(parsed?.deletedAssistantIds) ? parsed.deletedAssistantIds.map(String).filter(Boolean) : [],
       automations: Array.isArray(parsed?.automations) ? parsed.automations.filter(item => item?.id && item?.name) : [],
+      jiraSyncRuns: Array.isArray(parsed?.jiraSyncRuns) ? parsed.jiraSyncRuns.filter(item => item?.id) : [],
       knowledge: Array.isArray(parsed?.knowledge) ? parsed.knowledge.filter(item => item?.id && item?.title) : [],
       jira: parsed?.jira && typeof parsed.jira === 'object' ? parsed.jira : undefined,
     };
   } catch {
-    return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], knowledge: [] };
+    return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], jiraSyncRuns: [], knowledge: [] };
   }
 }
 
@@ -344,6 +370,65 @@ export function markAutomationRun(id: string, sessionKey: string | undefined): A
   rule.updatedAt = now;
   writeFile(file);
   return rule;
+}
+
+export function createJiraSyncRun(input: { assistantId?: unknown; assistantName?: unknown; agent?: unknown; workdir?: unknown }): JiraSyncRun {
+  const now = new Date().toISOString();
+  const run: JiraSyncRun = {
+    id: newId('jira_sync'),
+    status: 'starting',
+    assistantId: normalizeText(input.assistantId, 160) || undefined,
+    assistantName: normalizeText(input.assistantName, 160) || undefined,
+    agent: normalizeText(input.agent, 80) || undefined,
+    workdir: normalizeText(input.workdir, 2048) || undefined,
+    startedAt: now,
+    updatedAt: now,
+    events: [{ id: newId('event'), at: now, label: 'Sync requested', detail: 'Preparing Jira MCP sync run.' }],
+  };
+  const file = readFile();
+  file.jiraSyncRuns = [run, ...(file.jiraSyncRuns || [])].slice(0, 50);
+  writeFile(file);
+  return run;
+}
+
+export function listJiraSyncRuns(): JiraSyncRun[] {
+  return [...(readFile().jiraSyncRuns || [])].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function getJiraSyncRun(id: string): JiraSyncRun | undefined {
+  const runId = normalizeText(id, 160);
+  return (readFile().jiraSyncRuns || []).find(run => run.id === runId);
+}
+
+export function updateJiraSyncRun(id: string, patch: Partial<Omit<JiraSyncRun, 'id' | 'startedAt' | 'events'>> & { event?: { label: unknown; detail?: unknown } }): JiraSyncRun {
+  const runId = normalizeText(id, 160);
+  const file = readFile();
+  const run = (file.jiraSyncRuns || []).find(item => item.id === runId);
+  if (!run) throw new Error('jira sync run not found');
+  const now = new Date().toISOString();
+  if (patch.status) run.status = patch.status;
+  if (patch.assistantId !== undefined) run.assistantId = normalizeText(patch.assistantId, 160) || undefined;
+  if (patch.assistantName !== undefined) run.assistantName = normalizeText(patch.assistantName, 160) || undefined;
+  if (patch.agent !== undefined) run.agent = normalizeText(patch.agent, 80) || undefined;
+  if (patch.workdir !== undefined) run.workdir = normalizeText(patch.workdir, 2048) || undefined;
+  if (patch.sessionKey !== undefined) run.sessionKey = normalizeText(patch.sessionKey, 240) || undefined;
+  if (typeof patch.ticketCount === 'number') run.ticketCount = Math.max(0, Math.floor(patch.ticketCount));
+  if (typeof patch.taskCount === 'number') run.taskCount = Math.max(0, Math.floor(patch.taskCount));
+  if (patch.error !== undefined) run.error = normalizeText(patch.error, 2000) || undefined;
+  if (patch.status === 'completed' || patch.status === 'failed') run.completedAt = now;
+  const label = normalizeText(patch.event?.label, 240);
+  if (label) {
+    run.events.push({
+      id: newId('event'),
+      at: now,
+      label,
+      detail: normalizeText(patch.event?.detail, 2000) || undefined,
+    });
+  }
+  run.updatedAt = now;
+  file.jiraSyncRuns = [run, ...(file.jiraSyncRuns || []).filter(item => item.id !== run.id)].slice(0, 50);
+  writeFile(file);
+  return run;
 }
 
 export function listKnowledgeEntries(): KnowledgeEntry[] {

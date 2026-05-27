@@ -1140,6 +1140,30 @@ export interface AutomationRule {
   }>;
 }
 
+export interface JiraSyncRunEvent {
+  id: string;
+  at: string;
+  label: string;
+  detail?: string;
+}
+
+export interface JiraSyncRun {
+  id: string;
+  status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed';
+  assistantId?: string;
+  assistantName?: string;
+  agent?: string;
+  workdir?: string;
+  sessionKey?: string;
+  ticketCount?: number;
+  taskCount?: number;
+  error?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  events: JiraSyncRunEvent[];
+}
+
 export interface KnowledgeEntry {
   id: string;
   title: string;

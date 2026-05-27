@@ -31,14 +31,18 @@ import { buildProUsageSummary } from '../../pro/usage-summary.js';
 import {
   createAgentAssistant,
   createAutomationRule,
+  createJiraSyncRun,
   createKnowledgeEntry,
   deleteAgentAssistant,
   getJiraWorkflowConfig,
+  getJiraSyncRun,
   listAgentAssistants,
   listAutomationRules,
+  listJiraSyncRuns,
   listKnowledgeEntries,
   markAutomationRun,
   updateAgentAssistant,
+  updateJiraSyncRun,
   updateJiraWorkflowConfig,
   upsertAutomationRuleByKey,
   type AgentAssistant,
@@ -72,32 +76,51 @@ function buildAssistantPrompt(prompt: string, assistant?: AgentAssistant): strin
   ].join('\n');
 }
 
-function buildJiraMcpSyncPrompt(): string {
+function buildJiraMcpSyncPrompt(runId?: string): string {
   return [
     'Sync Jira through the configured Jira/Atlassian MCP server.',
+    runId ? `Jira sync run id: ${runId}` : '',
     '',
     'Requirements:',
+    runId ? '- Immediately call `pikiclaw_pro_report_jira_sync_progress` with this runId before each visible step.' : '',
+    runId ? '- Report which Jira MCP tool/query you are using, how many tickets you found, and when task writing starts.' : '',
     '- Use the Jira MCP tools to find issues assigned to me and recently updated issues relevant to my active work.',
     '- After pulling Jira issues, call the `pikiclaw_pro_sync_jira_issues` MCP tool with an `issues` array so Pikiclaw creates or updates task cards.',
+    runId ? '- Include the same runId when calling `pikiclaw_pro_sync_jira_issues`.' : '',
     '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, and sprint when available.',
     '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint/status, and changed remote notes.',
     '- Append remote updates as new notes instead of overwriting existing local task context.',
     '- Mark newly assigned tickets and changed tickets clearly.',
     '- Summarize what was synced, what changed, and anything that needs manual attention.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 async function queueAutomationRule(rule: AutomationRule) {
   const config = loadUserConfig();
   const assistant = rule.assistantId ? listAgentAssistants().find(item => item.id === rule.assistantId) : undefined;
+  const agent = pickAssistantAgent(assistant, rule.agent);
+  const workdir = rule.workdir || runtime.getRequestWorkdir(config);
+  const syncRun = rule.key === JIRA_MCP_SYNC_AUTOMATION_KEY
+    ? createJiraSyncRun({ assistantId: rule.assistantId, assistantName: assistant?.name, agent, workdir })
+    : null;
+  if (syncRun) {
+    updateJiraSyncRun(syncRun.id, {
+      status: 'starting',
+      event: { label: 'Scheduled sync triggered', detail: `${rule.schedule} · ${assistant?.name || 'assistant'} · ${agent || runtime.getRuntimeDefaultAgent(config)}` },
+    });
+  }
   const queued = await queueDashboardSessionTask({
-    workdir: rule.workdir || runtime.getRequestWorkdir(config),
-    agent: pickAssistantAgent(assistant, rule.agent),
+    workdir,
+    agent,
     sessionId: '',
-    prompt: buildAssistantPrompt(rule.prompt, assistant),
+    prompt: buildAssistantPrompt(syncRun ? buildJiraMcpSyncPrompt(syncRun.id) : rule.prompt, assistant),
     attachments: [],
   });
-  if (!queued.ok) return { queued, updated: markAutomationRun(rule.id, undefined) };
+  if (!queued.ok) {
+    if (syncRun) updateJiraSyncRun(syncRun.id, { status: 'failed', error: queued.error, event: { label: 'Failed to start scheduled sync session', detail: queued.error } });
+    return { queued, updated: markAutomationRun(rule.id, undefined) };
+  }
+  if (syncRun) updateJiraSyncRun(syncRun.id, { status: 'queued', sessionKey: queued.sessionKey, event: { label: 'Scheduled agent session queued', detail: queued.sessionKey || queued.taskId || 'Queued' } });
   return { queued, updated: markAutomationRun(rule.id, queued.sessionKey) };
 }
 
@@ -394,21 +417,51 @@ app.post('/api/pro/jira/mcp-sync/run', async (c) => {
     const config = loadUserConfig();
     const assistantId = readString(body?.assistantId) || getJiraWorkflowConfig().ticketSyncAssistantId;
     const assistant = assistantId ? listAgentAssistants().find(item => item.id === assistantId) : undefined;
+    const agent = pickAssistantAgent(assistant, readString(body?.agent) || null);
+    const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
+    const run = createJiraSyncRun({ assistantId, assistantName: assistant?.name, agent, workdir });
+    updateJiraSyncRun(run.id, {
+      status: 'starting',
+      event: {
+        label: `Using ${assistant?.name || 'selected assistant'}`,
+        detail: `Agent: ${agent || runtime.getRuntimeDefaultAgent(config)} · Workdir: ${workdir}`,
+      },
+    });
     const queued = await queueDashboardSessionTask({
-      workdir: readString(body?.workdir) || runtime.getRequestWorkdir(config),
-      agent: pickAssistantAgent(assistant, readString(body?.agent) || null),
+      workdir,
+      agent,
       sessionId: '',
-      prompt: buildAssistantPrompt(buildJiraMcpSyncPrompt(), assistant),
+      prompt: buildAssistantPrompt(buildJiraMcpSyncPrompt(run.id), assistant),
       attachments: [],
     });
     if (!queued.ok) {
+      updateJiraSyncRun(run.id, {
+        status: 'failed',
+        error: queued.error,
+        event: { label: 'Failed to start sync session', detail: queued.error },
+      });
       const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
       return c.json(queued, statusCode);
     }
-    return c.json({ ok: true, queued });
+    const updated = updateJiraSyncRun(run.id, {
+      status: 'queued',
+      sessionKey: queued.sessionKey,
+      event: { label: 'Agent session queued', detail: queued.sessionKey || queued.taskId || 'Queued' },
+    });
+    return c.json({ ok: true, queued, run: updated });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
   }
+});
+
+app.get('/api/pro/jira/mcp-sync/runs', (c) => {
+  return c.json({ ok: true, runs: listJiraSyncRuns() });
+});
+
+app.get('/api/pro/jira/mcp-sync/runs/:runId', (c) => {
+  const run = getJiraSyncRun(c.req.param('runId'));
+  if (!run) return c.json({ ok: false, error: 'jira sync run not found' }, 404);
+  return c.json({ ok: true, run });
 });
 
 app.post('/api/pro/jira/mcp-sync/schedule', async (c) => {

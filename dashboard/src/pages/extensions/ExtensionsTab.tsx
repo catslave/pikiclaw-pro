@@ -19,6 +19,7 @@ import { useStore } from '../../store';
 import type {
   AgentAssistant,
   AutomationRule,
+  JiraSyncRun,
   CliCatalogItem,
   McpAuthSpec,
   McpCatalogItem,
@@ -562,6 +563,7 @@ function JiraSyncDialog({
   const [monthDay, setMonthDay] = useState('1');
   const [assistantId, setAssistantId] = useState('');
   const [busy, setBusy] = useState(false);
+  const [activeRun, setActiveRun] = useState<JiraSyncRun | null>(null);
 
   const refresh = useCallback(async () => {
     const [assistantRes, automationRes] = await Promise.all([api.getProAssistants(), api.getProAutomations()]);
@@ -586,6 +588,16 @@ function JiraSyncDialog({
     if (open) void refresh();
   }, [open, refresh]);
 
+  useEffect(() => {
+    if (!open || !activeRun?.id) return;
+    if (activeRun.status === 'completed' || activeRun.status === 'failed') return;
+    const timer = window.setInterval(async () => {
+      const res = await api.getJiraMcpSyncRun(activeRun.id).catch(() => null);
+      if (res?.ok && res.run) setActiveRun(res.run);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [activeRun?.id, activeRun?.status, open]);
+
   const existingJob = jobs.find(job => job.key === 'jira-mcp-sync');
   const schedule = cadence === 'daily'
     ? `daily@${time}`
@@ -600,8 +612,8 @@ function JiraSyncDialog({
       if (mode === 'once') {
         const res = await api.runJiraMcpSync({ assistantId, workdir: workdir || runtimeWorkdir });
         if (!res.ok) throw new Error(res.error || 'Failed to queue Jira sync');
+        if (res.run) setActiveRun(res.run);
         toast(L(locale, 'Jira 同步已启动', 'Jira sync queued'), true);
-        onClose();
         return;
       }
       const res = await api.scheduleJiraMcpSync({
@@ -612,7 +624,7 @@ function JiraSyncDialog({
       });
       if (!res.ok) throw new Error(res.error || 'Failed to save schedule');
       toast(L(locale, 'Jira 自动同步已保存', 'Jira auto sync saved'), true);
-      onClose();
+      await refresh();
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed', false);
     } finally {
@@ -628,6 +640,37 @@ function JiraSyncDialog({
         onClose={onClose}
       />
       <div className="space-y-3">
+        {activeRun && (
+          <div className="rounded-lg border border-edge bg-panel-alt p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[13px] font-semibold text-fg">
+                  {L(locale, '同步状态', 'Sync status')}: {activeRun.status}
+                </div>
+                <div className="mt-1 text-[11px] text-fg-5">
+                  {activeRun.assistantName || activeRun.assistantId || '--'} · {activeRun.agent || '--'} · {activeRun.sessionKey || activeRun.id}
+                </div>
+              </div>
+              {(activeRun.status === 'starting' || activeRun.status === 'queued' || activeRun.status === 'syncing') && <Spinner />}
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-fg-4">
+              <div className="rounded border border-edge bg-panel px-2 py-1">{L(locale, 'Tickets', 'Tickets')}: {activeRun.ticketCount ?? '--'}</div>
+              <div className="rounded border border-edge bg-panel px-2 py-1">{L(locale, 'Tasks', 'Tasks')}: {activeRun.taskCount ?? '--'}</div>
+            </div>
+            <div className="mt-3 max-h-44 space-y-2 overflow-auto pr-1">
+              {activeRun.events.map(event => (
+                <div key={event.id} className="border-l-2 border-primary/40 pl-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[12px] font-medium text-fg">{event.label}</div>
+                    <div className="shrink-0 text-[10px] text-fg-5">{new Date(event.at).toLocaleTimeString()}</div>
+                  </div>
+                  {event.detail && <div className="mt-0.5 text-[11px] leading-snug text-fg-4">{event.detail}</div>}
+                </div>
+              ))}
+            </div>
+            {activeRun.error && <div className="mt-2 rounded border border-err/20 bg-err/10 px-2 py-1 text-[11px] text-err">{activeRun.error}</div>}
+          </div>
+        )}
         {existingJob && (
           <div className="rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-4">
             {L(locale, '当前自动同步', 'Current auto sync')}: {existingJob.schedule} · {L(locale, '上次运行', 'last run')} {existingJob.lastRunAt ? new Date(existingJob.lastRunAt).toLocaleString() : '--'}

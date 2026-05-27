@@ -5,8 +5,25 @@
 import type { McpToolModule, ToolResult } from './types.js';
 import { toolResult, toolLog } from './types.js';
 import { syncJiraTask } from '../../../pro/tasks.js';
+import { updateJiraSyncRun } from '../../../pro/workflow.js';
 
 const tools: McpToolModule['tools'] = [
+  {
+    name: 'pikiclaw_pro_report_jira_sync_progress',
+    description: 'Report visible progress for the current Jira sync run: tool being used, number of tickets found, or current sync stage.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        runId: { type: 'string', description: 'Jira sync run id provided in the prompt.' },
+        label: { type: 'string', description: 'Short progress label, e.g. "Searching Jira tickets".' },
+        detail: { type: 'string', description: 'Optional detail, e.g. tool name, query, or result summary.' },
+        status: { type: 'string', enum: ['syncing', 'completed', 'failed'] },
+        ticketCount: { type: 'number' },
+        taskCount: { type: 'number' },
+      },
+      required: ['runId', 'label'],
+    },
+  },
   {
     name: 'pikiclaw_pro_sync_jira_issues',
     description: 'Create or update Pikiclaw Jira tasks from Jira issue data pulled by MCP tools. Use this after fetching Jira tickets.',
@@ -32,6 +49,10 @@ const tools: McpToolModule['tools'] = [
               workdir: { type: 'string' },
             },
           },
+        },
+        runId: {
+          type: 'string',
+          description: 'Optional Jira sync run id. Include this so Pikiclaw can show ticket/task counts in the progress timeline.',
         },
       },
       required: ['issues'],
@@ -72,6 +93,16 @@ function normalizeDescription(value: unknown): string {
 function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): ToolResult {
   const issues = Array.isArray(args.issues) ? args.issues : [];
   if (!issues.length) return toolResult('Error: issues array is required', true);
+  const runId = text(args.runId, 160);
+  if (runId) {
+    try {
+      updateJiraSyncRun(runId, {
+        status: 'syncing',
+        ticketCount: issues.length,
+        event: { label: `Found ${issues.length} Jira ticket${issues.length === 1 ? '' : 's'}`, detail: 'Starting Pikiclaw task sync.' },
+      });
+    } catch { /* progress is best effort */ }
+  }
 
   const tasks = [];
   const errors = [];
@@ -108,13 +139,46 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
   }
 
   toolLog('pikiclaw_pro_sync_jira_issues', `synced=${tasks.length} errors=${errors.length}`);
+  if (runId) {
+    try {
+      updateJiraSyncRun(runId, {
+        status: errors.length ? 'failed' : 'completed',
+        ticketCount: issues.length,
+        taskCount: tasks.length,
+        error: errors.join('; ') || undefined,
+        event: {
+          label: errors.length ? 'Jira task sync failed' : `Synced ${tasks.length} Pikiclaw task${tasks.length === 1 ? '' : 's'}`,
+          detail: errors.length ? errors.join('; ') : tasks.map(task => task.jiraKey || task.title).filter(Boolean).join(', '),
+        },
+      });
+    } catch { /* progress is best effort */ }
+  }
   return toolResult(JSON.stringify({ ok: errors.length === 0, synced: tasks.length, tasks, errors }, null, 2), errors.length > 0 && tasks.length === 0);
+}
+
+function handleReportProgress(args: Record<string, unknown>): ToolResult {
+  const runId = text(args.runId, 160);
+  const label = text(args.label, 240);
+  if (!runId) return toolResult('Error: runId is required', true);
+  if (!label) return toolResult('Error: label is required', true);
+  try {
+    const run = updateJiraSyncRun(runId, {
+      status: args.status === 'completed' || args.status === 'failed' ? args.status : 'syncing',
+      ticketCount: typeof args.ticketCount === 'number' ? args.ticketCount : undefined,
+      taskCount: typeof args.taskCount === 'number' ? args.taskCount : undefined,
+      event: { label, detail: text(args.detail, 2000) || undefined },
+    });
+    return toolResult(JSON.stringify({ ok: true, runId: run.id, status: run.status }, null, 2));
+  } catch (e: any) {
+    return toolResult(`Error reporting progress: ${e?.message || e}`, true);
+  }
 }
 
 export const proTools: McpToolModule = {
   tools,
   handle(name, args, ctx) {
     switch (name) {
+      case 'pikiclaw_pro_report_jira_sync_progress': return handleReportProgress(args);
       case 'pikiclaw_pro_sync_jira_issues': return handleSyncJiraIssues(args, ctx.workdir);
       default: return toolResult(`Unknown pro tool: ${name}`, true);
     }

@@ -15,6 +15,7 @@ import type {
   GitRemoteBranchUrlResult,
   HostInfo,
   KnowledgeEntry,
+  JiraSyncRun,
   JiraWorkflowConfig,
   LocalModelsProbeResponse,
   LsDirResult,
@@ -731,10 +732,17 @@ export const api = {
     body: { assistantId?: string | null; workdir?: string; agent?: string | null } = {},
     opts?: ApiRequestOptions,
   ) =>
-    post<{ ok: boolean; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+    post<{ ok: boolean; run?: JiraSyncRun; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
       '/api/pro/jira/mcp-sync/run',
       body,
       { timeoutMs: 30_000, ...opts },
+    ),
+  getJiraMcpSyncRuns: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; runs: JiraSyncRun[]; error?: string }>('/api/pro/jira/mcp-sync/runs', opts),
+  getJiraMcpSyncRun: (runId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; run?: JiraSyncRun; error?: string }>(
+      `/api/pro/jira/mcp-sync/runs/${encodeURIComponent(runId)}`,
+      opts,
     ),
   scheduleJiraMcpSync: (
     body: { schedule: string; assistantId?: string | null; workdir?: string; enabled?: boolean },
