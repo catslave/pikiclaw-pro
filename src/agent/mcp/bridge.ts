@@ -104,9 +104,12 @@ interface McpServerRuntimeInfo {
 
 interface RegisteredMcpServer {
   name: string;
-  command: string;
-  args: string[];
+  type?: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
   env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 export interface GuiIntegrationConfig {
@@ -257,7 +260,9 @@ function buildClaudeMcpConfig(servers: RegisteredMcpServer[]) {
   return {
     mcpServers: Object.fromEntries(servers.map(server => [
       server.name,
-      { type: 'stdio', command: server.command, args: server.args, ...(server.env ? { env: server.env } : {}) },
+      server.type === 'http' || server.url
+        ? { type: 'http', url: server.url, ...(server.headers ? { headers: server.headers } : {}) }
+        : { type: 'stdio', command: server.command, args: server.args || [], ...(server.env ? { env: server.env } : {}) },
     ])),
   };
 }
@@ -272,9 +277,23 @@ function buildGeminiMcpConfig(servers: RegisteredMcpServer[]) {
     },
     mcpServers: Object.fromEntries(servers.map(server => [
       server.name,
-      { command: server.command, args: server.args, ...(server.env ? { env: server.env } : {}), trust: true },
+      server.type === 'http' || server.url
+        ? { url: server.url, httpUrl: server.url, ...(server.headers ? { headers: server.headers } : {}), trust: true }
+        : { command: server.command, args: server.args || [], ...(server.env ? { env: server.env } : {}), trust: true },
     ])),
   };
+}
+
+function sanitizeEnvVarName(name: string): string {
+  return name.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([^A-Za-z_])/, '_$1').toUpperCase();
+}
+
+function bearerTokenFromHeaders(headers?: Record<string, string>): string | undefined {
+  const authEntry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === 'authorization');
+  const value = authEntry?.[1]?.trim();
+  if (!value) return undefined;
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return (match?.[1] || value).trim() || undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -751,6 +770,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   let extraEnv: Record<string, string> | undefined;
   let mcpServers: Record<string, any> | undefined;
   const codexRegisteredNames: string[] = [];
+  const codexTokenEnvRestore = new Map<string, string | undefined>();
 
   if (opts.agent === 'codex') {
     // Codex: register MCP servers via `codex mcp add/remove`
@@ -758,9 +778,23 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     const extServers = getGlobalExtensionsAsServers(opts.workdir);
     const allServers = [...extServers, ...servers];
     for (const server of allServers) {
-      const codexArgs = ['mcp', 'add', server.name];
-      for (const [k, v] of Object.entries(server.env || {})) codexArgs.push('--env', `${k}=${v}`);
-      codexArgs.push('--', server.command, ...server.args);
+      const codexArgs = ['mcp', 'add'];
+      if (server.type === 'http' || server.url) {
+        if (!server.url) continue;
+        codexArgs.push('--url', server.url);
+        const token = bearerTokenFromHeaders(server.headers);
+        if (token) {
+          const envName = `PIKICLAW_MCP_${sanitizeEnvVarName(server.name)}_TOKEN`;
+          if (!codexTokenEnvRestore.has(envName)) codexTokenEnvRestore.set(envName, process.env[envName]);
+          process.env[envName] = token;
+          codexArgs.push('--bearer-token-env-var', envName);
+        }
+        codexArgs.push(server.name);
+      } else {
+        if (!server.command) continue;
+        for (const [k, v] of Object.entries(server.env || {})) codexArgs.push('--env', `${k}=${v}`);
+        codexArgs.push(server.name, '--', server.command, ...(server.args || []));
+      }
       try {
         execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpAdd });
         codexRegisteredNames.push(server.name);
@@ -804,6 +838,10 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       if (callbackServer) await new Promise<void>(resolve => callbackServer!.close(() => resolve()));
       for (const name of [...codexRegisteredNames].reverse()) {
         try { execFileSync('codex', ['mcp', 'remove', name], { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpRemove }); } catch {}
+      }
+      for (const [name, previous] of codexTokenEnvRestore) {
+        if (previous == null) delete process.env[name];
+        else process.env[name] = previous;
       }
       if (configPath) {
         try { fs.rmSync(configPath, { force: true }); } catch {}

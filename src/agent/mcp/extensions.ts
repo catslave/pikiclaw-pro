@@ -90,9 +90,12 @@ export interface McpCatalogItem {
 
 interface RegisteredMcpServer {
   name: string;
-  command: string;
-  args: string[];
+  type?: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
   env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +575,7 @@ export function mergeExtensionsForSession(
 }
 
 /**
- * Convert global extensions to RegisteredMcpServer[] for Codex/Gemini agents
+ * Convert global/workspace extensions to RegisteredMcpServer[] for agents
  * that use server arrays instead of merged configs.
  */
 export function getGlobalExtensionsAsServers(workdir?: string): RegisteredMcpServer[] {
@@ -583,8 +586,17 @@ export function getGlobalExtensionsAsServers(workdir?: string): RegisteredMcpSer
   if (globalMcp) {
     for (const [name, cfg] of Object.entries(globalMcp)) {
       if (cfg.enabled === false || cfg.disabled) continue;
-      if (cfg.command) {
-        merged.set(name, { name, command: cfg.command, args: cfg.args || [], env: cfg.env });
+      if (cfg.type === 'http' && cfg.url) {
+        const oauthKey = cfg.catalogId || name;
+        const headers = injectOAuthHeaders(oauthKey, { headers: cfg.headers });
+        merged.set(name, {
+          name,
+          type: 'http',
+          url: cfg.url,
+          ...(Object.keys(headers).length ? { headers } : {}),
+        });
+      } else if (cfg.command) {
+        merged.set(name, { name, type: 'stdio', command: cfg.command, args: cfg.args || [], env: cfg.env });
       }
     }
   }
@@ -594,8 +606,17 @@ export function getGlobalExtensionsAsServers(workdir?: string): RegisteredMcpSer
     for (const [name, cfg] of Object.entries(wsServers)) {
       if (cfg.disabled) {
         merged.delete(name);
+      } else if (cfg.type === 'http' && cfg.url) {
+        const oauthKey = cfg.catalogId || name;
+        const headers = injectOAuthHeaders(oauthKey, { headers: cfg.headers });
+        merged.set(name, {
+          name,
+          type: 'http',
+          url: cfg.url,
+          ...(Object.keys(headers).length ? { headers } : {}),
+        });
       } else if (cfg.command) {
-        merged.set(name, { name, command: cfg.command, args: cfg.args || [], env: cfg.env });
+        merged.set(name, { name, type: 'stdio', command: cfg.command, args: cfg.args || [], env: cfg.env });
       }
     }
   }
@@ -623,6 +644,7 @@ function healthFingerprint(config: McpServerConfig): string {
     command: config.command,
     args: config.args,
     hasEnv: !!config.env && Object.keys(config.env).length > 0,
+    headers: config.headers || {},
   });
 }
 
@@ -638,18 +660,162 @@ export function cacheHealth(id: string, config: McpServerConfig, result: McpHeal
   healthCache.set(id, { result, fingerprint: healthFingerprint(config), cachedAt: Date.now() });
 }
 
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function mcpJsonRpcRequest(id: number, method: string, params: Record<string, any> = {}): string {
+  return JSON.stringify({
+    jsonrpc: '2.0',
+    id,
+    method,
+    params,
+  });
+}
+
+function httpMcpHeaders(config: McpServerConfig): Record<string, string> {
+  return {
+    ...(config.headers || {}),
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+  };
+}
+
+function extractMcpError(text: string): string | undefined {
+  try {
+    const parsed = JSON.parse(text);
+    const message = parsed?.error?.message || parsed?.message;
+    if (message) return String(message);
+  } catch { /* not JSON */ }
+  const compact = text.trim().replace(/\s+/g, ' ');
+  return compact ? compact.slice(0, 220) : undefined;
+}
+
+async function readResponseSnippet(res: Response, max = 4000): Promise<string> {
+  try {
+    return (await res.text()).slice(0, max);
+  } catch {
+    return '';
+  }
+}
+
+function responseLooksLikeMcpSuccess(text: string): boolean {
+  if (!text.trim()) return false;
+  if (text.includes('"result"') || text.includes('"serverInfo"')) return true;
+  if (text.includes('event:') && (text.includes('message') || text.includes('endpoint'))) return true;
+  return false;
+}
+
+function extractToolsFromText(text: string): string[] {
+  const tools = new Set<string>();
+  try {
+    const parsed = JSON.parse(text);
+    const candidates = [
+      ...(Array.isArray(parsed?.tools) ? parsed.tools : []),
+      ...(Array.isArray(parsed?.result?.tools) ? parsed.result.tools : []),
+    ];
+    for (const tool of candidates) {
+      if (tool?.name) tools.add(String(tool.name));
+    }
+  } catch { /* fall through to regex extraction */ }
+
+  const nameMatches = text.matchAll(/"name"\s*:\s*"([^"]+)"/g);
+  for (const match of nameMatches) {
+    if (match[1]) tools.add(match[1]);
+  }
+
+  return [...tools];
+}
+
+async function checkHttpMcpHealth(config: McpServerConfig, timeoutMs: number): Promise<McpHealthResult> {
+  const url = config.url?.trim();
+  if (!url) return { ok: false, error: 'no URL specified' };
+
+  const start = Date.now();
+  const elapsed = () => Date.now() - start;
+  const initBody = mcpJsonRpcRequest(1, 'initialize', {
+    protocolVersion: '2024-11-05',
+    capabilities: {},
+    clientInfo: { name: 'pikiclaw-health-check', version: '1.0.0' },
+  });
+
+  try {
+    const initRes = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers: httpMcpHeaders(config),
+      body: initBody,
+    }, timeoutMs);
+
+    const initText = await readResponseSnippet(initRes);
+    if (initRes.status === 401 || initRes.status === 403) {
+      return { ok: false, error: `authentication failed (HTTP ${initRes.status})`, elapsedMs: elapsed() };
+    }
+
+    if (initRes.ok && responseLooksLikeMcpSuccess(initText)) {
+      const toolsBody = mcpJsonRpcRequest(2, 'tools/list');
+      try {
+        const toolsRes = await fetchWithTimeout(url, {
+          method: 'POST',
+          headers: httpMcpHeaders(config),
+          body: toolsBody,
+        }, Math.min(timeoutMs, 5000));
+        const toolsText = await readResponseSnippet(toolsRes);
+        return {
+          ok: true,
+          tools: toolsRes.ok ? extractToolsFromText(toolsText) : undefined,
+          elapsedMs: elapsed(),
+        };
+      } catch {
+        return { ok: true, elapsedMs: elapsed() };
+      }
+    }
+
+    // Some HTTP MCP servers expose an SSE endpoint where GET opens the stream
+    // and POST is not accepted on the same URL. Fall back to a reachability
+    // check, but still treat auth errors as real failures.
+    if (initRes.status !== 404 && initRes.status !== 405) {
+      const detail = extractMcpError(initText);
+      return {
+        ok: false,
+        error: detail ? `HTTP ${initRes.status}: ${detail}` : `HTTP ${initRes.status}`,
+        elapsedMs: elapsed(),
+      };
+    }
+  } catch (e: any) {
+    const message = e?.name === 'AbortError' ? `timeout after ${timeoutMs}ms` : (e?.message || 'unreachable');
+    return { ok: false, error: message, elapsedMs: elapsed() };
+  }
+
+  try {
+    const getRes = await fetchWithTimeout(url, {
+      method: 'GET',
+      headers: {
+        ...(config.headers || {}),
+        accept: 'text/event-stream, application/json',
+      },
+    }, timeoutMs);
+    try { await getRes.body?.cancel(); } catch { /* best effort */ }
+
+    if (getRes.status === 401 || getRes.status === 403) {
+      return { ok: false, error: `authentication failed (HTTP ${getRes.status})`, elapsedMs: elapsed() };
+    }
+    if (getRes.ok) return { ok: true, elapsedMs: elapsed() };
+    return { ok: false, error: `HTTP ${getRes.status}`, elapsedMs: elapsed() };
+  } catch (e: any) {
+    const message = e?.name === 'AbortError' ? `timeout after ${timeoutMs}ms` : (e?.message || 'unreachable');
+    return { ok: false, error: message, elapsedMs: elapsed() };
+  }
+}
+
 export async function checkMcpHealth(config: McpServerConfig, timeoutMs = 10_000): Promise<McpHealthResult> {
   if (config.type === 'http') {
-    try {
-      const start = Date.now();
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      const res = await fetch(config.url!, { signal: controller.signal, method: 'GET' });
-      clearTimeout(timer);
-      return { ok: res.ok || res.status === 405 || res.status === 401, elapsedMs: Date.now() - start };
-    } catch (e: any) {
-      return { ok: false, error: e?.message || 'unreachable' };
-    }
+    return checkHttpMcpHealth(config, timeoutMs);
   }
 
   if (!config.command) return { ok: false, error: 'no command specified' };
