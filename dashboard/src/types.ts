@@ -670,7 +670,7 @@ export interface McpCatalogItem {
   iconSlug?: string;
   iconUrl?: string;
   homepage?: string;
-  transport: { type: 'stdio' | 'http'; summary: string };
+  transport: { type: 'stdio' | 'http'; summary: string; url?: string };
   auth: McpAuthSpec;
   state: McpCatalogState;
   isRecommended: boolean;

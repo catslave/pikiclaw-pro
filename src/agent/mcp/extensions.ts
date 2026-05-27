@@ -65,7 +65,7 @@ export interface McpCatalogItem {
   iconSlug?: string;
   iconUrl?: string;
   homepage?: string;
-  transport: { type: 'stdio' | 'http'; summary: string };
+  transport: { type: 'stdio' | 'http'; summary: string; url?: string };
   auth: McpAuthSpec;
   state: McpCatalogState;
   /** True when this item comes from the recommended registry. */
@@ -266,6 +266,16 @@ function hasRequiredCredentials(config: McpServerConfig, auth: McpAuthSpec): boo
   const bag = { ...(config.env || {}), ...(config.headers || {}) };
   for (const field of auth.fields) {
     if (!field.required) continue;
+    if (field.key === 'MCP_URL') {
+      if (!String(config.url || '').trim()) return false;
+      continue;
+    }
+    if (field.key === 'MCP_TOKEN') {
+      const token = String(bag.MCP_TOKEN || '').trim();
+      const authHeader = String(bag.Authorization || '').trim();
+      if (!token && !authHeader) return false;
+      continue;
+    }
     if (!bag[field.key] || !String(bag[field.key]).trim()) return false;
   }
   return true;
@@ -374,7 +384,11 @@ export function getCatalogItems(opts: {
       iconSlug: rec.iconSlug,
       iconUrl: rec.iconUrl,
       homepage: rec.homepage,
-      transport: { type: rec.transport.type, summary: transportSummary(rec.transport) },
+      transport: {
+        type: rec.transport.type,
+        summary: transportSummary(rec.transport),
+        ...(rec.transport.type === 'http' ? { url: rec.transport.url } : {}),
+      },
       auth: rec.auth,
       state,
       isRecommended: true,
@@ -402,6 +416,7 @@ export function getCatalogItems(opts: {
       transport: {
         type: entry.config.type === 'http' ? 'http' : 'stdio',
         summary: cmdSummary(entry.config),
+        ...(entry.config.type === 'http' && entry.config.url ? { url: entry.config.url } : {}),
       },
       auth,
       state,
@@ -446,15 +461,25 @@ export function buildInstalledConfigFromRecommended(
   }
 
   const headers: Record<string, string> = {};
+  let url = rec.transport.url;
   if (rec.auth.type === 'credentials') {
-    // Convention: first non-empty credential becomes Authorization: Bearer <value>.
-    // Matches how Stripe, Perplexity, and similar providers expect the token.
-    const first = rec.auth.fields.find(f => creds[f.key]);
-    if (first) headers.Authorization = `Bearer ${creds[first.key]}`;
+    const urlField = rec.auth.fields.find(f => f.key === 'MCP_URL');
+    if (urlField && creds[urlField.key]?.trim()) url = creds[urlField.key].trim();
+    const tokenField = rec.auth.fields.find(f => f.key === 'MCP_TOKEN')
+      || rec.auth.fields.find(f => /token|key|secret/i.test(f.key));
+    if (tokenField && creds[tokenField.key]?.trim()) {
+      const token = creds[tokenField.key].trim();
+      headers.Authorization = /^Bearer\s+/i.test(token) ? token : `Bearer ${token}`;
+    } else {
+      // Convention: first non-URL credential becomes Authorization: Bearer <value>.
+      // Matches how Stripe, Perplexity, and similar providers expect the token.
+      const first = rec.auth.fields.find(f => f.key !== 'MCP_URL' && creds[f.key]);
+      if (first) headers.Authorization = `Bearer ${creds[first.key]}`;
+    }
   }
   return {
     type: 'http',
-    url: rec.transport.url,
+    url,
     ...(Object.keys(headers).length ? { headers } : {}),
     enabled: opts.enabled,
     catalogId: rec.id,
@@ -718,4 +743,3 @@ export async function checkMcpHealth(config: McpServerConfig, timeoutMs = 10_000
     }, 100);
   });
 }
-

@@ -41,8 +41,70 @@ function L(locale: string, zh: string, en: string): string {
 
 function authKindLabel(locale: string, auth: McpAuthSpec): string {
   if (auth.type === 'mcp-oauth') return L(locale, 'OAuth', 'OAuth');
+  if (auth.type === 'credentials' && auth.fields.some(field => field.key === 'MCP_URL')) return L(locale, 'URL + Token', 'URL + Token');
   if (auth.type === 'credentials') return L(locale, 'API Key', 'API Key');
   return L(locale, '无需配置', 'No auth');
+}
+
+function credentialsFromMcpConfig(item: McpCatalogItem | null, initial?: Record<string, string>): Record<string, string> {
+  if (!item || item.auth.type !== 'credentials') return {};
+  const values: Record<string, string> = {};
+  for (const field of item.auth.fields) {
+    if (field.key === 'MCP_URL') {
+      values[field.key] = item.config?.url || item.transport.url || item.transport.summary || '';
+    } else if (field.key === 'MCP_TOKEN') {
+      const auth = initial?.Authorization || item.config?.headers?.Authorization || '';
+      values[field.key] = auth.replace(/^Bearer\s+/i, '');
+    } else {
+      values[field.key] = initial?.[field.key] || '';
+    }
+  }
+  return values;
+}
+
+function buildConfigFromCredentials(item: McpCatalogItem, values: Record<string, string>, enabled: boolean): McpServerConfig {
+  if (item.transport.type === 'http') {
+    const url = (values.MCP_URL || item.config?.url || item.transport.url || item.transport.summary || '').trim();
+    const headers: Record<string, string> = {};
+    const credentialFields = item.auth.type === 'credentials' ? item.auth.fields : [];
+    const tokenField = credentialFields.find(field => field.key === 'MCP_TOKEN')
+      || credentialFields.find(field => /token|key|secret/i.test(field.key));
+    const token = tokenField ? (values[tokenField.key] || '').trim() : '';
+    if (token) headers.Authorization = /^Bearer\s+/i.test(token) ? token : `Bearer ${token}`;
+    for (const field of credentialFields) {
+      if (field.key === 'MCP_URL' || field.key === 'MCP_TOKEN') continue;
+      if (tokenField?.key === field.key) continue;
+      const value = (values[field.key] || '').trim();
+      if (value) headers[field.key] = value;
+    }
+    return {
+      type: 'http',
+      url,
+      enabled,
+      catalogId: item.isRecommended ? item.id : item.config?.catalogId,
+      ...(Object.keys(headers).length ? { headers } : {}),
+    };
+  }
+
+  const env: Record<string, string> = {};
+  if (item.auth.type === 'credentials') {
+    for (const field of item.auth.fields) {
+      const value = (values[field.key] || '').trim();
+      if (value) env[field.key] = value;
+    }
+  }
+  return {
+    type: 'stdio',
+    command: item.config?.command || item.transport.summary.split(/\s+/)[0] || '',
+    args: item.config?.args || [],
+    enabled,
+    catalogId: item.isRecommended ? item.id : item.config?.catalogId,
+    ...(Object.keys(env).length ? { env } : {}),
+  };
+}
+
+function usesUrlTokenMcpConfig(item: McpCatalogItem): boolean {
+  return item.auth.type === 'credentials' && item.auth.fields.some(field => field.key === 'MCP_URL');
 }
 
 /** Signature colour for a brand, used for gradient tints and avatar fills. */
@@ -389,12 +451,13 @@ function CredentialsDialog({
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     if (open && item && item.auth.type === 'credentials') {
-      const seed: Record<string, string> = {};
-      for (const f of item.auth.fields) seed[f.key] = initial?.[f.key] || '';
-      setValues(seed);
+      setValues(credentialsFromMcpConfig(item, initial));
+      setTestResult(null);
     }
   }, [open, item, initial]);
 
@@ -404,6 +467,25 @@ function CredentialsDialog({
   const submit = async () => {
     setSubmitting(true);
     try { await onSubmit(values); } finally { setSubmitting(false); }
+  };
+
+  const test = async () => {
+    if (!item) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await api.checkMcpHealth(item.id, buildConfigFromCredentials(item, values, true), true);
+      if (result.ok) {
+        const suffix = result.tools?.length ? ` · ${result.tools.length} tools` : '';
+        setTestResult({ ok: true, message: L(locale, `连接成功${suffix}`, `Connection works${suffix}`) });
+      } else {
+        setTestResult({ ok: false, message: result.error || L(locale, '连接失败', 'Connection failed') });
+      }
+    } catch (e: any) {
+      setTestResult({ ok: false, message: e?.message || L(locale, '连接失败', 'Connection failed') });
+    } finally {
+      setTesting(false);
+    }
   };
 
   return (
@@ -438,6 +520,17 @@ function CredentialsDialog({
           </div>
         ))}
         <div className="flex justify-end gap-2 border-t border-edge pt-3">
+          {testResult && (
+            <div className={cn(
+              'mr-auto flex min-h-8 items-center rounded-md px-2.5 text-[11px]',
+              testResult.ok ? 'bg-ok/10 text-[var(--th-ok)]' : 'bg-err/10 text-[var(--th-err)]',
+            )}>
+              {testResult.message}
+            </div>
+          )}
+          <Button variant="outline" disabled={testing || missingRequired} onClick={test}>
+            {testing ? <Spinner /> : L(locale, '测试', 'Test')}
+          </Button>
           <Button variant="ghost" onClick={onClose}>{L(locale, '取消', 'Cancel')}</Button>
           <Button variant="primary" disabled={submitting || missingRequired} onClick={submit}>
             {submitting ? <Spinner /> : L(locale, '保存并启用', 'Save & Enable')}
@@ -801,6 +894,8 @@ function AvailableCard({
   // here we only signal "extra step" vs "one click".
   const primaryLabel = item.auth.type === 'none'
     ? L(locale, '一键启用', 'One-click enable')
+    : usesUrlTokenMcpConfig(item)
+      ? L(locale, '启用', 'Enable')
     : L(locale, '授权并启用', 'Authorize & enable');
 
   return (
@@ -1447,7 +1542,11 @@ function McpCatalogSection({
 
   const handleConnectedPrimary = useCallback((item: McpCatalogItem) => {
     if (item.state === 'ready' || item.state === 'unhealthy') { void runToggle(item, false); return; }
-    if (item.state === 'disabled') { void runToggle(item, true); return; }
+    if (item.state === 'disabled') {
+      if (usesUrlTokenMcpConfig(item)) { setCredsTarget(item); return; }
+      void runToggle(item, true);
+      return;
+    }
     if (item.state === 'needs_auth') {
       if (item.auth.type === 'mcp-oauth') { void runOAuth(item); return; }
       if (item.auth.type === 'credentials') { setCredsTarget(item); return; }
@@ -1456,7 +1555,11 @@ function McpCatalogSection({
 
   const handleAvailablePrimary = useCallback((item: McpCatalogItem) => {
     // Already-installed item that's just paused — flip the toggle, reuse creds.
-    if (item.state === 'disabled') { void runToggle(item, true); return; }
+    if (item.state === 'disabled') {
+      if (usesUrlTokenMcpConfig(item)) { setCredsTarget(item); return; }
+      void runToggle(item, true);
+      return;
+    }
     // Already-installed but missing creds/token — go straight to auth flow.
     if (item.state === 'needs_auth') {
       if (item.auth.type === 'mcp-oauth') { void runOAuth(item); return; }
