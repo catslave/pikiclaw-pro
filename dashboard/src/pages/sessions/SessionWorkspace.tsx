@@ -493,7 +493,7 @@ function readStoredWorkspaceSidebarCollapsed(): boolean {
 
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'dashboard' | 'settings';
-type ChatLayoutMode = 'single' | 'multi' | 'column';
+type ChatLayoutMode = 'single' | 'multi';
 type DashboardScope = 'all' | string;
 type DashboardColumnKey = 'running' | 'review' | 'incomplete' | 'done';
 type DashboardSessionItem = {
@@ -521,7 +521,7 @@ type WorkspaceStatusSummary = {
 
 function readStoredChatLayout(): ChatLayoutMode {
   const raw = readBrowserStorage(CHAT_LAYOUT_STORAGE_KEY);
-  if (raw === 'single' || raw === 'column') return raw;
+  if (raw === 'single') return raw;
   return 'multi';
 }
 
@@ -1161,6 +1161,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [dashboardPendingPrompt, setDashboardPendingPrompt] = useState<string | null>(null);
   const [dashboardPendingImageUrls, setDashboardPendingImageUrls] = useState<string[]>([]);
   const [dashboardPendingCreatedAt, setDashboardPendingCreatedAt] = useState<string | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [quickTodoText, setQuickTodoText] = useState('');
   const [quickTodoSaving, setQuickTodoSaving] = useState(false);
@@ -2865,9 +2866,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	      incomplete: 0,
 	      done: 0,
     };
-    for (const item of dashboardItems) counts[item.column] += 1;
-    return counts;
-  }, [dashboardItems]);
+	    for (const item of dashboardItems) counts[item.column] += 1;
+	    return counts;
+	  }, [dashboardItems]);
+	  const inboxAlertCount = dashboardCounts.running + dashboardCounts.review + dashboardCounts.incomplete;
 
   const startDashboardTask = useCallback((workdir: string) => {
     if (!workdir) {
@@ -2885,18 +2887,47 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     startDashboardTask(preferred);
   }, [dashboardScope, runtimeWorkdir, startDashboardTask, workspaces]);
 
-  const handleOpenDashboardSession = useCallback((item: DashboardSessionItem) => {
-    const agent = item.session.agent || '';
-    if (!agent || !item.session.sessionId) return;
-    warmSession(item.session, item.workdir);
-    markSessionReadOnOpen(item.session, item.workdir);
+	  const handleOpenDashboardSession = useCallback((item: DashboardSessionItem) => {
+	    const agent = item.session.agent || '';
+	    if (!agent || !item.session.sessionId) return;
+	    warmSession(item.session, item.workdir);
+	    markSessionReadOnOpen(item.session, item.workdir);
     setDashboardFocusedSlot({
       agent,
       sessionId: item.session.sessionId,
       workdir: item.workdir,
       mountKey: nextMountKey(),
     });
-  }, [markSessionReadOnOpen, warmSession]);
+	  }, [markSessionReadOnOpen, warmSession]);
+
+	  const handleOpenInboxSession = useCallback((item: DashboardSessionItem) => {
+	    const agent = item.session.agent || '';
+	    if (!agent || !item.session.sessionId) return;
+	    warmSession(item.session, item.workdir);
+	    setInboxOpen(false);
+	    const slot: SessionSlot = {
+	      agent,
+	      sessionId: item.session.sessionId,
+	      workdir: item.workdir,
+	      mountKey: nextMountKey(),
+	    };
+	    setOpenSessions(prev => {
+	      const existingIdx = prev.findIndex(existing => (
+	        existing.workdir === slot.workdir
+	        && existing.agent === slot.agent
+	        && existing.sessionId === slot.sessionId
+	      ));
+	      const next = existingIdx >= 0 ? prev : [...prev, slot];
+	      const focusIndex = existingIdx >= 0 ? existingIdx : next.length - 1;
+	      focusedOpenSessionsSnapshotRef.current = {
+	        slots: next.map(item => ({ ...item })),
+	        focusedIndex: focusIndex,
+	      };
+	      setActiveSlotIndex(focusIndex);
+	      setFocusedSlotIndex(focusIndex);
+	      return next;
+	    });
+	  }, [setActiveSlotIndex, setOpenSessions, warmSession]);
 
   const handleMarkDashboardDone = useCallback(async (item: DashboardSessionItem) => {
     const agent = item.session.agent || '';
@@ -2990,17 +3021,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setDashboardCreateTaskWorkdir(null);
   }, [mode]);
 
-  useEffect(() => {
-    const taskColumnVisible = mode === 'dashboard' || (mode === 'workspace' && chatLayout === 'column');
-    if (!taskColumnVisible || (!dashboardFocusedSlot && !dashboardCreateTaskWorkdir)) return undefined;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setDashboardCreateTaskWorkdir(null);
-      setDashboardFocusedSlot(null);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [chatLayout, dashboardCreateTaskWorkdir, dashboardFocusedSlot, mode]);
+	  useEffect(() => {
+	    if (mode !== 'dashboard' || (!dashboardFocusedSlot && !dashboardCreateTaskWorkdir)) return undefined;
+	    const onKeyDown = (event: KeyboardEvent) => {
+	      if (event.key !== 'Escape') return;
+	      setDashboardCreateTaskWorkdir(null);
+	      setDashboardFocusedSlot(null);
+	    };
+	    window.addEventListener('keydown', onKeyDown);
+	    return () => window.removeEventListener('keydown', onKeyDown);
+	  }, [dashboardCreateTaskWorkdir, dashboardFocusedSlot, mode]);
   const closeFocusMode = useCallback(() => {
     const snapshot = focusedOpenSessionsSnapshotRef.current;
     focusedOpenSessionsSnapshotRef.current = null;
@@ -3182,7 +3212,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             {([
               ['single', t('chat.singleWindow')],
               ['multi', t('chat.multiWindow')],
-              ['column', t('chat.columnMode')],
             ] as const).map(([view, label]) => (
               <button
                 key={view}
@@ -3197,57 +3226,33 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={() => setInboxOpen(true)}
+            className={cn(
+              'inline-flex h-8 shrink-0 items-center gap-2 rounded-xl border px-3 text-[12px] font-semibold shadow-sm transition-[border-color,background,color,box-shadow]',
+              inboxAlertCount > 0
+                ? 'border-primary/45 bg-primary/[0.10] text-primary hover:bg-primary/[0.14] hover:shadow-[0_0_0_3px_var(--th-glow-a)]'
+                : 'border-edge bg-panel-alt text-fg-4 hover:border-edge-h hover:bg-panel hover:text-fg-2',
+            )}
+            aria-label={t('inbox.open')}
+            title={t('inbox.open')}
+          >
+            <span>{t('inbox.title')}</span>
+            <span className="rounded-md border border-current/20 bg-panel/40 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
+              {inboxAlertCount}
+            </span>
+            <span className="hidden items-center gap-1.5 text-[10px] font-medium text-fg-5 lg:inline-flex">
+              <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-ok" />{dashboardCounts.running}</span>
+              <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-err" />{dashboardCounts.incomplete}</span>
+              <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-warn" />{dashboardCounts.review}</span>
+            </span>
+          </button>
         </div>
       )}
     </div>
   );
-  const workspaceColumnContent = (
-    <>
-      <WorkspaceTaskDashboard
-        workspaces={workspaces}
-        scope={dashboardScope}
-        onScopeChange={setDashboardScope}
-        items={dashboardItems}
-        counts={dashboardCounts}
-        loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
-        onCreateTask={handleDashboardCreateTask}
-        onOpenSession={handleOpenDashboardSession}
-        onMarkDone={handleMarkDashboardDone}
-        t={t}
-      />
-      {dashboardCreateTaskWorkdir && (
-        <DashboardCreateTaskModal
-          workdir={dashboardCreateTaskWorkdir}
-          workspaceName={workspaces.find(ws => ws.path === dashboardCreateTaskWorkdir)?.name || workspaceBaseName(dashboardCreateTaskWorkdir)}
-          onClose={() => setDashboardCreateTaskWorkdir(null)}
-          onSessionCreated={handleDashboardNewSessionCreated}
-          t={t}
-        />
-      )}
-      {dashboardFocusedSlot && dashboardFocusedInfo && (
-        <DashboardSessionFocusModal
-          slot={dashboardFocusedSlot}
-          session={dashboardFocusedInfo}
-          workspaceName={workspaces.find(ws => ws.path === dashboardFocusedSlot.workdir)?.name || workspaceBaseName(dashboardFocusedSlot.workdir)}
-          active={active}
-          onClose={closeDashboardFocus}
-          onSessionChange={handleDashboardFocusedSessionChange}
-          onOpenFileLink={(target) => handleDashboardFocusFileLink(dashboardFocusedSlot.workdir, target)}
-          initialPendingPrompt={dashboardPendingPrompt}
-          initialPendingImageUrls={dashboardPendingImageUrls}
-          initialPendingCreatedAt={dashboardPendingCreatedAt}
-          onPendingPromptConsumed={() => {
-            setDashboardPendingPrompt(null);
-            setDashboardPendingImageUrls([]);
-            setDashboardPendingCreatedAt(null);
-          }}
-          t={t}
-        />
-      )}
-    </>
-  );
-
-  useEffect(() => {
+	  useEffect(() => {
     if (focusedSlotIndex != null) return;
     const timer = window.setTimeout(() => {
       const el = document.querySelector(`[data-session-slot-index="${activeSlotIndex}"]`) as HTMLElement | null;
@@ -3557,11 +3562,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           <div className="min-h-0 flex-1 overflow-hidden rounded-[18px] border border-edge/70 bg-panel/78 shadow-[var(--th-card-shadow)] backdrop-blur-md">
             {settingsContent}
           </div>
-        ) : chatLayout === 'column' ? (
-          <>
-            {mainModeBar}
-            {workspaceColumnContent}
-          </>
         ) : (
           <>
             {mainModeBar}
@@ -4135,9 +4135,21 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             </div>
           </>
         )}
-      </div>
+	      </div>
 
-      {/* ═══ Floating File Tree ═══ */}
+	      {mode === 'workspace' && inboxOpen && (
+	        <InboxDrawer
+	          items={dashboardItems}
+	          counts={dashboardCounts}
+	          loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
+	          onClose={() => setInboxOpen(false)}
+	          onOpenFocus={handleOpenInboxSession}
+	          onMarkDone={handleMarkDashboardDone}
+	          t={t}
+	        />
+	      )}
+	
+	      {/* ═══ Floating File Tree ═══ */}
       {fileTreeOpen && (filePanelRequest?.workdir || selectedSession?.workdir) && (
         <FloatingFileTree
           workdir={filePanelRequest?.workdir || selectedSession!.workdir}
@@ -4987,6 +4999,121 @@ function TodoCenterModal({
       })()}
     </div>
   );
+}
+
+function InboxDrawer({
+  items,
+  counts,
+  loading,
+  onClose,
+  onOpenFocus,
+  onMarkDone,
+  t,
+}: {
+  items: DashboardSessionItem[];
+  counts: Record<DashboardColumnKey, number>;
+  loading: boolean;
+  onClose: () => void;
+  onOpenFocus: (item: DashboardSessionItem) => void;
+  onMarkDone: (item: DashboardSessionItem) => void;
+  t: (key: string) => string;
+}) {
+  const groups = useMemo(() => {
+    const grouped: Record<DashboardColumnKey, DashboardSessionItem[]> = {
+      running: [],
+      review: [],
+      incomplete: [],
+      done: [],
+    };
+    for (const item of items) grouped[item.column].push(item);
+    return grouped;
+  }, [items]);
+  const orderedColumns: Array<{ key: DashboardColumnKey; labelKey: string; hintKey: string; variant: StripBadgeVariant }> = [
+    { key: 'incomplete', labelKey: 'inbox.needsMe', hintKey: 'inbox.needsMeHint', variant: 'err' },
+    { key: 'review', labelKey: 'inbox.ready', hintKey: 'inbox.readyHint', variant: 'warn' },
+    { key: 'running', labelKey: 'inbox.running', hintKey: 'inbox.runningHint', variant: 'ok' },
+    { key: 'done', labelKey: 'inbox.openLoops', hintKey: 'inbox.openLoopsHint', variant: 'muted' },
+  ];
+  const alertCount = counts.running + counts.review + counts.incomplete;
+
+  return createPortal((
+    <div className="fixed inset-0 z-[210] flex justify-end bg-black/18 backdrop-blur-[2px]" onMouseDown={onClose}>
+      <aside
+        className="flex h-full w-[min(460px,calc(100vw-18px))] flex-col overflow-hidden border-l border-edge-h bg-panel/96 shadow-[-24px_0_72px_rgba(0,0,0,0.28)]"
+        onMouseDown={event => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('inbox.title')}
+      >
+        <div className="shrink-0 border-b border-edge/45 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),transparent)] px-4 py-3">
+          <div className="flex items-start gap-3">
+            <div className={cn(
+              'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border text-[12px] font-bold tabular-nums',
+              alertCount > 0 ? 'border-primary/45 bg-primary/[0.12] text-primary' : 'border-edge bg-panel-alt text-fg-4',
+            )}>
+              {alertCount}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[15px] font-semibold tracking-tight text-fg">{t('inbox.title')}</div>
+              <div className="mt-1 text-[12px] leading-relaxed text-fg-5">{t('inbox.subtitle')}</div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
+              aria-label={t('common.close')}
+              title={t('common.close')}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <StatusMetric label={t('inbox.running')} value={counts.running} variant={counts.running > 0 ? 'ok' : 'muted'} />
+            <StatusMetric label={t('inbox.needsMe')} value={counts.incomplete} variant={counts.incomplete > 0 ? 'err' : 'muted'} />
+            <StatusMetric label={t('inbox.ready')} value={counts.review} variant={counts.review > 0 ? 'warn' : 'muted'} />
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+          {loading && items.length === 0 ? (
+            <div className="flex h-32 items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>
+          ) : items.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-edge/45 px-4 py-12 text-center text-[13px] text-fg-5">{t('inbox.empty')}</div>
+          ) : (
+            <div className="space-y-3">
+              {orderedColumns.map(column => {
+                const columnItems = groups[column.key];
+                if (!columnItems.length) return null;
+                return (
+                  <section key={column.key} className="rounded-xl border border-edge/50 bg-panel-alt/30 p-2.5">
+                    <div className="mb-2 flex items-center gap-2 px-0.5">
+                      <Badge variant={column.variant} className="h-5 px-2 text-[10px] tabular-nums">{columnItems.length}</Badge>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[12px] font-semibold text-fg-2">{t(column.labelKey)}</div>
+                        <div className="truncate text-[10px] text-fg-5">{t(column.hintKey)}</div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {columnItems.map(item => (
+                        <DashboardTaskCard
+                          key={item.key}
+                          item={item}
+                          onOpen={() => onOpenFocus(item)}
+                          onMarkDone={() => onMarkDone(item)}
+                          t={t}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
+  ), document.body);
 }
 
 function WorkspaceTaskDashboard({
