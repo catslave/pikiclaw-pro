@@ -4,6 +4,7 @@ import type {
   AppState,
   AutomationRule,
   BrowserSetupResponse,
+  BrowserPanelSnapshot,
   BrowserStatusResponse,
   CliCatalogItem,
   CliStatus,
@@ -35,6 +36,7 @@ import type {
   TodoItemKind,
   TodoItemSource,
   VerificationResult,
+  VerificationRun,
   SkillCatalogItem,
   RemoteSkillInfo,
   SessionHubResult,
@@ -120,6 +122,7 @@ function post<T>(url: string, body: unknown, opts: ApiRequestOptions = {}): Prom
 }
 
 export const api = {
+  health: (opts?: ApiRequestOptions) => json<{ ok: boolean; version?: string }>('/api/health', opts),
   getState: () => json<AppState>('/api/state'),
   getHost: () => json<HostInfo>('/api/host'),
   getAgentStatus: () => json<AgentStatusResponse>('/api/agent-status'),
@@ -202,7 +205,7 @@ export const api = {
       opts,
     ),
   requestPermission: (permission: string) => post<PermissionRequestResult>('/api/open-preferences', { permission }),
-  restart: () => post<{ ok: boolean; error?: string | null; activeTasks?: number }>('/api/restart', {}),
+  restart: (opts?: ApiRequestOptions) => post<{ ok: boolean; error?: string | null; activeTasks?: number }>('/api/restart', {}, opts),
   switchWorkdir: (path: string) => post<{ ok: boolean; workdir?: string; error?: string }>('/api/switch-workdir', { path }),
   lsDir: (dir?: string, includeFiles?: boolean, includeHidden?: boolean) => {
     const params = new URLSearchParams();
@@ -961,10 +964,36 @@ export const api = {
     body: { environment: string; url: string; stageRunId?: string; pipeline?: unknown },
     opts?: ApiRequestOptions,
   ) =>
-    post<{ ok: boolean; task?: ProTask; verificationRun?: unknown; error?: string }>(
+    post<{ ok: boolean; task?: ProTask; verificationRun?: VerificationRun; error?: string }>(
       `/api/pro/tasks/${encodeURIComponent(taskId)}/verification-runs`,
       body,
       opts,
+    ),
+  openBrowserPanelSession: (url: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; snapshot?: BrowserPanelSnapshot; error?: string }>(
+      '/api/pro/browser-sessions',
+      { url },
+      { timeoutMs: 45_000, ...opts },
+    ),
+  getBrowserPanelSession: (sessionId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; snapshot?: BrowserPanelSnapshot; error?: string }>(
+      `/api/pro/browser-sessions/${encodeURIComponent(sessionId)}`,
+      { timeoutMs: 20_000, ...opts },
+    ),
+  browserPanelAction: (
+    sessionId: string,
+    body: { action: 'navigate'; url: string } | { action: 'reload' } | { action: 'click'; xRatio: number; yRatio: number } | { action: 'type'; text: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; snapshot?: BrowserPanelSnapshot; error?: string }>(
+      `/api/pro/browser-sessions/${encodeURIComponent(sessionId)}/actions`,
+      body,
+      { timeoutMs: 45_000, ...opts },
+    ),
+  closeBrowserPanelSession: (sessionId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; error?: string }>(
+      `/api/pro/browser-sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE', ...opts },
     ),
   finishVerificationRun: (
     taskId: string,

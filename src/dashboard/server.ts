@@ -47,6 +47,7 @@ export interface DashboardServer {
 
 const DASHBOARD_PORT_RETRY_LIMIT = 10;
 const WS_KEEPALIVE_MS = 25_000;
+const DASHBOARD_HOST = '127.0.0.1';
 
 // ---------------------------------------------------------------------------
 // WebSocket push layer (replaces SSE)
@@ -212,13 +213,13 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
         // Attach WebSocket BEFORE listening — ensures upgrade events are captured
         wsHandle = attachWebSocketServer(server);
 
-        server.listen(port, () => {
+        server.listen(port, DASHBOARD_HOST, () => {
           if (settled) return;
           settled = true;
           nodeServer = server;
           const addr = server.address();
           const actualPort = typeof addr === 'object' && addr ? addr.port : port;
-          const dashUrl = `http://localhost:${actualPort}`;
+          const dashUrl = `http://${DASHBOARD_HOST}:${actualPort}`;
           const ts = new Date().toTimeString().slice(0, 8);
           process.stdout.write(`[pikiclaw ${ts}] dashboard: ${dashUrl}\n`);
 

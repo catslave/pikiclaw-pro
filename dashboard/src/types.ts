@@ -1008,6 +1008,16 @@ export interface VerificationRun {
   completedAt?: string;
 }
 
+export interface BrowserPanelSnapshot {
+  id: string;
+  url: string;
+  title: string;
+  image: string;
+  width: number;
+  height: number;
+  updatedAt: string;
+}
+
 export interface StageRun {
   id: string;
   taskId: string;

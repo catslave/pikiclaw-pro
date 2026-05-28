@@ -1,6 +1,6 @@
 import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useCallback, useRef, memo, useMemo, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
@@ -956,6 +956,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const appState = useStore(s => s.state);
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? null);
   const toastSession = useStore(s => s.toast);
+  const navigate = useNavigate();
   const t = useMemo(() => createT(locale), [locale]);
   const appStatus = resolveAppStatusBadge(appState, t);
   const themeToggleLabel = theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode');
@@ -3236,7 +3237,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       >
         <button
           type="button"
-          onClick={() => setWorkspaceSidebarCollapsed(false)}
+          onClick={() => {
+            setWorkspaceSidebarCollapsed(false);
+            navigate('/', { state: { forceWorkspace: true } });
+          }}
           className={cn(
             'group absolute left-0 top-3 z-40 flex h-12 w-11 items-center justify-center overflow-hidden border border-l-0 border-edge/65 bg-panel/92 text-fg-5 shadow-[0_6px_18px_rgba(15,23,42,0.12)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[74px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
             workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-150' : '-translate-x-2 opacity-0 pointer-events-none',

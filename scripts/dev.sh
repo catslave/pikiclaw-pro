@@ -39,13 +39,10 @@ fi
 
 if (( _should_detach )); then
   : > "${LOG_FILE}"
-  # nohup ignores SIGHUP so the worker outlives this shell; disown removes it
-  # from the job table so the calling agent's bash doesn't track it.
-  # setsid isn't portable to macOS, but nohup + redirect + disown is enough
-  # because the worker is reparented to init once we exit immediately below.
-  nohup env PIKICLAW_DEV_DETACHED=1 bash "$0" "$@" </dev/null >>"${LOG_FILE}" 2>&1 &
-  _bg_pid=$!
-  disown "$_bg_pid" 2>/dev/null || true
+  # Spawn through Node's detached child_process API. Some agent shells clean up
+  # their whole descendant tree when the tool call returns; a plain nohup/disown
+  # child can still be collected before it binds the dashboard port.
+  _bg_pid=$(node scripts/spawn-detached-dev.mjs "${LOG_FILE}" "$0" "$@")
   cat <<EOF
 [dev.sh] detached worker spawned (pid=${_bg_pid}); restart proceeds outside caller's process tree
 [dev.sh]   log:  ${LOG_FILE}     (tail -f to follow)
@@ -63,12 +60,27 @@ fi
 
 # Kill any previous dev processes (npm -> bash -> tsx -> node tree)
 _killed=0
-# 1) Kill by "tsx src/cli.ts --no-daemon" pattern (the actual node worker)
+# 1) Kill by "tsx src/cli/main.ts --no-daemon" pattern (the actual node worker)
 if pkill -f 'tsx src/cli/main.ts --no-daemon' 2>/dev/null; then
   _killed=1
 fi
-# 2) Kill whatever is listening on the dev dashboard port
-_port_pid=$(lsof -ti tcp:3940 2>/dev/null || true)
+# 2) Kill whatever is listening on the requested dev dashboard port.
+_dashboard_port=3939
+_prev_arg=''
+for _arg in "$@"; do
+  if [[ "${_prev_arg}" == "--dashboard-port" ]]; then
+    _dashboard_port="${_arg}"
+    break
+  fi
+  case "${_arg}" in
+    --dashboard-port=*)
+      _dashboard_port="${_arg#--dashboard-port=}"
+      break
+      ;;
+  esac
+  _prev_arg="${_arg}"
+done
+_port_pid=$(lsof -ti "tcp:${_dashboard_port}" 2>/dev/null || true)
 if [[ -n "$_port_pid" ]]; then
   echo "$_port_pid" | xargs kill 2>/dev/null || true
   _killed=1
@@ -108,6 +120,7 @@ done < <(env | grep -oE '^(PIKICLAW_|CLAUDECODE|CLAUDE_CODE_|CLAUDE_MODEL|CLAUDE
 # Set dev-specific env AFTER the cleanup so they are not wiped.
 export PIKICLAW_CONFIG="${DEV_DIR}/setting.json"
 export PIKICLAW_LOG_LEVEL="${PIKICLAW_LOG_LEVEL:-debug}"
+export PIKICLAW_RESTART_CMD="${PIKICLAW_RESTART_CMD:-npm run dev --}"
 
 echo $$ > "${DEV_DIR}/dev.pid"
 trap 'rm -f "${DEV_DIR}/dev.pid"' EXIT
@@ -120,7 +133,14 @@ if (( ! _is_detached_worker )); then
   : > "${LOG_FILE}"
 fi
 
-{
-  npm run build:dashboard
-  npx tsx src/cli/main.ts --no-daemon "$@"
-} 2>&1 | node scripts/retained-tee.mjs "${LOG_FILE}"
+if (( _is_detached_worker )); then
+  {
+    npm run build:dashboard
+    npx tsx src/cli/main.ts --no-daemon "$@"
+  } 2>&1 | node scripts/retained-tee.mjs "${LOG_FILE}" >/dev/null
+else
+  {
+    npm run build:dashboard
+    npx tsx src/cli/main.ts --no-daemon "$@"
+  } 2>&1 | node scripts/retained-tee.mjs "${LOG_FILE}"
+fi

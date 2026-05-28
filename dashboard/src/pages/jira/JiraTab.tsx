@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
 import { api } from '../../api';
+import { BrowserPanelModal } from '../../components/BrowserPanelModal';
 import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
 import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { AgentAssistant, AgentRuntimeStatus, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
@@ -765,6 +766,7 @@ function TaskDetail({
   agents,
   config,
   onStartVerification,
+  onOpenBrowserUrl,
   onFinishVerification,
   onCompleteStage,
   onExclusiveMode,
@@ -784,6 +786,7 @@ function TaskDetail({
   agents: AgentRuntimeStatus[];
   config: JiraWorkflowConfig;
   onStartVerification: (task: ProTask) => void;
+  onOpenBrowserUrl: (url: string) => void;
   onFinishVerification: (task: ProTask, run: VerificationRun, result: VerificationResult) => void;
   onCompleteStage: (task: ProTask, run: StageRun) => void;
   onExclusiveMode: (task: ProTask, enabled: boolean) => void;
@@ -1053,7 +1056,15 @@ function TaskDetail({
                       {run.result || 'not-run'}
                     </Badge>
                     <span className="text-[12px] text-fg-4">{run.environment}</span>
-                    {run.browserSession?.url && <a className="truncate text-[12px] text-primary hover:underline" href={run.browserSession.url} target="_blank" rel="noreferrer">{run.browserSession.url}</a>}
+                    {run.browserSession?.url && (
+                      <button
+                        type="button"
+                        className="truncate text-left text-[12px] text-primary hover:underline"
+                        onClick={() => onOpenBrowserUrl(run.browserSession!.url)}
+                      >
+                        {run.browserSession.url}
+                      </button>
+                    )}
                   </div>
                   <div className="mt-1 text-[11px] text-fg-5">{formatTime(run.startedAt)}{run.completedAt ? ` - ${formatTime(run.completedAt)}` : ''}</div>
                   {!run.completedAt && (
@@ -1130,6 +1141,10 @@ export function JiraTab() {
   const [selectedSprint, setSelectedSprint] = useState<string>('all');
   const [verifyDraft, setVerifyDraft] = useState({ environment: 'cnlab03', url: '', notes: '' });
   const [subtaskDraft, setSubtaskDraft] = useState({ title: '', description: '', assignedAgent: '', assistantId: '' });
+  const [browserSnapshot, setBrowserSnapshot] = useState<BrowserPanelSnapshot | null>(null);
+  const [browserUrlDraft, setBrowserUrlDraft] = useState('');
+  const [browserTypeDraft, setBrowserTypeDraft] = useState('');
+  const [browserBusy, setBrowserBusy] = useState(false);
   const activeFocusSessionRef = useRef<{ taskId: string; focusSessionId: string } | null>(null);
 
   const sprintOptions = useMemo(() => {
@@ -1460,6 +1475,47 @@ export function JiraTab() {
     }
   }, [toast, upsertTask]);
 
+  const openBrowserPanel = useCallback(async (url: string) => {
+    const targetUrl = url.trim();
+    if (!targetUrl) return;
+    setBrowserBusy(true);
+    try {
+      const result = await api.openBrowserPanelSession(targetUrl);
+      if (!result.ok || !result.snapshot) throw new Error(result.error || 'Failed to open browser');
+      setBrowserSnapshot(result.snapshot);
+      setBrowserUrlDraft(result.snapshot.url || targetUrl);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to open browser', false);
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [toast]);
+
+  const runBrowserAction = useCallback(async (
+    action: { action: 'navigate'; url: string } | { action: 'reload' } | { action: 'click'; xRatio: number; yRatio: number } | { action: 'type'; text: string },
+  ) => {
+    if (!browserSnapshot) return;
+    setBrowserBusy(true);
+    try {
+      const result = await api.browserPanelAction(browserSnapshot.id, action);
+      if (!result.ok || !result.snapshot) throw new Error(result.error || 'Browser action failed');
+      setBrowserSnapshot(result.snapshot);
+      setBrowserUrlDraft(result.snapshot.url);
+      if (action.action === 'type') setBrowserTypeDraft('');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Browser action failed', false);
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [browserSnapshot, toast]);
+
+  const closeBrowserPanel = useCallback(() => {
+    const id = browserSnapshot?.id;
+    setBrowserSnapshot(null);
+    setBrowserTypeDraft('');
+    if (id) void api.closeBrowserPanelSession(id).catch(() => {});
+  }, [browserSnapshot?.id]);
+
   const startVerification = useCallback(async (task: ProTask) => {
     try {
       const result = await api.startVerificationRun(task.id, {
@@ -1470,11 +1526,13 @@ export function JiraTab() {
       });
       if (!result.ok || !result.task) throw new Error(result.error || 'Failed to start verification');
       upsertTask(result.task);
+      const url = result.verificationRun?.browserSession?.url || verifyDraft.url;
+      if (url) void openBrowserPanel(url);
       toast('Verification opened');
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to start verification', false);
     }
-  }, [toast, upsertTask, verifyDraft]);
+  }, [openBrowserPanel, toast, upsertTask, verifyDraft]);
 
   const finishVerification = useCallback(async (task: ProTask, run: VerificationRun, resultValue: VerificationResult) => {
     try {
@@ -1640,6 +1698,7 @@ export function JiraTab() {
             agents={agentStatus?.agents || []}
             config={jiraConfig}
             onStartVerification={startVerification}
+            onOpenBrowserUrl={(url) => { void openBrowserPanel(url); }}
             onFinishVerification={finishVerification}
             onCompleteStage={completeStage}
             onExclusiveMode={toggleExclusiveMode}
@@ -1654,6 +1713,19 @@ export function JiraTab() {
           />
         </div>
       </Modal>
+      <BrowserPanelModal
+        snapshot={browserSnapshot}
+        busy={browserBusy}
+        urlDraft={browserUrlDraft}
+        typeDraft={browserTypeDraft}
+        onUrlDraft={setBrowserUrlDraft}
+        onTypeDraft={setBrowserTypeDraft}
+        onNavigate={() => { void runBrowserAction({ action: 'navigate', url: browserUrlDraft }); }}
+        onReload={() => { void runBrowserAction({ action: 'reload' }); }}
+        onClickImage={(xRatio, yRatio) => { void runBrowserAction({ action: 'click', xRatio, yRatio }); }}
+        onTypeText={() => { void runBrowserAction({ action: 'type', text: browserTypeDraft }); }}
+        onClose={closeBrowserPanel}
+      />
     </div>
   );
 }

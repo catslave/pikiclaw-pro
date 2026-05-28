@@ -3,11 +3,18 @@
  */
 
 import { Hono } from 'hono';
-import { execFile } from 'node:child_process';
 import { loadUserConfig } from '../../core/config/user-config.js';
 import { runtime } from '../runtime.js';
 import { queueDashboardSessionTask } from '../session-control.js';
-import { getManagedBrowserStatus } from '../../browser-profile.js';
+import {
+  clickBrowserPanelSession,
+  closeBrowserPanelSession,
+  createBrowserPanelSession,
+  navigateBrowserPanelSession,
+  reloadBrowserPanelSession,
+  snapshotBrowserPanelSession,
+  typeBrowserPanelSession,
+} from '../browser-panel.js';
 import {
   addStageRun,
   createSubtask,
@@ -874,7 +881,6 @@ app.post('/api/pro/tasks/:taskId/verification-runs', async (c) => {
       pipeline: body?.pipeline,
     });
     const latest = task.verificationRuns[0];
-    if (latest?.browserSession?.url) void openUrl(latest.browserSession.url);
     return c.json({ ok: true, task, verificationRun: latest });
   } catch (e: any) {
     const status = e?.message === 'task not found' ? 404 : 400;
@@ -898,6 +904,60 @@ app.patch('/api/pro/tasks/:taskId/verification-runs/:verificationRunId', async (
 function isVerificationResult(value: string): value is VerificationResult {
   return value === 'passed' || value === 'failed' || value === 'blocked' || value === 'not-run';
 }
+
+app.post('/api/pro/browser-sessions', async (c) => {
+  try {
+    const body = await c.req.json();
+    const url = readString(body?.url);
+    if (!url) return c.json({ ok: false, error: 'url is required' }, 400);
+    const snapshot = await createBrowserPanelSession(url);
+    return c.json({ ok: true, snapshot });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.get('/api/pro/browser-sessions/:sessionId', async (c) => {
+  try {
+    const snapshot = await snapshotBrowserPanelSession(c.req.param('sessionId'));
+    return c.json({ ok: true, snapshot });
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 500;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/browser-sessions/:sessionId/actions', async (c) => {
+  try {
+    const body = await c.req.json();
+    const action = readString(body?.action);
+    const sessionId = c.req.param('sessionId');
+    if (action === 'navigate') {
+      const url = readString(body?.url);
+      if (!url) return c.json({ ok: false, error: 'url is required' }, 400);
+      return c.json({ ok: true, snapshot: await navigateBrowserPanelSession(sessionId, url) });
+    }
+    if (action === 'reload') return c.json({ ok: true, snapshot: await reloadBrowserPanelSession(sessionId) });
+    if (action === 'click') {
+      return c.json({
+        ok: true,
+        snapshot: await clickBrowserPanelSession(sessionId, Number(body?.xRatio || 0), Number(body?.yRatio || 0)),
+      });
+    }
+    if (action === 'type') {
+      return c.json({ ok: true, snapshot: await typeBrowserPanelSession(sessionId, String(body?.text || '')) });
+    }
+    return c.json({ ok: false, error: 'unsupported browser action' }, 400);
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 500;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/browser-sessions/:sessionId', async (c) => {
+  await closeBrowserPanelSession(c.req.param('sessionId'));
+  return c.json({ ok: true });
+});
 
 async function fetchJiraIssues(opts: {
   baseUrl: string;
@@ -948,28 +1008,6 @@ function jiraDescriptionToText(value: unknown): string {
   };
   visit(value);
   return chunks.join(' ').replace(/\s+/g, ' ').trim();
-}
-
-function openUrl(url: string) {
-  const browser = getManagedBrowserStatus();
-  if (browser.launchCommand.length) {
-    const [command, ...args] = browser.launchCommand;
-    execFile(command, [...args, url], (error) => {
-      if (error) fallbackOpenUrl(url);
-    });
-    return;
-  }
-  fallbackOpenUrl(url);
-}
-
-function fallbackOpenUrl(url: string) {
-  const opener = process.platform === 'darwin'
-    ? 'open'
-    : process.platform === 'win32'
-      ? 'cmd'
-      : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
-  execFile(opener, args, () => {});
 }
 
 function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>>, stage: string, assistant?: ReturnType<typeof listAgentAssistants>[number]): string {

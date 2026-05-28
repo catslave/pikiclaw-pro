@@ -58,14 +58,7 @@ function fileLinkTitle(target: FileLinkTarget): string {
 }
 
 function TargetTooltip({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <span className="group relative inline-block align-baseline">
-      {children}
-      <span className="pointer-events-none absolute left-0 top-full z-[90] mt-1 hidden max-h-28 max-w-[min(420px,72vw)] overflow-hidden whitespace-normal break-all rounded-md border border-edge bg-dropdown px-2 py-1 text-[11px] leading-snug text-fg-3 shadow-lg group-hover:block">
-        {label}
-      </span>
-    </span>
-  );
+  return <span title={label}>{children}</span>;
 }
 
 function looksLikeRemoteBranchRef(text: string): boolean {
@@ -231,6 +224,7 @@ export function createMdComponents({ onOpenFileLink, workdir }: { onOpenFileLink
         <TargetTooltip label={title}>
           <button
             type="button"
+            data-copy-path={title}
             className="inline cursor-pointer rounded-sm bg-transparent p-0 text-left text-blue-400 underline decoration-blue-400/30 underline-offset-2 transition-colors hover:text-blue-300"
             aria-label={title}
             onClick={() => openFileLink(fileTarget)}

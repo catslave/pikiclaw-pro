@@ -4,9 +4,11 @@ import { useStore } from './store';
 import { createT } from './i18n';
 import type { RestartPhase } from './components/Sidebar';
 import { Spinner, Toasts } from './components/ui';
+import { BrowserPanelModal } from './components/BrowserPanelModal';
 import { api } from './api';
 import { getDashboardTabMeta, type DashboardTab } from './tabs';
 import { cn } from './utils';
+import type { BrowserPanelSnapshot } from './types';
 
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
@@ -38,6 +40,12 @@ type ModalState =
   | { type: 'browser-setup' };
 
 const LAST_DASHBOARD_PATH_KEY = 'pikiclaw:last-dashboard-path:v1';
+
+type HoveredLinkState = {
+  href: string;
+  x: number;
+  y: number;
+};
 
 function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
@@ -106,6 +114,122 @@ function RouteFallback() {
   );
 }
 
+function HoverLinkCopyButton({ t, toast }: { t: (key: string) => string; toast: (message: string, ok?: boolean) => void }) {
+  const [hovered, setHovered] = useState<HoveredLinkState | null>(null);
+  const activeLinkRef = useRef<Element | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const hideTimerRef = useRef<number | null>(null);
+
+  const clearHideTimer = useCallback(() => {
+    if (hideTimerRef.current !== null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleHide = useCallback(() => {
+    clearHideTimer();
+    hideTimerRef.current = window.setTimeout(() => {
+      activeLinkRef.current = null;
+      setHovered(null);
+      hideTimerRef.current = null;
+    }, 140);
+  }, [clearHideTimer]);
+
+  const positionForPointer = useCallback((clientX: number, clientY: number, href: string) => {
+    const x = Math.min(window.innerWidth - 34, Math.max(8, clientX + 10));
+    const y = Math.min(window.innerHeight - 30, Math.max(8, clientY - 28));
+    setHovered({ href, x, y });
+  }, []);
+
+  useEffect(() => {
+    const readCopyTarget = (element: Element | null): { link: Element; href: string } | null => {
+      const link = element?.closest('a[href],button[data-copy-path]');
+      if (!link) return null;
+      const href = link instanceof HTMLAnchorElement
+        ? link.getAttribute('href') || ''
+        : link.getAttribute('data-copy-path') || '';
+      if (!href || href.startsWith('javascript:')) return null;
+      return { link, href };
+    };
+
+    const onMouseOver = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const copyTarget = readCopyTarget(target);
+      if (!copyTarget) return;
+      clearHideTimer();
+      activeLinkRef.current = copyTarget.link;
+      positionForPointer(event.clientX, event.clientY, copyTarget.href);
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+      const active = activeLinkRef.current;
+      if (!active) return;
+      const target = event.target instanceof Node ? event.target : null;
+      if (!target || (!active.contains(target) && !buttonRef.current?.contains(target))) return;
+      const href = active instanceof HTMLAnchorElement
+        ? active.getAttribute('href') || ''
+        : active.getAttribute('data-copy-path') || '';
+      if (href) positionForPointer(event.clientX, event.clientY, href);
+    };
+
+    const onMouseOut = (event: MouseEvent) => {
+      const active = activeLinkRef.current;
+      if (!active) return;
+      const target = event.target instanceof Node ? event.target : null;
+      if (target && !active.contains(target)) return;
+      const next = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+      if (next && (active.contains(next) || buttonRef.current?.contains(next))) return;
+      scheduleHide();
+    };
+
+    document.addEventListener('mouseover', onMouseOver);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseout', onMouseOut);
+    window.addEventListener('scroll', scheduleHide, true);
+    window.addEventListener('resize', scheduleHide);
+    return () => {
+      document.removeEventListener('mouseover', onMouseOver);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseout', onMouseOut);
+      window.removeEventListener('scroll', scheduleHide, true);
+      window.removeEventListener('resize', scheduleHide);
+      clearHideTimer();
+    };
+  }, [clearHideTimer, positionForPointer, scheduleHide]);
+
+  const copyLink = useCallback(() => {
+    if (!hovered?.href) return;
+    void navigator.clipboard.writeText(hovered.href)
+      .then(() => toast(t('hub.copied')))
+      .catch(() => toast('Copy failed', false));
+  }, [hovered?.href, t, toast]);
+
+  if (!hovered) return null;
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      className="fixed z-[9500] inline-flex h-6 w-6 items-center justify-center rounded-md border border-edge bg-dropdown text-fg-4 shadow-lg transition-colors hover:border-primary/50 hover:text-primary"
+      style={{ left: hovered.x, top: hovered.y }}
+      aria-label={t('ext.copyPath')}
+      title={t('ext.copyPath')}
+      onMouseEnter={clearHideTimer}
+      onMouseLeave={scheduleHide}
+      onClick={e => {
+        e.preventDefault();
+        e.stopPropagation();
+        copyLink();
+      }}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="9" y="9" width="13" height="13" rx="2" />
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      </svg>
+    </button>
+  );
+}
+
 export function App() {
   // Granular selectors -- each subscription triggers re-render only when its slice changes.
   // Actions (toast, reload) are stable refs and never cause re-renders.
@@ -126,6 +250,10 @@ export function App() {
       : 'settings';
   const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
   const initialPathRestoreCheckedRef = useRef(false);
+  const [browserSnapshot, setBrowserSnapshot] = useState<BrowserPanelSnapshot | null>(null);
+  const [browserUrlDraft, setBrowserUrlDraft] = useState('');
+  const [browserTypeDraft, setBrowserTypeDraft] = useState('');
+  const [browserBusy, setBrowserBusy] = useState(false);
 
   const t = useMemo(() => createT(locale), [locale]);
   const [modal, setModal] = useState<ModalState>(null);
@@ -133,12 +261,68 @@ export function App() {
 
   const version = state?.version || '...';
 
-  const [prompted, setPrompted] = useState(false);
+  const openBrowserPanel = useCallback(async (url: string) => {
+    const targetUrl = url.trim();
+    if (!targetUrl) return;
+    setBrowserBusy(true);
+    try {
+      const result = await api.openBrowserPanelSession(targetUrl);
+      if (!result.ok || !result.snapshot) throw new Error(result.error || 'Failed to open browser');
+      setBrowserSnapshot(result.snapshot);
+      setBrowserUrlDraft(result.snapshot.url || targetUrl);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to open browser', false);
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [toast]);
+
+  const runBrowserAction = useCallback(async (
+    action: { action: 'navigate'; url: string } | { action: 'reload' } | { action: 'click'; xRatio: number; yRatio: number } | { action: 'type'; text: string },
+  ) => {
+    if (!browserSnapshot) return;
+    setBrowserBusy(true);
+    try {
+      const result = await api.browserPanelAction(browserSnapshot.id, action);
+      if (!result.ok || !result.snapshot) throw new Error(result.error || 'Browser action failed');
+      setBrowserSnapshot(result.snapshot);
+      setBrowserUrlDraft(result.snapshot.url);
+      if (action.action === 'type') setBrowserTypeDraft('');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Browser action failed', false);
+    } finally {
+      setBrowserBusy(false);
+    }
+  }, [browserSnapshot, toast]);
+
+  const closeBrowserPanel = useCallback(() => {
+    const id = browserSnapshot?.id;
+    setBrowserSnapshot(null);
+    setBrowserTypeDraft('');
+    if (id) void api.closeBrowserPanelSession(id).catch(() => {});
+  }, [browserSnapshot?.id]);
+
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
+      if (!anchor || anchor.dataset.externalBrowser === 'true') return;
+      const href = anchor.getAttribute('href') || '';
+      if (!/^https?:\/\//i.test(href)) return;
+      event.preventDefault();
+      void openBrowserPanel(href);
+    };
+    document.addEventListener('click', onClick);
+    return () => document.removeEventListener('click', onClick);
+  }, [openBrowserPanel]);
+
   useEffect(() => {
     if (sessionShellActive) setSessionsTabReady(true);
   }, [sessionShellActive]);
 
   useEffect(() => {
+    const navState = location.state as { forceWorkspace?: boolean } | null;
     if (location.pathname === '/jira') {
       navigate('/dashboard?view=jira', { replace: true });
       return;
@@ -146,6 +330,11 @@ export function App() {
     const normalized = normalizeDashboardPath(location.pathname);
     if (!normalized) return;
     if (normalized === '/') {
+      if (navState?.forceWorkspace) {
+        initialPathRestoreCheckedRef.current = true;
+        writeLastDashboardPath('/');
+        return;
+      }
       if (!initialPathRestoreCheckedRef.current) {
         initialPathRestoreCheckedRef.current = true;
         const lastPath = readLastDashboardPath();
@@ -159,25 +348,7 @@ export function App() {
     }
     initialPathRestoreCheckedRef.current = true;
     writeLastDashboardPath(normalized);
-  }, [location.pathname, navigate]);
-
-  useEffect(() => {
-    if (
-      state
-      && !prompted
-      && location.pathname !== '/'
-      && !state.config.weixinBotToken
-      && !state.config.telegramBotToken
-      && !state.config.feishuAppId
-      && !state.config.slackBotToken
-      && !state.config.discordBotToken
-      && !state.config.dingtalkClientId
-      && !state.config.wecomBotId
-    ) {
-      setPrompted(true);
-      setTimeout(() => setModal({ type: 'weixin' }), 400);
-    }
-  }, [state, prompted, location.pathname]);
+  }, [location.pathname, location.state, navigate]);
 
   // Restart: phase-based overlay
   const [restartPhase, setRestartPhase] = useState<RestartPhase>(null);
@@ -202,12 +373,15 @@ export function App() {
           }
           setRestartPhase('reconnecting');
           let recovered = false;
-          for (let i = 0; i < 30; i++) {
-            await new Promise(r => setTimeout(r, 600));
-            try { await api.getState(); recovered = true; break; } catch {}
+          for (let i = 0; i < 90; i++) {
+            await new Promise(r => setTimeout(r, 800));
+            try {
+              const health = await api.health({ timeoutMs: 3000 });
+              if (health.ok) { recovered = true; break; }
+            } catch {}
           }
           if (recovered) {
-            await reload();
+            try { await reload(); } catch {}
             toast(t('modal.restartSuccess'));
           } else {
             toast(t('modal.restartFailed'), false);
@@ -314,6 +488,20 @@ export function App() {
         </Suspense>
       )}
       <Toasts items={toasts} />
+      <HoverLinkCopyButton t={t} toast={toast} />
+      <BrowserPanelModal
+        snapshot={browserSnapshot}
+        busy={browserBusy}
+        urlDraft={browserUrlDraft}
+        typeDraft={browserTypeDraft}
+        onUrlDraft={setBrowserUrlDraft}
+        onTypeDraft={setBrowserTypeDraft}
+        onNavigate={() => { void runBrowserAction({ action: 'navigate', url: browserUrlDraft }); }}
+        onReload={() => { void runBrowserAction({ action: 'reload' }); }}
+        onClickImage={(xRatio, yRatio) => { void runBrowserAction({ action: 'click', xRatio, yRatio }); }}
+        onTypeText={() => { void runBrowserAction({ action: 'type', text: browserTypeDraft }); }}
+        onClose={closeBrowserPanel}
+      />
 
       {/* Full-page restart overlay */}
       {(restartPhase === 'restarting' || restartPhase === 'reconnecting') && (

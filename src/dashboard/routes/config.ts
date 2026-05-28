@@ -197,6 +197,8 @@ function looksBinary(buffer: Buffer): boolean {
 
 const app = new Hono();
 
+app.get('/api/health', (c) => c.json({ ok: true, version: VERSION }));
+
 // Full state (config from file only)
 app.get('/api/state', async (c) => {
   const config = loadUserConfig();
