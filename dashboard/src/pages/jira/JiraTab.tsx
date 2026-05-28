@@ -20,6 +20,14 @@ const JIRA_COLUMNS: Array<{ key: JiraColumnKey; label: string; hint: string }> =
   { key: 'done', label: 'Done', hint: 'Closed work' },
 ];
 
+const JIRA_COLUMN_BADGE: Record<JiraColumnKey, 'ok' | 'warn' | 'muted' | 'accent'> = {
+  backlog: 'muted',
+  running: 'warn',
+  incomplete: 'warn',
+  review: 'accent',
+  done: 'ok',
+};
+
 const STATUS_LABEL: Record<ProTaskStatus, string> = {
   backlog: 'Backlog',
   refinement: 'Refinement',
@@ -140,6 +148,12 @@ function TaskCard({
 }) {
   const latestRun = task.stageRuns[0];
   const progress = subtaskProgress(task);
+  const quickStatuses: Array<{ status: ProTaskStatus; label: string }> = [
+    { status: 'refinement', label: 'Refine' },
+    { status: 'coding', label: 'Code' },
+    { status: 'resolved', label: 'Review' },
+    { status: 'done', label: 'Done' },
+  ].filter(item => item.status !== task.status);
   return (
     <button
       type="button"
@@ -152,7 +166,7 @@ function TaskCard({
       }}
       onDragEnd={onDragEnd}
       className={cn(
-        'w-full rounded-md border border-l-4 px-3 py-2.5 text-left shadow-sm transition duration-150',
+        'jira-task-card group/task w-full rounded-lg border border-l-4 px-3 py-2.5 text-left shadow-[0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,transform,opacity,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(0,0,0,0.16),0_1px_0_rgba(255,255,255,0.045)]',
         draggable && 'cursor-grab active:cursor-grabbing',
         taskCardColor(task.status),
         isDragging && 'scale-[0.98] opacity-35 shadow-none',
@@ -161,16 +175,16 @@ function TaskCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-[13px] font-semibold text-fg">{task.title}</div>
+          <div className="line-clamp-2 text-[13px] font-semibold leading-snug text-fg">{task.title}</div>
           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-5">
             {task.jiraKey && <span className="font-mono">{task.jiraKey}</span>}
             {task.sprint && <span>{task.sprint}</span>}
             <span>{formatTime(task.updatedAt)}</span>
           </div>
         </div>
-        <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
+        <Badge variant={taskStatusTone(task.status)} className="shrink-0">{STATUS_LABEL[task.status]}</Badge>
       </div>
-      {task.description && <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-fg-4">{task.description}</div>}
+      {task.description && <div className="mt-2 line-clamp-3 text-[12px] leading-relaxed text-fg-4">{task.description}</div>}
       {progress.total > 0 && (
         <div className="mt-2 flex items-center gap-2 rounded-md border border-edge bg-panel-alt px-2 py-1.5 text-[11px] text-fg-4">
           <span className="font-semibold text-fg-3">Subtasks</span>
@@ -181,8 +195,41 @@ function TaskCard({
         </div>
       )}
       {latestRun && (
-        <div className="mt-2 rounded-md border border-edge bg-panel-alt px-2 py-1.5 text-[11px] text-fg-4">
-          Latest: {STAGE_LABEL[latestRun.stage]} · {latestRun.session.agent}:{latestRun.session.sessionId.slice(0, 8)}
+        <div className="mt-2 flex items-center gap-1.5 rounded-md border border-edge bg-panel-alt px-2 py-1.5 text-[11px] text-fg-4">
+          {busyStage === latestRun.stage ? <Spinner className="h-3 w-3" /> : null}
+          <span className="shrink-0 font-medium text-fg-3">{STAGE_LABEL[latestRun.stage]}</span>
+          <span className="min-w-0 truncate">{latestRun.session.agent}:{latestRun.session.sessionId.slice(0, 8)}</span>
+        </div>
+      )}
+      {(onStatus || onStartStage) && (
+        <div className="jira-task-actions mt-2 flex max-h-0 flex-wrap items-center gap-1.5 overflow-hidden opacity-0 transition-[max-height,opacity] duration-200 group-hover/task:max-h-8 group-hover/task:opacity-100 group-focus-visible/task:max-h-8 group-focus-visible/task:opacity-100">
+          {quickStatuses.slice(0, 3).map(item => (
+            <span
+              key={item.status}
+              role="button"
+              tabIndex={-1}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStatus?.(task, item.status);
+              }}
+              className="inline-flex h-6 items-center rounded-md border border-edge bg-panel-alt px-2 text-[10px] font-semibold text-fg-4 transition-colors hover:border-primary/40 hover:bg-primary/[0.08] hover:text-primary"
+            >
+              {item.label}
+            </span>
+          ))}
+          {onStartStage && (
+            <span
+              role="button"
+              tabIndex={-1}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStartStage(task, task.status === 'coding' ? 'verification' : 'focus');
+              }}
+              className="inline-flex h-6 items-center rounded-md border border-edge bg-panel-alt px-2 text-[10px] font-semibold text-fg-4 transition-colors hover:border-primary/40 hover:bg-primary/[0.08] hover:text-primary"
+            >
+              Stage
+            </span>
+          )}
         </div>
       )}
     </button>
@@ -1545,17 +1592,17 @@ export function JiraTab() {
   }, [toast, upsertTask, verifyDraft.notes]);
 
   return (
-    <div className="flex h-full min-h-[640px] flex-col rounded-xl border border-edge bg-panel" style={{ boxShadow: 'var(--th-card-shadow)' }}>
-      <div className="shrink-0 border-b border-edge/40 px-4 py-3">
+    <div className="flex h-full min-h-[640px] flex-col overflow-hidden rounded-[16px] border border-edge/65 bg-panel/70" style={{ boxShadow: 'var(--th-card-shadow)' }}>
+      <div className="shrink-0 border-b border-edge/35 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),transparent)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
-            <div className="text-[14px] font-semibold text-fg">Jira Dashboard</div>
-            <div className="mt-0.5 text-[11px] text-fg-5">Track Jira-backed tasks with the same lightweight board layout as Workspace.</div>
+            <div className="text-[15px] font-semibold tracking-tight text-fg">Jira Dashboard</div>
+            <div className="mt-1 text-[12px] text-fg-5">Track Jira-backed tasks with the same lightweight board layout as Workspace.</div>
           </div>
           <select
             value={selectedSprint}
             onChange={event => setSelectedSprint(event.target.value || 'all')}
-            className="h-8 min-w-[150px] rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+            className="h-8 min-w-[150px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
           >
             <option value="all">All sprints</option>
             {sprintOptions.map(sprint => (
@@ -1581,7 +1628,7 @@ export function JiraTab() {
         <div className="flex h-48 items-center justify-center text-sm text-fg-4"><Spinner /> {t('sessions.loading')}</div>
       ) : (
         <div className="min-h-0 flex-1 overflow-hidden p-3">
-          <div className="grid h-full min-h-0 grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-5">
+          <div className="dashboard-board-grid grid h-full min-h-0 gap-3">
             {JIRA_COLUMNS.map(column => (
               <section
                 key={column.key}
@@ -1597,28 +1644,28 @@ export function JiraTab() {
                   if (taskId) void handleDropTask(taskId, column.key);
                 }}
                 className={cn(
-                  'min-h-0 rounded-lg border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden transition',
+                  'group/column min-h-0 rounded-xl border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,box-shadow] duration-200 hover:border-edge/75 hover:bg-panel-alt/45',
                   dragOverColumn === column.key ? 'border-primary/45 bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]' : '',
                 )}
               >
-                <div className="shrink-0 border-b border-edge/30 px-3 py-2">
+                <div className="shrink-0 border-b border-edge/25 bg-panel/30 px-3 py-2.5">
                   <div className="flex items-center gap-2">
-                    <Badge variant="muted" className="h-5 px-2 text-[10px]">{byStatus.get(column.key)?.length || 0}</Badge>
+                    <Badge variant={JIRA_COLUMN_BADGE[column.key]} className="h-5 px-2 text-[10px] tabular-nums">{byStatus.get(column.key)?.length || 0}</Badge>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[12px] font-semibold text-fg-2">{column.label}</div>
                       <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
                     </div>
                   </div>
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
                   {dragOverColumn === column.key && draggingTask && jiraColumnForTask(draggingTask) !== column.key && (
-                    <div className="mb-2 flex h-[76px] items-center justify-center rounded-md border border-dashed border-primary/45 bg-primary/[0.055] text-[11px] font-medium text-primary">
+                    <div className="mb-2 flex h-[76px] items-center justify-center rounded-lg border border-dashed border-primary/45 bg-primary/[0.055] text-[11px] font-medium text-primary shadow-[inset_0_0_0_1px_rgba(255,255,255,0.035)]">
                       Drop to move to {column.label}
                     </div>
                   )}
                   {(byStatus.get(column.key) || []).length === 0 ? (
                     <div className={cn(
-                      'flex h-24 items-center justify-center rounded-md border border-dashed text-[11px]',
+                      'flex h-24 items-center justify-center rounded-lg border border-dashed bg-inset/30 text-[11px]',
                       dragOverColumn === column.key
                         ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
                         : 'border-edge/40 text-fg-5/60',
@@ -1634,6 +1681,8 @@ export function JiraTab() {
                           draggable
                           isDragging={draggingTaskId === task.id}
                           onSelect={openTaskDetail}
+                          onStatus={(nextTask, status) => { void moveTaskToStatus(nextTask, status); }}
+                          onStartStage={(nextTask, stage) => { void startStage(nextTask, stage); }}
                           onDragStart={(next) => setDraggingTaskId(next.id)}
                           onDragEnd={() => {
                             setDraggingTaskId(null);

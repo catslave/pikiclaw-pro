@@ -445,9 +445,8 @@ export function App() {
   return (
     <div className="noise-overlay">
       <div className="fixed inset-0 pointer-events-none overflow-hidden" style={{ contain: 'strict' }}>
-        <div className="grid-bg absolute inset-0 opacity-50" />
-        <div className="absolute -top-36 right-0 h-[420px] w-[420px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb1), transparent 72%)', animation: 'drift 24s ease-in-out infinite', willChange: 'transform' }} />
-        <div className="absolute -bottom-40 -left-20 h-[360px] w-[360px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb2), transparent 74%)', animation: 'drift 28s ease-in-out infinite reverse', willChange: 'transform' }} />
+        <div className="app-ambient absolute inset-0" />
+        <div className="grid-bg absolute inset-0 opacity-45" />
       </div>
 
       <div className="relative h-screen overflow-hidden">
@@ -505,7 +504,7 @@ export function App() {
 
       {/* Full-page restart overlay */}
       {(restartPhase === 'restarting' || restartPhase === 'reconnecting') && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-[var(--th-bg)]/80 backdrop-blur-sm animate-in">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-[var(--th-surface)]/80 backdrop-blur-sm animate-in">
           <div className="flex flex-col items-center gap-4">
             <div className="relative h-10 w-10">
               <svg

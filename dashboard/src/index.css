@@ -10,9 +10,9 @@
   --th-fg-5: rgba(148,163,184,0.68);
   --th-fg-6: rgba(148,163,184,0.38);
 
-  --th-panel: rgba(28,28,30,0.74);
-  --th-panel-h: rgba(44,44,46,0.82);
-  --th-panel-alt: rgba(44,44,46,0.48);
+  --th-panel: rgba(27,28,31,0.82);
+  --th-panel-h: rgba(45,46,51,0.92);
+  --th-panel-alt: rgba(45,46,51,0.56);
   --th-inset: rgba(255,255,255,0.05);
   --th-session-bg: #121214;
 
@@ -23,8 +23,8 @@
   --th-control-border: rgba(148,163,184,0.28);
   --th-control-border-h: rgba(148,163,184,0.45);
 
-  --th-edge: rgba(235,235,245,0.14);
-  --th-edge-h: rgba(235,235,245,0.26);
+  --th-edge: rgba(235,235,245,0.13);
+  --th-edge-h: rgba(245,158,11,0.34);
 
   --th-inset-hl: rgba(255,255,255,0.05);
   --th-selected-bg: rgba(255,255,255,0.07);
@@ -36,30 +36,27 @@
   --th-selection-bg-h: rgba(235,235,245,0.12);
   --th-selection-soft: rgba(235,235,245,0.045);
 
-  --th-primary: #f8fafc;
-  --th-primary-fg: #09090b;
-  --th-primary-h: #ffffff;
+  --th-primary: #f4c430;
+  --th-primary-fg: #15120a;
+  --th-primary-h: #ffe08a;
 
-  --th-sidebar: rgba(20,20,22,0.78);
-  --th-header: rgba(30,30,32,0.76);
+  --th-sidebar: rgba(20,21,24,0.86);
+  --th-header: rgba(30,31,35,0.82);
   --th-modal-bg: #1c1c1e;
   --th-overlay: rgba(2,6,23,0.6);
   --th-focus-backdrop: rgba(17,17,19,0.78);
   --th-dropdown: rgba(12,16,24,0.98);
 
-  --th-grid-dot: rgba(148,163,184,0.08);
-  --th-grad-start: #f8fafc;
-  --th-grad-mid: #cbd5e1;
-  --th-grad-end: #94a3b8;
-  --th-glow-a: rgba(148,163,184,0.16);
-  --th-glow-b: rgba(96,165,250,0.08);
+  --th-grid-dot: rgba(250,204,21,0.075);
+  --th-grad-start: #fff7ed;
+  --th-grad-mid: #facc15;
+  --th-grad-end: #f59e0b;
+  --th-glow-a: rgba(245,158,11,0.18);
+  --th-glow-b: rgba(148,163,184,0.08);
   --th-shimmer-a: rgba(255,255,255,0.015);
   --th-shimmer-b: rgba(148,163,184,0.08);
-  --th-orb1: rgba(148,163,184,0.12);
-  --th-orb2: rgba(96,165,250,0.09);
-  --th-orb3: rgba(59,130,246,0.05);
   --th-noise: 0.02;
-  --th-card-shadow: 0 8px 26px rgba(0,0,0,0.18);
+  --th-card-shadow: 0 14px 42px rgba(0,0,0,0.22), 0 1px 0 rgba(255,255,255,0.035);
   --th-composer-shadow: 0 10px 28px rgba(0,0,0,0.20);
   --th-composer-shadow-focus: 0 0 0 3px rgba(235,235,245,0.08), 0 14px 36px rgba(0,0,0,0.26);
   --th-elevated-shadow: 0 28px 86px rgba(0,0,0,0.38), var(--th-card-shadow);
@@ -108,14 +105,14 @@
   --th-fg-5: rgba(71,85,105,0.74);
   --th-fg-6: rgba(71,85,105,0.38);
 
-  --th-panel: rgba(255,255,255,0.94);
+  --th-panel: rgba(255,255,255,0.95);
   --th-panel-h: rgba(255,255,255,0.98);
   --th-panel-alt: rgba(255,255,255,0.82);
   --th-inset: rgba(0,0,0,0.035);
   --th-session-bg: #fbfbfd;
 
   --th-edge: rgba(60,60,67,0.12);
-  --th-edge-h: rgba(60,60,67,0.20);
+  --th-edge-h: rgba(180,83,9,0.30);
 
   /* Form controls — pure white in light theme so inputs read as fillable. */
   --th-control-bg: #ffffff;
@@ -123,9 +120,9 @@
   --th-control-border: rgba(15,23,42,0.18);
   --th-control-border-h: rgba(15,23,42,0.32);
 
-  --th-primary: #475569;
+  --th-primary: #9a5b00;
   --th-primary-fg: #ffffff;
-  --th-primary-h: #334155;
+  --th-primary-h: #7c4a00;
 
   --th-sidebar: rgba(242,242,247,0.86);
   --th-header: rgba(248,248,250,0.86);
@@ -134,17 +131,14 @@
   --th-focus-backdrop: rgba(245,245,247,0.82);
   --th-dropdown: rgba(255,255,255,0.99);
 
-  --th-grid-dot: rgba(60,60,67,0.08);
-  --th-grad-start: #0f172a;
-  --th-grad-mid: #334155;
-  --th-grad-end: #64748b;
-  --th-glow-a: rgba(100,116,139,0.18);
+  --th-grid-dot: rgba(180,83,9,0.075);
+  --th-grad-start: #7c2d12;
+  --th-grad-mid: #b45309;
+  --th-grad-end: #0f172a;
+  --th-glow-a: rgba(180,83,9,0.14);
   --th-glow-b: rgba(100,116,139,0.10);
   --th-shimmer-a: rgba(15,23,42,0.045);
   --th-shimmer-b: rgba(100,116,139,0.12);
-  --th-orb1: rgba(148,163,184,0.12);
-  --th-orb2: rgba(100,116,139,0.08);
-  --th-orb3: rgba(71,85,105,0.05);
   --th-noise: 0.012;
   --th-card-shadow: 0 10px 28px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.80);
   --th-composer-shadow: 0 10px 28px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.90);
@@ -243,8 +237,8 @@
 body {
   background: var(--color-surface);
   background-image:
-    radial-gradient(circle at top right, rgba(148, 163, 184, 0.08), transparent 28%),
-    radial-gradient(circle at bottom left, rgba(96, 165, 250, 0.06), transparent 24%);
+    linear-gradient(135deg, rgba(245, 158, 11, 0.025), transparent 34%),
+    linear-gradient(315deg, rgba(148, 163, 184, 0.07), transparent 38%);
   color: var(--color-foreground);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
@@ -253,8 +247,8 @@ body {
 
 [data-theme="light"] body {
   background-image:
-    radial-gradient(circle at top right, rgba(148, 163, 184, 0.08), transparent 28%),
-    radial-gradient(circle at bottom left, rgba(100, 116, 139, 0.06), transparent 24%);
+    linear-gradient(135deg, rgba(180, 83, 9, 0.065), transparent 32%),
+    linear-gradient(315deg, rgba(100, 116, 139, 0.055), transparent 38%);
 }
 
 #root {
@@ -273,6 +267,16 @@ button:disabled { cursor: not-allowed; }
 
 .composer-shell {
   container-type: inline-size;
+}
+
+.dashboard-board-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+}
+
+.jira-task-card:hover .jira-task-actions,
+.jira-task-card:focus-visible .jira-task-actions {
+  max-height: 32px;
+  opacity: 1;
 }
 
 @container (max-width: 430px) {
@@ -382,6 +386,20 @@ button:disabled { cursor: not-allowed; }
 .grid-bg {
   background-image: radial-gradient(var(--th-grid-dot) 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+.app-ambient {
+  background:
+    linear-gradient(90deg, transparent 0 24%, rgba(245,158,11,0.055) 24% 24.08%, transparent 24.08% 100%),
+    linear-gradient(180deg, rgba(255,255,255,0.032), transparent 18%, transparent 78%, rgba(245,158,11,0.024)),
+    linear-gradient(135deg, rgba(245,158,11,0.03), transparent 32%, rgba(148,163,184,0.055) 68%, transparent);
+}
+
+[data-theme="light"] .app-ambient {
+  background:
+    linear-gradient(90deg, transparent 0 24%, rgba(180,83,9,0.07) 24% 24.08%, transparent 24.08% 100%),
+    linear-gradient(180deg, rgba(255,255,255,0.62), transparent 26%, transparent 74%, rgba(180,83,9,0.035)),
+    linear-gradient(135deg, rgba(180,83,9,0.055), transparent 34%, rgba(100,116,139,0.045) 70%, transparent);
 }
 
 /* ── Card glow ── */

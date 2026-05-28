@@ -493,9 +493,9 @@ function readStoredWorkspaceSidebarCollapsed(): boolean {
 
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'dashboard' | 'settings';
-type ChatLayoutMode = 'layout' | 'column';
+type ChatLayoutMode = 'single' | 'multi' | 'column';
 type DashboardScope = 'all' | string;
-type DashboardColumnKey = 'running' | 'pending' | 'review' | 'incomplete' | 'done';
+type DashboardColumnKey = 'running' | 'review' | 'incomplete' | 'done';
 type DashboardSessionItem = {
   key: string;
   session: SessionInfo;
@@ -520,7 +520,9 @@ type WorkspaceStatusSummary = {
 };
 
 function readStoredChatLayout(): ChatLayoutMode {
-  return readBrowserStorage(CHAT_LAYOUT_STORAGE_KEY) === 'column' ? 'column' : 'layout';
+  const raw = readBrowserStorage(CHAT_LAYOUT_STORAGE_KEY);
+  if (raw === 'single' || raw === 'column') return raw;
+  return 'multi';
 }
 
 function isOpenTarget(value: string | null | undefined): value is OpenTarget {
@@ -595,11 +597,10 @@ function useElapsedNow(enabled: boolean): number {
 }
 
 const DASHBOARD_COLUMNS: Array<{ key: DashboardColumnKey; titleKey: string; hintKey: string; variant: StripBadgeVariant }> = [
-  { key: 'running', titleKey: 'dashboard.running', hintKey: 'dashboard.runningHint', variant: 'ok' },
-  { key: 'pending', titleKey: 'dashboard.pending', hintKey: 'dashboard.pendingHint', variant: 'accent' },
-  { key: 'review', titleKey: 'dashboard.review', hintKey: 'dashboard.reviewHint', variant: 'warn' },
-  { key: 'incomplete', titleKey: 'dashboard.incomplete', hintKey: 'dashboard.incompleteHint', variant: 'err' },
-  { key: 'done', titleKey: 'dashboard.done', hintKey: 'dashboard.doneHint', variant: 'muted' },
+  { key: 'running', titleKey: 'chat.columnRunning', hintKey: 'chat.columnRunningHint', variant: 'ok' },
+  { key: 'review', titleKey: 'chat.columnReview', hintKey: 'chat.columnReviewHint', variant: 'warn' },
+  { key: 'incomplete', titleKey: 'chat.columnBlocked', hintKey: 'chat.columnBlockedHint', variant: 'err' },
+  { key: 'done', titleKey: 'chat.columnActive', hintKey: 'chat.columnActiveHint', variant: 'muted' },
 ];
 
 function dashboardColumnForSession(
@@ -607,7 +608,7 @@ function dashboardColumnForSession(
   live: LiveSessionState | null,
   recentCutoff: number,
 ): DashboardColumnKey | null {
-  if (live?.phase === 'queued') return 'pending';
+  if (live?.phase === 'queued') return 'running';
   if (live?.phase === 'streaming') return 'running';
 
   const displayState = sessionDisplayState(session);
@@ -785,15 +786,16 @@ function WorkspaceSidebarHeader({
   version: string;
 }) {
   return (
-    <div className="shrink-0 border-b border-edge/25 bg-[var(--th-sidebar)]/80 px-3 py-3">
+    <div className="shrink-0 border-b border-edge/30 bg-[linear-gradient(180deg,var(--th-sidebar),rgba(20,21,24,0.58))] px-3 py-3">
       <div className="flex items-center gap-2.5">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-amber-300/35 bg-[linear-gradient(145deg,rgba(250,204,21,0.28),rgba(251,146,60,0.12))] shadow-[0_8px_22px_rgba(245,158,11,0.18),inset_0_1px_0_rgba(255,255,255,0.35)]">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-amber-300/40 bg-[linear-gradient(145deg,rgba(250,204,21,0.34),rgba(251,146,60,0.14))] shadow-[0_12px_30px_rgba(245,158,11,0.22),inset_0_1px_0_rgba(255,255,255,0.42)]">
           <PikiclawLogo />
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw Pro</div>
+          <div className="mt-0.5 truncate text-[10px] font-medium text-fg-5">Agent workspace</div>
         </div>
-        <div className="shrink-0 font-mono text-[10px] text-fg-5/70">
+        <div className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 font-mono text-[10px] text-fg-5/80">
           v{version}
         </div>
         <button
@@ -2856,13 +2858,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     return items.sort((a, b) => (statusTimestampMs(b.session) || 0) - (statusTimestampMs(a.session) || 0));
   }, [dashboardScope, hydrateSession, liveSessionStates, sessionsMap, workspaces]);
 
-  const dashboardCounts = useMemo(() => {
-    const counts: Record<DashboardColumnKey, number> = {
-      running: 0,
-      pending: 0,
-      review: 0,
-      incomplete: 0,
-      done: 0,
+	  const dashboardCounts = useMemo(() => {
+	    const counts: Record<DashboardColumnKey, number> = {
+	      running: 0,
+	      review: 0,
+	      incomplete: 0,
+	      done: 0,
     };
     for (const item of dashboardItems) counts[item.column] += 1;
     return counts;
@@ -3138,36 +3139,66 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setDragOverSlotIndex(null);
   }, []);
 
-  const renderedOpenSessions = openSessions;
-  const visibleSlotCount = Math.max(1, renderedOpenSessions.length + (showNewSession ? 1 : 0));
-  const gridColumnCount = Math.min(3, visibleSlotCount);
+  const renderedSlotEntries = useMemo(() => {
+    if (chatLayout === 'single') {
+      const activeSlot = openSessions[activeSlotIndex] || null;
+      return activeSlot ? [{ slot: activeSlot, slotIdx: activeSlotIndex }] : [];
+    }
+    return openSessions.map((slot, slotIdx) => ({ slot, slotIdx }));
+  }, [activeSlotIndex, chatLayout, openSessions]);
+  const singleNewSessionVisible = chatLayout === 'single' && !!showNewSession && activeSlotIndex >= openSessions.length;
+  const visibleSlotCount = Math.max(1, singleNewSessionVisible ? 1 : renderedSlotEntries.length + (showNewSession ? 1 : 0));
+  const gridColumnCount = chatLayout === 'single' ? 1 : Math.min(3, visibleSlotCount);
   const gridRowCount = Math.ceil(visibleSlotCount / gridColumnCount);
   const gridNeedsVerticalScroll = gridRowCount > SESSION_GRID_MAX_VISIBLE_ROWS;
   const gridHeight = gridNeedsVerticalScroll
     ? `calc(${(gridRowCount / SESSION_GRID_MAX_VISIBLE_ROWS) * 100}% + ${Math.max(0, (gridRowCount / SESSION_GRID_MAX_VISIBLE_ROWS - 1) * SESSION_GRID_GAP_PX)}px)`
     : '100%';
   const dashboardFocusedInfo = dashboardFocusedSlot ? resolveSlotInfo(dashboardFocusedSlot) : null;
-  const chatLayoutBar = (
-    <div className="mb-3 flex shrink-0 items-center justify-between gap-2 rounded-xl border border-edge/70 bg-panel/80 px-3 py-2 shadow-sm">
-      <div className="min-w-0">
-        <div className="text-[13px] font-semibold text-fg">{t('tab.sessions')}</div>
-        <div className="mt-0.5 text-[11px] text-fg-5">{t('chat.layoutHint')}</div>
-      </div>
-      <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge bg-panel-alt p-0.5">
-        {(['layout', 'column'] as const).map(view => (
-          <button
-            key={view}
-            type="button"
-            onClick={() => setChatLayout(view)}
+  const mainModeBar = (
+    <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-[18px] border border-edge/70 bg-panel/80 px-3 py-2 shadow-[var(--th-card-shadow)] backdrop-blur-md">
+      <div className="inline-flex min-w-0 rounded-xl border border-edge/70 bg-inset p-0.5">
+        {[
+          { to: '/', label: t('nav.chat'), active: mode === 'workspace' },
+          { to: '/dashboard?view=jira', label: t('nav.dashboard'), active: mode === 'dashboard' },
+        ].map(item => (
+          <Link
+            key={item.to}
+            to={item.to}
+            state={item.to === '/' ? { forceWorkspace: true } : undefined}
             className={cn(
-              'h-7 rounded-md px-3 text-[12px] font-semibold transition',
-              chatLayout === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
+              'inline-flex h-8 min-w-20 items-center justify-center rounded-lg px-3 text-[12px] font-semibold transition-[background,color,box-shadow]',
+              item.active ? 'bg-primary text-primary-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
             )}
           >
-            {view === 'layout' ? t('chat.layoutMode') : t('chat.columnMode')}
-          </button>
+            {item.label}
+          </Link>
         ))}
       </div>
+      {mode === 'workspace' && (
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+          <div className="hidden min-w-0 flex-1 text-right text-[11px] text-fg-5 md:block">{t('chat.layoutHint')}</div>
+          <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-xl border border-edge bg-panel-alt p-0.5">
+            {([
+              ['single', t('chat.singleWindow')],
+              ['multi', t('chat.multiWindow')],
+              ['column', t('chat.columnMode')],
+            ] as const).map(([view, label]) => (
+              <button
+                key={view}
+                type="button"
+                onClick={() => setChatLayout(view)}
+                className={cn(
+                  'h-7 rounded-lg px-3 text-[12px] font-semibold transition',
+                  chatLayout === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
   const workspaceColumnContent = (
@@ -3226,11 +3257,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [activeSlotIndex, focusedSlotIndex, openSessions.length, showNewSession]);
 
   return (
-    <div className="relative h-full overflow-hidden p-3 flex gap-3 mx-auto">
+    <div className="relative h-full overflow-hidden p-2 md:p-4 flex gap-3 mx-auto">
       {/* ═══ Left Panel — Session Navigator ═══ */}
       <div
         className={cn(
-          'relative h-full shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out',
+          'relative h-full shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out max-md:absolute max-md:inset-y-2 max-md:left-2 max-md:z-50',
           workspaceSidebarCollapsed ? 'w-10' : 'w-[280px]',
           focusedSlotIndex != null && 'pointer-events-none opacity-0',
         )}
@@ -3288,7 +3319,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         </button>
       <div
         className={cn(
-          'panel-isolated absolute inset-y-0 left-0 w-[280px] flex flex-col overflow-hidden rounded-xl border border-edge/70 bg-panel/90 backdrop-blur-sm transition-[transform,opacity] duration-300 ease-out',
+          'panel-isolated absolute inset-y-0 left-0 w-[280px] flex flex-col overflow-hidden rounded-[18px] border border-edge/70 bg-panel/88 backdrop-blur-md transition-[transform,opacity] duration-300 ease-out',
           workspaceSidebarCollapsed ? '-translate-x-[292px] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100',
         )}
         style={{ boxShadow: 'var(--th-card-shadow)' }}
@@ -3300,7 +3331,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         />
 
         {/* Search */}
-        <div className="border-b border-edge/20 bg-panel/55 px-3 py-3">
+        <div className="border-b border-edge/20 bg-panel/45 px-3 py-3">
           <div className="flex items-center gap-1.5">
             <div className="relative group min-w-0 flex-1">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-5/40 group-focus-within:text-fg-4 transition-colors">
@@ -3501,38 +3532,39 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           'flex-1 min-w-0 flex flex-col overflow-hidden gap-0',
         )}
       >
-        {mode === 'dashboard' ? (
+              {mode === 'dashboard' ? (
           <>
-            <div className="mb-3 flex shrink-0 items-center justify-between gap-2 rounded-xl border border-edge/70 bg-panel/80 px-3 py-2 shadow-sm">
+            {mainModeBar}
+            <div className="mb-3 flex shrink-0 items-center justify-between gap-3 rounded-[18px] border border-edge/70 bg-panel/78 px-4 py-3 shadow-[var(--th-card-shadow)] backdrop-blur-md">
               <div className="min-w-0">
-                <div className="text-[13px] font-semibold text-fg">{t('tab.dashboard')}</div>
-                <div className="mt-0.5 text-[11px] text-fg-5">{t('tabDesc.jira')}</div>
+                <div className="text-[15px] font-semibold tracking-tight text-fg">{t('tab.dashboard')}</div>
+                <div className="mt-1 text-[12px] text-fg-5">{t('tabDesc.jira')}</div>
               </div>
-              <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge bg-panel-alt p-0.5">
+              <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge/70 bg-inset p-0.5">
                 <button
                   type="button"
-                  className="h-7 rounded-md bg-panel-h px-3 text-[12px] font-semibold text-fg shadow-sm"
+                  className="h-7 rounded-md bg-primary px-3 text-[12px] font-semibold text-primary-fg shadow-sm"
                 >
                   {t('dashboard.viewJira')}
                 </button>
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge/70 bg-panel/80 p-3 shadow-[var(--th-card-shadow)]">
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-[18px] border border-edge/70 bg-panel/78 p-3 shadow-[var(--th-card-shadow)] backdrop-blur-md">
               {dashboardJiraContent}
             </div>
           </>
         ) : mode === 'settings' ? (
-          <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-edge/70 bg-panel/80 shadow-[var(--th-card-shadow)]">
+          <div className="min-h-0 flex-1 overflow-hidden rounded-[18px] border border-edge/70 bg-panel/78 shadow-[var(--th-card-shadow)] backdrop-blur-md">
             {settingsContent}
           </div>
         ) : chatLayout === 'column' ? (
           <>
-            {chatLayoutBar}
+            {mainModeBar}
             {workspaceColumnContent}
           </>
         ) : (
           <>
-            {chatLayoutBar}
+            {mainModeBar}
             {focusedSlotIndex != null && (
               <div
                 className="fixed inset-0 z-[60] bg-[var(--th-focus-backdrop)]"
@@ -3550,16 +3582,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 }}
               >
               {(() => {
-                const newSessionSlot = showNewSession ? renderedOpenSessions.length : -1;
-                return Array.from({ length: visibleSlotCount }, (_, slotIdx) => {
-              if (showNewSession && slotIdx === newSessionSlot) {
+                const newSessionSlot = showNewSession ? renderedSlotEntries.length : -1;
+                return Array.from({ length: visibleSlotCount }, (_, displaySlotIdx) => {
+              if (showNewSession && (singleNewSessionVisible || displaySlotIdx === newSessionSlot)) {
                 return (
                   <div
                     key={`new-${showNewSession}`}
                     className="min-w-0 overflow-hidden rounded-xl border border-edge bg-panel flex flex-col"
                     style={{ boxShadow: 'var(--th-card-shadow)' }}
-                    onDragOver={e => handleSlotDragOver(slotIdx, e)}
-                    onDrop={e => handleSlotDrop(slotIdx, e)}
+                    onDragOver={e => handleSlotDragOver(activeSlotIndex, e)}
+                    onDrop={e => handleSlotDrop(activeSlotIndex, e)}
                   >
                     <NewSessionView
                       key={showNewSession}
@@ -3581,7 +3613,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   </div>
                 );
               }
-              const slot = renderedOpenSessions[slotIdx] ?? null;
+              const entry = renderedSlotEntries[displaySlotIdx] ?? null;
+              const slot = entry?.slot ?? null;
+              const slotIdx = entry?.slotIdx ?? displaySlotIdx;
               if (!slot) {
                 // Empty slot placeholder
                 return (
@@ -4979,29 +5013,28 @@ function WorkspaceTaskDashboard({
   t: (key: string) => string;
 }) {
   const byColumn = useMemo(() => {
-    const grouped: Record<DashboardColumnKey, DashboardSessionItem[]> = {
-      running: [],
-      pending: [],
-      review: [],
-      incomplete: [],
-      done: [],
+	    const grouped: Record<DashboardColumnKey, DashboardSessionItem[]> = {
+	      running: [],
+	      review: [],
+	      incomplete: [],
+	      done: [],
     };
     for (const item of items) grouped[item.column].push(item);
     return grouped;
   }, [items]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-xl border border-edge bg-panel" style={{ boxShadow: 'var(--th-card-shadow)' }}>
-      <div className="shrink-0 border-b border-edge/40 px-4 py-3">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[16px] border border-edge/65 bg-panel/70" style={{ boxShadow: 'var(--th-card-shadow)' }}>
+      <div className="shrink-0 border-b border-edge/35 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),transparent)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
-            <div className="text-[14px] font-semibold text-fg">{t('dashboard.title')}</div>
-            <div className="mt-0.5 text-[11px] text-fg-5">{t('dashboard.subtitle')}</div>
+            <div className="text-[15px] font-semibold tracking-tight text-fg">{t('chat.columnBoardTitle')}</div>
+            <div className="mt-1 text-[12px] text-fg-5">{t('chat.columnBoardSubtitle')}</div>
           </div>
           <select
             value={scope}
             onChange={e => onScopeChange(e.target.value || 'all')}
-            className="h-8 min-w-[150px] rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+            className="h-8 min-w-[150px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
           >
             <option value="all">{t('dashboard.allWorkspaces')}</option>
             {workspaces.map(ws => (
@@ -5020,12 +5053,12 @@ function WorkspaceTaskDashboard({
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden p-3">
-        <div className="grid h-full min-h-0 grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-5">
+        <div className="dashboard-board-grid grid h-full min-h-0 gap-3">
           {DASHBOARD_COLUMNS.map(column => (
-            <div key={column.key} className="min-h-0 rounded-lg border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden">
-              <div className="shrink-0 border-b border-edge/30 px-3 py-2">
+            <div key={column.key} className="min-h-0 rounded-xl border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+              <div className="shrink-0 border-b border-edge/25 bg-panel/30 px-3 py-2.5">
                 <div className="flex items-center gap-2">
-                  <Badge variant={column.variant} className="h-5 px-2 text-[10px]">
+                  <Badge variant={column.variant} className="h-5 px-2 text-[10px] tabular-nums">
                     {counts[column.key]}
                   </Badge>
                   <div className="min-w-0 flex-1">
@@ -5034,13 +5067,13 @@ function WorkspaceTaskDashboard({
                   </div>
                 </div>
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
                 {loading && items.length === 0 ? (
                   <div className="flex h-24 items-center justify-center">
                     <Spinner className="h-3.5 w-3.5 text-fg-5" />
                   </div>
                 ) : byColumn[column.key].length === 0 ? (
-                  <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-edge/40 text-[11px] text-fg-5/60">
+                  <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-edge/35 bg-inset/30 text-[11px] text-fg-5/60">
                     {t('dashboard.emptyColumn')}
                   </div>
                 ) : (
@@ -5164,15 +5197,13 @@ function DashboardTaskCard({
     ? 'ok'
     : item.column === 'incomplete'
       ? 'err'
-      : item.column === 'review'
-        ? 'warn'
-        : item.column === 'pending'
-          ? 'accent'
-          : 'muted';
+	    : item.column === 'review'
+	      ? 'warn'
+	      : 'muted';
   const time = fmtRelative(item.session.runUpdatedAt || item.session.createdAt);
 
   return (
-    <div className="rounded-md border border-edge/50 bg-panel px-3 py-2 transition-colors hover:border-primary/25 hover:bg-panel-h/45">
+    <div className="rounded-lg border border-edge/50 bg-panel/78 px-3 py-2.5 shadow-[0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-panel-h/55">
       <button type="button" onClick={onOpen} className="block w-full text-left">
         <div className="flex items-center gap-1.5 text-[10px] text-fg-5">
           <BrandIcon brand={item.session.agent || ''} size={11} />
@@ -5180,16 +5211,16 @@ function DashboardTaskCard({
           <span className="min-w-0 truncate">{item.workspaceName}</span>
           <span className="ml-auto shrink-0 tabular-nums">{time}</span>
         </div>
-        <div className="mt-1.5 flex items-start gap-1.5">
+        <div className="mt-1.5 flex items-start gap-2">
           <Dot variant={displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />
           <div className="min-w-0 flex-1">
-            <div className="line-clamp-2 text-[12px] leading-snug text-fg-2" title={title}>{title}</div>
-            {detail && <div className="mt-1 truncate text-[10px] text-fg-5">{detail}</div>}
+            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
+            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
           </div>
         </div>
       </button>
-      <div className="mt-2 flex items-center gap-1.5">
-        <Badge variant={statusTone} className="h-5 px-1.5 text-[10px]">{t(`dashboard.${item.column}`)}</Badge>
+      <div className="mt-2.5 flex items-center gap-1.5">
+        <Badge variant={statusTone} className="h-5 px-1.5 text-[10px]">{t(`chat.columnLabel.${item.column}`)}</Badge>
         {item.live?.phase === 'queued' && (
           <span className="text-[10px] text-fg-5">{t('dashboard.queued')}</span>
         )}
@@ -5319,13 +5350,13 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   };
 
   return (
-    <div className="border-b border-edge-h/55 py-2 last:border-b-0">
+    <div className="border-b border-edge-h/45 py-2 last:border-b-0">
       {/* Workspace header */}
       <div
         data-workspace-path={wsPath}
         draggable
         className={cn(
-          'mx-2 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-[background,border-color,box-shadow,opacity] duration-150',
+          'mx-2 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-[background,border-color,box-shadow,opacity,transform] duration-150 hover:translate-x-0.5',
           groupHeaderSelected
             ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-1 ring-[color:var(--th-selection-ring)] shadow-[inset_3px_0_0_var(--th-selection-accent)] hover:bg-[var(--th-selection-bg-h)]'
             : isActive
@@ -5470,7 +5501,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
 
       {/* Sessions */}
       {expanded && (
-        <div className="mt-1 px-2 pb-1">
+        <div className="mt-1 space-y-1 px-2 pb-1">
           {loading ? (
             <div className="flex items-center justify-center py-4">
               <Spinner className="h-3 w-3 text-fg-5" />
@@ -5501,7 +5532,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
               {remaining > 0 && (
                 <button
                   onClick={() => setVisibleCount(v => v + PAGE_SIZE)}
-                  className="flex items-center gap-1.5 w-full px-3 py-1.5 text-[11px] text-fg-5 hover:text-fg-3 hover:bg-panel-h/50 transition-colors"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent px-3 py-1.5 text-[11px] text-fg-5 transition-colors hover:border-edge/50 hover:bg-panel-h/45 hover:text-fg-3"
                 >
                   <span>+ {t('hub.nMore').replace('{n}', String(remaining))}</span>
                   <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -5568,7 +5599,16 @@ const SessionCard = memo(function SessionCard({
   const kebabRef = useRef<HTMLButtonElement | null>(null);
 
   return (
-    <div className="relative group">
+    <div className="relative group/session">
+    <span
+      aria-hidden="true"
+      className={cn(
+        'pointer-events-none absolute inset-y-2 left-0 w-[2px] rounded-full opacity-0 transition-opacity duration-150',
+        displayState === 'running' ? 'bg-ok' : displayState === 'incomplete' ? 'bg-warn' : 'bg-primary',
+        (isSelected || isOpen) && 'opacity-100',
+        !isSelected && !isOpen && 'group-hover/session:opacity-60',
+      )}
+    />
     <button
       data-session-card
       onClick={onClick}
@@ -5577,14 +5617,14 @@ const SessionCard = memo(function SessionCard({
       onMouseLeave={onCancelWarm}
       onBlur={onCancelWarm}
       className={cn(
-        'h-[86px] w-full overflow-hidden rounded-lg border pr-3 py-2 text-left transition-[background,border-color,box-shadow,transform] duration-150',
+        'h-[88px] w-full overflow-hidden rounded-lg border pr-3 py-2 text-left transition-[background,border-color,box-shadow,transform] duration-150',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
         isSelected
-          ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)] hover:bg-[var(--th-selection-bg-h)] shadow-sm'
+          ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)] hover:bg-[var(--th-selection-bg-h)] shadow-[0_8px_18px_rgba(0,0,0,0.12)]'
           : isOpen
             ? 'border-[color:var(--th-selection-ring)] bg-[var(--th-selection-soft)] hover:border-[color:var(--th-selection-border)] hover:bg-[var(--th-selection-bg)] hover:ring-2 hover:ring-inset hover:ring-[color:var(--th-selection-ring)]'
-            : 'border-edge/45 bg-panel/55 hover:border-edge-h hover:bg-panel-h/55',
-        !isSelected && 'hover:translate-x-0.5',
+            : 'border-edge/40 bg-panel/42 hover:border-edge-h hover:bg-panel-h/62 hover:shadow-[0_8px_18px_rgba(0,0,0,0.10)]',
+        !isSelected && 'hover:translate-x-1',
         isSelected && 'shadow-[inset_4px_0_0_var(--th-selection-accent)]',
       )}
       style={{
@@ -5619,7 +5659,7 @@ const SessionCard = memo(function SessionCard({
             {originLabel}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-1.5 shrink-0 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+        <div className="ml-auto flex items-center gap-1.5 shrink-0 transition-opacity group-hover/session:opacity-0 group-focus-within/session:opacity-0">
           {!!session.numTurns && (
             <span className="flex items-center gap-0.5 text-fg-5/50 tabular-nums">
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-50">
@@ -5662,12 +5702,12 @@ const SessionCard = memo(function SessionCard({
           {displayText}
         </span>
         <span className={cn(
-          'mt-0.5 shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-semibold leading-none',
+          'mt-0.5 shrink-0 whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[9px] font-semibold leading-none',
           displayState === 'running'
-            ? 'bg-ok/15 text-ok'
+            ? 'border-ok/20 bg-ok/15 text-ok'
             : displayState === 'incomplete'
-              ? 'bg-warn/15 text-warn'
-              : 'bg-fg-5/10 text-fg-3',
+              ? 'border-warn/20 bg-warn/15 text-warn'
+              : 'border-edge/40 bg-fg-5/10 text-fg-3',
         )}>
           {statusLabel}
         </span>
@@ -5693,7 +5733,7 @@ const SessionCard = memo(function SessionCard({
           if (kebabRef.current) onShowMenu(kebabRef.current.getBoundingClientRect());
         }}
         title={menuLabel}
-        className="absolute top-1.5 right-1.5 inline-flex h-6 w-6 items-center justify-center rounded border border-edge/40 bg-panel/95 text-fg-5 opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-panel-h hover:text-fg-2"
+        className="absolute top-1.5 right-1.5 inline-flex h-6 w-6 items-center justify-center rounded border border-edge/40 bg-panel/95 text-fg-5 opacity-0 shadow-sm transition-opacity group-hover/session:opacity-100 focus-visible:opacity-100 hover:bg-panel-h hover:text-fg-2"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="shrink-0">
           <circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" />
