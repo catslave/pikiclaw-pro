@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent as ReactDragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
 import { api } from '../../api';
+import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
 import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { AgentAssistant, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, StageRun, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
@@ -50,6 +51,45 @@ function formatTime(value: string | null | undefined): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time)) return '--';
   return new Date(time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function secondsBetween(start: string | null | undefined, end: string | null | undefined): number {
+  const a = start ? Date.parse(start) : NaN;
+  const b = end ? Date.parse(end) : NaN;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return 0;
+  return Math.round((b - a) / 1000);
+}
+
+function formatDuration(value: number | null | undefined): string {
+  const seconds = Math.max(0, Math.floor(Number(value || 0)));
+  if (!seconds) return '--';
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours < 48) return rest ? `${hours}h ${rest}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const dayHours = hours % 24;
+  return dayHours ? `${days}d ${dayHours}h` : `${days}d`;
+}
+
+function taskUserFocusSeconds(task: ProTask): number {
+  const now = new Date().toISOString();
+  return (task.focusSessions || []).reduce((sum, session) => {
+    return sum + (typeof session.durationSeconds === 'number'
+      ? Math.max(0, session.durationSeconds)
+      : secondsBetween(session.openedAt, session.closedAt || now));
+  }, 0);
+}
+
+function taskAgentSeconds(task: ProTask): number {
+  const now = new Date().toISOString();
+  return task.stageRuns.reduce((sum, run) => sum + secondsBetween(run.startedAt, run.completedAt || now), 0);
+}
+
+function taskLifecycleSeconds(task: ProTask): number {
+  const doneAt = task.status === 'done' || task.status === 'resolved' ? task.updatedAt : new Date().toISOString();
+  return secondsBetween(task.createdAt, doneAt);
 }
 
 function taskStatusTone(status: ProTaskStatus): 'ok' | 'warn' | 'muted' | 'accent' {
@@ -255,6 +295,8 @@ function CreateJiraTaskModal({
 }
 
 const DEFAULT_JIRA_ASSISTANT_CONFIG: JiraWorkflowConfig = {
+  executionOwnerMode: 'status',
+  executionMode: 'direct',
   refinementAssistantId: 'assistant_refinement',
   codingAssistantId: 'assistant_coding',
   ticketSyncAssistantId: 'assistant_ticket_sync',
@@ -281,15 +323,28 @@ function pickRandomModel(models?: string[]): string | null {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-function buildStatusWorkflowPrompt(task: ProTask, status: ProTaskStatus, instruction?: string): string | undefined {
+function resolveTaskExecution(task: ProTask, config: JiraWorkflowConfig) {
+  return {
+    ownerMode: task.execution?.ownerMode || config.executionOwnerMode || 'status',
+    agent: task.execution?.agent || config.lifecycleAgent || '',
+    assistantId: task.execution?.assistantId || config.lifecycleAssistantId || '',
+    mode: task.execution?.mode || config.executionMode || 'direct',
+  } as const;
+}
+
+function buildStatusWorkflowPrompt(task: ProTask, status: ProTaskStatus, instruction?: string, executionMode: 'direct' | 'interactive' = 'direct'): string | undefined {
   const body = instruction?.trim();
   if (!body) return undefined;
+  const modeLine = executionMode === 'interactive'
+    ? 'Execution mode: user-intervention. Ask the user only when blocked by missing input, risky choices, credentials, or unclear acceptance points; otherwise keep working.'
+    : 'Execution mode: direct. Do not ask the user for routine input; make reasonable assumptions and complete the stage autonomously.';
   return [
     `Task: ${task.title}`,
     task.jiraKey ? `Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
     task.description ? `Description:\n${task.description}` : '',
     '',
     `Pikiclaw task status moved to ${STATUS_LABEL[status]}.`,
+    modeLine,
     'Status workflow instruction:',
     body,
   ].filter(Boolean).join('\n');
@@ -299,6 +354,7 @@ function JiraAssistantConfigModal({
   open,
   saving,
   assistants,
+  agents,
   config,
   onClose,
   onSave,
@@ -306,6 +362,7 @@ function JiraAssistantConfigModal({
   open: boolean;
   saving: boolean;
   assistants: AgentAssistant[];
+  agents: AgentRuntimeStatus[];
   config: JiraWorkflowConfig;
   onClose: () => void;
   onSave: (config: JiraWorkflowConfig) => void;
@@ -382,6 +439,62 @@ function JiraAssistantConfigModal({
     <Modal open={open} onClose={onClose}>
       <ModalHeader title="Jira assistants" onClose={onClose} />
       <div className="space-y-4">
+        <div className="rounded-md border border-edge bg-panel-alt px-3 py-2.5">
+          <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Lifecycle owner</div>
+          <div className="grid gap-2 md:grid-cols-3">
+            <label className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Owner mode</div>
+              <select
+                value={draft.executionOwnerMode || 'status'}
+                onChange={event => setDraft(prev => ({ ...prev, executionOwnerMode: event.target.value as JiraWorkflowConfig['executionOwnerMode'] }))}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+              >
+                <option value="status">Per-status workflow</option>
+                <option value="agent">Single agent owns lifecycle</option>
+                <option value="assistant">Single assistant owns lifecycle</option>
+              </select>
+            </label>
+            <label className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Lifecycle agent</div>
+              <select
+                value={draft.lifecycleAgent || ''}
+                onChange={event => setDraft(prev => ({ ...prev, lifecycleAgent: event.target.value || undefined }))}
+                disabled={draft.executionOwnerMode !== 'agent'}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
+              >
+                <option value="">Runtime default</option>
+                {agents.filter(agent => agent.installed).map(agent => <option key={agent.agent} value={agent.agent}>{agent.label}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Lifecycle assistant</div>
+              <select
+                value={draft.lifecycleAssistantId || ''}
+                onChange={event => setDraft(prev => ({ ...prev, lifecycleAssistantId: event.target.value || undefined }))}
+                disabled={draft.executionOwnerMode !== 'assistant'}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
+              >
+                <option value="">Runtime default</option>
+                {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="mt-2 inline-flex rounded-lg border border-edge/60 bg-inset p-0.5">
+            {(['direct', 'interactive'] as const).map(mode => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setDraft(prev => ({ ...prev, executionMode: mode }))}
+                className={cn(
+                  'h-7 rounded-md px-2.5 text-[11px] font-medium transition-colors',
+                  (draft.executionMode || 'direct') === mode ? 'bg-panel text-fg shadow-sm' : 'text-fg-5 hover:bg-panel-h hover:text-fg-3',
+                )}
+              >
+                {mode === 'direct' ? 'Direct' : 'Needs input'}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="grid gap-3 md:grid-cols-2">
           {renderSelect('Running / Refinement', 'refinementAssistantId')}
           {renderSelect('Coding', 'codingAssistantId')}
@@ -444,6 +557,78 @@ function estimateSummary(run: StageRun): string | null {
   if (total) parts.push(total);
   if (estimate.confidence) parts.push(estimate.confidence);
   return parts.length ? parts.join(' · ') : null;
+}
+
+function compactMessageText(message: RichMessage): string {
+  const text = message.text || message.blocks?.filter(block => block.type === 'text').map(block => block.content).join('\n') || '';
+  return text.trim();
+}
+
+function StageRunChatPreview({ run }: { run: StageRun }) {
+  const [loading, setLoading] = useState(false);
+  const [messages, setMessages] = useState<RichMessage[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api.getSessionMessages(run.session.workdir, run.session.agent, run.session.sessionId, { lastNTurns: 4, rich: true })
+      .then(result => {
+        if (cancelled) return;
+        if (!result.ok) {
+          setError(result.error || 'Failed to load chat');
+          setMessages([]);
+          return;
+        }
+        setMessages((result.richMessages || []).slice(-8));
+      })
+      .catch(err => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load chat');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [run.session.agent, run.session.sessionId, run.session.workdir]);
+
+  const visible = expanded ? messages : messages.slice(-4);
+  return (
+    <div className="mt-3 rounded-md border border-edge bg-inset px-2.5 py-2">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Chat</div>
+        {messages.length > 4 && (
+          <button type="button" onClick={() => setExpanded(prev => !prev)} className="text-[11px] font-medium text-primary hover:underline">
+            {expanded ? 'Collapse' : `Show ${messages.length} messages`}
+          </button>
+        )}
+      </div>
+      {loading ? (
+        <div className="flex items-center gap-2 text-[12px] text-fg-5"><Spinner /> Loading chat...</div>
+      ) : error ? (
+        <div className="text-[12px] text-err">{error}</div>
+      ) : visible.length === 0 ? (
+        <div className="text-[12px] text-fg-5">No chat transcript yet.</div>
+      ) : (
+        <div className="space-y-2">
+          {visible.map((message, index) => {
+            const text = compactMessageText(message);
+            if (!text) return null;
+            return (
+              <div key={`${message.role}-${message.createdAt || index}`} className={cn(
+                'rounded-md border px-2 py-1.5 text-[12px] leading-relaxed',
+                message.role === 'user'
+                  ? 'border-primary/20 bg-primary/[0.055] text-fg-3'
+                  : 'border-edge bg-panel text-fg-4',
+              )}>
+                <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{message.role === 'user' ? 'User' : 'Agent'}</div>
+                <div className="max-h-44 overflow-auto whitespace-pre-wrap">{text}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function JiraNativeFields({
@@ -515,18 +700,75 @@ function JiraNativeFields({
   );
 }
 
+function TaskStatusProgress({ status }: { status: ProTaskStatus }) {
+  const activeIndex = Math.max(0, STATUSES.indexOf(status));
+  return (
+    <div className="rounded-md border border-edge bg-panel-alt px-3 py-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Status progress</div>
+        <Badge variant={taskStatusTone(status)}>{STATUS_LABEL[status]}</Badge>
+      </div>
+      <div className="grid grid-cols-5 gap-1.5">
+        {STATUSES.map((item, index) => {
+          const done = index < activeIndex;
+          const active = index === activeIndex;
+          return (
+            <div key={item} className="min-w-0">
+              <div
+                className={cn(
+                  'h-1.5 rounded-full transition',
+                  done ? 'bg-[var(--th-ok)]' : active ? 'bg-primary' : 'bg-inset',
+                )}
+              />
+              <div className={cn('mt-1 truncate text-[10px] font-medium', active ? 'text-fg-2' : done ? 'text-fg-4' : 'text-fg-5')}>
+                {STATUS_LABEL[item]}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TaskTimeAudit({ task }: { task: ProTask }) {
+  const userSeconds = taskUserFocusSeconds(task);
+  const agentSeconds = taskAgentSeconds(task);
+  const lifecycleSeconds = taskLifecycleSeconds(task);
+  const focusCount = task.focusSessions?.length || 0;
+  return (
+    <div className="grid gap-2 sm:grid-cols-3">
+      <div className="rounded-md border border-edge bg-panel-alt px-3 py-2">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">My focus</div>
+        <div className="mt-1 text-[15px] font-semibold text-fg">{formatDuration(userSeconds)}</div>
+        <div className="mt-0.5 text-[11px] text-fg-5">{focusCount} opens</div>
+      </div>
+      <div className="rounded-md border border-edge bg-panel-alt px-3 py-2">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Agent time</div>
+        <div className="mt-1 text-[15px] font-semibold text-fg">{formatDuration(agentSeconds)}</div>
+        <div className="mt-0.5 text-[11px] text-fg-5">{task.stageRuns.length} runs</div>
+      </div>
+      <div className="rounded-md border border-edge bg-panel-alt px-3 py-2">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Lifecycle</div>
+        <div className="mt-1 text-[15px] font-semibold text-fg">{formatDuration(lifecycleSeconds)}</div>
+        <div className="mt-0.5 text-[11px] text-fg-5">created {formatTime(task.createdAt)}</div>
+      </div>
+    </div>
+  );
+}
+
 function TaskDetail({
   task,
   verifyDraft,
   onVerifyDraft,
-  subtaskDraft,
-  onSubtaskDraft,
-  onCreateSubtask,
-  onUpdateSubtaskStatus,
+  assistants,
+  agents,
+  config,
   onStartVerification,
   onFinishVerification,
   onCompleteStage,
   onExclusiveMode,
+  onExecution,
   onStatus,
   onStartStage,
   onDelete,
@@ -538,14 +780,14 @@ function TaskDetail({
   task: ProTask | null;
   verifyDraft: { environment: string; url: string; notes: string };
   onVerifyDraft: (patch: Partial<{ environment: string; url: string; notes: string }>) => void;
-  subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
-  onSubtaskDraft: (patch: Partial<{ title: string; description: string; assignedAgent: string; assistantId: string }>) => void;
-  onCreateSubtask: (task: ProTask) => void;
-  onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
+  assistants: AgentAssistant[];
+  agents: AgentRuntimeStatus[];
+  config: JiraWorkflowConfig;
   onStartVerification: (task: ProTask) => void;
   onFinishVerification: (task: ProTask, run: VerificationRun, result: VerificationResult) => void;
   onCompleteStage: (task: ProTask, run: StageRun) => void;
   onExclusiveMode: (task: ProTask, enabled: boolean) => void;
+  onExecution: (task: ProTask, patch: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; mode?: 'direct' | 'interactive' }) => void;
   onStatus: (task: ProTask, status: ProTaskStatus) => void;
   onStartStage: (task: ProTask, stage: ProTaskStage) => void;
   onDelete: (task: ProTask) => void;
@@ -561,33 +803,152 @@ function TaskDetail({
       </div>
     );
   }
-  const progress = subtaskProgress(task);
+  const execution = resolveTaskExecution(task, config);
+  const ownerLabel = execution.ownerMode === 'assistant'
+    ? assistants.find(assistant => assistant.id === execution.assistantId)?.name || execution.assistantId || 'Runtime assistant'
+    : execution.ownerMode === 'agent'
+      ? agents.find(agent => agent.agent === execution.agent)?.label || execution.agent || 'Runtime agent'
+      : 'Per-status workflow';
   return (
     <div className="h-full overflow-y-auto rounded-md border border-edge bg-panel">
-      <div className="border-b border-edge px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="min-w-0 flex-1 text-[15px] font-semibold text-fg">{task.title}</h3>
-          {task.exclusiveMode && <Badge variant="warn">Exclusive</Badge>}
-          <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
+      <div className="border-b border-edge bg-panel px-5 py-4">
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              {task.jiraKey && <span className="font-mono text-[12px] font-semibold text-primary">{task.jiraKey}</span>}
+              <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
+              <Badge variant="muted">{task.kind}</Badge>
+              {task.exclusiveMode && <Badge variant="warn">Exclusive</Badge>}
+            </div>
+            <h3 className="text-[18px] font-semibold leading-snug text-fg">{task.title}</h3>
+          </div>
+          <Button variant="ghost" disabled={deleting} onClick={() => onDelete(task)}>
+            {deleting ? <Spinner /> : null}
+            Delete
+          </Button>
         </div>
-        <div className="mt-1 flex flex-wrap gap-2 text-[12px] text-fg-5">
-          {task.jiraKey && <span className="font-mono">{task.jiraKey}</span>}
-          {task.jiraUrl && <a className="text-primary hover:underline" href={task.jiraUrl} target="_blank" rel="noreferrer">Open Jira</a>}
-          {task.workdir && <span className="truncate">{task.workdir}</span>}
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <TaskStatusProgress status={task.status} />
+          <TaskTimeAudit task={task} />
         </div>
-        <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-          <label className="space-y-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Status</div>
-            <select
-              value={task.status}
-              onChange={event => onStatus(task, event.target.value as ProTaskStatus)}
-              className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
-            >
-              {STATUSES.map(status => <option key={status} value={status}>{STATUS_LABEL[status]}</option>)}
-            </select>
-          </label>
-          <label className="space-y-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Start stage</div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(260px,0.8fr)]">
+          <section className="min-w-0 rounded-md border border-edge bg-panel-alt px-3 py-3">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Details</div>
+            <div className="grid gap-x-4 gap-y-2 text-[12px] md:grid-cols-2">
+              <div>
+                <div className="text-fg-5">Workspace</div>
+                <div className="truncate text-fg-3" title={task.workdir || undefined}>{task.workdir || '--'}</div>
+              </div>
+              <div>
+                <div className="text-fg-5">Sprint</div>
+                <div className="text-fg-3">{task.sprint || '--'}</div>
+              </div>
+              <div>
+                <div className="text-fg-5">Jira status</div>
+                <div className="text-fg-3">{task.jiraFields?.status || '--'}</div>
+              </div>
+              <div>
+                <div className="text-fg-5">Assignee</div>
+                <div className="text-fg-3">{task.jiraFields?.assignee || '--'}</div>
+              </div>
+            </div>
+            {task.jiraUrl && (
+              <a className="mt-3 inline-flex text-[12px] font-medium text-primary hover:underline" href={task.jiraUrl} target="_blank" rel="noreferrer">Open Jira ticket</a>
+            )}
+          </section>
+
+          <section className="rounded-md border border-edge bg-panel-alt px-3 py-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Execution</div>
+              <span className="truncate text-[11px] text-fg-5" title={ownerLabel}>{ownerLabel}</span>
+            </div>
+            <div className="grid gap-2 md:grid-cols-2">
+              <select
+                value={task.status}
+                onChange={event => onStatus(task, event.target.value as ProTaskStatus)}
+                className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+                title="Pikiclaw task status"
+              >
+                {STATUSES.map(status => <option key={status} value={status}>{STATUS_LABEL[status]}</option>)}
+              </select>
+              <select
+                value={execution.mode}
+                onChange={event => onExecution(task, { mode: event.target.value as 'direct' | 'interactive' })}
+                className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+                title="Execution mode"
+              >
+                <option value="direct">Direct mode</option>
+                <option value="interactive">Needs input</option>
+              </select>
+              <select
+                value={execution.ownerMode}
+                onChange={event => onExecution(task, { ownerMode: event.target.value as 'status' | 'agent' | 'assistant' })}
+                className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+                title="Lifecycle owner mode"
+              >
+                <option value="status">Per-status</option>
+                <option value="agent">Single agent</option>
+                <option value="assistant">Single assistant</option>
+              </select>
+              {execution.ownerMode === 'assistant' ? (
+                <select
+                  value={execution.assistantId}
+                  onChange={event => onExecution(task, { assistantId: event.target.value || null })}
+                  className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
+                >
+                  <option value="">Default assistant</option>
+                  {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+                </select>
+              ) : (
+                <select
+                  value={execution.agent}
+                  onChange={event => onExecution(task, { agent: event.target.value || null })}
+                  disabled={execution.ownerMode !== 'agent'}
+                  className="h-9 rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
+                >
+                  <option value="">Runtime agent</option>
+                  {agents.filter(agent => agent.installed).map(agent => <option key={agent.agent} value={agent.agent}>{agent.label}</option>)}
+                </select>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <select
+                value=""
+                disabled={!!busyStage}
+                onChange={event => {
+                  const stage = event.target.value as ProTaskStage;
+                  if (stage) onStartStage(task, stage);
+                }}
+                className="h-8 rounded-md border border-edge bg-panel px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
+              >
+                <option value="">Start agent stage...</option>
+                {STAGES.map(stage => <option key={stage} value={stage}>{STAGE_LABEL[stage]}</option>)}
+              </select>
+              <button
+                type="button"
+                onClick={() => onExclusiveMode(task, !task.exclusiveMode)}
+                className="h-8 rounded-md border border-edge bg-panel px-2.5 text-[12px] font-medium text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+              >
+                {task.exclusiveMode ? 'Shared focus' : 'Exclusive focus'}
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div className="space-y-5 px-5 py-4">
+        {task.description && (
+          <section>
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Description</div>
+            <div className="whitespace-pre-wrap rounded-md border border-edge bg-panel-alt px-3 py-3 text-[13px] leading-relaxed text-fg-3">{task.description}</div>
+          </section>
+        )}
+        <JiraNativeFields task={task} saving={savingJiraFields} onSave={onUpdateJiraFields} />
+        <section>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agent Activity</div>
             <select
               value=""
               disabled={!!busyStage}
@@ -595,106 +956,33 @@ function TaskDetail({
                 const stage = event.target.value as ProTaskStage;
                 if (stage) onStartStage(task, stage);
               }}
-              className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
+              className="h-8 rounded-md border border-edge bg-panel px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
             >
-              <option value="">Choose stage...</option>
+              <option value="">New side stage...</option>
               {STAGES.map(stage => <option key={stage} value={stage}>{STAGE_LABEL[stage]}</option>)}
             </select>
-          </label>
-          <div className="flex items-end">
-            <Button variant="ghost" disabled={deleting} onClick={() => onDelete(task)}>
-              {deleting ? <Spinner /> : null}
-              Delete
-            </Button>
           </div>
-        </div>
-      </div>
-      <div className="space-y-4 px-4 py-3">
-        <section className="rounded-md border border-edge bg-panel-alt px-3 py-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Execution Mode</div>
-              <div className="mt-1 text-[12px] text-fg-4">
-                Exclusive mode keeps this Jira task as the primary coding focus while other work remains queued.
-              </div>
-            </div>
-            <Button variant={task.exclusiveMode ? 'secondary' : 'outline'} onClick={() => onExclusiveMode(task, !task.exclusiveMode)}>
-              {task.exclusiveMode ? 'Disable Exclusive' : 'Enable Exclusive'}
-            </Button>
-          </div>
-        </section>
-        <section>
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Subtasks</div>
-            <div className="text-[12px] text-fg-5">{progress.total ? `${progress.done}/${progress.total} done` : 'No subtasks'}</div>
-          </div>
-          <div className="rounded-md border border-edge bg-panel-alt px-3 py-3">
-            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_120px_120px_auto]">
-              <Input value={subtaskDraft.title} onChange={event => onSubtaskDraft({ title: event.target.value })} placeholder="Subtask title" />
-              <Input value={subtaskDraft.assignedAgent} onChange={event => onSubtaskDraft({ assignedAgent: event.target.value })} placeholder="agent" />
-              <Input value={subtaskDraft.assistantId} onChange={event => onSubtaskDraft({ assistantId: event.target.value })} placeholder="assistant" />
-              <Button variant="secondary" disabled={!subtaskDraft.title.trim()} onClick={() => onCreateSubtask(task)}>Add</Button>
-            </div>
-            <textarea
-              value={subtaskDraft.description}
-              onChange={event => onSubtaskDraft({ description: event.target.value })}
-              placeholder="Optional scope / repo / dependency"
-              className="mt-2 min-h-14 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[12px] text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
-            />
-            <div className="mt-3 space-y-2">
-              {(task.subTasks || []).length === 0 ? (
-                <div className="rounded-md border border-dashed border-edge px-3 py-5 text-center text-[12px] text-fg-5">
-                  Use subtasks only when this task splits across projects, repos, or independent work streams.
-                </div>
-              ) : task.subTasks.map(subtask => (
-                <div key={subtask.id} className="rounded-md border border-edge bg-inset px-3 py-2">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="font-semibold text-[13px] text-fg">{subtask.title}</div>
-                      {subtask.description && <div className="mt-1 text-[12px] text-fg-4">{subtask.description}</div>}
-                      <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-fg-5">
-                        {subtask.assignedAgent && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">agent: {subtask.assignedAgent}</span>}
-                        {subtask.assistantId && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">assistant: {subtask.assistantId}</span>}
-                        {!!subtask.stageRunIds.length && <span className="rounded border border-edge bg-panel px-1.5 py-0.5">{subtask.stageRunIds.length} run link{subtask.stageRunIds.length === 1 ? '' : 's'}</span>}
-                      </div>
-                    </div>
-                    <select
-                      value={subtask.status}
-                      onChange={event => onUpdateSubtaskStatus(task, subtask.id, event.target.value as ProSubtaskStatus)}
-                      className="h-8 rounded-md border border-edge bg-panel px-2 text-[12px] text-fg outline-none focus:border-primary/40"
-                    >
-                      {SUBTASK_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
-                    </select>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-        {task.description && (
-          <section>
-            <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Description</div>
-            <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-fg-3">{task.description}</div>
-          </section>
-        )}
-        <JiraNativeFields task={task} saving={savingJiraFields} onSave={onUpdateJiraFields} />
-        <section>
-          <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Stage Chats</div>
           <div className="space-y-2">
             {task.stageRuns.length === 0 ? (
-              <div className="rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-5">No stage chat yet.</div>
+              <div className="rounded-md border border-edge bg-panel-alt px-3 py-6 text-center text-[12px] text-fg-5">No agent activity yet.</div>
             ) : task.stageRuns.map(run => (
-              <div key={run.id} className="rounded-md border border-edge bg-panel-alt px-3 py-2">
-                <div className="flex flex-wrap items-center gap-2">
+              <div key={run.id} className="rounded-md border border-edge bg-panel-alt px-3 py-3">
+                <div className="flex flex-wrap items-start gap-2">
                   <Badge variant={stageTone(run.stage)}>{STAGE_LABEL[run.stage]}</Badge>
-                  <span className="text-[12px] font-mono text-fg-4">{run.session.agent}:{run.session.sessionId}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-[12px] text-fg-3">{run.session.agent}:{run.session.sessionId}</div>
+                    <div className="mt-0.5 text-[11px] text-fg-5">{formatTime(run.startedAt)} · {run.status} · {run.selectedAgentReason}</div>
+                  </div>
+                  {run.status !== 'completed' && (
+                    <Button size="sm" variant="ghost" onClick={() => onCompleteStage(task, run)}>Complete</Button>
+                  )}
                 </div>
-                <div className="mt-1 text-[11px] text-fg-5">{formatTime(run.startedAt)} · {run.selectedAgentReason}</div>
                 {estimateSummary(run) && (
                   <div className="mt-2 rounded-md border border-edge bg-inset px-2 py-1 text-[11px] text-fg-4">
                     Estimate: {estimateSummary(run)}
                   </div>
                 )}
+                <StageRunChatPreview run={run} />
                 {(run.output?.branch || run.output?.testResultId || run.output?.diffSummary || run.output?.changedFiles?.length) && (
                   <div className="mt-2 rounded-md border border-edge bg-inset px-2 py-2 text-[11px] text-fg-4">
                     {run.output.branch && <div>Branch: <span className="font-mono text-fg-3">{run.output.branch}</span></div>}
@@ -737,17 +1025,12 @@ function TaskDetail({
                   <summary className="cursor-pointer text-[12px] text-fg-4">Prompt</summary>
                   <pre className="mt-2 max-h-52 overflow-auto rounded-md border border-edge bg-inset p-2 text-[11px] leading-relaxed text-fg-3 whitespace-pre-wrap">{run.prompt}</pre>
                 </details>
-                {run.status !== 'completed' && (
-                  <div className="mt-2">
-                    <Button size="sm" variant="ghost" onClick={() => onCompleteStage(task, run)}>Mark stage complete</Button>
-                  </div>
-                )}
               </div>
             ))}
           </div>
         </section>
         <section>
-          <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Verification</div>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Verification</div>
           <div className="rounded-md border border-edge bg-panel-alt px-3 py-3">
             <div className="grid gap-2 md:grid-cols-[120px_minmax(0,1fr)_auto]">
               <Input value={verifyDraft.environment} onChange={event => onVerifyDraft({ environment: event.target.value })} placeholder="cnlab03" />
@@ -789,7 +1072,23 @@ function TaskDetail({
           </div>
         </section>
         <section>
-          <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-fg-5">Timeline</div>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Ticket Timeline</div>
+          {!!task.focusSessions?.length && (
+            <div className="mb-2 rounded-md border border-edge bg-panel-alt px-3 py-2">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">My focus sessions</div>
+              <div className="space-y-1">
+                {task.focusSessions.slice(0, 8).map(session => (
+                  <div key={session.id} className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+                    <span className="text-fg-3">{formatTime(session.openedAt)}</span>
+                    <span className="text-fg-5">
+                      {formatDuration(typeof session.durationSeconds === 'number' ? session.durationSeconds : secondsBetween(session.openedAt, session.closedAt || new Date().toISOString()))}
+                      {!session.closedAt ? ' · active' : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="space-y-2">
             {task.events.map(event => (
               <div key={event.id} className="rounded-md border border-edge bg-panel-alt px-3 py-2">
@@ -807,6 +1106,7 @@ function TaskDetail({
 export function JiraTab() {
   const locale = useStore(s => s.locale);
   const state = useStore(s => s.state);
+  const agentStatus = useStore(s => s.agentStatus);
   const toast = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
 
@@ -817,6 +1117,7 @@ export function JiraTab() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [agentCreateOpen, setAgentCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
@@ -829,6 +1130,7 @@ export function JiraTab() {
   const [selectedSprint, setSelectedSprint] = useState<string>('all');
   const [verifyDraft, setVerifyDraft] = useState({ environment: 'cnlab03', url: '', notes: '' });
   const [subtaskDraft, setSubtaskDraft] = useState({ title: '', description: '', assignedAgent: '', assistantId: '' });
+  const activeFocusSessionRef = useRef<{ taskId: string; focusSessionId: string } | null>(null);
 
   const sprintOptions = useMemo(() => {
     return Array.from(new Set(tasks.map(task => task.sprint).filter((sprint): sprint is string => !!sprint))).sort();
@@ -888,6 +1190,45 @@ export function JiraTab() {
     setSelectedId(task.id);
     setDetailOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (!detailOpen || !selectedId) {
+      const activeSession = activeFocusSessionRef.current;
+      activeFocusSessionRef.current = null;
+      if (activeSession) {
+        void api.finishProTaskFocusSession(activeSession.taskId, activeSession.focusSessionId).then(result => {
+          if (result.ok && result.task) upsertTask(result.task);
+        }).catch(() => {});
+      }
+      return undefined;
+    }
+
+    let cancelled = false;
+    const previous = activeFocusSessionRef.current;
+    if (previous && previous.taskId !== selectedId) {
+      activeFocusSessionRef.current = null;
+      void api.finishProTaskFocusSession(previous.taskId, previous.focusSessionId).then(result => {
+        if (result.ok && result.task) upsertTask(result.task);
+      }).catch(() => {});
+    }
+
+    if (!activeFocusSessionRef.current) {
+      void api.startProTaskFocusSession(selectedId, 'jira-focus-mode').then(result => {
+        if (cancelled) {
+          if (result.focusSession?.id) void api.finishProTaskFocusSession(selectedId, result.focusSession.id).catch(() => {});
+          return;
+        }
+        if (result.ok && result.task && result.focusSession?.id) {
+          activeFocusSessionRef.current = { taskId: selectedId, focusSessionId: result.focusSession.id };
+          upsertTask(result.task);
+        }
+      }).catch(() => {});
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detailOpen, selectedId, upsertTask]);
 
   const createTask = useCallback(async (taskDraft: { title: string; description: string; workdir: string; defaultAgent: string; defaultAssistantId: string }) => {
     const title = taskDraft.title.trim();
@@ -963,15 +1304,17 @@ export function JiraTab() {
   const startStage = useCallback(async (
     task: ProTask,
     stage: ProTaskStage,
-    options: { assistantId?: string; prompt?: string; model?: string | null } = {},
+    options: { assistantId?: string; agent?: string | null; prompt?: string; model?: string | null; executionMode?: 'direct' | 'interactive' } = {},
   ): Promise<ProTask | null> => {
     setBusy({ taskId: task.id, stage });
     try {
       const result = await api.startProTaskStage(task.id, stage, {
         workdir: task.workdir || state?.runtimeWorkdir,
         assistantId: options.assistantId || undefined,
+        agent: options.agent || undefined,
         prompt: options.prompt,
         model: options.model,
+        executionMode: options.executionMode || undefined,
       });
       if (!result.ok || !result.task) throw new Error(result.error || 'Failed to start stage chat');
       upsertTask(result.task);
@@ -1004,11 +1347,20 @@ export function JiraTab() {
     const stage = jiraStageForStatus(status);
     if (!stage) return task;
     const workflow = jiraConfig.statusWorkflows?.[status] || {};
-    const stageAssistantId = workflow.assistantId || (stage === 'refinement' ? jiraConfig.refinementAssistantId : jiraConfig.codingAssistantId);
+    const execution = resolveTaskExecution(task, jiraConfig);
+    const ownerMode = execution.ownerMode;
+    const stageAssistantId = ownerMode === 'assistant'
+      ? execution.assistantId
+      : ownerMode === 'agent'
+        ? undefined
+        : workflow.assistantId || (stage === 'refinement' ? jiraConfig.refinementAssistantId : jiraConfig.codingAssistantId);
+    const stageAgent = ownerMode === 'agent' ? execution.agent : undefined;
     const stagedTask = await startStage(task, stage, {
       assistantId: stageAssistantId,
-      prompt: buildStatusWorkflowPrompt(task, status, workflow.instruction),
+      agent: stageAgent,
+      prompt: buildStatusWorkflowPrompt(task, status, workflow.instruction, execution.mode),
       model: pickRandomModel(workflow.modelPool),
+      executionMode: execution.mode,
     });
     const taskAfterStage = stagedTask || task;
     const shouldRunKnowledge = stage === 'refinement'
@@ -1059,6 +1411,25 @@ export function JiraTab() {
       toast(err instanceof Error ? err.message : 'Failed to update exclusive mode', false);
     }
   }, [toast, upsertTask]);
+
+  const updateTaskExecution = useCallback(async (
+    task: ProTask,
+    patch: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; mode?: 'direct' | 'interactive' },
+  ) => {
+    try {
+      const current = resolveTaskExecution(task, jiraConfig);
+      const result = await api.updateProTaskExecution(task.id, {
+        ownerMode: patch.ownerMode || current.ownerMode,
+        agent: patch.agent !== undefined ? patch.agent : current.agent,
+        assistantId: patch.assistantId !== undefined ? patch.assistantId : current.assistantId,
+        mode: patch.mode || current.mode,
+      });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to update execution settings');
+      upsertTask(result.task);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to update execution settings', false);
+    }
+  }, [jiraConfig, toast, upsertTask]);
 
   const createSubtask = useCallback(async (task: ProTask) => {
     const title = subtaskDraft.title.trim();
@@ -1135,6 +1506,9 @@ export function JiraTab() {
           </select>
           <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
             Assistants
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setAgentCreateOpen(true)}>
+            Agent create
           </Button>
           <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -1227,10 +1601,25 @@ export function JiraTab() {
         onClose={() => setCreateOpen(false)}
         onCreate={createTask}
       />
+      <FeatureAgentDialog
+        open={agentCreateOpen}
+        onClose={() => setAgentCreateOpen(false)}
+        workdir={state?.runtimeWorkdir || workspaces[0]?.path || ''}
+        config={{
+          kind: 'jira-task',
+          title: 'Create Jira task with Agent',
+          description: 'Use a task-creation assistant to clarify goal, boundary, acceptance points, workspace, owner mode, and execution mode before the task is created.',
+          assistantName: 'Task Creator Assistant',
+          assistantResponsibility: 'Guide rough intent into a clear Jira/Pikiclaw task by asking for missing goal, boundary, assumptions, acceptance points, workspace, lifecycle owner, and direct or interactive execution preference.',
+          placeholder: 'Describe what you want to do. Example: help me create a task for verifying cnlab03 login after the new deployment.',
+          submitLabel: 'Start task assistant',
+        }}
+      />
       <JiraAssistantConfigModal
         open={settingsOpen}
         saving={savingConfig}
         assistants={assistants}
+        agents={agentStatus?.agents || []}
         config={jiraConfig}
         onClose={() => setSettingsOpen(false)}
         onSave={saveJiraConfig}
@@ -1241,20 +1630,20 @@ export function JiraTab() {
         wide
         panelStyle={{ maxWidth: 'min(960px, calc(100vw - 32px))' }}
       >
-        <ModalHeader title="Jira task detail" onClose={() => setDetailOpen(false)} />
+        <ModalHeader title="Jira task focus mode" description="Time is tracked while this focus window is open." onClose={() => setDetailOpen(false)} />
         <div className="h-[min(72vh,760px)]">
           <TaskDetail
             task={selectedTask}
             verifyDraft={verifyDraft}
             onVerifyDraft={(patch) => setVerifyDraft(prev => ({ ...prev, ...patch }))}
-            subtaskDraft={subtaskDraft}
-            onSubtaskDraft={(patch) => setSubtaskDraft(prev => ({ ...prev, ...patch }))}
-            onCreateSubtask={createSubtask}
-            onUpdateSubtaskStatus={updateSubtaskStatus}
+            assistants={assistants}
+            agents={agentStatus?.agents || []}
+            config={jiraConfig}
             onStartVerification={startVerification}
             onFinishVerification={finishVerification}
             onCompleteStage={completeStage}
             onExclusiveMode={toggleExclusiveMode}
+            onExecution={(task, patch) => { void updateTaskExecution(task, patch); }}
             onStatus={(task, status) => { void moveTaskToStatus(task, status); }}
             onStartStage={(task, stage) => { void startStage(task, stage); }}
             onDelete={(task) => { void deleteTask(task); }}

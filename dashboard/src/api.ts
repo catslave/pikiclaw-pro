@@ -851,10 +851,45 @@ export const api = {
         ...opts,
       },
     ),
+  updateProTaskExecution: (
+    taskId: string,
+    execution: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; mode?: 'direct' | 'interactive' },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/execution`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(execution),
+        ...opts,
+      },
+    ),
+  startProTaskFocusSession: (taskId: string, source?: string, opts?: ApiRequestOptions) =>
+    post<{
+      ok: boolean;
+      task?: ProTask;
+      focusSession?: NonNullable<ProTask['focusSessions']>[number];
+      error?: string;
+    }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/focus-sessions`,
+      { source },
+      opts,
+    ),
+  finishProTaskFocusSession: (taskId: string, focusSessionId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/focus-sessions/${encodeURIComponent(focusSessionId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        ...opts,
+      },
+    ),
   startProTaskStage: (
     taskId: string,
     stage: ProTaskStage,
-    options: { prompt?: string; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null } = {},
+    options: { prompt?: string; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null; executionMode?: 'direct' | 'interactive' } = {},
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; task?: ProTask; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
@@ -867,6 +902,7 @@ export const api = {
         ...(options.model ? { model: options.model } : {}),
         ...(options.effort ? { effort: options.effort } : {}),
         ...(options.workdir ? { workdir: options.workdir } : {}),
+        ...(options.executionMode ? { executionMode: options.executionMode } : {}),
       },
       { timeoutMs: 30_000, ...opts },
     ),

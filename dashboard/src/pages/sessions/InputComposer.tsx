@@ -38,6 +38,8 @@ export type PendingReviewComment = {
   turnIndex?: number;
 };
 
+type ComposerMode = 'single' | 'multi';
+
 const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
   {
     command: 'goal',
@@ -274,7 +276,7 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onReorderQueued, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onReorderQueued, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -282,6 +284,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   onSendTaskAssigned?: (taskId: string) => void;
   onSendFailed?: () => void;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
+  onMultiSessionChange?: (next: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => void;
   t: (k: string) => string;
   streamPhase: string | null;
   streamTaskId?: string | null;
@@ -328,6 +331,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [selectedAgent, setSelectedAgent] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState('');
+  const [composerMode, setComposerMode] = useState<ComposerMode>('single');
+  const [multiAgentIds, setMultiAgentIds] = useState<string[]>([]);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [queuedPreviewUrl, setQueuedPreviewUrl] = useState<string | null>(null);
@@ -388,6 +393,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   }, []);
 
   useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
+  useEffect(() => {
+    if (!agents.length) return;
+    const installed = agents.filter(a => a.installed).map(a => a.agent);
+    setMultiAgentIds(prev => {
+      const filtered = prev.filter(agent => installed.includes(agent));
+      if (filtered.length) return filtered;
+      const fallback = selectedAgent || session.agent || agents.find(a => a.isDefault)?.agent || installed[0] || '';
+      return fallback ? [fallback] : [];
+    });
+  }, [agents, selectedAgent, session.agent]);
   useEffect(() => { attachmentsRef.current = composerAttachments; }, [composerAttachments]);
 
   // Restore draft on mount, save on unmount
@@ -631,6 +646,17 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     setPreviewImageId(current => current === id ? null : current);
   }, [persistDraft]);
 
+  const buildMultiAgentPrompt = useCallback((prompt: string, agent: string, groupAgents: string[], runId: string) => {
+    const peers = groupAgents.join(', ');
+    return [
+      `Multi-agent run: ${runId}`,
+      `You are the ${agent} agent in a parallel run with: ${peers}.`,
+      'Work independently in your own session. Make your output easy to synthesize later: include assumptions, key findings, risks, and recommended next steps. If the user later asks for synthesis, reference peer outputs by agent/session when available.',
+      '',
+      prompt,
+    ].join('\n');
+  }, []);
+
   const handleSend = useCallback(() => {
     const body = input.trim();
     const commentBlock = formatPendingReviewComments(pendingReviewComments);
@@ -643,6 +669,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       || agents.find(a => a.isDefault)?.agent
       || '';
     if (!targetAgent) return;
+    const installedAgentIds = agents.filter(a => a.installed).map(a => a.agent);
+    const targetMultiAgents = Array.from(new Set(
+      multiAgentIds.filter(agent => installedAgentIds.includes(agent)),
+    ));
+    if (composerMode === 'multi' && !targetMultiAgents.length) return;
     const targetStatus = agents.find(a => a.agent === targetAgent) || null;
     // Per-session pick wins over the global runtime default. selectedModel/Effort
     // is set by applyCascade and only applies to this session's React state.
@@ -650,6 +681,48 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     const targetEffort = targetAgent === 'gemini'
       ? null
       : ((selectedEffort || targetStatus?.selectedEffort || '').trim() || null);
+    if (composerMode === 'multi') {
+      setSending(true);
+      lastSentRef.current = { prompt, files: attachments };
+      inputValueRef.current = '';
+      setInput('');
+      onClearPendingReviewComments?.();
+      draftStore.delete(dkRef.current);
+      writeDraftText(dkRef.current, '');
+      clearDraftFiles(dkRef.current);
+      clearComposerAttachments();
+      setUploadingAttachmentCount(attachments.length);
+      const previousAgent = session.agent || null;
+      const previousSessionId = session.sessionId || null;
+      const startedSessions: Array<{ agent: string; sessionId: string; workdir: string }> = [];
+      const runId = `multi-${Date.now().toString(36)}`;
+      Promise.allSettled(targetMultiAgents.map(async agent => {
+        const status = agents.find(a => a.agent === agent) || null;
+        const model = (status?.selectedModel || '').trim() || null;
+        const effort = agent === 'gemini' ? null : ((status?.selectedEffort || '').trim() || null);
+        const res = await api.sendSessionMessage(workdir, agent, '', buildMultiAgentPrompt(prompt || 'Please inspect the attached file(s).', agent, targetMultiAgents, runId), {
+          attachments,
+          model,
+          effort,
+          previousAgent: previousAgent && previousAgent !== agent ? previousAgent : null,
+          previousSessionId: previousAgent && previousAgent !== agent ? previousSessionId : null,
+        });
+        if (!res.ok) throw new Error(res.error || `Failed to start ${agent}`);
+        const nextSession = typeof res.sessionKey === 'string' ? parseSessionKey(res.sessionKey) : null;
+        if (nextSession) startedSessions.push({ ...nextSession, workdir });
+        return res;
+      }))
+        .then(results => {
+          if (startedSessions.length) onMultiSessionChange?.(startedSessions, prompt);
+          if (results.some(result => result.status === 'rejected') || !startedSessions.length) onSendFailed?.();
+        })
+        .finally(() => {
+          setUploadingAttachmentCount(0);
+          setSending(false);
+        });
+      return;
+    }
+
     const isAgentSwitch = targetAgent !== session.agent;
     const targetSessionId = isAgentSwitch ? '' : session.sessionId;
     // When switching agent, pass the live session of the outgoing agent so the
@@ -717,10 +790,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     onSendFailed,
     onEditSendStart,
     onSessionChange,
+    onMultiSessionChange,
     onStreamQueued,
+    buildMultiAgentPrompt,
     selectedAgent,
     selectedEffort,
     selectedModel,
+    composerMode,
+    multiAgentIds,
     sending,
     session.agent,
     session.sessionId,
@@ -988,7 +1065,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       : null;
   const hasPendingAttachments = composerAttachments.some(item => item.status === 'adding');
   const hasFailedAttachments = composerAttachments.some(item => item.status === 'failed');
-  const canSend = (!!input.trim() || pendingReviewComments.length > 0 || composerAttachments.length > 0) && !sending && !!effectiveAgent && !hasPendingAttachments && !hasFailedAttachments;
+  const installedMultiAgents = multiAgentIds.filter(agent => agents.some(a => a.installed && a.agent === agent));
+  const canSend = (!!input.trim() || pendingReviewComments.length > 0 || composerAttachments.length > 0)
+    && !sending
+    && (composerMode === 'multi' ? installedMultiAgents.length > 0 : !!effectiveAgent)
+    && !hasPendingAttachments
+    && !hasFailedAttachments;
 
   const resetCascade = () => {
     setPendingAgent(null);
@@ -1314,6 +1396,62 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             </div>
           )}
 
+          <div className="flex min-w-0 items-center gap-2 px-3 pt-2">
+            <div className="inline-flex shrink-0 rounded-lg border border-edge/60 bg-panel-alt/50 p-0.5">
+              {(['single', 'multi'] as ComposerMode[]).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => {
+                    setComposerMode(mode);
+                    if (mode === 'multi') setCascadeStep('closed');
+                  }}
+                  className={cn(
+                    'h-6 rounded-md px-2 text-[10px] font-medium transition-colors',
+                    composerMode === mode
+                      ? 'bg-panel text-fg shadow-sm'
+                      : 'text-fg-5 hover:bg-panel-h/70 hover:text-fg-3',
+                  )}
+                >
+                  {mode === 'single' ? t('hub.modeSingle') : t('hub.modeMulti')}
+                </button>
+              ))}
+            </div>
+            {composerMode === 'multi' && (
+              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                {agents.filter(a => a.installed).map(agent => {
+                  const selected = multiAgentIds.includes(agent.agent);
+                  const meta = getAgentMeta(agent.agent);
+                  return (
+                    <button
+                      key={agent.agent}
+                      type="button"
+                      onClick={() => {
+                        setMultiAgentIds(prev => {
+                          if (prev.includes(agent.agent)) {
+                            const next = prev.filter(id => id !== agent.agent);
+                            return next.length ? next : prev;
+                          }
+                          return [...prev, agent.agent];
+                        });
+                      }}
+                      title={meta.label}
+                      className={cn(
+                        'inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5 text-[10px] font-medium transition-colors',
+                        selected
+                          ? 'border-primary/35 bg-primary/10 text-fg'
+                          : 'border-edge/45 bg-transparent text-fg-5 hover:border-edge-h hover:bg-panel-h/60 hover:text-fg-3',
+                      )}
+                    >
+                      <BrandIcon brand={agent.agent} size={12} />
+                      <span>{meta.shortLabel}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Slash command autocomplete */}
           {skillMenuOpen && commandOptions.length > 0 && (
             <div
@@ -1437,52 +1575,59 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             </button>
 
             {/* Cascade config trigger */}
-            <button
-              ref={triggerRef}
-              onClick={toggleCascade}
-              disabled={!agents.length}
-              title={agents.length ? cascadeLabel : undefined}
-              className={cn(
-                'composer-cascade-trigger flex min-w-0 items-center gap-1.5 h-[28px] px-2.5 rounded-lg text-[11px] font-medium transition-all duration-200 select-none',
-                cascadeStep !== 'closed'
-                  ? 'bg-panel-h border border-edge-h text-fg-3'
-                  : 'text-fg-5/60 hover:text-fg-4 hover:bg-panel-h/50 border border-transparent',
-              )}
-            >
-              {agents.length
-                ? <BrandIcon brand={displayAgent} size={12} />
-                : <Spinner className="h-3 w-3" />}
-              {agents.length ? (
-                <span className="composer-cascade-label flex items-center gap-1 max-w-[460px] min-w-0 truncate">
-                  <span className="shrink-0">{displayMeta.shortLabel}</span>
-                  {displayProvider && (
-                    <>
-                      <span className="text-fg-5/40 shrink-0">/</span>
-                      <BrandIcon brand={displayProviderBrand || 'custom'} size={12} />
-                      <span className="shrink-0 truncate max-w-[140px]">{displayProvider.name}</span>
-                    </>
-                  )}
-                  {displayModelLabel && (
-                    <>
-                      <span className="text-fg-5/40 shrink-0">/</span>
-                      <span className="truncate" title={displayModel || undefined}>{displayModelLabel}</span>
-                    </>
-                  )}
-                  {displayEffort && (
-                    <>
-                      <span className="text-fg-5/40 shrink-0">/</span>
-                      <span className="shrink-0">{displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1)}</span>
-                    </>
-                  )}
-                </span>
-              ) : (
-                <span className="max-w-[420px] truncate">{t('hub.selectAgent')}</span>
-              )}
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                className={cn('text-fg-5/30 transition-transform duration-200', cascadeStep !== 'closed' && 'rotate-180')}>
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
+            {composerMode === 'single' ? (
+              <button
+                ref={triggerRef}
+                onClick={toggleCascade}
+                disabled={!agents.length}
+                title={agents.length ? cascadeLabel : undefined}
+                className={cn(
+                  'composer-cascade-trigger flex min-w-0 items-center gap-1.5 h-[28px] px-2.5 rounded-lg text-[11px] font-medium transition-all duration-200 select-none',
+                  cascadeStep !== 'closed'
+                    ? 'bg-panel-h border border-edge-h text-fg-3'
+                    : 'text-fg-5/60 hover:text-fg-4 hover:bg-panel-h/50 border border-transparent',
+                )}
+              >
+                {agents.length
+                  ? <BrandIcon brand={displayAgent} size={12} />
+                  : <Spinner className="h-3 w-3" />}
+                {agents.length ? (
+                  <span className="composer-cascade-label flex items-center gap-1 max-w-[460px] min-w-0 truncate">
+                    <span className="shrink-0">{displayMeta.shortLabel}</span>
+                    {displayProvider && (
+                      <>
+                        <span className="text-fg-5/40 shrink-0">/</span>
+                        <BrandIcon brand={displayProviderBrand || 'custom'} size={12} />
+                        <span className="shrink-0 truncate max-w-[140px]">{displayProvider.name}</span>
+                      </>
+                    )}
+                    {displayModelLabel && (
+                      <>
+                        <span className="text-fg-5/40 shrink-0">/</span>
+                        <span className="truncate" title={displayModel || undefined}>{displayModelLabel}</span>
+                      </>
+                    )}
+                    {displayEffort && (
+                      <>
+                        <span className="text-fg-5/40 shrink-0">/</span>
+                        <span className="shrink-0">{displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1)}</span>
+                      </>
+                    )}
+                  </span>
+                ) : (
+                  <span className="max-w-[420px] truncate">{t('hub.selectAgent')}</span>
+                )}
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                  className={cn('text-fg-5/30 transition-transform duration-200', cascadeStep !== 'closed' && 'rotate-180')}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+            ) : (
+              <div className="composer-cascade-trigger flex min-w-0 items-center gap-1.5 h-[28px] px-2.5 rounded-lg border border-primary/20 bg-primary/[0.06] text-[11px] font-medium text-fg-4">
+                <span className="shrink-0">{t('hub.multiAgents')}</span>
+                <span className="truncate text-fg-5">{installedMultiAgents.length}</span>
+              </div>
+            )}
 
             {/* Cascade dropdown — rendered via portal to escape overflow:hidden */}
             {cascadeStep !== 'closed' && cascadePos && createPortal(

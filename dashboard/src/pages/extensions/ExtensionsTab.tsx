@@ -33,6 +33,7 @@ import type {
 } from '../../types';
 import { cn } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
+import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
 import { Badge, Button, Input, Modal, ModalHeader, Spinner, SectionLabel, TabsList, TabsTrigger } from '../../components/ui';
 import { SettingRowAction, SettingRowCard, SettingRowLead } from '../shared';
 
@@ -1785,6 +1786,7 @@ function McpCatalogSection({
   const [credsTarget, setCredsTarget] = useState<McpCatalogItem | null>(null);
   const [syncTarget, setSyncTarget] = useState<McpCatalogItem | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
+  const [agentCreateOpen, setAgentCreateOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   const items = data || [];
@@ -2047,7 +2049,13 @@ function McpCatalogSection({
         </div>
       )}
 
-      <div className="mt-3 flex justify-end">
+      <div className="mt-3 flex justify-end gap-2">
+        <button
+          className="text-[12px] font-medium text-primary hover:text-primary/80 transition-colors"
+          onClick={() => setAgentCreateOpen(true)}
+        >
+          + {L(locale, '用 Agent 创建 MCP', 'Create MCP with Agent')}
+        </button>
         <button
           className="text-[12px] text-fg-4 hover:text-fg-2 transition-colors"
           onClick={() => setCustomOpen(true)}
@@ -2077,6 +2085,20 @@ function McpCatalogSection({
         scope={scope}
         workdir={workdir}
         onAdded={refresh}
+      />
+      <FeatureAgentDialog
+        open={agentCreateOpen}
+        onClose={() => setAgentCreateOpen(false)}
+        workdir={workdir}
+        config={{
+          kind: 'mcp',
+          title: L(locale, '用 Agent 创建 MCP', 'Create MCP with Agent'),
+          description: L(locale, '告诉它你想接入什么服务，它会补齐 MCP 创建需要的信息、配置和验证步骤。', 'Tell it what service you want to connect; it will collect the MCP setup details, configuration, and validation steps.'),
+          assistantName: 'MCP Creator Assistant',
+          assistantResponsibility: L(locale, '负责创建和配置 MCP，包括 transport、URL/command、token/env、scope、测试以及是否需要重启。', 'Creates and configures MCP servers, including transport, URL/command, token/env, scope, tests, and restart notes.'),
+          placeholder: L(locale, '例如：我想添加一个 Linear MCP，用 http 方式，token 我稍后提供；或者我想把公司内部 Jira MCP 接进来。', 'Example: I want to add a Linear MCP over HTTP and provide token later, or connect our internal Jira MCP.'),
+          submitLabel: L(locale, '开始创建 MCP', 'Start MCP creation'),
+        }}
       />
     </section>
   );
@@ -2130,6 +2152,7 @@ function SkillsCatalogSection({
   );
 
   const [customOpen, setCustomOpen] = useState(false);
+  const [agentCreateOpen, setAgentCreateOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const items = data?.items || [];
@@ -2172,6 +2195,9 @@ function SkillsCatalogSection({
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={() => void refresh()}>
             {loading ? L(locale, '刷新中…', 'Refreshing…') : L(locale, '刷新', 'Refresh')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setAgentCreateOpen(true)}>
+            + {L(locale, '用 Agent 创建 Skill', 'Create with Agent')}
           </Button>
           <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
             + {L(locale, '从 GitHub 安装', 'Install from GitHub')}
@@ -2255,6 +2281,20 @@ function SkillsCatalogSection({
         scope={scope}
         workdir={workdir}
         onInstalled={refresh}
+      />
+      <FeatureAgentDialog
+        open={agentCreateOpen}
+        onClose={() => setAgentCreateOpen(false)}
+        workdir={workdir}
+        config={{
+          kind: 'skill',
+          title: L(locale, '用 Agent 创建 Skill', 'Create Skill with Agent'),
+          description: L(locale, '用聊天方式描述你想自动化的工作流，助手会澄清触发条件、输入输出和需要生成的 skill 文件。', 'Describe the workflow in chat; the assistant will clarify triggers, inputs, outputs, and skill files to create.'),
+          assistantName: 'Skill Creator Assistant',
+          assistantResponsibility: L(locale, '负责把一个模糊的能力需求整理成可用 Skill，并创建 SKILL.md、脚本、模板和验证说明。', 'Turns a rough capability request into a usable skill with SKILL.md, scripts, templates, and validation notes.'),
+          placeholder: L(locale, '例如：我想创建一个 quick setup skill，给它 GitHub 链接后自动读 README、安装依赖并跑起来。', 'Example: I want a quick setup skill that reads a GitHub README, installs dependencies, and starts the project.'),
+          submitLabel: L(locale, '开始创建 Skill', 'Start skill creation'),
+        }}
       />
     </section>
   );

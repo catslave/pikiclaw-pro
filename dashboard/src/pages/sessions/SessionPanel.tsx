@@ -104,12 +104,13 @@ function bridgePendingImagesIntoHistory(history: TurnHistoryWindow, pendingPromp
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
   onSessionChange?: (next: SessionPanelChange) => void;
+  onMultiSessionChange?: (next: SessionPanelChange[], prompt: string) => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
@@ -1139,6 +1140,7 @@ export const SessionPanel = memo(function SessionPanel({
         onSendTaskAssigned={handleSendTaskAssigned}
         onSendFailed={handleSendFailed}
         onSessionChange={onSessionChange}
+        onMultiSessionChange={onMultiSessionChange}
         t={t}
         streamPhase={streamPhase}
         streamTaskId={streamTaskId}

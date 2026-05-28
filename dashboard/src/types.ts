@@ -82,6 +82,10 @@ export interface ProUsageTaskTimingSummary {
   refinementStartedAt: string | null;
   resolvedAt: string | null;
   refinementToResolvedSeconds: number | null;
+  userFocusCount: number;
+  userFocusSeconds: number;
+  agentSeconds: number;
+  totalLifecycleSeconds: number | null;
 }
 
 export interface ProUsageSummary {
@@ -100,6 +104,9 @@ export interface ProUsageSummary {
     count: number;
     resolvedCount: number;
     averageRefinementToResolvedSeconds: number | null;
+    userFocusSeconds: number;
+    agentSeconds: number;
+    totalLifecycleSeconds: number;
     tasks: ProUsageTaskTimingSummary[];
   };
   notes: string[];
@@ -1059,6 +1066,12 @@ export interface ProTask {
   workdir?: string;
   defaultAgent?: string;
   defaultAssistantId?: string;
+  execution?: {
+    ownerMode?: 'status' | 'agent' | 'assistant';
+    agent?: string;
+    assistantId?: string;
+    mode?: 'direct' | 'interactive';
+  };
   jiraKey?: string;
   jiraUrl?: string;
   jiraFields?: {
@@ -1078,6 +1091,13 @@ export interface ProTask {
   stageRuns: StageRun[];
   verificationRuns: VerificationRun[];
   subTasks: ProSubtask[];
+  focusSessions?: Array<{
+    id: string;
+    taskId: string;
+    openedAt: string;
+    closedAt?: string;
+    durationSeconds?: number;
+  }>;
   exclusiveMode?: boolean;
   events: ProTaskEvent[];
 }
@@ -1121,6 +1141,10 @@ export interface AgentAssistant {
 }
 
 export interface JiraWorkflowConfig {
+  executionOwnerMode?: 'status' | 'agent' | 'assistant';
+  lifecycleAgent?: string;
+  lifecycleAssistantId?: string;
+  executionMode?: 'direct' | 'interactive';
   refinementAssistantId?: string;
   codingAssistantId?: string;
   ticketSyncAssistantId?: string;

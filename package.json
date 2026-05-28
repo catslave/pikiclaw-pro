@@ -1,7 +1,7 @@
 {
   "name": "pikiclaw",
-  "version": "0.3.51",
-  "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
+  "version": "0.4.0",
+  "description": "Pikiclaw Pro: an agent workspace for Chat, Jira dashboards, Todo capture, automation, skills, MCP, and usage analytics.",
   "type": "module",
   "bin": {
     "pikiclaw": "dist/cli/main.js"

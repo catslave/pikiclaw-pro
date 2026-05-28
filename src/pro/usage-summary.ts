@@ -51,6 +51,10 @@ export interface UsageTaskTimingSummary {
   refinementStartedAt: string | null;
   resolvedAt: string | null;
   refinementToResolvedSeconds: number | null;
+  userFocusCount: number;
+  userFocusSeconds: number;
+  agentSeconds: number;
+  totalLifecycleSeconds: number | null;
 }
 
 export interface ProUsageSummary {
@@ -69,6 +73,9 @@ export interface ProUsageSummary {
     count: number;
     resolvedCount: number;
     averageRefinementToResolvedSeconds: number | null;
+    userFocusSeconds: number;
+    agentSeconds: number;
+    totalLifecycleSeconds: number;
     tasks: UsageTaskTimingSummary[];
   };
   notes: string[];
@@ -226,6 +233,15 @@ function statusChangedAt(task: ProTask, status: string): string | null {
 function taskTimingSummary(task: ProTask): UsageTaskTimingSummary {
   const refinementStartedAt = statusChangedAt(task, 'refinement') || task.stageRuns.find(run => run.stage === 'refinement')?.startedAt || null;
   const resolvedAt = statusChangedAt(task, 'resolved') || (task.status === 'resolved' || task.status === 'done' ? task.updatedAt : null);
+  const now = new Date().toISOString();
+  const focusSessions = task.focusSessions || [];
+  const userFocusSeconds = focusSessions.reduce((sum, session) => {
+    return sum + (typeof session.durationSeconds === 'number'
+      ? Math.max(0, session.durationSeconds)
+      : addSeconds(session.openedAt, session.closedAt || now));
+  }, 0);
+  const agentSeconds = (task.stageRuns || []).reduce((sum, run) => sum + addSeconds(run.startedAt, run.completedAt || now), 0);
+  const lifecycleEnd = task.status === 'done' || task.status === 'resolved' ? task.updatedAt : now;
   return {
     taskId: task.id,
     title: task.title,
@@ -234,6 +250,10 @@ function taskTimingSummary(task: ProTask): UsageTaskTimingSummary {
     refinementStartedAt,
     resolvedAt,
     refinementToResolvedSeconds: refinementStartedAt && resolvedAt ? addSeconds(refinementStartedAt, resolvedAt) : null,
+    userFocusCount: focusSessions.length,
+    userFocusSeconds,
+    agentSeconds,
+    totalLifecycleSeconds: addSeconds(task.createdAt, lifecycleEnd),
   };
 }
 
@@ -302,6 +322,9 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
   const average = resolvedTaskRows.length
     ? Math.round(resolvedTaskRows.reduce((sum, task) => sum + (task.refinementToResolvedSeconds || 0), 0) / resolvedTaskRows.length)
     : null;
+  const userFocusSeconds = taskRows.reduce((sum, task) => sum + task.userFocusSeconds, 0);
+  const agentSeconds = taskRows.reduce((sum, task) => sum + task.agentSeconds, 0);
+  const totalLifecycleSeconds = taskRows.reduce((sum, task) => sum + (task.totalLifecycleSeconds || 0), 0);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -319,8 +342,11 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
       count: taskRows.length,
       resolvedCount: resolvedTaskRows.length,
       averageRefinementToResolvedSeconds: average,
+      userFocusSeconds,
+      agentSeconds,
+      totalLifecycleSeconds,
       tasks: taskRows
-        .sort((a, b) => (b.refinementToResolvedSeconds || 0) - (a.refinementToResolvedSeconds || 0))
+        .sort((a, b) => b.userFocusSeconds - a.userFocusSeconds || (b.refinementToResolvedSeconds || 0) - (a.refinementToResolvedSeconds || 0))
         .slice(0, 20),
     },
     notes: truncated ? [...notes, `Only the latest ${limit} chats were scanned.`] : notes,

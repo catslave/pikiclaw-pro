@@ -14,6 +14,7 @@ import {
   createProTask,
   deleteProTask,
   finishVerificationRun,
+  finishUserFocusSession,
   getProTask,
   isProTaskStage,
   isProTaskStatus,
@@ -21,10 +22,12 @@ import {
   listProTasks,
   setExclusiveMode,
   startVerificationRun,
+  startUserFocusSession,
   syncJiraTask,
   updateStageRun,
   updateSubtask,
   updateJiraFields,
+  updateProTaskExecution,
   updateProTaskStatus,
   type VerificationResult,
 } from '../../pro/tasks.js';
@@ -709,6 +712,44 @@ app.patch('/api/pro/tasks/:taskId/exclusive-mode', async (c) => {
   }
 });
 
+app.patch('/api/pro/tasks/:taskId/execution', async (c) => {
+  try {
+    const body = await c.req.json();
+    const task = updateProTaskExecution(c.req.param('taskId'), {
+      ownerMode: body?.ownerMode,
+      agent: body?.agent,
+      assistantId: body?.assistantId,
+      mode: body?.mode,
+    });
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/tasks/:taskId/focus-sessions', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const task = startUserFocusSession(c.req.param('taskId'), { source: body?.source });
+    const focusSession = task.focusSessions?.[0];
+    return c.json({ ok: true, task, focusSession });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/tasks/:taskId/focus-sessions/:focusSessionId', async (c) => {
+  try {
+    const task = finishUserFocusSession(c.req.param('taskId'), c.req.param('focusSessionId'));
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
   try {
     const taskId = c.req.param('taskId');
@@ -719,12 +760,15 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
     const stage = readString(body?.stage);
     if (!isProTaskStage(stage)) return c.json({ ok: false, error: 'invalid stage' }, 400);
 
-    const assistantId = readString(body?.assistantId) || task.defaultAssistantId || undefined;
+    const assistantId = readString(body?.assistantId) || task.execution?.assistantId || task.defaultAssistantId || undefined;
     const assistant = assistantId ? listAgentAssistants().find(item => item.id === assistantId) : undefined;
     const config = loadUserConfig();
     const workdir = readString(body?.workdir) || task.workdir || runtime.getRequestWorkdir(config);
-    const prompt = readString(body?.prompt) || buildDefaultStagePrompt(task, stage, assistant);
-    const requestedAgent = readString(body?.agent) || task.defaultAgent || assistant?.preferredAgents?.[0] || null;
+    const prompt = withExecutionModeInstruction(
+      readString(body?.prompt) || buildDefaultStagePrompt(task, stage, assistant),
+      readString(body?.executionMode) || task.execution?.mode || 'direct',
+    );
+    const requestedAgent = readString(body?.agent) || task.execution?.agent || task.defaultAgent || assistant?.preferredAgents?.[0] || null;
     const queued = await queueDashboardSessionTask({
       workdir,
       agent: requestedAgent,
@@ -955,6 +999,13 @@ function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>
     return `${common}\n\nAnalyze the reported bug, identify likely root cause, propose a minimal fix, implement it if enough evidence is available, and summarize verification steps.`;
   }
   return `${common}\n\nWork on the ${stage} stage for this task and summarize the result.`;
+}
+
+function withExecutionModeInstruction(prompt: string, mode: string): string {
+  const instruction = mode === 'interactive'
+    ? 'Execution mode: user-intervention. Continue autonomously when possible, but if a decision, missing requirement, credential, environment, or risky tradeoff blocks progress, ask the user for input and wait before continuing.'
+    : 'Execution mode: direct. Do not ask the user for routine input. Make reasonable assumptions, proceed autonomously, solve the task end to end, and only stop for genuinely unsafe or impossible actions.';
+  return `${instruction}\n\n${prompt}`;
 }
 
 export default app;

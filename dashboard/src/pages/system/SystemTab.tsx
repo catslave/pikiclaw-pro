@@ -78,7 +78,7 @@ export function SystemTab({
                 <span className="truncate text-[11px] text-fg-5">{hostSummary || t('status.loading')}</span>
               </div>
               <div className="text-[11px] text-fg-5">
-                {state?.version ? `Pikiclaw v${state.version}` : 'Pikiclaw'}
+                {state?.version ? `Pikiclaw Pro v${state.version}` : 'Pikiclaw Pro'}
                 {state?.nodeVersion ? ` · Node ${state.nodeVersion}` : ''}
               </div>
             </div>

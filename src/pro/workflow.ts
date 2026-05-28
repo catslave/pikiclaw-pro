@@ -76,6 +76,10 @@ export interface KnowledgeEntry {
 }
 
 export interface JiraWorkflowConfig {
+  executionOwnerMode?: 'status' | 'agent' | 'assistant';
+  lifecycleAgent?: string;
+  lifecycleAssistantId?: string;
+  executionMode?: 'direct' | 'interactive';
   refinementAssistantId?: string;
   codingAssistantId?: string;
   ticketSyncAssistantId?: string;
@@ -100,6 +104,8 @@ interface WorkflowFile {
 }
 
 const DEFAULT_JIRA_CONFIG: JiraWorkflowConfig = {
+  executionOwnerMode: 'status',
+  executionMode: 'direct',
   refinementAssistantId: 'assistant_refinement',
   codingAssistantId: 'assistant_coding',
   ticketSyncAssistantId: 'assistant_ticket_sync',
@@ -152,6 +158,30 @@ const DEFAULT_ASSISTANTS: AgentAssistant[] = [
     preferredAgents: ['codex', 'claude'],
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_mcp_creator',
+    name: 'MCP Creator Assistant',
+    responsibility: 'Help the user create or configure MCP servers. Collect transport, command or URL, auth fields, scopes, environment variables, validation steps, and restart requirements; then create or update the MCP configuration when enough information is available.',
+    preferredAgents: ['codex'],
+    createdAt: '2026-05-28T00:00:00.000Z',
+    updatedAt: '2026-05-28T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_skill_creator',
+    name: 'Skill Creator Assistant',
+    responsibility: 'Help the user create Pikiclaw/Codex skills. Clarify the workflow, trigger phrases, required inputs, tools, scripts, safety boundaries, and expected outputs; then create or update the skill files and explain how to validate them.',
+    preferredAgents: ['codex'],
+    createdAt: '2026-05-28T00:00:00.000Z',
+    updatedAt: '2026-05-28T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_task_creator',
+    name: 'Task Creator Assistant',
+    responsibility: 'Help the user create useful tasks from rough intent. Clarify goal, boundary, assumptions, acceptance points, workspace, owner mode, direct or interactive execution mode, and expected evidence before creating or drafting the task.',
+    preferredAgents: ['codex', 'claude'],
+    createdAt: '2026-05-28T00:00:00.000Z',
+    updatedAt: '2026-05-28T00:00:00.000Z',
   },
 ];
 
@@ -238,6 +268,12 @@ export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): Ji
     }
   }
   const next: JiraWorkflowConfig = {
+    executionOwnerMode: input.executionOwnerMode === 'agent' || input.executionOwnerMode === 'assistant' || input.executionOwnerMode === 'status'
+      ? input.executionOwnerMode
+      : current.executionOwnerMode,
+    lifecycleAgent: input.lifecycleAgent !== undefined ? normalizeText(input.lifecycleAgent, 80) || undefined : current.lifecycleAgent,
+    lifecycleAssistantId: input.lifecycleAssistantId !== undefined ? normalizeText(input.lifecycleAssistantId, 160) || undefined : current.lifecycleAssistantId,
+    executionMode: input.executionMode === 'interactive' || input.executionMode === 'direct' ? input.executionMode : current.executionMode,
     refinementAssistantId: normalizeText(input.refinementAssistantId, 160) || current.refinementAssistantId,
     codingAssistantId: normalizeText(input.codingAssistantId, 160) || current.codingAssistantId,
     ticketSyncAssistantId: normalizeText(input.ticketSyncAssistantId, 160) || current.ticketSyncAssistantId,

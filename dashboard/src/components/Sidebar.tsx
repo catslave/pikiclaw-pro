@@ -90,7 +90,7 @@ export function Sidebar({
             <PikiclawLogo />
           </div>
           <div className="leading-none">
-            <div className="text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw</div>
+            <div className="text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw Pro</div>
           </div>
           <span className="rounded-md border border-edge bg-panel px-1.5 py-0.5 text-[10px] font-mono text-fg-4">
             v{version}

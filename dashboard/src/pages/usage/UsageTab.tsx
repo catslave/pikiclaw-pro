@@ -343,6 +343,8 @@ export function UsageTab() {
             <CompactMetric label="Cache Read" value={formatTokens(proUsage.totals.cachedInputTokens || cachedTokens)} />
             <CompactMetric label="Avg Active / Chat" value={formatDuration(proUsage.totals.chatCount ? proUsage.totals.activeSeconds / proUsage.totals.chatCount : 0)} />
             <CompactMetric label="Task Cycle Avg" value={formatDuration(proUsage.taskTimings.averageRefinementToResolvedSeconds)} hint={`${proUsage.taskTimings.resolvedCount}/${proUsage.taskTimings.count} resolved`} />
+            <CompactMetric label="My Task Focus" value={formatDuration(proUsage.taskTimings.userFocusSeconds)} hint="Jira task focus windows" />
+            <CompactMetric label="Agent Task Time" value={formatDuration(proUsage.taskTimings.agentSeconds)} hint="Queued stage runtime" />
             <CompactMetric label="Agent Count" value={String(proUsage.byAgent.length)} hint="With saved sessions" />
           </div>
 
@@ -429,8 +431,11 @@ export function UsageTab() {
                       <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-2">{task.title}</div>
                       <Badge variant={task.refinementToResolvedSeconds == null ? 'muted' : 'accent'}>{task.status}</Badge>
                     </div>
-                    <div className="mt-1 text-[11px] text-fg-5">
-                      {task.jiraKey ? `${task.jiraKey} · ` : ''}refinement → resolved: {formatDuration(task.refinementToResolvedSeconds)}
+                    <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-fg-5">
+                      {task.jiraKey && <span>{task.jiraKey}</span>}
+                      <span>my focus {formatDuration(task.userFocusSeconds)} / {task.userFocusCount} opens</span>
+                      <span>agent {formatDuration(task.agentSeconds)}</span>
+                      <span>cycle {formatDuration(task.refinementToResolvedSeconds)}</span>
                     </div>
                   </div>
                 ))}

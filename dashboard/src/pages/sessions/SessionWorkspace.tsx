@@ -1,6 +1,6 @@
 import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useCallback, useRef, memo, useMemo, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
@@ -267,6 +267,7 @@ const FOCUSED_SLOT_STORAGE_KEY = 'pikiclaw:session-workspace:focused-slot:v1';
 const NEW_SESSION_STORAGE_KEY = 'pikiclaw:session-workspace:new-session-workdir:v1';
 const WORKSPACE_EXPANDED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-expanded:v1';
 const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-sidebar-collapsed:v1';
+const CHAT_LAYOUT_STORAGE_KEY = 'pikiclaw:session-workspace:chat-layout:v1';
 const LEGACY_OPEN_SESSIONS_STORAGE_KEY = 'pikiclaw-open-sessions';
 const LEGACY_ACTIVE_SLOT_STORAGE_KEY = 'pikiclaw-active-slot';
 const SIDE_CHAT_DEFAULT_WIDTH = 440;
@@ -492,7 +493,7 @@ function readStoredWorkspaceSidebarCollapsed(): boolean {
 
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'dashboard' | 'settings';
-type DashboardViewKey = 'workspace' | 'jira';
+type ChatLayoutMode = 'layout' | 'column';
 type DashboardScope = 'all' | string;
 type DashboardColumnKey = 'running' | 'pending' | 'review' | 'incomplete' | 'done';
 type DashboardSessionItem = {
@@ -517,6 +518,10 @@ type WorkspaceStatusSummary = {
   readyChannels: number;
   configuredChannels: number;
 };
+
+function readStoredChatLayout(): ChatLayoutMode {
+  return readBrowserStorage(CHAT_LAYOUT_STORAGE_KEY) === 'column' ? 'column' : 'layout';
+}
 
 function isOpenTarget(value: string | null | undefined): value is OpenTarget {
   return value === 'vscode'
@@ -786,7 +791,7 @@ function WorkspaceSidebarHeader({
           <PikiclawLogo />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw</div>
+          <div className="truncate text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw Pro</div>
         </div>
         <div className="shrink-0 font-mono text-[10px] text-fg-5/70">
           v{version}
@@ -952,17 +957,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? null);
   const toastSession = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
-  const [searchParams, setSearchParams] = useSearchParams();
-  const requestedDashboardView = searchParams.get('view');
-  const dashboardView: DashboardViewKey = mode === 'dashboard' && (
-    requestedDashboardView === 'jira'
-  ) ? requestedDashboardView : 'workspace';
-  const setDashboardView = useCallback((next: DashboardViewKey) => {
-    const params = new URLSearchParams(searchParams);
-    if (next !== 'workspace') params.set('view', next);
-    else params.delete('view');
-    setSearchParams(params, { replace: true });
-  }, [searchParams, setSearchParams]);
   const appStatus = resolveAppStatusBadge(appState, t);
   const themeToggleLabel = theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode');
 
@@ -1154,6 +1148,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [renamingWorkspace, setRenamingWorkspace] = useState(false);
   const [search, setSearch] = useState('');
   const [dashboardScope, setDashboardScope] = useState<DashboardScope>('all');
+  const [chatLayout, setChatLayoutRaw] = useState<ChatLayoutMode>(readStoredChatLayout);
+  const setChatLayout = useCallback((next: ChatLayoutMode) => {
+    setChatLayoutRaw(next);
+    writeBrowserStorage(CHAT_LAYOUT_STORAGE_KEY, next);
+  }, []);
   const [dashboardFocusedSlot, setDashboardFocusedSlot] = useState<SessionSlot | null>(null);
   const [dashboardCreateTaskWorkdir, setDashboardCreateTaskWorkdir] = useState<string | null>(null);
   const [dashboardPendingPrompt, setDashboardPendingPrompt] = useState<string | null>(null);
@@ -2055,6 +2054,52 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
   }, [loadSessionsForWorkspace, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
 
+  const handleMultiSessionCreated = useCallback((nextSessions: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => {
+    const unique = nextSessions.filter((session, index, arr) => (
+      session.agent
+      && session.sessionId
+      && arr.findIndex(item => item.agent === session.agent && item.sessionId === session.sessionId && item.workdir === session.workdir) === index
+    ));
+    if (!unique.length) return;
+    const createdAt = new Date().toISOString();
+    for (const next of unique) warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
+    setSessionsMap(prev => {
+      const updated = { ...prev };
+      for (const next of unique) {
+        const existing = updated[next.workdir] || [];
+        if (existing.some(s => s.sessionId === next.sessionId && s.agent === next.agent)) continue;
+        const stub: SessionInfo = {
+          sessionId: next.sessionId,
+          agent: next.agent,
+          runState: 'running',
+          lastQuestion: prompt,
+          createdAt,
+          runUpdatedAt: createdAt,
+        };
+        updated[next.workdir] = [stub, ...existing];
+      }
+      return updated;
+    });
+    startTransition(() => {
+      setNewSessionPendingPrompt(null);
+      setNewSessionPendingImageUrls([]);
+      setNewSessionPendingCreatedAt(null);
+      setShowNewSession(null);
+      setOpenSessions(prev => {
+        const updated = [...prev];
+        for (const next of unique) {
+          if (updated.some(s => s.workdir === next.workdir && s.agent === next.agent && s.sessionId === next.sessionId)) continue;
+          updated.push({ ...next, mountKey: nextMountKey() });
+        }
+        setActiveSlotIndex(Math.max(0, updated.length - 1));
+        return updated;
+      });
+    });
+    for (const workdir of Array.from(new Set(unique.map(item => item.workdir)))) {
+      void loadSessionsForWorkspace(workdir, { background: true, force: true });
+    }
+  }, [loadSessionsForWorkspace, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
+
   const handleNewSessionRequest = useCallback((wsPath: string) => {
     setShowNewSession(wsPath);
     setActiveSlotIndex(openSessionsRef.current.length);
@@ -2944,7 +2989,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [mode]);
 
   useEffect(() => {
-    if (mode !== 'dashboard' || (!dashboardFocusedSlot && !dashboardCreateTaskWorkdir)) return undefined;
+    const taskColumnVisible = mode === 'dashboard' || (mode === 'workspace' && chatLayout === 'column');
+    if (!taskColumnVisible || (!dashboardFocusedSlot && !dashboardCreateTaskWorkdir)) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setDashboardCreateTaskWorkdir(null);
@@ -2952,7 +2998,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [dashboardCreateTaskWorkdir, dashboardFocusedSlot, mode]);
+  }, [chatLayout, dashboardCreateTaskWorkdir, dashboardFocusedSlot, mode]);
   const closeFocusMode = useCallback(() => {
     const snapshot = focusedOpenSessionsSnapshotRef.current;
     focusedOpenSessionsSnapshotRef.current = null;
@@ -3100,6 +3146,74 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     ? `calc(${(gridRowCount / SESSION_GRID_MAX_VISIBLE_ROWS) * 100}% + ${Math.max(0, (gridRowCount / SESSION_GRID_MAX_VISIBLE_ROWS - 1) * SESSION_GRID_GAP_PX)}px)`
     : '100%';
   const dashboardFocusedInfo = dashboardFocusedSlot ? resolveSlotInfo(dashboardFocusedSlot) : null;
+  const chatLayoutBar = (
+    <div className="mb-3 flex shrink-0 items-center justify-between gap-2 rounded-xl border border-edge/70 bg-panel/80 px-3 py-2 shadow-sm">
+      <div className="min-w-0">
+        <div className="text-[13px] font-semibold text-fg">{t('tab.sessions')}</div>
+        <div className="mt-0.5 text-[11px] text-fg-5">{t('chat.layoutHint')}</div>
+      </div>
+      <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge bg-panel-alt p-0.5">
+        {(['layout', 'column'] as const).map(view => (
+          <button
+            key={view}
+            type="button"
+            onClick={() => setChatLayout(view)}
+            className={cn(
+              'h-7 rounded-md px-3 text-[12px] font-semibold transition',
+              chatLayout === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
+            )}
+          >
+            {view === 'layout' ? t('chat.layoutMode') : t('chat.columnMode')}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+  const workspaceColumnContent = (
+    <>
+      <WorkspaceTaskDashboard
+        workspaces={workspaces}
+        scope={dashboardScope}
+        onScopeChange={setDashboardScope}
+        items={dashboardItems}
+        counts={dashboardCounts}
+        loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
+        onCreateTask={handleDashboardCreateTask}
+        onOpenSession={handleOpenDashboardSession}
+        onMarkDone={handleMarkDashboardDone}
+        t={t}
+      />
+      {dashboardCreateTaskWorkdir && (
+        <DashboardCreateTaskModal
+          workdir={dashboardCreateTaskWorkdir}
+          workspaceName={workspaces.find(ws => ws.path === dashboardCreateTaskWorkdir)?.name || workspaceBaseName(dashboardCreateTaskWorkdir)}
+          onClose={() => setDashboardCreateTaskWorkdir(null)}
+          onSessionCreated={handleDashboardNewSessionCreated}
+          t={t}
+        />
+      )}
+      {dashboardFocusedSlot && dashboardFocusedInfo && (
+        <DashboardSessionFocusModal
+          slot={dashboardFocusedSlot}
+          session={dashboardFocusedInfo}
+          workspaceName={workspaces.find(ws => ws.path === dashboardFocusedSlot.workdir)?.name || workspaceBaseName(dashboardFocusedSlot.workdir)}
+          active={active}
+          onClose={closeDashboardFocus}
+          onSessionChange={handleDashboardFocusedSessionChange}
+          onOpenFileLink={(target) => handleDashboardFocusFileLink(dashboardFocusedSlot.workdir, target)}
+          initialPendingPrompt={dashboardPendingPrompt}
+          initialPendingImageUrls={dashboardPendingImageUrls}
+          initialPendingCreatedAt={dashboardPendingCreatedAt}
+          onPendingPromptConsumed={() => {
+            setDashboardPendingPrompt(null);
+            setDashboardPendingImageUrls([]);
+            setDashboardPendingCreatedAt(null);
+          }}
+          t={t}
+        />
+      )}
+    </>
+  );
 
   useEffect(() => {
     if (focusedSlotIndex != null) return;
@@ -3124,28 +3238,49 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           type="button"
           onClick={() => setWorkspaceSidebarCollapsed(false)}
           className={cn(
-            'group absolute left-0 top-3 z-40 flex h-12 w-10 items-center justify-center overflow-hidden rounded-r-xl border border-l-0 border-edge/65 bg-panel/92 text-fg-5 shadow-[0_6px_18px_rgba(15,23,42,0.12)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-11 hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
+            'group absolute left-0 top-3 z-40 flex h-12 w-11 items-center justify-center overflow-hidden border border-l-0 border-edge/65 bg-panel/92 text-fg-5 shadow-[0_6px_18px_rgba(15,23,42,0.12)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[74px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
             workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-150' : '-translate-x-2 opacity-0 pointer-events-none',
           )}
-          title={t('hub.showWorkspaceSidebar')}
-          aria-label={t('hub.showWorkspaceSidebar')}
+          style={{ borderTopRightRadius: 16, borderBottomRightRadius: 12, clipPath: 'polygon(0 0, 100% 7%, 88% 100%, 0 100%)' }}
+          title={t('rail.workspace')}
+          aria-label={t('rail.workspace')}
         >
-          <span className="-translate-x-1 rotate-[-13deg] scale-90 transition-transform duration-200 group-hover:translate-x-0 group-hover:rotate-0 group-hover:scale-100" aria-hidden="true">
+          <span className="-translate-x-1 rotate-[-10deg] scale-90 transition-transform duration-200 group-hover:translate-x-0 group-hover:rotate-0 group-hover:scale-100" aria-hidden="true">
             <PikiclawLogo />
           </span>
+          <span className="ml-1 hidden whitespace-nowrap text-[10px] font-semibold group-hover:inline">{t('rail.workspace')}</span>
         </button>
+        <Link
+          to="/dashboard?view=jira"
+          className={cn(
+            'group absolute left-0 top-[68px] z-40 flex h-10 w-9 items-center justify-center overflow-hidden border border-l-0 border-edge/60 bg-panel/92 text-fg-5 shadow-[0_6px_16px_rgba(15,23,42,0.10)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[78px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
+            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-200' : '-translate-x-2 opacity-0 pointer-events-none',
+          )}
+          style={{ borderTopRightRadius: 12, borderBottomRightRadius: 15, clipPath: 'polygon(0 4%, 100% 0, 90% 92%, 0 100%)' }}
+          title={t('rail.dashboard')}
+          aria-label={t('rail.dashboard')}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="transition-transform duration-200 group-hover:scale-110" aria-hidden="true">
+            <rect x="3" y="3" width="7" height="7" rx="1.5" />
+            <rect x="14" y="3" width="7" height="7" rx="1.5" />
+            <rect x="3" y="14" width="7" height="7" rx="1.5" />
+            <rect x="14" y="14" width="7" height="7" rx="1.5" />
+          </svg>
+          <span className="ml-2 hidden whitespace-nowrap text-[10px] font-semibold group-hover:inline">{t('rail.dashboard')}</span>
+        </Link>
         <button
           type="button"
           onClick={() => setQuickTodoOpen(true)}
           className={cn(
-            'group absolute left-0 top-[68px] z-40 flex h-9 w-8 items-center justify-center overflow-hidden border border-l-0 border-edge/60 bg-panel/92 text-fg-5 shadow-[0_6px_16px_rgba(15,23,42,0.10)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-9 hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
-            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-200' : '-translate-x-2 opacity-0 pointer-events-none',
+            'group absolute left-0 top-[116px] z-40 flex h-9 w-8 items-center justify-center overflow-hidden border border-l-0 border-edge/60 bg-panel/92 text-fg-5 shadow-[0_6px_16px_rgba(15,23,42,0.10)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[62px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
+            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-[250ms]' : '-translate-x-2 opacity-0 pointer-events-none',
           )}
           style={{ borderTopRightRadius: 10, borderBottomRightRadius: 14, clipPath: 'polygon(0 0, 100% 8%, 100% 92%, 0 100%)' }}
-          title={t('todo.quickAdd')}
-          aria-label={t('todo.quickAdd')}
+          title={t('rail.todo')}
+          aria-label={t('rail.todo')}
         >
           <TodoGlyph className="h-3.5 w-3.5 transition-transform duration-200 group-hover:scale-110" />
+          <span className="ml-2 hidden whitespace-nowrap text-[10px] font-semibold group-hover:inline">{t('rail.todo')}</span>
         </button>
       <div
         className={cn(
@@ -3367,80 +3502,33 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             <div className="mb-3 flex shrink-0 items-center justify-between gap-2 rounded-xl border border-edge/70 bg-panel/80 px-3 py-2 shadow-sm">
               <div className="min-w-0">
                 <div className="text-[13px] font-semibold text-fg">{t('tab.dashboard')}</div>
-                <div className="mt-0.5 text-[11px] text-fg-5">{t('dashboard.viewSwitchHint')}</div>
+                <div className="mt-0.5 text-[11px] text-fg-5">{t('tabDesc.jira')}</div>
               </div>
               <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge bg-panel-alt p-0.5">
-                {(['workspace', 'jira'] as const).map(view => (
-                  <button
-                    key={view}
-                    type="button"
-                    onClick={() => setDashboardView(view)}
-                    className={cn(
-                      'h-7 rounded-md px-3 text-[12px] font-semibold transition',
-                      dashboardView === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
-                    )}
-                  >
-                    {view === 'workspace' ? t('dashboard.viewWorkspace') : t('dashboard.viewJira')}
-                  </button>
-                ))}
+                <button
+                  type="button"
+                  className="h-7 rounded-md bg-panel-h px-3 text-[12px] font-semibold text-fg shadow-sm"
+                >
+                  {t('dashboard.viewJira')}
+                </button>
               </div>
             </div>
-            {dashboardView === 'jira' ? (
-              <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge/70 bg-panel/80 p-3 shadow-[var(--th-card-shadow)]">
-                {dashboardJiraContent}
-              </div>
-            ) : (
-              <>
-                <WorkspaceTaskDashboard
-                  workspaces={workspaces}
-                  scope={dashboardScope}
-                  onScopeChange={setDashboardScope}
-                  items={dashboardItems}
-                  counts={dashboardCounts}
-                  loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
-                  onCreateTask={handleDashboardCreateTask}
-                  onOpenSession={handleOpenDashboardSession}
-                  onMarkDone={handleMarkDashboardDone}
-                  t={t}
-                />
-                {dashboardCreateTaskWorkdir && (
-                  <DashboardCreateTaskModal
-                    workdir={dashboardCreateTaskWorkdir}
-                    workspaceName={workspaces.find(ws => ws.path === dashboardCreateTaskWorkdir)?.name || workspaceBaseName(dashboardCreateTaskWorkdir)}
-                    onClose={() => setDashboardCreateTaskWorkdir(null)}
-                    onSessionCreated={handleDashboardNewSessionCreated}
-                    t={t}
-                  />
-                )}
-                {dashboardFocusedSlot && dashboardFocusedInfo && (
-                  <DashboardSessionFocusModal
-                    slot={dashboardFocusedSlot}
-                    session={dashboardFocusedInfo}
-                    workspaceName={workspaces.find(ws => ws.path === dashboardFocusedSlot.workdir)?.name || workspaceBaseName(dashboardFocusedSlot.workdir)}
-                    active={active}
-                    onClose={closeDashboardFocus}
-                    onSessionChange={handleDashboardFocusedSessionChange}
-                    onOpenFileLink={(target) => handleDashboardFocusFileLink(dashboardFocusedSlot.workdir, target)}
-                    initialPendingPrompt={dashboardPendingPrompt}
-                    initialPendingImageUrls={dashboardPendingImageUrls}
-                    initialPendingCreatedAt={dashboardPendingCreatedAt}
-                    onPendingPromptConsumed={() => {
-                      setDashboardPendingPrompt(null);
-                      setDashboardPendingImageUrls([]);
-                      setDashboardPendingCreatedAt(null);
-                    }}
-                    t={t}
-                  />
-                )}
-              </>
-            )}
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge/70 bg-panel/80 p-3 shadow-[var(--th-card-shadow)]">
+              {dashboardJiraContent}
+            </div>
           </>
         ) : mode === 'settings' ? (
           <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-edge/70 bg-panel/80 shadow-[var(--th-card-shadow)]">
             {settingsContent}
           </div>
+        ) : chatLayout === 'column' ? (
+          <>
+            {chatLayoutBar}
+            {workspaceColumnContent}
+          </>
         ) : (
           <>
+            {chatLayoutBar}
             {focusedSlotIndex != null && (
               <div
                 className="fixed inset-0 z-[60] bg-[var(--th-focus-backdrop)]"
@@ -3475,6 +3563,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       workspaceName={workspaces.find(ws => ws.path === showNewSession)?.name || showNewSession.split('/').pop() || ''}
                       workspaces={workspaces}
                       onSessionCreated={handleNewSessionCreated}
+                      onMultiSessionCreated={handleMultiSessionCreated}
                       onClose={() => {
                         setShowNewSession(null);
                         setActiveSlotIndex(prev => (
@@ -3855,6 +3944,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                             workdir={slot.workdir}
                             active={active && isActive}
                             onSessionChange={(next) => handlePanelSessionChange(next, slotIdx)}
+                            onMultiSessionChange={handleMultiSessionCreated}
                             onOpenFileLink={(target) => handleOpenFileLink(slotIdx, slot.workdir, target)}
                             onCreateSideChatFromSelection={(request) => handleCreateSideChatFromSelection(slotIdx, slot, info, request)}
                             onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(slot, request)}
@@ -4424,6 +4514,7 @@ function NewSessionView({
   workspaceName,
   workspaces,
   onSessionCreated,
+  onMultiSessionCreated,
   onClose,
   t,
 }: {
@@ -4431,6 +4522,7 @@ function NewSessionView({
   workspaceName: string;
   workspaces: WorkspaceEntry[];
   onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => void;
+  onMultiSessionCreated: (next: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => void;
   onClose: () => void;
   t: (key: string) => string;
 }) {
@@ -4558,6 +4650,7 @@ function NewSessionView({
         onStreamQueued={noop}
         onSendStart={handleSendStart}
         onSessionChange={handleSessionCreated}
+        onMultiSessionChange={onMultiSessionCreated}
         t={t}
         streamPhase={null}
       />

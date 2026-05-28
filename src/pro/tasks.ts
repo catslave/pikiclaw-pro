@@ -124,11 +124,21 @@ export interface ProTaskEvent {
     | 'focus-finished'
     | 'exclusive-mode-changed'
     | 'subtask-created'
-    | 'subtask-updated';
+    | 'subtask-updated'
+    | 'user-focus-started'
+    | 'user-focus-finished';
   createdAt: string;
   actor: 'user' | 'system' | 'assistant';
   summary: string;
   diff?: unknown;
+}
+
+export interface UserFocusSession {
+  id: string;
+  taskId: string;
+  openedAt: string;
+  closedAt?: string;
+  durationSeconds?: number;
 }
 
 export interface ProSubtask {
@@ -154,6 +164,12 @@ export interface ProTask {
   workdir?: string;
   defaultAgent?: string;
   defaultAssistantId?: string;
+  execution?: {
+    ownerMode?: 'status' | 'agent' | 'assistant';
+    agent?: string;
+    assistantId?: string;
+    mode?: 'direct' | 'interactive';
+  };
   jiraKey?: string;
   jiraUrl?: string;
   jiraFields?: {
@@ -173,6 +189,7 @@ export interface ProTask {
   stageRuns: StageRun[];
   verificationRuns: VerificationRun[];
   subTasks: ProSubtask[];
+  focusSessions?: UserFocusSession[];
   exclusiveMode?: boolean;
   events: ProTaskEvent[];
 }
@@ -231,6 +248,13 @@ export interface UpdateJiraFieldsInput {
   labels?: unknown;
 }
 
+export interface UpdateTaskExecutionInput {
+  ownerMode?: unknown;
+  agent?: unknown;
+  assistantId?: unknown;
+  mode?: unknown;
+}
+
 export interface UpdateStageRunInput {
   status?: ProStageRunStatus;
   summary?: string;
@@ -269,6 +293,10 @@ export interface UpdateSubtaskInput {
   stageRunId?: unknown;
 }
 
+export interface StartUserFocusInput {
+  source?: unknown;
+}
+
 const VALID_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const VALID_KINDS: ProTaskKind[] = ['manual', 'todo', 'jira-ticket', 'jira-bug', 'jira-epic', 'automation'];
 const VALID_STAGES: ProTaskStage[] = ['refinement', 'focus', 'coding', 'verification', 'demo', 'bugfix', 'knowledge'];
@@ -304,6 +332,7 @@ function readFile(): ProTaskFile {
           subTasks: Array.isArray((task as any).subTasks) ? (task as any).subTasks : [],
           stageRuns: Array.isArray(task.stageRuns) ? task.stageRuns : [],
           verificationRuns: Array.isArray(task.verificationRuns) ? task.verificationRuns : [],
+          focusSessions: Array.isArray((task as any).focusSessions) ? (task as any).focusSessions : [],
           jiraFields: (task as any).jiraFields && typeof (task as any).jiraFields === 'object' ? (task as any).jiraFields : undefined,
           events: Array.isArray(task.events) ? task.events : [],
         })),
@@ -328,6 +357,13 @@ function appendEvent(task: ProTask, event: Omit<ProTaskEvent, 'id' | 'taskId' | 
     createdAt: new Date().toISOString(),
     ...event,
   });
+}
+
+function durationSeconds(start: string | undefined, end: string | undefined): number {
+  const a = start ? Date.parse(start) : NaN;
+  const b = end ? Date.parse(end) : NaN;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return 0;
+  return Math.max(0, Math.round((b - a) / 1000));
 }
 
 function taskKindFromIssueType(issueType: string | undefined): ProTaskKind {
@@ -411,6 +447,7 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     stageRuns: [],
     verificationRuns: [],
     subTasks: [],
+    focusSessions: [],
     exclusiveMode: false,
     events: [],
   };
@@ -485,6 +522,7 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     stageRuns: [],
     verificationRuns: [],
     subTasks: [],
+    focusSessions: [],
     exclusiveMode: false,
     events: [],
   };
@@ -548,6 +586,75 @@ export function updateProTaskStatus(taskId: string, status: ProTaskStatus): ProT
       type: 'status-changed',
       actor: 'user',
       summary: `Status changed from ${previous} to ${status}.`,
+    });
+    writeFile(file);
+  }
+  return task;
+}
+
+export function updateProTaskExecution(taskId: string, input: UpdateTaskExecutionInput): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const ownerMode = normalizeText(input.ownerMode, 40);
+  const mode = normalizeText(input.mode, 40);
+  task.execution = {
+    ownerMode: ownerMode === 'agent' || ownerMode === 'assistant' ? ownerMode : ownerMode === 'status' ? 'status' : task.execution?.ownerMode,
+    agent: normalizeText(input.agent, 80) || undefined,
+    assistantId: normalizeText(input.assistantId, 160) || undefined,
+    mode: mode === 'interactive' ? 'interactive' : mode === 'direct' ? 'direct' : task.execution?.mode,
+  };
+  if (!task.execution.ownerMode && !task.execution.agent && !task.execution.assistantId && !task.execution.mode) delete task.execution;
+  task.updatedAt = new Date().toISOString();
+  appendEvent(task, {
+    type: 'status-changed',
+    actor: 'user',
+    summary: `Task execution settings updated${task.execution?.mode ? ` (${task.execution.mode})` : ''}.`,
+  });
+  writeFile(file);
+  return task;
+}
+
+export function startUserFocusSession(taskId: string, input: StartUserFocusInput = {}): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const now = new Date().toISOString();
+  task.focusSessions = Array.isArray(task.focusSessions) ? task.focusSessions : [];
+  const session: UserFocusSession = {
+    id: newId('focus'),
+    taskId: task.id,
+    openedAt: now,
+  };
+  task.focusSessions.unshift(session);
+  task.updatedAt = now;
+  const source = normalizeText(input.source, 120);
+  appendEvent(task, {
+    type: 'user-focus-started',
+    actor: 'user',
+    summary: `User entered ticket focus mode${source ? ` from ${source}` : ''}.`,
+  });
+  writeFile(file);
+  return task;
+}
+
+export function finishUserFocusSession(taskId: string, focusSessionId: string): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  task.focusSessions = Array.isArray(task.focusSessions) ? task.focusSessions : [];
+  const session = task.focusSessions.find(item => item.id === focusSessionId);
+  if (!session) throw new Error('focus session not found');
+  if (!session.closedAt) {
+    const now = new Date().toISOString();
+    session.closedAt = now;
+    session.durationSeconds = durationSeconds(session.openedAt, session.closedAt);
+    task.updatedAt = now;
+    appendEvent(task, {
+      type: 'user-focus-finished',
+      actor: 'user',
+      summary: `User left ticket focus mode after ${Math.max(1, Math.round((session.durationSeconds || 0) / 60))} min.`,
+      diff: { focusSessionId: session.id, durationSeconds: session.durationSeconds || 0 },
     });
     writeFile(file);
   }

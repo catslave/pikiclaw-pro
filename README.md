@@ -1,8 +1,8 @@
 <div align="center">
 
-# pikiclaw
+# Pikiclaw Pro
 
-## Put the world's smartest AI agents in your pocket.
+## Chat, Jira dashboards, Todo capture, automation, skills, MCP, and usage analytics for agent-led work.
 
 ##### *The open Agent orchestrator for the era when creators no longer need to read code.*
 
