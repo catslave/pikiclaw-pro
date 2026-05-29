@@ -10,9 +10,10 @@ export const DEFAULT_AGENT_MODELS: Record<Agent, string> = {
   claude: 'claude-opus-4-7',
   codex: 'gpt-5.5',
   copilot: 'gpt-5.3-codex',
-  cursor: 'gpt-5',
+  cursor: 'auto',
   gemini: 'gemini-3.1-pro-preview',
   hermes: 'anthropic/claude-sonnet-4',
+  openclaw: '',
 };
 
 export const DEFAULT_AGENT_EFFORTS: Partial<Record<Agent, string>> = {
@@ -22,6 +23,7 @@ export const DEFAULT_AGENT_EFFORTS: Partial<Record<Agent, string>> = {
   cursor: 'medium',
   gemini: 'high',
   hermes: 'medium',
+  openclaw: 'medium',
 };
 
 function trimmed(value: unknown): string {
@@ -36,6 +38,7 @@ export function agentModelEnv(agent: Agent, env: Record<string, string | undefin
     case 'cursor': return trimmed(env.CURSOR_MODEL);
     case 'gemini': return trimmed(env.GEMINI_MODEL);
     case 'hermes': return trimmed(env.HERMES_MODEL);
+    case 'openclaw': return trimmed(env.OPENCLAW_MODEL);
   }
   return '';
 }
@@ -48,6 +51,7 @@ export function agentEffortEnv(agent: Agent, env: Record<string, string | undefi
     case 'cursor': return trimmed(env.CURSOR_REASONING_EFFORT).toLowerCase();
     case 'gemini': return trimmed(env.GEMINI_REASONING_EFFORT).toLowerCase();
     case 'hermes': return trimmed(env.HERMES_REASONING_EFFORT).toLowerCase();
+    case 'openclaw': return trimmed(env.OPENCLAW_REASONING_EFFORT).toLowerCase();
   }
   return '';
 }
@@ -66,6 +70,7 @@ export function resolveAgentModel(config: Partial<UserConfig> | Record<string, a
       return value || DEFAULT_AGENT_MODELS.copilot;
     case 'cursor':
       value = trimmed((config as Partial<UserConfig>).cursorModel || agentModelEnv('cursor') || DEFAULT_AGENT_MODELS.cursor);
+      if (value === 'gpt-5') return DEFAULT_AGENT_MODELS.cursor;
       return value || DEFAULT_AGENT_MODELS.cursor;
     case 'gemini':
       value = trimmed((config as Partial<UserConfig>).geminiModel || agentModelEnv('gemini') || DEFAULT_AGENT_MODELS.gemini);
@@ -73,6 +78,9 @@ export function resolveAgentModel(config: Partial<UserConfig> | Record<string, a
     case 'hermes':
       value = trimmed((config as Partial<UserConfig>).hermesModel || agentModelEnv('hermes') || DEFAULT_AGENT_MODELS.hermes);
       return value || DEFAULT_AGENT_MODELS.hermes;
+    case 'openclaw':
+      value = trimmed((config as Partial<UserConfig>).openclawModel || agentModelEnv('openclaw') || DEFAULT_AGENT_MODELS.openclaw);
+      return value || DEFAULT_AGENT_MODELS.openclaw;
   }
   return '';
 }
@@ -103,6 +111,10 @@ export function resolveAgentEffort(config: Partial<UserConfig> | Record<string, 
       const value = trimmed((config as Partial<UserConfig>).hermesReasoningEffort || agentEffortEnv('hermes') || DEFAULT_AGENT_EFFORTS.hermes).toLowerCase();
       return value || DEFAULT_AGENT_EFFORTS.hermes || null;
     }
+    case 'openclaw': {
+      const value = trimmed((config as Partial<UserConfig>).openclawReasoningEffort || agentEffortEnv('openclaw') || DEFAULT_AGENT_EFFORTS.openclaw).toLowerCase();
+      return value || DEFAULT_AGENT_EFFORTS.openclaw || null;
+    }
   }
   return null;
 }
@@ -115,6 +127,7 @@ export function setAgentModelEnv(agent: Agent, value: string, env: NodeJS.Proces
     case 'cursor': env.CURSOR_MODEL = value; break;
     case 'gemini': env.GEMINI_MODEL = value; break;
     case 'hermes': env.HERMES_MODEL = value; break;
+    case 'openclaw': env.OPENCLAW_MODEL = value; break;
   }
 }
 
@@ -126,5 +139,6 @@ export function setAgentEffortEnv(agent: Agent, value: string, env: NodeJS.Proce
     case 'cursor': env.CURSOR_REASONING_EFFORT = value; break;
     case 'gemini': env.GEMINI_REASONING_EFFORT = value; break;
     case 'hermes': env.HERMES_REASONING_EFFORT = value; break;
+    case 'openclaw': env.OPENCLAW_REASONING_EFFORT = value; break;
   }
 }

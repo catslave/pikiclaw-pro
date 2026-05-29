@@ -20,6 +20,7 @@ import './drivers/copilot.js';
 import './drivers/cursor.js';
 import './drivers/gemini.js';
 import './drivers/hermes.js';
+import './drivers/openclaw.js';
 
 // ── Re-export: types ────────────────────────────────────────────────────────
 export type {
@@ -92,7 +93,10 @@ export {
   deleteAgentSession, deleteSideChatSession,
   type DeleteAgentSessionOpts, type DeleteAgentSessionResult,
   type DeleteSideChatSessionOpts, type DeleteSideChatSessionResult,
-  isProcessAlive, isRunningSessionStale, reconcileOrphanedRunningSessions,
+  isProcessAlive, isRunningSessionStale,
+  ORPHANED_RUNNING_RUN_DETAIL, reconcileAndCollectOrphanedRunningSessions, reconcileOrphanedRunningSessions,
+  markSessionAutoResumeAttempt,
+  type ReconciledOrphanedRunningSession,
 } from './session.js';
 
 // ── Re-export: stream & detection ───────────────────────────────────────────
@@ -190,3 +194,4 @@ export { doCopilotStream } from './drivers/copilot.js';
 export { doCursorStream } from './drivers/cursor.js';
 export { doGeminiStream } from './drivers/gemini.js';
 export { doHermesStream } from './drivers/hermes.js';
+export { doOpenClawStream } from './drivers/openclaw.js';

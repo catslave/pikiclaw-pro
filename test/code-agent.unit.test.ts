@@ -179,6 +179,58 @@ describe('buildCodexTurnInput and usage helpers', () => {
     });
   });
 
+  it('recovers orphaned incomplete run state when native Codex transcript completed', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-orphan-recovered',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'local-model',
+        createdAt: '2026-03-16T00:00:00.000Z',
+        title: 'local title',
+        running: false,
+        runState: 'incomplete',
+        runDetail: 'Process exited before reporting completion.',
+        runUpdatedAt: '2026-03-16T00:03:00.000Z',
+        lastQuestion: 'local question',
+        lastAnswer: null,
+        lastMessageText: 'local question',
+      },
+    ], [
+      {
+        sessionId: 'sess-orphan-recovered',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'native-model',
+        createdAt: '2026-03-16T00:01:00.000Z',
+        title: 'native title',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:02:30.000Z',
+        lastQuestion: 'native question',
+        lastAnswer: 'native answer',
+        lastMessageText: 'native answer',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      sessionId: 'sess-orphan-recovered',
+      title: 'local title',
+      workspacePath: '/tmp/pikiclaw/workspace',
+      running: false,
+      runState: 'completed',
+      runDetail: null,
+      runUpdatedAt: '2026-03-16T00:02:30.000Z',
+      lastQuestion: 'native question',
+      lastAnswer: 'native answer',
+      lastMessageText: 'native answer',
+    });
+  });
+
   it('uses an agent-generated native title over the first prompt placeholder', () => {
     const merged = mergeManagedAndNativeSessions([
       {

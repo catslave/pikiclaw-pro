@@ -8,7 +8,7 @@ import { loadUserConfig } from '../core/config/user-config.js';
 import { isLogTraceSlash, runLogTraceSkill } from '../platform/logtrace.js';
 import { runtime } from './runtime.js';
 
-const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes']);
+const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw']);
 
 /**
  * Parse a `/goal[ args]` prompt typed in the dashboard chat box. Returns null

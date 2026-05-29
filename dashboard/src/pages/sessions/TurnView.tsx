@@ -14,7 +14,7 @@ import type { Turn } from './utils';
 export type SelectionActionRequest = { quote: string; note: string; turnIndex?: number };
 export type SelectionSideChatRequest = SelectionActionRequest & { question: string };
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent }: {
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent, assistantRunError }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
    *  agent is currently bound to a Profile. Saved turns lack this in their
@@ -32,6 +32,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   workdir?: string;
   retryProminent?: boolean;
+  assistantRunError?: string | null;
 }) {
   // Detect system continuation messages stored as user role (context compression summaries,
   // interruption markers). These should not render as user bubbles regardless of whether
@@ -61,7 +62,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
           <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={previewMeta ?? turn.assistant?.usage ?? null} />
           {showLiveAssistant
             ? <div className="mb-6">{liveAssistant}</div>
-            : <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} />}
+            : <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} runError={assistantRunError ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} />}
         </>
       )}
     </div>
@@ -210,6 +211,7 @@ function AssistantMessageFrame({
   turnIndex,
   t,
   startedAt,
+  runError,
   onFork,
   onOpenFileLink,
   onCreateSideChatFromSelection,
@@ -221,6 +223,7 @@ function AssistantMessageFrame({
   turnIndex?: number;
   t: (k: string) => string;
   startedAt?: string | null;
+  runError?: string | null;
   onFork?: () => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
@@ -237,6 +240,7 @@ function AssistantMessageFrame({
     highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
     note: string;
     creating: null | 'comment' | 'side-chat' | 'todo';
+    expanded: boolean;
   } | null>(null);
   const copyText = stripOaiMemoryCitations(message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n'));
 
@@ -302,6 +306,7 @@ function AssistantMessageFrame({
       highlightRects,
       note: '',
       creating: null,
+      expanded: false,
     });
   };
 
@@ -347,7 +352,7 @@ function AssistantMessageFrame({
       onMouseUp={handleSelectionEnd}
       onKeyUp={handleSelectionEnd}
     >
-      <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} />
+      <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} runError={runError ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} />
       <HoverMessageActions
         align="left"
         visible={showActions}
@@ -373,63 +378,84 @@ function AssistantMessageFrame({
               }}
             />
           ))}
-          <div
-            data-selection-side-chat-popover
-            className="fixed z-[10000]"
-            style={{
-              left: Math.min(
-                window.innerWidth - 380,
-                Math.max(12, selectionDraft.rect.left - 190 + (selectionDraft.rect.width / 2)),
-              ),
-              top: Math.min(window.innerHeight - 148, Math.max(12, selectionDraft.rect.top + selectionDraft.rect.height + 8)),
-            }}
-            onClick={event => event.stopPropagation()}
-          >
-            <div className="w-[360px] rounded-xl border border-edge-h bg-panel p-2 shadow-xl">
-              <div className="mb-2 max-h-[42px] overflow-hidden rounded-lg bg-panel-alt px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">
-                {selectionDraft.quote}
-              </div>
-              <input
-                autoFocus
-                value={selectionDraft.note}
-                onChange={event => setSelectionDraft(current => current ? { ...current, note: event.target.value } : current)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                    event.preventDefault();
-                    void submitSelectionAction('side-chat');
-                  }
-                }}
-                placeholder={t('session.selectionActionPlaceholder')}
-                className="h-8 w-full rounded-lg border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
-              />
-              <div className="mt-2 flex items-center justify-end gap-1.5">
-                <button
-                  type="button"
-                  disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateReviewCommentFromSelection}
-                  onClick={() => void submitSelectionAction('comment')}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-panel-alt px-3 text-[12px] font-semibold text-fg-3 transition hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {selectionDraft.creating === 'comment' ? t('session.savingComment') : t('session.selectionComment')}
-                </button>
-                <button
-                  type="button"
-                  disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateSideChatFromSelection}
-                  onClick={() => void submitSelectionAction('side-chat')}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-panel-alt px-3 text-[12px] font-semibold text-fg-3 transition hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {selectionDraft.creating === 'side-chat' ? t('session.creatingSideChat') : t('session.createSideChat')}
-                </button>
-                <button
-                  type="button"
-                  disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateTodoFromSelection}
-                  onClick={() => void submitSelectionAction('todo')}
-                  className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge-h bg-panel-h px-3 text-[12px] font-semibold text-fg transition hover:bg-control disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {selectionDraft.creating === 'todo' ? t('session.savingTodo') : t('session.selectionTodo')}
-                </button>
+          {selectionDraft.expanded ? (
+            <div
+              data-selection-side-chat-popover
+              className="fixed z-[10000]"
+              style={{
+                left: Math.min(
+                  window.innerWidth - 380,
+                  Math.max(12, selectionDraft.rect.left - 190 + (selectionDraft.rect.width / 2)),
+                ),
+                top: Math.min(window.innerHeight - 148, Math.max(12, selectionDraft.rect.top + selectionDraft.rect.height + 8)),
+              }}
+              onClick={event => event.stopPropagation()}
+            >
+              <div className="w-[360px] rounded-xl border border-edge-h bg-panel p-2 shadow-xl">
+                <div className="mb-2 max-h-[42px] overflow-hidden rounded-lg bg-panel-alt px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">
+                  {selectionDraft.quote}
+                </div>
+                <input
+                  autoFocus
+                  value={selectionDraft.note}
+                  onChange={event => setSelectionDraft(current => current ? { ...current, note: event.target.value } : current)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      void submitSelectionAction('side-chat');
+                    }
+                  }}
+                  placeholder={t('session.selectionActionPlaceholder')}
+                  className="h-8 w-full rounded-lg border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
+                />
+                <div className="mt-2 flex items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateReviewCommentFromSelection}
+                    onClick={() => void submitSelectionAction('comment')}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-panel-alt px-3 text-[12px] font-semibold text-fg-3 transition hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {selectionDraft.creating === 'comment' ? t('session.savingComment') : t('session.selectionComment')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateSideChatFromSelection}
+                    onClick={() => void submitSelectionAction('side-chat')}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge bg-panel-alt px-3 text-[12px] font-semibold text-fg-3 transition hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {selectionDraft.creating === 'side-chat' ? t('session.creatingSideChat') : t('session.createSideChat')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectionDraft.note.trim() || !!selectionDraft.creating || !onCreateTodoFromSelection}
+                    onClick={() => void submitSelectionAction('todo')}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-edge-h bg-panel-h px-3 text-[12px] font-semibold text-fg transition hover:bg-control disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {selectionDraft.creating === 'todo' ? t('session.savingTodo') : t('session.selectionTodo')}
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <button
+              type="button"
+              data-selection-side-chat-popover
+              className="fixed z-[10000] inline-flex h-7 w-7 items-center justify-center rounded-full border border-edge-h bg-panel/95 text-[16px] font-semibold leading-none text-fg-3 shadow-[0_10px_28px_rgba(15,23,42,0.20)] ring-1 ring-white/[0.05] backdrop-blur transition-[background,color,transform] hover:-translate-y-px hover:bg-panel-h hover:text-primary"
+              style={{
+                left: Math.min(window.innerWidth - 40, Math.max(12, selectionDraft.rect.left + selectionDraft.rect.width + 8)),
+                top: Math.min(window.innerHeight - 40, Math.max(12, selectionDraft.rect.top + selectionDraft.rect.height + 6)),
+              }}
+              aria-label={t('hub.add')}
+              title={t('hub.add')}
+              onClick={event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setSelectionDraft(current => current ? { ...current, expanded: true } : current);
+              }}
+            >
+              +
+            </button>
+          )}
         </>,
         document.body,
       )}
@@ -454,9 +480,9 @@ function HoverMessageActions({ align, visible, createdAt, canCopy, copied, t, on
   if (!createdAt && !canCopy && !onResend && !onEdit && !onFork) return null;
   return (
     <div className={cn(
-      'flex items-center gap-1 mt-1.5 transition-all duration-200',
+      'flex min-h-7 items-center gap-1 mt-1.5 transition-opacity duration-150',
       align === 'right' ? 'mr-1 justify-end' : 'ml-1 justify-start',
-      visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-1 pointer-events-none',
+      visible ? 'opacity-100' : 'opacity-0 pointer-events-none',
     )}>
       {createdAt && (
         <span className="px-1.5 text-[10.5px] tabular-nums text-fg-5/70" title={formatFullMessageTime(createdAt)}>
@@ -559,22 +585,22 @@ export function TurnDivider({ agent, meta, model, effort, providerName: provider
   return (
     <div className="flex items-center gap-1.5 mt-1 mb-3">
       <BrandIcon brand={agent} size={13} />
-      <span style={{ color: meta.color }} className="text-[12px] font-semibold opacity-70">{meta.label}</span>
+      <span className="text-[12px] font-semibold text-fg-2">{meta.label}</span>
       {(model || effort) && (
-        <span className="text-[10px] font-mono text-fg-5/50">
+        <span className="text-[10px] font-mono text-fg-4">
           {model || ''}{model && effort ? ' · ' : ''}{effort || ''}
         </span>
       )}
       {providerName && (
         <span
-          className="text-[10px] font-mono text-fg-5/70 px-1.5 py-px rounded bg-fg-5/8"
+          className="text-[10px] font-mono text-fg-4 px-1.5 py-px rounded bg-fg-5/8"
           title={`This turn is routed through ${providerName} (BYOK), not the agent CLI's native auth.`}
         >
           via {providerName}
         </span>
       )}
       {showCtx && (
-        <span className="ml-auto inline-flex items-center gap-1 text-[10px] font-mono text-fg-5/55" title={formatContextTitle(previewMeta)}>
+        <span className="ml-auto inline-flex min-w-[92px] justify-end items-center gap-1 text-[10px] font-mono tabular-nums text-fg-5/55" title={formatContextTitle(previewMeta)}>
           {ctxPct != null && <ContextDot pct={ctxPct} />}
           <span>{ctxPct != null ? `${ctxPct.toFixed(1)}%` : ''}</span>
           {ctxTokens > 0 && <span className="text-fg-5/40">· {formatTokens(ctxTokens)}</span>}

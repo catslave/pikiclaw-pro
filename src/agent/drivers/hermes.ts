@@ -17,6 +17,7 @@ import { join, extname } from 'node:path';
 import { resolve as resolvePath } from 'node:path';
 import { registerDriver, type AgentDriver, type AgentNativeConfig } from '../driver.js';
 import { AcpClient, toAcpMcpServers } from '../acp-client.js';
+import { processEnvWithUserBins, resolveExecutablePath } from '../../core/platform.js';
 import {
   type StreamOpts, type StreamResult,
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
@@ -169,13 +170,14 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
   // ACP `session/set_model` request below — `hermes acp` does NOT accept any
   // CLI flags besides `--accept-hooks`, so we MUST NOT append byokArgvAppend
   // here (doing so would crash the spawn with `unrecognized arguments`).
-  const baseEnv: NodeJS.ProcessEnv = { ...process.env, ...(opts.extraEnv || {}) };
+  const baseEnv: NodeJS.ProcessEnv = processEnvWithUserBins({ ...process.env, ...(opts.extraEnv || {}) });
+  const hermesCmd = resolveExecutablePath('hermes', baseEnv) || 'hermes';
   if (!opts.hermesModel) {
     agentLog(`[hermes] no active profile bound — running with hermes' native config default`);
   }
 
   const client = new AcpClient({
-    command: 'hermes',
+    command: hermesCmd,
     args: ['acp'],
     env: baseEnv,
     cwd: opts.workdir,
@@ -769,8 +771,10 @@ async function getHermesUsageLive(_opts: UsageOpts): Promise<UsageResult> {
     let stdout = '';
     let stderr = '';
     try {
-      const proc = spawn('hermes', ['insights', '--days', '30', '--source', 'tool'], {
-        env: process.env,
+      const env = processEnvWithUserBins();
+      const hermesCmd = resolveExecutablePath('hermes', env) || 'hermes';
+      const proc = spawn(hermesCmd, ['insights', '--days', '30', '--source', 'tool'], {
+        env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       proc.stdout.on('data', (b: Buffer) => { stdout += b.toString(); });

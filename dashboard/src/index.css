@@ -24,7 +24,7 @@
   --th-control-border-h: rgba(148,163,184,0.45);
 
   --th-edge: rgba(235,235,245,0.13);
-  --th-edge-h: rgba(245,158,11,0.34);
+  --th-edge-h: rgba(147,169,207,0.34);
 
   --th-inset-hl: rgba(255,255,255,0.05);
   --th-selected-bg: rgba(255,255,255,0.07);
@@ -36,23 +36,33 @@
   --th-selection-bg-h: rgba(235,235,245,0.12);
   --th-selection-soft: rgba(235,235,245,0.045);
 
-  --th-primary: #f4c430;
-  --th-primary-fg: #15120a;
-  --th-primary-h: #ffe08a;
+  --th-primary: #91b7ff;
+  --th-primary-fg: #07111f;
+  --th-primary-h: #b7ceff;
 
   --th-sidebar: rgba(20,21,24,0.86);
   --th-header: rgba(30,31,35,0.82);
   --th-modal-bg: #1c1c1e;
+  --th-chat-window-bg: #191a1d;
+  --th-chat-window-border: rgba(235,235,245,0.16);
+  --th-chat-window-border-active: rgba(235,235,245,0.28);
+  --th-chat-window-border-running: rgba(52,211,153,0.34);
+  --th-chat-window-ring: rgba(235,235,245,0.08);
+  --th-chat-header-bg: rgba(34,35,39,0.86);
+  --th-chat-header-bg-active: rgba(39,40,44,0.92);
+  --th-chat-header-border: rgba(235,235,245,0.13);
+  --th-chat-window-shadow: 0 10px 26px rgba(0,0,0,0.20), 0 1px 0 rgba(255,255,255,0.04);
+  --th-chat-window-shadow-focus: 0 24px 74px rgba(0,0,0,0.34), var(--th-chat-window-shadow);
   --th-overlay: rgba(2,6,23,0.6);
   --th-focus-backdrop: rgba(17,17,19,0.78);
   --th-dropdown: rgba(12,16,24,0.98);
 
-  --th-grid-dot: rgba(250,204,21,0.075);
-  --th-grad-start: #fff7ed;
-  --th-grad-mid: #facc15;
-  --th-grad-end: #f59e0b;
-  --th-glow-a: rgba(245,158,11,0.18);
-  --th-glow-b: rgba(148,163,184,0.08);
+  --th-grid-dot: rgba(148,163,184,0.045);
+  --th-grad-start: #dbeafe;
+  --th-grad-mid: #91b7ff;
+  --th-grad-end: #cbd5e1;
+  --th-glow-a: rgba(145,183,255,0.16);
+  --th-glow-b: rgba(148,163,184,0.07);
   --th-shimmer-a: rgba(255,255,255,0.015);
   --th-shimmer-b: rgba(148,163,184,0.08);
   --th-noise: 0.02;
@@ -97,7 +107,7 @@
 
 /* ── Light theme overrides ── */
 [data-theme="light"] {
-  --th-surface: #f5f5f7;
+  --th-surface: #f7f8fa;
   --th-fg: rgba(15,23,42,0.98);
   --th-fg-2: rgba(15,23,42,0.88);
   --th-fg-3: rgba(30,41,59,0.86);
@@ -105,14 +115,14 @@
   --th-fg-5: rgba(71,85,105,0.74);
   --th-fg-6: rgba(71,85,105,0.38);
 
-  --th-panel: rgba(255,255,255,0.95);
+  --th-panel: rgba(255,255,255,0.97);
   --th-panel-h: rgba(255,255,255,0.98);
-  --th-panel-alt: rgba(255,255,255,0.82);
-  --th-inset: rgba(0,0,0,0.035);
-  --th-session-bg: #fbfbfd;
+  --th-panel-alt: rgba(248,250,252,0.84);
+  --th-inset: rgba(15,23,42,0.028);
+  --th-session-bg: #ffffff;
 
-  --th-edge: rgba(60,60,67,0.12);
-  --th-edge-h: rgba(180,83,9,0.30);
+  --th-edge: rgba(15,23,42,0.095);
+  --th-edge-h: rgba(15,23,42,0.18);
 
   /* Form controls — pure white in light theme so inputs read as fillable. */
   --th-control-bg: #ffffff;
@@ -120,30 +130,40 @@
   --th-control-border: rgba(15,23,42,0.18);
   --th-control-border-h: rgba(15,23,42,0.32);
 
-  --th-primary: #9a5b00;
+  --th-primary: #2459a6;
   --th-primary-fg: #ffffff;
-  --th-primary-h: #7c4a00;
+  --th-primary-h: #1f4f94;
 
-  --th-sidebar: rgba(242,242,247,0.86);
-  --th-header: rgba(248,248,250,0.86);
+  --th-sidebar: rgba(255,255,255,0.9);
+  --th-header: rgba(255,255,255,0.92);
   --th-modal-bg: #ffffff;
+  --th-chat-window-bg: #ffffff;
+  --th-chat-window-border: rgba(15,23,42,0.13);
+  --th-chat-window-border-active: rgba(15,23,42,0.24);
+  --th-chat-window-border-running: rgba(34,197,94,0.34);
+  --th-chat-window-ring: rgba(36,89,166,0.075);
+  --th-chat-header-bg: rgba(248,250,252,0.96);
+  --th-chat-header-bg-active: rgba(244,247,251,0.98);
+  --th-chat-header-border: rgba(15,23,42,0.115);
+  --th-chat-window-shadow: 0 14px 38px rgba(15,23,42,0.085), 0 1px 0 rgba(255,255,255,0.92);
+  --th-chat-window-shadow-focus: 0 22px 72px rgba(15,23,42,0.15), var(--th-chat-window-shadow);
   --th-overlay: rgba(0,0,0,0.14);
-  --th-focus-backdrop: rgba(245,245,247,0.82);
+  --th-focus-backdrop: rgba(255,255,255,0.78);
   --th-dropdown: rgba(255,255,255,0.99);
 
-  --th-grid-dot: rgba(180,83,9,0.075);
-  --th-grad-start: #7c2d12;
-  --th-grad-mid: #b45309;
-  --th-grad-end: #0f172a;
-  --th-glow-a: rgba(180,83,9,0.14);
-  --th-glow-b: rgba(100,116,139,0.10);
+  --th-grid-dot: rgba(71,85,105,0.05);
+  --th-grad-start: #0f172a;
+  --th-grad-mid: #2459a6;
+  --th-grad-end: #64748b;
+  --th-glow-a: rgba(36,89,166,0.09);
+  --th-glow-b: rgba(100,116,139,0.055);
   --th-shimmer-a: rgba(15,23,42,0.045);
   --th-shimmer-b: rgba(100,116,139,0.12);
   --th-noise: 0.012;
-  --th-card-shadow: 0 10px 28px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.80);
-  --th-composer-shadow: 0 10px 28px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.90);
-  --th-composer-shadow-focus: 0 0 0 3px rgba(0,0,0,0.045), 0 14px 34px rgba(0,0,0,0.10);
-  --th-elevated-shadow: 0 26px 76px rgba(0,0,0,0.16), 0 6px 20px rgba(0,0,0,0.06), var(--th-card-shadow);
+  --th-card-shadow: 0 10px 30px rgba(15,23,42,0.06), 0 1px 0 rgba(255,255,255,0.86);
+  --th-composer-shadow: 0 10px 30px rgba(15,23,42,0.06), 0 1px 0 rgba(255,255,255,0.92);
+  --th-composer-shadow-focus: 0 0 0 3px rgba(36,89,166,0.055), 0 14px 36px rgba(15,23,42,0.08);
+  --th-elevated-shadow: 0 28px 82px rgba(15,23,42,0.13), 0 6px 20px rgba(15,23,42,0.05), var(--th-card-shadow);
 
   --th-ok: #22c55e;
   --th-ok-glow: rgba(34,197,94,0.35);
@@ -237,8 +257,8 @@
 body {
   background: var(--color-surface);
   background-image:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.025), transparent 34%),
-    linear-gradient(315deg, rgba(148, 163, 184, 0.07), transparent 38%);
+    linear-gradient(135deg, rgba(148, 163, 184, 0.035), transparent 34%),
+    linear-gradient(315deg, rgba(59, 130, 246, 0.035), transparent 38%);
   color: var(--color-foreground);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
@@ -247,8 +267,9 @@ body {
 
 [data-theme="light"] body {
   background-image:
-    linear-gradient(135deg, rgba(180, 83, 9, 0.065), transparent 32%),
-    linear-gradient(315deg, rgba(100, 116, 139, 0.055), transparent 38%);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0) 42%),
+    linear-gradient(135deg, rgba(15, 23, 42, 0.018), transparent 36%),
+    linear-gradient(315deg, rgba(36, 89, 166, 0.018), transparent 42%);
 }
 
 #root {
@@ -257,6 +278,18 @@ body {
 
 button:not(:disabled) { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
+[data-chat-output-copy="true"],
+[data-chat-output-copy="true"] * { cursor: pointer; }
+.session-md a[href],
+.session-md button[data-external-browser="true"],
+.session-md button[data-chat-output-copy="true"] {
+  cursor: pointer;
+}
+.session-md a[href] * ,
+.session-md button[data-external-browser="true"] *,
+.session-md button[data-chat-output-copy="true"] * {
+  cursor: pointer;
+}
 
 ::selection { background: rgba(100, 116, 139, 0.24); }
 
@@ -269,8 +302,36 @@ button:disabled { cursor: not-allowed; }
   container-type: inline-size;
 }
 
+.composer-shell-compact .composer-bottom-bar {
+  gap: 4px;
+}
+
+.composer-shell-compact .composer-attach-button,
+.composer-shell-compact .composer-mode-trigger,
+.composer-shell-compact .composer-send-button {
+  width: 30px;
+  padding-inline: 0;
+}
+
+.composer-shell-compact .composer-attach-label,
+.composer-shell-compact .composer-mode-label,
+.composer-shell-compact .composer-mode-count,
+.composer-shell-compact .composer-mode-chevron,
+.composer-shell-compact .composer-send-label {
+  display: none;
+}
+
+.composer-shell-compact .composer-cascade-trigger {
+  flex: 1 1 auto;
+  padding-inline: 8px;
+}
+
+.composer-shell-compact .composer-cascade-label {
+  max-width: none;
+}
+
 .dashboard-board-grid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 }
 
 .jira-task-card:hover .jira-task-actions,
@@ -390,16 +451,14 @@ button:disabled { cursor: not-allowed; }
 
 .app-ambient {
   background:
-    linear-gradient(90deg, transparent 0 24%, rgba(245,158,11,0.055) 24% 24.08%, transparent 24.08% 100%),
-    linear-gradient(180deg, rgba(255,255,255,0.032), transparent 18%, transparent 78%, rgba(245,158,11,0.024)),
-    linear-gradient(135deg, rgba(245,158,11,0.03), transparent 32%, rgba(148,163,184,0.055) 68%, transparent);
+    linear-gradient(180deg, rgba(255,255,255,0.024), transparent 18%, transparent 78%, rgba(148,163,184,0.018)),
+    linear-gradient(135deg, rgba(59,130,246,0.026), transparent 32%, rgba(148,163,184,0.036) 68%, transparent);
 }
 
 [data-theme="light"] .app-ambient {
   background:
-    linear-gradient(90deg, transparent 0 24%, rgba(180,83,9,0.07) 24% 24.08%, transparent 24.08% 100%),
-    linear-gradient(180deg, rgba(255,255,255,0.62), transparent 26%, transparent 74%, rgba(180,83,9,0.035)),
-    linear-gradient(135deg, rgba(180,83,9,0.055), transparent 34%, rgba(100,116,139,0.045) 70%, transparent);
+    linear-gradient(180deg, rgba(255,255,255,0.62), transparent 26%, transparent 74%, rgba(100,116,139,0.024)),
+    linear-gradient(135deg, rgba(36,89,166,0.038), transparent 34%, rgba(100,116,139,0.035) 70%, transparent);
 }
 
 /* ── Card glow ── */

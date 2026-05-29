@@ -4,6 +4,7 @@
 
 import { Hono } from 'hono';
 import { loadUserConfig } from '../../core/config/user-config.js';
+import { findPikiclawSessionInfo } from '../../agent/session.js';
 import { runtime } from '../runtime.js';
 import { queueDashboardSessionTask } from '../session-control.js';
 import {
@@ -17,16 +18,21 @@ import {
 } from '../browser-panel.js';
 import {
   addStageRun,
+  archiveTaskSpace,
+  assignProTasksToCycle,
   createSubtask,
   createProTask,
+  createTaskSpace,
   deleteProTask,
   finishVerificationRun,
   finishUserFocusSession,
   getProTask,
+  getProTaskWorkbench,
   isProTaskStage,
   isProTaskStatus,
   isProSubtaskStatus,
   listProTasks,
+  listTaskSpaces,
   setExclusiveMode,
   startVerificationRun,
   startUserFocusSession,
@@ -35,10 +41,14 @@ import {
   updateSubtask,
   updateJiraFields,
   updateProTaskExecution,
+  updateProTaskCycle,
+  updateProTaskMeta,
   updateProTaskStatus,
+  updateTaskSpace,
   type VerificationResult,
 } from '../../pro/tasks.js';
 import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems } from '../../pro/todos.js';
+import { closeActiveJiraCycle, deleteJiraCycle, kickOffJiraCycle, listJiraCycles } from '../../pro/jira-cycles.js';
 import { buildProUsageSummary } from '../../pro/usage-summary.js';
 import {
   createAgentAssistant,
@@ -46,6 +56,7 @@ import {
   createJiraSyncRun,
   createKnowledgeEntry,
   deleteAgentAssistant,
+  getAssistantPrompt,
   getJiraWorkflowConfig,
   getJiraSyncRun,
   listAgentAssistants,
@@ -54,6 +65,8 @@ import {
   listKnowledgeEntries,
   markAutomationRun,
   updateAgentAssistant,
+  resetAgentAssistantPrompt,
+  updateAgentAssistantPrompt,
   updateJiraSyncRun,
   updateJiraWorkflowConfig,
   upsertAutomationRuleByKey,
@@ -96,10 +109,13 @@ function buildJiraMcpSyncPrompt(runId?: string): string {
     'Requirements:',
     runId ? '- Immediately call `pikiclaw_pro_report_jira_sync_progress` with this runId before each visible step.' : '',
     runId ? '- Report which Jira MCP tool/query you are using, how many tickets you found, and when task writing starts.' : '',
-    '- Use the Jira MCP tools to find issues assigned to me and recently updated issues relevant to my active work.',
+    '- Only sync Jira issues assigned to me / the current Jira user. Do not sync issues assigned to other people, unassigned issues, watched issues, reporter-only issues, or team-wide results unless they are also assigned to me.',
+    '- When using Jira search, use an assignee-scoped query such as `assignee = currentUser() ORDER BY updated DESC`; if you add filters for sprint, project, status, or updated date, keep `assignee = currentUser()` in the JQL.',
+    '- Before calling `pikiclaw_pro_sync_jira_issues`, discard any issue whose assignee is not me / the current Jira user.',
     '- After pulling Jira issues, call the `pikiclaw_pro_sync_jira_issues` MCP tool with an `issues` array so Pikiclaw creates or updates task cards.',
     runId ? '- Include the same runId when calling `pikiclaw_pro_sync_jira_issues`.' : '',
-    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, reporter, assignee, ticketStatus/status, dueDate, priority, and labels when available.',
+    '- When using Jira search/get issue, request summary, description, issuetype, status, assignee, reporter, duedate, priority, labels, and updated.',
+    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, reporter, assignee, ticketStatus/status, dueDate, priority, labels, and updatedAt when available.',
     '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint, native Jira fields, and changed remote notes.',
     '- Append remote updates as new notes instead of overwriting existing local task context.',
     '- Mark newly assigned tickets and changed tickets clearly.',
@@ -220,8 +236,73 @@ function parseSessionKey(sessionKey: string | null | undefined): { agent: string
   return { agent: raw.slice(0, index), sessionId: raw.slice(index + 1) };
 }
 
+app.get('/api/pro/task-spaces', (c) => {
+  return c.json({ ok: true, spaces: listTaskSpaces() });
+});
+
+app.post('/api/pro/task-spaces', async (c) => {
+  try {
+    const body = await c.req.json();
+    return c.json({ ok: true, space: createTaskSpace(body || {}) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/task-spaces/:spaceId', async (c) => {
+  try {
+    const body = await c.req.json();
+    return c.json({ ok: true, space: updateTaskSpace(c.req.param('spaceId'), body || {}) });
+  } catch (e: any) {
+    const status = e?.message === 'task space not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/task-spaces/:spaceId', (c) => {
+  try {
+    return c.json({ ok: true, space: archiveTaskSpace(c.req.param('spaceId')) });
+  } catch (e: any) {
+    const status = e?.message === 'task space not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.get('/api/pro/tasks', (c) => {
-  return c.json({ ok: true, tasks: listProTasks() });
+  const spaceId = readString(c.req.query('spaceId'));
+  return c.json({ ok: true, tasks: listProTasks(spaceId && spaceId !== 'all' ? { spaceId } : {}) });
+});
+
+app.get('/api/pro/jira/cycles', (c) => {
+  return c.json({ ok: true, cycles: listJiraCycles() });
+});
+
+app.post('/api/pro/jira/cycles/kickoff', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const cycle = kickOffJiraCycle({ name: body?.name, startDate: body?.startDate, endDate: body?.endDate });
+    const taskIds = Array.isArray(body?.taskIds) ? body.taskIds.filter((id: unknown): id is string => typeof id === 'string') : [];
+    const tasks = assignProTasksToCycle(taskIds, cycle.id);
+    return c.json({ ok: true, cycle, tasks });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/jira/cycles/close-active', (c) => {
+  try {
+    return c.json({ ok: true, cycle: closeActiveJiraCycle() });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.delete('/api/pro/jira/cycles/:cycleId', (c) => {
+  try {
+    return c.json({ ok: true, cycle: deleteJiraCycle(c.req.param('cycleId')) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 404);
+  }
 });
 
 app.get('/api/pro/usage-summary', async (c) => {
@@ -295,10 +376,11 @@ app.post('/api/pro/todos/chat', async (c) => {
       return c.json(queued, statusCode);
     }
     const session = parseSessionKey(queued.sessionKey);
-    if (session) {
-      for (const item of items) {
+    for (const item of items) {
+      if (session) {
         linkTodoChat(item.id, { workdir, agent: session.agent, sessionId: session.sessionId });
       }
+      deleteTodoItem(item.id);
     }
     return c.json({ ok: true, queued, items: getTodoItems(items.map(item => item.id)) });
   } catch (e: any) {
@@ -323,6 +405,147 @@ app.post('/api/pro/review-comments', async (c) => {
 
 app.get('/api/pro/assistants', (c) => {
   return c.json({ ok: true, assistants: listAgentAssistants() });
+});
+
+app.get('/api/pro/assistants/history', (c) => {
+  const limitQuery = readString(c.req.query('limit'));
+  const limitRaw = Number.parseInt(limitQuery || '50', 10);
+  const limit = limitQuery === 'all'
+    ? Number.POSITIVE_INFINITY
+    : Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+  const config = loadUserConfig();
+  const defaultWorkdir = runtime.getRequestWorkdir(config);
+  const assistants = listAgentAssistants();
+  const history: Record<string, any[]> = Object.fromEntries(assistants.map(assistant => [assistant.id, []]));
+  const seen = new Set<string>();
+
+  const addSession = (entry: {
+    assistantId?: string;
+    source: 'automation' | 'jira-sync' | 'stage-run';
+    sourceLabel?: string;
+    workdir?: string;
+    agent?: string;
+    sessionId?: string;
+    sessionKey?: string;
+  }) => {
+    const assistantId = readString(entry.assistantId);
+    if (!assistantId) return;
+    const parsed = parseSessionKey(entry.sessionKey);
+    const agent = readString(entry.agent) || parsed?.agent || '';
+    const sessionId = readString(entry.sessionId) || parsed?.sessionId || '';
+    const workdir = readString(entry.workdir) || defaultWorkdir;
+    if (!agent || !sessionId || !workdir) return;
+    if (!history[assistantId]) history[assistantId] = [];
+    const key = `${assistantId}:${workdir}:${agent}:${sessionId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const session = findPikiclawSessionInfo(workdir, agent as any, sessionId);
+    if (!session) return;
+    history[assistantId].push({
+      assistantId,
+      source: entry.source,
+      sourceLabel: entry.sourceLabel,
+      workdir,
+      agent,
+      sessionId,
+      sessionKey: `${agent}:${sessionId}`,
+      title: session?.title ?? null,
+      lastQuestion: session?.lastQuestion ?? null,
+      lastMessageText: session?.lastMessageText ?? null,
+      runState: session?.runState,
+      createdAt: session?.createdAt ?? null,
+      updatedAt: session?.runUpdatedAt || session?.createdAt || null,
+      runUpdatedAt: session?.runUpdatedAt ?? null,
+      numTurns: session?.numTurns ?? null,
+    });
+  };
+
+  for (const task of listProTasks()) {
+    for (const run of task.stageRuns || []) {
+      addSession({
+        assistantId: run.assistantId,
+        source: 'stage-run',
+        sourceLabel: `${task.title || task.id} · ${run.stage}`,
+        workdir: run.session?.workdir || task.workdir,
+        agent: run.session?.agent,
+        sessionId: run.session?.sessionId,
+      });
+    }
+  }
+
+  for (const rule of listAutomationRules()) {
+    for (const run of rule.runHistory || []) {
+      addSession({
+        assistantId: rule.assistantId,
+        source: 'automation',
+        sourceLabel: rule.name,
+        workdir: rule.workdir,
+        sessionKey: run.sessionKey,
+      });
+    }
+  }
+
+  for (const run of listJiraSyncRuns()) {
+    addSession({
+      assistantId: run.assistantId,
+      source: 'jira-sync',
+      sourceLabel: run.issueKeys?.length ? run.issueKeys.join(', ') : 'Jira sync',
+      workdir: run.workdir,
+      agent: run.agent,
+      sessionKey: run.sessionKey,
+    });
+  }
+
+  for (const assistantId of Object.keys(history)) {
+    history[assistantId] = history[assistantId]
+      .sort((a, b) => Date.parse(b.runUpdatedAt || b.updatedAt || b.createdAt || '') - Date.parse(a.runUpdatedAt || a.updatedAt || a.createdAt || ''));
+    if (Number.isFinite(limit)) history[assistantId] = history[assistantId].slice(0, limit);
+  }
+
+  return c.json({ ok: true, history });
+});
+
+app.get('/api/pro/assistants/:assistantId/prompt', (c) => {
+  try {
+    const prompt = getAssistantPrompt(c.req.param('assistantId'));
+    return c.json({ ok: true, ...prompt });
+  } catch (e: any) {
+    const status = e?.message === 'assistant not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/assistants/:assistantId/prompt', async (c) => {
+  try {
+    const body = await c.req.json();
+    const assistant = updateAgentAssistantPrompt(c.req.param('assistantId'), { prompt: body?.prompt });
+    return c.json({
+      ok: true,
+      assistant,
+      prompt: assistant.prompt || assistant.defaultPrompt || assistant.responsibility,
+      defaultPrompt: assistant.defaultPrompt || assistant.responsibility,
+      customized: (assistant.prompt || '').trim() !== (assistant.defaultPrompt || assistant.responsibility).trim(),
+    });
+  } catch (e: any) {
+    const status = e?.message === 'assistant not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/assistants/:assistantId/reset-prompt', (c) => {
+  try {
+    const assistant = resetAgentAssistantPrompt(c.req.param('assistantId'));
+    return c.json({
+      ok: true,
+      assistant,
+      prompt: assistant.prompt || assistant.defaultPrompt || assistant.responsibility,
+      defaultPrompt: assistant.defaultPrompt || assistant.responsibility,
+      customized: false,
+    });
+  } catch (e: any) {
+    const status = e?.message === 'assistant not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
 });
 
 app.get('/api/pro/jira/config', (c) => {
@@ -353,6 +576,13 @@ app.post('/api/pro/assistants', async (c) => {
       name: body?.name,
       responsibility: body?.responsibility,
       preferredAgents: body?.preferredAgents,
+      kind: body?.kind,
+      surfaceId: body?.surfaceId,
+      objectTypes: body?.objectTypes,
+      prompt: body?.prompt,
+      defaultPrompt: body?.defaultPrompt,
+      allowedActions: body?.allowedActions,
+      enabled: body?.enabled,
     });
     return c.json({ ok: true, assistant });
   } catch (e: any) {
@@ -367,6 +597,13 @@ app.patch('/api/pro/assistants/:assistantId', async (c) => {
       name: body?.name,
       responsibility: body?.responsibility,
       preferredAgents: body?.preferredAgents,
+      kind: body?.kind,
+      surfaceId: body?.surfaceId,
+      objectTypes: body?.objectTypes,
+      prompt: body?.prompt,
+      defaultPrompt: body?.defaultPrompt,
+      allowedActions: body?.allowedActions,
+      enabled: body?.enabled,
     });
     return c.json({ ok: true, assistant });
   } catch (e: any) {
@@ -462,6 +699,43 @@ app.post('/api/pro/jira/mcp-sync/run', async (c) => {
       event: { label: 'Agent session queued', detail: queued.sessionKey || queued.taskId || 'Queued' },
     });
     return c.json({ ok: true, queued, run: updated });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/jira/analyze-ticket', async (c) => {
+  try {
+    const body = await c.req.json();
+    const query = readString(body?.query);
+    if (!query) return c.json({ ok: false, error: 'query is required' }, 400);
+    const config = loadUserConfig();
+    const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
+    const agent = readString(body?.agent) || null;
+    const prompt = [
+      'Analyze a Jira ticket and its related merge requests for me.',
+      '',
+      `Ticket/search query: ${query}`,
+      '',
+      'Requirements:',
+      '- Use available Jira/Atlassian MCP tools to find the ticket when the exact key is not enough.',
+      '- Find linked or likely related merge requests from Jira development links, issue comments, branch names, or repository references when available.',
+      '- Summarize the ticket goal, current status, owner, sprint, risk, missing context, and next action.',
+      '- Summarize each related MR: purpose, state, risk, notable changed areas, and whether it appears aligned with the ticket.',
+      '- If evidence is incomplete, say exactly which lookup failed or what is missing.',
+    ].join('\n');
+    const queued = await queueDashboardSessionTask({
+      workdir,
+      agent,
+      sessionId: '',
+      prompt,
+      attachments: [],
+    });
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+    return c.json({ ok: true, queued });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
   }
@@ -606,6 +880,12 @@ app.get('/api/pro/tasks/:taskId', (c) => {
   return c.json({ ok: true, task });
 });
 
+app.get('/api/pro/tasks/:taskId/workbench', (c) => {
+  const workbench = getProTaskWorkbench(c.req.param('taskId'));
+  if (!workbench) return c.json({ ok: false, error: 'task not found' }, 404);
+  return c.json({ ok: true, workbench });
+});
+
 app.delete('/api/pro/tasks/:taskId', (c) => {
   try {
     const task = deleteProTask(c.req.param('taskId'));
@@ -625,11 +905,13 @@ app.post('/api/pro/tasks', async (c) => {
       description: body?.description,
       kind: body?.kind,
       status: body?.status,
+      spaceId: body?.spaceId,
       workdir: body?.workdir || runtime.getRequestWorkdir(config),
       defaultAgent: body?.defaultAgent,
       defaultAssistantId: body?.defaultAssistantId,
       jiraKey: body?.jiraKey,
       jiraUrl: body?.jiraUrl,
+      prUrl: body?.prUrl,
       sprint: body?.sprint,
     });
     return c.json({ ok: true, task });
@@ -654,14 +936,24 @@ app.post('/api/pro/jira/sync', async (c) => {
       : Array.isArray(body?.issues)
       ? body.issues
       : [{
-          title: body?.title,
-          description: body?.description,
-          issueType: body?.issueType,
-          jiraKey: body?.jiraKey,
-          jiraUrl: body?.jiraUrl,
-          sprint: body?.sprint,
-          workdir: body?.workdir,
-        }];
+        title: body?.title,
+        description: body?.description,
+        issueType: body?.issueType,
+        jiraKey: body?.jiraKey,
+        jiraUrl: body?.jiraUrl,
+        prUrl: body?.prUrl || body?.mergeRequestUrl,
+        sprint: body?.sprint,
+        spaceId: body?.spaceId,
+        workdir: body?.workdir,
+        reporter: body?.reporter,
+        assignee: body?.assignee,
+        ticketStatus: body?.ticketStatus || body?.status,
+        dueDate: body?.dueDate,
+        priority: body?.priority,
+        labels: body?.labels,
+        updatedAt: body?.updatedAt || body?.updated,
+        rawFields: body?.rawFields || body?.fields,
+      }];
     const tasks = issues.map((issue: any) => syncJiraTask({
       title: issue?.title,
       description: issue?.description,
@@ -669,14 +961,17 @@ app.post('/api/pro/jira/sync', async (c) => {
       jiraKey: issue?.jiraKey,
       jiraUrl: issue?.jiraUrl,
       sprint: issue?.sprint,
+      spaceId: issue?.spaceId || body?.spaceId,
       workdir: issue?.workdir || runtime.getRequestWorkdir(config),
+      prUrl: issue?.prUrl || issue?.mergeRequestUrl,
       reporter: issue?.reporter,
       assignee: issue?.assignee,
       ticketStatus: issue?.ticketStatus || issue?.status,
       dueDate: issue?.dueDate,
       priority: issue?.priority,
       labels: Array.isArray(issue?.labels) ? issue.labels : undefined,
-      rawFields: issue?.rawFields,
+      updatedAt: issue?.updatedAt || issue?.updated,
+      rawFields: issue?.rawFields || issue?.fields,
     }));
     return c.json({ ok: true, tasks });
   } catch (e: any) {
@@ -728,6 +1023,31 @@ app.patch('/api/pro/tasks/:taskId/execution', async (c) => {
       assistantId: body?.assistantId,
       mode: body?.mode,
     });
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/tasks/:taskId/cycle', async (c) => {
+  try {
+    const body = await c.req.json();
+    const task = updateProTaskCycle(c.req.param('taskId'), { cycleId: body?.cycleId });
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/tasks/:taskId/meta', async (c) => {
+  try {
+    const body = await c.req.json();
+    const patch: Record<string, unknown> = {};
+    if (body && Object.prototype.hasOwnProperty.call(body, 'workdir')) patch.workdir = body.workdir;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'prUrl')) patch.prUrl = body.prUrl;
+    const task = updateProTaskMeta(c.req.param('taskId'), patch);
     return c.json({ ok: true, task });
   } catch (e: any) {
     const status = e?.message === 'task not found' ? 404 : 400;
@@ -794,6 +1114,7 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
 
     const updated = addStageRun({
       taskId,
+      subtaskId: body?.subtaskId,
       stage,
       prompt,
       session: { workdir, agent: session.agent, sessionId: session.sessionId },
@@ -973,7 +1294,7 @@ async function fetchJiraIssues(opts: {
   const params = new URLSearchParams();
   params.set('jql', readString(opts.jql) || 'assignee = currentUser() ORDER BY updated DESC');
   params.set('maxResults', '50');
-  params.set('fields', 'summary,description,issuetype,assignee,status,updated');
+  params.set('fields', 'summary,description,issuetype,assignee,reporter,status,duedate,priority,labels,updated');
   const headers: Record<string, string> = { Accept: 'application/json' };
   const email = readString(opts.email);
   headers.Authorization = email
@@ -990,6 +1311,14 @@ async function fetchJiraIssues(opts: {
     title: issue?.fields?.summary || issue?.key || 'Untitled Jira issue',
     description: jiraDescriptionToText(issue?.fields?.description),
     issueType: issue?.fields?.issuetype?.name,
+    reporter: issue?.fields?.reporter?.displayName || issue?.fields?.reporter?.name || issue?.fields?.reporter?.emailAddress,
+    assignee: issue?.fields?.assignee?.displayName || issue?.fields?.assignee?.name || issue?.fields?.assignee?.emailAddress,
+    ticketStatus: issue?.fields?.status?.name,
+    dueDate: issue?.fields?.duedate,
+    priority: issue?.fields?.priority?.name,
+    labels: Array.isArray(issue?.fields?.labels) ? issue.fields.labels : undefined,
+    updatedAt: issue?.fields?.updated,
+    rawFields: issue?.fields,
     sprint: opts.sprint,
     workdir: opts.workdir,
   }));

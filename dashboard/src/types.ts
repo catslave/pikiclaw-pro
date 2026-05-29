@@ -1,4 +1,4 @@
-export type Agent = 'claude' | 'codex' | 'copilot' | 'cursor' | 'gemini' | 'hermes';
+export type Agent = 'claude' | 'codex' | 'copilot' | 'cursor' | 'gemini' | 'hermes' | 'openclaw';
 export type OpenTarget = 'vscode' | 'cursor' | 'windsurf' | 'finder' | 'default';
 
 export interface AgentInfo {
@@ -59,6 +59,7 @@ export interface ProUsageDaySummary {
 
 export interface ProUsageChatSummary {
   sessionId: string;
+  threadId?: string | null;
   agent: string;
   workdir: string;
   title: string;
@@ -162,6 +163,14 @@ export interface AgentStatusResponse {
   defaultAgent: Agent;
   workdir: string;
   agents: AgentRuntimeStatus[];
+}
+
+export interface AgentHealthResult {
+  ok: boolean;
+  agent: Agent;
+  checkedAt: string;
+  detail: string;
+  output: string | null;
 }
 
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
@@ -428,6 +437,10 @@ export interface SessionInfo {
   runDetail?: string | null;
   runUpdatedAt?: string | null;
   runStartedAt?: string | null;
+  runPid?: number | null;
+  autoResumeAttempts?: number;
+  autoResumeLastAt?: string | null;
+  autoResumeLastError?: string | null;
   agent?: string;
   lastQuestion?: string | null;
   lastAnswer?: string | null;
@@ -697,6 +710,7 @@ export interface McpServerConfig {
   enabled?: boolean;
   disabled?: boolean;
   catalogId?: string;
+  instructions?: Record<string, unknown>;
 }
 
 export interface McpExtensionEntry {
@@ -789,6 +803,7 @@ export interface SkillCatalogItem {
   iconUrl?: string;
   totalCount?: number;
   partial?: boolean;
+  localOnly?: boolean;
 }
 
 export interface RemoteSkillInfo {
@@ -944,6 +959,25 @@ export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 
 export type ProSubtaskStatus = 'todo' | 'running' | 'review' | 'done' | 'blocked';
 export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
 export type VerificationResult = 'passed' | 'failed' | 'blocked' | 'not-run';
+export type ProOutputKind = 'final' | 'document' | 'image' | 'file' | 'diff' | 'estimate' | 'stage-summary' | 'link';
+export type TaskSpaceKind = 'personal' | 'jira' | 'custom';
+
+export interface TaskSpace {
+  id: string;
+  name: string;
+  kind: TaskSpaceKind;
+  defaultWorkdir?: string;
+  defaultAgent?: string;
+  archived?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskOrigin {
+  type: 'manual' | 'jira';
+  key?: string;
+  url?: string;
+}
 
 export interface TaskEstimate {
   estimatePoint?: number;
@@ -1018,9 +1052,25 @@ export interface BrowserPanelSnapshot {
   updatedAt: string;
 }
 
+export interface ProOutput {
+  id: string;
+  kind: ProOutputKind;
+  title: string;
+  summary?: string;
+  taskId: string;
+  stageRunId?: string;
+  session?: StageSessionRef;
+  turnIndex?: number;
+  path?: string;
+  url?: string;
+  createdAt: string;
+  pinned?: boolean;
+}
+
 export interface StageRun {
   id: string;
   taskId: string;
+  subtaskId?: string;
   stage: ProTaskStage;
   status: ProStageRunStatus;
   assistantId?: string;
@@ -1032,6 +1082,7 @@ export interface StageRun {
   completedAt?: string;
   focus?: FocusSessionState;
   verificationRunId?: string;
+  outputIds?: string[];
   output?: {
     summary?: string;
     estimate?: TaskEstimate;
@@ -1073,7 +1124,10 @@ export interface ProTask {
   description?: string;
   kind: ProTaskKind;
   status: ProTaskStatus;
+  spaceId?: string;
+  origin?: TaskOrigin;
   workdir?: string;
+  prUrl?: string;
   defaultAgent?: string;
   defaultAssistantId?: string;
   execution?: {
@@ -1096,9 +1150,11 @@ export interface ProTask {
     raw?: Record<string, unknown>;
   };
   sprint?: string;
+  cycleId?: string;
   createdAt: string;
   updatedAt: string;
   stageRuns: StageRun[];
+  outputs?: ProOutput[];
   verificationRuns: VerificationRun[];
   subTasks: ProSubtask[];
   focusSessions?: Array<{
@@ -1110,6 +1166,48 @@ export interface ProTask {
   }>;
   exclusiveMode?: boolean;
   events: ProTaskEvent[];
+}
+
+export interface ProTaskWorkbench {
+  task: ProTask;
+  activeStageRun: StageRun | null;
+  outputs: ProOutput[];
+  sideChats: Array<StageSessionRef & { parentStageRunId?: string; title?: string }>;
+  files: Array<{ path: string; workdir?: string; stageRunId?: string; outputId?: string; label?: string }>;
+  ticketSnapshot: {
+    jiraKey?: string;
+    jiraUrl?: string;
+    title: string;
+    description?: string;
+    reporter?: string;
+    assignee?: string;
+    status?: string;
+    dueDate?: string;
+    priority?: string;
+    labels?: string[];
+    issueType?: string;
+    sprint?: string;
+    updatedAt?: string;
+  };
+}
+
+export interface JiraCycleTaskSnapshot {
+  taskId: string;
+  jiraKey?: string;
+  title: string;
+  assignee?: string;
+  sprint?: string;
+  completedAt: string;
+}
+
+export interface JiraCycle {
+  id: string;
+  name: string;
+  status: 'active' | 'closed';
+  startedAt: string;
+  endsAt?: string;
+  closedAt?: string;
+  tasks: JiraCycleTaskSnapshot[];
 }
 
 export type TodoItemKind = 'todo' | 'review-comment';
@@ -1143,11 +1241,46 @@ export interface TodoItem {
 export interface AgentAssistant {
   id: string;
   name: string;
+  kind?: 'page-owner' | 'task-stage' | 'creation' | 'automation' | 'custom';
+  surfaceId?: string;
+  objectTypes?: string[];
   responsibility: string;
+  prompt?: string;
+  defaultPrompt?: string;
   preferredAgents: string[];
+  allowedActions?: string[];
+  builtIn?: boolean;
+  enabled?: boolean;
   avatarSeed?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AssistantPromptInfo {
+  ok: boolean;
+  assistant?: AgentAssistant;
+  prompt?: string;
+  defaultPrompt?: string;
+  customized?: boolean;
+  error?: string;
+}
+
+export interface AssistantHistoryItem {
+  assistantId: string;
+  source: 'automation' | 'jira-sync' | 'stage-run';
+  sourceLabel?: string;
+  workdir: string;
+  agent: string;
+  sessionId: string;
+  sessionKey: string;
+  title?: string | null;
+  lastQuestion?: string | null;
+  lastMessageText?: string | null;
+  runState?: 'running' | 'completed' | 'incomplete';
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  runUpdatedAt?: string | null;
+  numTurns?: number | null;
 }
 
 export interface JiraWorkflowConfig {
@@ -1197,6 +1330,21 @@ export interface JiraSyncRunEvent {
   detail?: string;
 }
 
+export interface JiraSyncRunChange {
+  taskId?: string;
+  jiraKey?: string;
+  title: string;
+  action: 'created' | 'updated' | 'unchanged';
+  summary?: string;
+  status?: string;
+  kind?: string;
+  sprint?: string;
+  assignee?: string;
+  priority?: string;
+  dueDate?: string;
+  updatedAt?: string;
+}
+
 export interface JiraSyncRun {
   id: string;
   status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed';
@@ -1207,6 +1355,9 @@ export interface JiraSyncRun {
   sessionKey?: string;
   ticketCount?: number;
   taskCount?: number;
+  analysisSummary?: string;
+  issueKeys?: string[];
+  changes?: JiraSyncRunChange[];
   error?: string;
   startedAt: string;
   updatedAt: string;

@@ -31,6 +31,8 @@ export interface McpServerConfig {
   disabled?: boolean;
   /** Catalog id this server was installed from (for state lookup). Undefined for custom servers. */
   catalogId?: string;
+  /** Optional user-facing guidance/config shown in the Extensions MCP editor. */
+  instructions?: Record<string, unknown>;
 }
 
 /** OAuth token record stored for a remote MCP server. */
@@ -85,6 +87,8 @@ export interface UserConfig {
   geminiReasoningEffort?: string;
   hermesModel?: string;
   hermesReasoningEffort?: string;
+  openclawModel?: string;
+  openclawReasoningEffort?: string;
   workdir?: string;
   workspaces?: WorkspaceEntry[];
   telegramBotToken?: string;

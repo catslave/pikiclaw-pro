@@ -18,6 +18,7 @@ export function AssistantMsg({
   t,
   startedAt,
   completedAt,
+  runError,
   onOpenFileLink,
   workdir,
 }: {
@@ -25,14 +26,23 @@ export function AssistantMsg({
   t: (k: string) => string;
   startedAt?: string | null;
   completedAt?: string | null;
+  runError?: string | null;
   onOpenFileLink?: OpenFileLinkHandler;
   workdir?: string;
 }) {
   const { activityBlocks, thinkingBlocks, narrativeBlocks, planBlocks, subAgentBlocks, outputBlocks, noticeBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
   const narrativeText = narrativeBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
-  const fallbackNarrativeToOutput = outputBlocks.length === 0 && narrativeBlocks.length > 0;
-  const renderedOutputBlocks = outputBlocks.length > 0 ? outputBlocks : narrativeBlocks;
+  const hasProcessBlocks = activityBlocks.length > 0
+    || thinkingBlocks.length > 0
+    || planBlocks.some(block => hasPlan(block.plan))
+    || subAgentBlocks.length > 0;
+  const fallbackNarrativeToOutput = outputBlocks.length === 0 && narrativeBlocks.length > 0 && !hasProcessBlocks;
+  const renderedOutputBlocks = outputBlocks.length > 0
+    ? outputBlocks
+    : fallbackNarrativeToOutput
+      ? narrativeBlocks
+      : [];
   const workingNarrativeText = fallbackNarrativeToOutput ? '' : narrativeText;
   const thinkingText = thinkingBlocks.map(b => b.content).filter(Boolean).join('\n\n').trim();
   const subAgents = subAgentBlocks.map(block => block.subAgent).filter(Boolean) as NonNullable<MessageBlock['subAgent']>[];
@@ -53,6 +63,7 @@ export function AssistantMsg({
           defaultOpen={false}
           startedAt={startedAt ?? null}
           completedAt={completedAt ?? message.createdAt ?? null}
+          error={runError ?? null}
         >
           <div className="space-y-3 px-3.5 py-3">
             <WorkingNarrativeBlock text={workingNarrativeText} t={t} />

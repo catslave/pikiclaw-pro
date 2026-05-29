@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { createT, type Locale } from '../../i18n';
 import { useStore } from '../../store';
-import type { Agent, AgentRuntimeStatus, AgentStatusResponse, ModelInfo } from '../../types';
+import type { Agent, AgentHealthResult, AgentRuntimeStatus, AgentStatusResponse, ModelInfo, SessionInfo, WorkspaceEntry } from '../../types';
 import { AGENT_ACCEPTED_PROVIDER_KINDS, cn, EFFORT_OPTIONS, getAgentMeta } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
 import { Badge, Button, Input, Label, Modal, ModalHeader, ModelSelect, Select, Spinner } from '../../components/ui';
@@ -29,10 +29,11 @@ import ModelsSection, { useModelLayer, type ModelLayerSnapshot } from '../models
 import LocalModelsSection, { useLocalBackends } from '../local-models/LocalModelsSection';
 import ProfilesSection from '../profiles/ProfilesSection';
 import { ProAssistantsSection, ProAutomationSection } from './ProAgentWorkflowSection';
+import { SessionPanel } from '../sessions/SessionPanel';
+import { NewSessionView } from '../sessions/SessionWorkspace';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
-const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'];
-
+const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'];
 // Mirrors the backend type in src/model/validation.ts. Pricing fields are USD
 // per 1M tokens; `created` is unix epoch (seconds).
 interface ProviderModelInfo {
@@ -172,6 +173,7 @@ function buildBoundInfo(layer: ModelLayerSnapshot, agentId: string): BoundProfil
 
 type SnapshotState = {
   defaultAgent: Agent;
+  workdir: string;
   agents: AgentRuntimeStatus[];
 };
 
@@ -201,6 +203,14 @@ type CopyPack = {
   checkUpdate: string;
   checking: string;
   upToDate: string;
+  testAgent: string;
+  testingAgent: string;
+  testPassed: string;
+  testFailed: string;
+  repairWithDefaultAgent: string;
+  repairingWithDefaultAgent: string;
+  repairModalTitle: string;
+  repairModalDescription: (agent: string) => string;
   install: string;
   installing: string;
   profilesTitle: string;
@@ -270,9 +280,17 @@ function getCopy(locale: Locale): CopyPack {
       checkUpdate: '检查更新',
       checking: '检查中…',
       upToDate: '已是最新',
+      testAgent: '测试',
+      testingAgent: '测试中…',
+      testPassed: '可用',
+      testFailed: '不可用',
+      repairWithDefaultAgent: '用默认 Agent 修复',
+      repairingWithDefaultAgent: '正在创建…',
+      repairModalTitle: 'Agent 修复',
+      repairModalDescription: agent => `默认 Agent 正在修复 ${agent} 的本地可用性问题。`,
       install: '安装',
       installing: '安装中…',
-      profilesHint: '把你常用的模型登记成一条条快捷方式，自由起别名。这是一份纯粹的选择列表——智能体（包括 Hermes）会从这里挑模型，但选了谁不会反向显示在这里。',
+      profilesHint: '把你常用的模型登记成一条条快捷方式，自由起别名。这是一份纯粹的选择列表，智能体（包括 Hermes）会从这里挑模型，但选了谁不会反向显示在这里。',
       profilesTitle: '我的模型',
       modelsTitle: '模型供应商',
       modelsHint: '接入 BYOK 供应商；接入后可在上方"我的模型"里挑选具体模型并固定下来。',
@@ -334,10 +352,18 @@ function getCopy(locale: Locale): CopyPack {
     checkUpdate: 'Check update',
     checking: 'Checking…',
     upToDate: 'Up to date',
+    testAgent: 'Test',
+    testingAgent: 'Testing…',
+    testPassed: 'Available',
+    testFailed: 'Unavailable',
+    repairWithDefaultAgent: 'Fix with default agent',
+    repairingWithDefaultAgent: 'Creating…',
+    repairModalTitle: 'Agent Repair',
+    repairModalDescription: agent => `The default agent is repairing local availability for ${agent}.`,
     install: 'Install',
     installing: 'Installing…',
     profilesTitle: 'My Models',
-    profilesHint: 'Register the models you actually use as named shortcuts. A pure selection list — agents (including Hermes) pick from here, but who picks what does not bubble back into this view.',
+    profilesHint: 'Register the models you actually use as named shortcuts. A pure selection list; agents (including Hermes) pick from here, but who picks what does not bubble back into this view.',
     modelsTitle: 'Model Providers',
     modelsHint: 'Connect BYOK providers; pin specific models above in "My Models".',
     localTitle: 'Local Models',
@@ -349,7 +375,7 @@ function getCopy(locale: Locale): CopyPack {
     providerNativeFromAgent: "agent's own config",
     effortDefault: 'default',
     modelLoading: 'Loading model list…',
-    modelEmpty: 'Provider returned no model list — use custom input.',
+    modelEmpty: 'Provider returned no model list, use custom input.',
     modelCustomToggle: 'Use custom input',
     modelListToggle: 'Pick from list',
     modelCustomPlaceholder: 'anthropic/claude-sonnet-4',
@@ -387,7 +413,7 @@ function buildAgentOptions(agents: AgentRuntimeStatus[], copy: CopyPack) {
 }
 
 function modelLabel(model: ModelInfo | null | undefined): string {
-  if (!model) return '—';
+  if (!model) return '--';
   return model.alias || model.id;
 }
 
@@ -402,7 +428,118 @@ function defaultNativeModel(agent: AgentRuntimeStatus): string {
 }
 
 function applySnapshot(setter: (value: SnapshotState) => void, next: AgentStatusResponse) {
-  setter({ defaultAgent: next.defaultAgent, agents: next.agents });
+  setter({ defaultAgent: next.defaultAgent, workdir: next.workdir, agents: next.agents });
+}
+
+function parseSessionKey(sessionKey: string | undefined): { agent: string; sessionId: string } | null {
+  const raw = String(sessionKey || '');
+  const sep = raw.indexOf(':');
+  if (sep <= 0 || sep >= raw.length - 1) return null;
+  return { agent: raw.slice(0, sep), sessionId: raw.slice(sep + 1) };
+}
+
+type RepairCause =
+  | { kind: 'install'; error: string }
+  | { kind: 'health'; health: AgentHealthResult };
+
+interface RepairSessionState {
+  workdir: string;
+  repairAgent: string;
+  targetAgent: Agent;
+  targetLabel: string;
+  sessionId: string;
+  sessionKey: string;
+  prompt: string;
+  displayPrompt: string;
+  createdAt: string;
+}
+
+interface AgentTestModalState {
+  key: string;
+  workdir: string;
+  agent: Agent;
+  label: string;
+}
+
+interface AgentTestSessionState {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+  pendingPrompt?: string | null;
+  pendingImageUrls?: string[];
+  pendingCreatedAt?: string | null;
+}
+
+function workspaceBaseName(workspacePath: string): string {
+  const trimmed = workspacePath.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || workspacePath;
+}
+
+function buildRepairPrompt(agent: AgentRuntimeStatus, cause: RepairCause): string {
+  const causeLines = cause.kind === 'install'
+    ? [
+      'Install result:',
+      '- ok: false',
+      `- error: ${cause.error}`,
+    ]
+    : [
+      'Health result:',
+      `- ok: ${cause.health.ok}`,
+      `- checkedAt: ${cause.health.checkedAt}`,
+      `- detail: ${cause.health.detail}`,
+      cause.health.output ? `- output:\n${cause.health.output}` : '- output: (none)',
+    ];
+  return [
+    `Pikiclaw Agent ${cause.kind === 'install' ? 'install' : 'health check'} failed for ${getAgentMeta(agent.agent).label} (${agent.agent}).`,
+    '',
+    'Please diagnose and fix this local agent availability problem with minimal changes. Check CLI install state, PATH, auth, npm/brew/global shims, and Pikiclaw config as needed. After the fix, run the relevant install or health check again.',
+    '',
+    'Agent status:',
+    `- installed: ${agent.installed}`,
+    `- version: ${agent.version || '(unknown)'}`,
+    `- selected model: ${agent.selectedModel || '(none)'}`,
+    `- selected effort: ${agent.selectedEffort || '(none)'}`,
+    '',
+    ...causeLines,
+  ].join('\n');
+}
+
+function makeRepairSessionInfo(repair: RepairSessionState): SessionInfo {
+  return {
+    agent: repair.repairAgent,
+    sessionId: repair.sessionId,
+    workdir: repair.workdir,
+    workspacePath: repair.workdir,
+    createdAt: repair.createdAt,
+    title: `Repair ${repair.targetLabel}`,
+    titleSource: 'prompt',
+    running: true,
+    runState: 'running',
+    runDetail: null,
+    runUpdatedAt: repair.createdAt,
+    classification: null,
+    userStatus: null,
+    userNote: null,
+    pinned: false,
+    archived: false,
+    archivedAt: null,
+    lastQuestion: repair.displayPrompt,
+    lastAnswer: null,
+    lastMessageText: repair.displayPrompt,
+    migratedFrom: null,
+    migratedTo: null,
+    linkedSessions: [],
+    sideChatOf: null,
+    sideChats: [],
+    numTurns: null,
+    origin: {
+      channel: 'dashboard',
+      chatId: 'dashboard',
+      createdAt: repair.createdAt,
+      updatedAt: repair.createdAt,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +800,7 @@ function AgentInlineConfig({
               value={selectionValue}
               options={modelOptions}
               onChange={handleSelectionChange}
-              placeholder="—"
+              placeholder={copy.noModel}
               searchPlaceholder={copy.modelSearchPlaceholder}
               noMatchesText={copy.modelSearchEmpty}
               currentLabel={copy.modelCurrentLabel}
@@ -761,9 +898,14 @@ function AgentRow({
   checkingAgent,
   onUpdate,
   onCheckUpdate,
+  onCheckHealth,
+  onRepairWithDefaultAgent,
   onEdit,
   loading = false,
   boundInfo,
+  health,
+  healthChecking,
+  repairStarting,
 }: {
   agent: AgentRuntimeStatus;
   copy: CopyPack;
@@ -774,9 +916,14 @@ function AgentRow({
   checkingAgent: boolean;
   onUpdate: (agent: AgentRuntimeStatus) => void;
   onCheckUpdate: (agent: AgentRuntimeStatus) => void;
+  onCheckHealth: (agent: AgentRuntimeStatus) => void;
+  onRepairWithDefaultAgent: (agent: AgentRuntimeStatus, health: AgentHealthResult) => void;
   onEdit: (agent: AgentRuntimeStatus) => void;
   loading?: boolean;
   boundInfo: BoundProfileInfo | null;
+  health: AgentHealthResult | null;
+  healthChecking: boolean;
+  repairStarting: boolean;
 }) {
   const meta = getAgentMeta(agent.agent);
   const tagline = meta.advantageKey ? t(meta.advantageKey) : '';
@@ -860,6 +1007,18 @@ function AgentRow({
             </Button>
           )}
           {!loading && agent.installed && (
+            <Button
+              variant={health?.ok ? 'ghost' : 'outline'}
+              size="sm"
+              disabled={healthChecking}
+              onClick={() => onCheckHealth(agent)}
+              title={health?.detail || copy.testAgent}
+            >
+              {healthChecking && <Spinner className="h-3 w-3" />}
+              {healthChecking ? copy.testingAgent : health?.ok ? copy.testPassed : copy.testAgent}
+            </Button>
+          )}
+          {!loading && agent.installed && (
             <Button variant="outline" size="sm" onClick={() => onEdit(agent)}>
               {copy.configure}
             </Button>
@@ -876,6 +1035,24 @@ function AgentRow({
       {!loading && agent.installed && agent.updateStatus === 'failed' && agent.updateDetail && (
         <div className="mt-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--th-badge-err-text)' }}>
           {copy.updateFailed}: {agent.updateDetail}
+        </div>
+      )}
+      {!loading && health && !health.ok && (
+        <div className="mt-1.5 flex flex-wrap items-start justify-between gap-2 text-[11px] leading-relaxed" style={{ color: 'var(--th-badge-err-text)' }}>
+          <div className="min-w-0 flex-1">
+            {copy.testFailed}: {health.detail}
+            {health.output ? <span className="ml-1 font-mono text-fg-5">{health.output}</span> : null}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={repairStarting}
+            onClick={() => onRepairWithDefaultAgent(agent, health)}
+            className="h-7 shrink-0"
+          >
+            {repairStarting && <Spinner className="h-3 w-3" />}
+            {repairStarting ? copy.repairingWithDefaultAgent : copy.repairWithDefaultAgent}
+          </Button>
         </div>
       )}
     </div>
@@ -908,6 +1085,7 @@ function SummaryField({ label, value, hint, loading = false }: {
 export function AgentTab() {
   const locale = useStore(s => s.locale);
   const toast = useStore(s => s.toast);
+  const appState = useStore(s => s.state);
   const storeAgentStatus = useStore(s => s.agentStatus);
   const setStoreAgentStatus = useStore(s => s.setAgentStatus);
   const refreshStoreAgentStatus = useStore(s => s.refreshAgentStatus);
@@ -920,7 +1098,7 @@ export function AgentTab() {
   const localBackendLayer = useLocalBackends();
 
   const [snapshot, setSnapshot] = useState<SnapshotState | null>(
-    storeAgentStatus ? { defaultAgent: storeAgentStatus.defaultAgent, agents: storeAgentStatus.agents } : null,
+    storeAgentStatus ? { defaultAgent: storeAgentStatus.defaultAgent, workdir: storeAgentStatus.workdir, agents: storeAgentStatus.agents } : null,
   );
   const [loading, setLoading] = useState(!storeAgentStatus);
   const [error, setError] = useState<string | null>(null);
@@ -930,6 +1108,12 @@ export function AgentTab() {
   const [defaultsDraft, setDefaultsDraft] = useState<Agent>('codex');
   const [updatingAgent, setUpdatingAgent] = useState<Agent | null>(null);
   const [checkingAgent, setCheckingAgent] = useState<Agent | null>(null);
+  const [healthCheckingAgents, setHealthCheckingAgents] = useState<Record<string, boolean>>({});
+  const [repairStartingAgent, setRepairStartingAgent] = useState<Agent | null>(null);
+  const [repairSession, setRepairSession] = useState<RepairSessionState | null>(null);
+  const [agentTestModal, setAgentTestModal] = useState<AgentTestModalState | null>(null);
+  const [agentTestSession, setAgentTestSession] = useState<AgentTestSessionState | null>(null);
+  const [agentHealth, setAgentHealth] = useState<Record<string, AgentHealthResult>>({});
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const hasLoaded = useRef(!!storeAgentStatus);
 
@@ -997,6 +1181,51 @@ export function AgentTab() {
   const canEditDefaults = installedAgents.length > 0;
   const agentOptions = buildAgentOptions(agents, copy);
 
+  const startRepairWithDefaultAgent = useCallback(async (agent: AgentRuntimeStatus, cause: RepairCause) => {
+    if (repairStartingAgent) return false;
+    const defaultStatus = agents.find(item => item.agent === defaultAgent && item.installed);
+    const repairStatus = defaultStatus || installedAgents[0] || null;
+    if (!repairStatus) {
+      toast(locale === 'zh-CN' ? '没有可用的默认 Agent 来修复安装问题。' : 'No available default agent can repair this install problem.', false);
+      return false;
+    }
+    const workdir = snapshot?.workdir || appState?.runtimeWorkdir || appState?.bot?.workdir || storeAgentStatus?.workdir || '';
+    if (!workdir) {
+      toast(locale === 'zh-CN' ? '没有可用的运行工作区来启动修复会话。' : 'No runtime workdir available for the repair chat.', false);
+      return false;
+    }
+
+    setRepairStartingAgent(agent.agent);
+    const targetLabel = getAgentMeta(agent.agent).label;
+    const prompt = buildRepairPrompt(agent, cause);
+    const displayPrompt = cause.kind === 'install'
+      ? `Repair ${targetLabel} install failure: ${cause.error}`
+      : `Repair ${targetLabel} health failure: ${cause.health.detail}`;
+    try {
+      const result = await api.sendSessionMessage(workdir, repairStatus.agent, '', prompt, { timeoutMs: 30_000 });
+      if (!result.ok) throw new Error(result.error || 'Failed to create repair chat');
+      const parsed = parseSessionKey(result.sessionKey);
+      if (!parsed) throw new Error('Repair chat was queued but no session id was returned');
+      setRepairSession({
+        workdir,
+        repairAgent: parsed.agent,
+        targetAgent: agent.agent,
+        targetLabel,
+        sessionId: parsed.sessionId,
+        sessionKey: result.sessionKey || `${parsed.agent}:${parsed.sessionId}`,
+        prompt,
+        displayPrompt,
+        createdAt: new Date().toISOString(),
+      });
+      return true;
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create repair chat', false);
+      return false;
+    } finally {
+      setRepairStartingAgent(current => (current === agent.agent ? null : current));
+    }
+  }, [agents, appState, defaultAgent, installedAgents, locale, repairStartingAgent, snapshot?.workdir, storeAgentStatus?.workdir, toast]);
+
   const updateRuntime = useCallback(async (patch: Record<string, unknown>) => {
     setUpdating(true);
     try {
@@ -1041,11 +1270,12 @@ export function AgentTab() {
     } catch (err) {
       const message = err instanceof Error ? err.message : t('config.agentInstallFailed');
       toast(message, false);
+      void startRepairWithDefaultAgent(agent, { kind: 'install', error: message });
       void refresh();
     } finally {
       setInstallingAgent(current => (current === agent.agent ? null : current));
     }
-  }, [applyAndSync, installingAgent, refresh, t, toast]);
+  }, [applyAndSync, installingAgent, refresh, startRepairWithDefaultAgent, t, toast]);
 
   const handleUpdate = useCallback(async (agent: AgentRuntimeStatus) => {
     if (updatingAgent) return;
@@ -1080,6 +1310,26 @@ export function AgentTab() {
     }
   }, [applyAndSync, checkingAgent, copy.loadFailed, refresh, toast]);
 
+  const handleCheckHealth = useCallback((agent: AgentRuntimeStatus) => {
+    if (!agent.installed) return;
+    const workdir = snapshot?.workdir || appState?.runtimeWorkdir || appState?.bot?.workdir || storeAgentStatus?.workdir || '';
+    if (!workdir) {
+      toast(locale === 'zh-CN' ? '没有可用的运行工作区来启动测试会话。' : 'No runtime workdir available for the test chat.', false);
+      return;
+    }
+    setAgentTestSession(null);
+    setAgentTestModal({
+      key: `${agent.agent}:${Date.now()}`,
+      workdir,
+      agent: agent.agent,
+      label: getAgentMeta(agent.agent).label,
+    });
+  }, [appState, locale, snapshot?.workdir, storeAgentStatus?.workdir, toast]);
+
+  const handleRepairWithDefaultAgent = useCallback((agent: AgentRuntimeStatus, health: AgentHealthResult) => {
+    void startRepairWithDefaultAgent(agent, { kind: 'health', health });
+  }, [startRepairWithDefaultAgent]);
+
   const initialLoading = loading && !snapshot;
   const defaultAgentValue = initialLoading
     ? t('status.loading')
@@ -1097,6 +1347,17 @@ export function AgentTab() {
 
   const editingAgentStatus = editingAgent ? agents.find(a => a.agent === editingAgent) ?? null : null;
   const editingMeta = editingAgentStatus ? getAgentMeta(editingAgentStatus.agent) : null;
+  const agentTestWorkspaces = useMemo<WorkspaceEntry[]>(() => {
+    if (!agentTestModal?.workdir) return [];
+    return [{ path: agentTestModal.workdir, name: workspaceBaseName(agentTestModal.workdir) }];
+  }, [agentTestModal?.workdir]);
+  const activeAgentTestSession: SessionInfo | null = agentTestSession ? {
+    sessionId: agentTestSession.sessionId,
+    agent: agentTestSession.agent,
+    workdir: agentTestSession.workdir,
+    workspacePath: agentTestSession.workdir,
+    runState: 'running',
+  } : null;
 
   return (
     <div className="animate-in space-y-4">
@@ -1108,7 +1369,7 @@ export function AgentTab() {
           of the page. */}
       <section className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.agentsTitle}</div>
+          <div className="text-base font-semibold tracking-tight text-fg">{copy.agentsTitle}</div>
           {initialLoading ? (
             <div className="flex items-center gap-1.5 text-[12px] text-fg-5">
               <Spinner className="h-3 w-3" />
@@ -1154,10 +1415,15 @@ export function AgentTab() {
               onInstall={handleInstall}
               updatingAgent={updatingAgent === agent.agent}
               checkingAgent={checkingAgent === agent.agent}
+              healthChecking={!!healthCheckingAgents[agent.agent]}
               onUpdate={handleUpdate}
               onCheckUpdate={handleCheckUpdate}
+              onCheckHealth={handleCheckHealth}
+              onRepairWithDefaultAgent={handleRepairWithDefaultAgent}
               onEdit={a => setEditingAgent(a.agent)}
               boundInfo={buildBoundInfo(modelLayer, agent.agent)}
+              health={agentHealth[agent.agent] || null}
+              repairStarting={repairStartingAgent === agent.agent}
             />
           ))}
         </div>
@@ -1233,6 +1499,148 @@ export function AgentTab() {
               }}
               onCancel={() => setEditingAgent(null)}
             />
+          </>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!agentTestModal}
+        onClose={() => {
+          setAgentTestModal(null);
+          setAgentTestSession(null);
+        }}
+        panelStyle={{
+          width: 'min(440px, calc(100vw - 32px))',
+          maxWidth: 'min(440px, calc(100vw - 32px))',
+          maxHeight: 'min(86vh, 760px)',
+        }}
+      >
+        {agentTestModal && (
+          <>
+            <ModalHeader
+              title={`Test ${agentTestModal.label}`}
+              description={agentTestModal.workdir}
+              onClose={() => {
+                setAgentTestModal(null);
+                setAgentTestSession(null);
+              }}
+            />
+            <div className="h-[min(66vh,620px)] min-h-[520px] overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[0_18px_48px_rgba(2,6,23,0.18)] ring-1 ring-[color:var(--th-chat-window-ring)]">
+              {activeAgentTestSession ? (
+                <SessionPanel
+                  session={activeAgentTestSession}
+                  workdir={agentTestSession?.workdir || agentTestModal.workdir}
+                  active
+                  initialPendingPrompt={agentTestSession?.pendingPrompt || null}
+                  initialPendingImageUrls={agentTestSession?.pendingImageUrls || []}
+                  initialPendingCreatedAt={agentTestSession?.pendingCreatedAt || null}
+                  onPendingPromptConsumed={() => {
+                    setAgentTestSession(current => current ? {
+                      ...current,
+                      pendingPrompt: null,
+                      pendingImageUrls: [],
+                      pendingCreatedAt: null,
+                    } : current);
+                  }}
+                  onSessionChange={next => {
+                    setAgentTestSession(current => current ? {
+                      ...current,
+                      agent: next.agent || current.agent,
+                      sessionId: next.sessionId || current.sessionId,
+                      workdir: next.workdir || current.workdir,
+                    } : current);
+                  }}
+                />
+              ) : (
+                <NewSessionView
+                  key={agentTestModal.key}
+                  workdir={agentTestModal.workdir}
+                  workspaceName={workspaceBaseName(agentTestModal.workdir)}
+                  workspaces={agentTestWorkspaces}
+                  initialAgent={agentTestModal.agent}
+                  initialDraftPrompt="Say OK only."
+                  initialAutoSend
+                  onSessionCreated={(next, pendingPrompt, pendingImageUrls, pendingCreatedAt) => {
+                    setAgentTestSession({
+                      workdir: next.workdir,
+                      agent: next.agent,
+                      sessionId: next.sessionId,
+                      pendingPrompt: pendingPrompt || null,
+                      pendingImageUrls: pendingImageUrls || [],
+                      pendingCreatedAt: pendingCreatedAt || null,
+                    });
+                  }}
+                  onMultiSessionCreated={(nextSessions, prompt) => {
+                    const next = nextSessions[0];
+                    if (!next) return;
+                    setAgentTestSession({
+                      workdir: next.workdir,
+                      agent: next.agent,
+                      sessionId: next.sessionId,
+                      pendingPrompt: prompt,
+                      pendingImageUrls: [],
+                      pendingCreatedAt: new Date().toISOString(),
+                    });
+                  }}
+                  onClose={() => {
+                    setAgentTestModal(null);
+                    setAgentTestSession(null);
+                  }}
+                  t={t}
+                />
+              )}
+            </div>
+          </>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!repairSession}
+        onClose={() => setRepairSession(null)}
+        wide
+        panelStyle={{
+          maxWidth: 'min(980px, calc(100vw - 32px))',
+          maxHeight: 'min(92vh, 860px)',
+        }}
+      >
+        {repairSession && (
+          <>
+            <ModalHeader
+              title={copy.repairModalTitle}
+              description={copy.repairModalDescription(repairSession.targetLabel)}
+              onClose={() => setRepairSession(null)}
+            />
+            <div className="space-y-3">
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px]">
+                <div className="flex min-w-0 items-center gap-2">
+                  <BrandIcon brand={repairSession.repairAgent} size={14} />
+                  <span className="font-mono text-fg-3">{repairSession.sessionKey}</span>
+                </div>
+                <span className="truncate text-fg-5">{repairSession.workdir}</span>
+              </div>
+              <div className="h-[min(58vh,560px)] min-h-[420px] overflow-hidden rounded-lg border border-edge bg-[var(--th-session-bg)]">
+                <SessionPanel
+                  session={makeRepairSessionInfo(repairSession)}
+                  workdir={repairSession.workdir}
+                  active
+                  initialPendingPrompt={repairSession.displayPrompt}
+                  initialPendingCreatedAt={repairSession.createdAt}
+                  onPendingPromptConsumed={() => {
+                    setRepairSession(current => current?.sessionKey === repairSession.sessionKey
+                      ? { ...current, displayPrompt: '' }
+                      : current);
+                  }}
+                  onSessionChange={(next) => {
+                    setRepairSession(current => current ? {
+                      ...current,
+                      repairAgent: next.agent,
+                      sessionId: next.sessionId,
+                      sessionKey: `${next.agent}:${next.sessionId}`,
+                    } : current);
+                  }}
+                />
+              </div>
+            </div>
           </>
         )}
       </Modal>

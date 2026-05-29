@@ -657,12 +657,13 @@ describe('Bot external session control', () => {
     });
     const indexPath = path.join(workdir, '.pikiclaw', 'sessions', 'index.json');
     const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    const orphanRunUpdatedAt = new Date(Date.now() - 40 * 60_000).toISOString();
     index.sessions[0] = {
       ...index.sessions[0],
       runState: 'running',
       runDetail: null,
       runPid: null,
-      runUpdatedAt: new Date(Date.now() - 40 * 60_000).toISOString(),
+      runUpdatedAt: orphanRunUpdatedAt,
       autoResumeAttempts: 0,
       userStatus: 'active',
     };
@@ -677,6 +678,7 @@ describe('Bot external session control', () => {
       autoResumeAttempts: 0,
       runState: 'incomplete',
       runDetail: 'Process exited before reporting completion.',
+      runUpdatedAt: orphanRunUpdatedAt,
     });
     expect(vi.mocked(doStream)).not.toHaveBeenCalled();
     expect(bot.activeTasks.size).toBe(0);

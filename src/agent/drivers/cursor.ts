@@ -47,9 +47,10 @@ function cursorArgs(opts: StreamOpts, prompt: string): string[] {
 
 function listCursorModels(): ModelListResult {
   const fallback = [
-    { id: 'gpt-5', alias: null },
-    { id: 'sonnet-4', alias: null },
-    { id: 'sonnet-4-thinking', alias: null },
+    { id: 'auto', alias: 'Auto' },
+    { id: 'gpt-5.3-codex', alias: 'Codex 5.3' },
+    { id: 'composer-2.5-fast', alias: 'Composer 2.5 Fast' },
+    { id: 'gpt-5.2', alias: 'GPT-5.2' },
   ];
   try {
     const raw = execFileSync('cursor-agent', ['--list-models'], { encoding: 'utf8', timeout: 5_000 });

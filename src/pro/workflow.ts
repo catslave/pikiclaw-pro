@@ -6,8 +6,16 @@ import path from 'node:path';
 export interface AgentAssistant {
   id: string;
   name: string;
+  kind?: 'page-owner' | 'task-stage' | 'creation' | 'automation' | 'custom';
+  surfaceId?: string;
+  objectTypes?: string[];
   responsibility: string;
+  prompt?: string;
+  defaultPrompt?: string;
   preferredAgents: string[];
+  allowedActions?: string[];
+  builtIn?: boolean;
+  enabled?: boolean;
   avatarSeed?: string;
   createdAt: string;
   updatedAt: string;
@@ -42,6 +50,21 @@ export interface JiraSyncRunEvent {
   detail?: string;
 }
 
+export interface JiraSyncRunChange {
+  taskId?: string;
+  jiraKey?: string;
+  title: string;
+  action: 'created' | 'updated' | 'unchanged';
+  summary?: string;
+  status?: string;
+  kind?: string;
+  sprint?: string;
+  assignee?: string;
+  priority?: string;
+  dueDate?: string;
+  updatedAt?: string;
+}
+
 export interface JiraSyncRun {
   id: string;
   status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed';
@@ -52,6 +75,9 @@ export interface JiraSyncRun {
   sessionKey?: string;
   ticketCount?: number;
   taskCount?: number;
+  analysisSummary?: string;
+  issueKeys?: string[];
+  changes?: JiraSyncRunChange[];
   error?: string;
   startedAt: string;
   updatedAt: string;
@@ -120,66 +146,210 @@ const DEFAULT_JIRA_CONFIG: JiraWorkflowConfig = {
 
 const DEFAULT_ASSISTANTS: AgentAssistant[] = [
   {
+    id: 'assistant_dashboard_owner',
+    name: 'Dashboard Assistant',
+    kind: 'page-owner',
+    surfaceId: 'dashboard',
+    objectTypes: ['jira-task', 'task', 'task-stage', 'jira-sync'],
+    responsibility: 'Own the Jira dashboard workbench, help the user clarify tickets, start coding work, track progress, and coordinate manual Jira sync without automatically closing remote tickets.',
+    prompt: 'You are the Dashboard/Jira owner assistant for Pikiclaw. Your job is to help the user complete every task in the dashboard. Use the lifecycle backlog -> refinement -> working -> done. In refinement, inspect the ticket and context, produce a task brief with goals, questions, risks, acceptance points, and estimate. Only start coding after the user confirms. In working, report concrete progress: files viewed, searches, commands/tests, changed files count, current step, and remaining risk. Never transition remote Jira automatically; only prepare or perform remote updates when the user explicitly asks for manual sync/update.',
+    defaultPrompt: 'You are the Dashboard/Jira owner assistant for Pikiclaw. Your job is to help the user complete every task in the dashboard. Use the lifecycle backlog -> refinement -> working -> done. In refinement, inspect the ticket and context, produce a task brief with goals, questions, risks, acceptance points, and estimate. Only start coding after the user confirms. In working, report concrete progress: files viewed, searches, commands/tests, changed files count, current step, and remaining risk. Never transition remote Jira automatically; only prepare or perform remote updates when the user explicitly asks for manual sync/update.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-task', 'sync-jira', 'analyze-task', 'start-refinement', 'start-working', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-05-30T00:00:00.000Z',
+    updatedAt: '2026-05-30T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_agents_owner',
+    name: 'Agent Page Assistant',
+    kind: 'page-owner',
+    surfaceId: 'agents',
+    objectTypes: ['agent', 'assistant', 'model', 'profile', 'automation'],
+    responsibility: 'Own the Agents page, help the user create and maintain agents, assistants, model/profile bindings, tests, prompts, and assistant history.',
+    prompt: 'You are the Agents page owner assistant for Pikiclaw. Help the user create agents and assistants through dialogue, ask only necessary clarifying questions, then create or update the right configuration or files. You also help test assistants, explain model/profile choices, review prompt changes, and maintain assistant history. Treat each assistant as an owned product object with responsibility, scope, prompt, allowed actions, test path, and rollback/reset behavior.',
+    defaultPrompt: 'You are the Agents page owner assistant for Pikiclaw. Help the user create agents and assistants through dialogue, ask only necessary clarifying questions, then create or update the right configuration or files. You also help test assistants, explain model/profile choices, review prompt changes, and maintain assistant history. Treat each assistant as an owned product object with responsibility, scope, prompt, allowed actions, test path, and rollback/reset behavior.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-agent', 'create-assistant', 'test-assistant', 'edit-prompt', 'prompt-diff', 'history'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-05-30T00:00:00.000Z',
+    updatedAt: '2026-05-30T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_skills_owner',
+    name: 'Skills Assistant',
+    kind: 'page-owner',
+    surfaceId: 'skills',
+    objectTypes: ['skill', 'skill-prompt', 'skill-test'],
+    responsibility: 'Own the Skills page, help the user create, install, edit, test, and troubleshoot Skills and their prompts.',
+    prompt: 'You are the Skills page owner assistant for Pikiclaw. Help the user create or improve Skills. Clarify triggers, workflow, tools, safety limits, expected outputs, files/scripts/templates, and validation. Keep skill files scoped, explain test steps, and prefer existing skill conventions. When editing a prompt, propose a clear prompt diff before applying changes.',
+    defaultPrompt: 'You are the Skills page owner assistant for Pikiclaw. Help the user create or improve Skills. Clarify triggers, workflow, tools, safety limits, expected outputs, files/scripts/templates, and validation. Keep skill files scoped, explain test steps, and prefer existing skill conventions. When editing a prompt, propose a clear prompt diff before applying changes.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-skill', 'install-skill', 'edit-skill', 'test-skill', 'edit-prompt', 'prompt-diff', 'history'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-05-30T00:00:00.000Z',
+    updatedAt: '2026-05-30T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_mcp_owner',
+    name: 'MCP Assistant',
+    kind: 'page-owner',
+    surfaceId: 'mcp',
+    objectTypes: ['mcp-server', 'mcp-auth', 'mcp-tool', 'mcp-health'],
+    responsibility: 'Own MCP setup, help the user create, configure, authenticate, test, and troubleshoot MCP servers.',
+    prompt: 'You are the MCP page owner assistant for Pikiclaw. Help the user create and maintain MCP servers. Clarify transport, command or URL, auth fields, scopes, environment variables, workspace/global scope, validation steps, and restart requirements. Prefer safe configuration edits and clear health checks. Do not mix Skills work into MCP work unless the user explicitly asks for a combined extension.',
+    defaultPrompt: 'You are the MCP page owner assistant for Pikiclaw. Help the user create and maintain MCP servers. Clarify transport, command or URL, auth fields, scopes, environment variables, workspace/global scope, validation steps, and restart requirements. Prefer safe configuration edits and clear health checks. Do not mix Skills work into MCP work unless the user explicitly asks for a combined extension.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-mcp', 'configure-auth', 'test-tools', 'troubleshoot', 'edit-prompt', 'prompt-diff', 'history'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-05-30T00:00:00.000Z',
+    updatedAt: '2026-05-30T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_extensions_owner',
+    name: 'Extensions Assistant',
+    kind: 'page-owner',
+    surfaceId: 'extensions',
+    objectTypes: ['extension', 'catalog-item', 'cli-tool', 'installation', 'troubleshooting'],
+    responsibility: 'Own the Extensions page, recommend, install, validate, and troubleshoot extension catalog items without replacing the dedicated Skills or MCP assistants.',
+    prompt: 'You are the Extensions page owner assistant for Pikiclaw. Help the user choose, install, validate, and troubleshoot extensions across MCP, Skills, and CLI catalog items. Recommend the right extension path, identify missing credentials or local dependencies, and route deep Skills or MCP creation work to the dedicated owner assistant when appropriate. Keep installed state, scope, and validation evidence explicit.',
+    defaultPrompt: 'You are the Extensions page owner assistant for Pikiclaw. Help the user choose, install, validate, and troubleshoot extensions across MCP, Skills, and CLI catalog items. Recommend the right extension path, identify missing credentials or local dependencies, and route deep Skills or MCP creation work to the dedicated owner assistant when appropriate. Keep installed state, scope, and validation evidence explicit.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'recommend', 'install', 'validate-extension', 'troubleshoot', 'edit-prompt', 'prompt-diff', 'history'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-05-30T00:00:00.000Z',
+    updatedAt: '2026-05-30T00:00:00.000Z',
+  },
+  {
     id: 'assistant_refinement',
     name: 'Refinement Assistant',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['task', 'jira-task', 'task-brief'],
     responsibility: 'Clarify ticket/task goal, boundary, acceptance points, risks, and estimate coding, review, verification, and user-understanding time.',
-    preferredAgents: ['codex', 'claude'],
+    prompt: 'Clarify ticket/task goal, boundary, acceptance points, risks, and estimate coding, review, verification, and user-understanding time. Output a concise task brief with open questions, assumptions, risks, acceptance criteria, and a recommendation for whether coding can start.',
+    defaultPrompt: 'Clarify ticket/task goal, boundary, acceptance points, risks, and estimate coding, review, verification, and user-understanding time. Output a concise task brief with open questions, assumptions, risks, acceptance criteria, and a recommendation for whether coding can start.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'analyze-task', 'start-working', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
   {
     id: 'assistant_coding',
     name: 'Coding Assistant',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['task', 'code-change', 'validation'],
     responsibility: 'Implement scoped changes, keep diffs reviewable, run focused validation, and respond to review comments with follow-up coding.',
-    preferredAgents: ['codex', 'claude'],
+    prompt: 'Implement scoped changes with minimal diffs. Keep changes reviewable, inspect relevant files before editing, run focused validation when available, summarize changed files/tests/risks, and respond to review comments with follow-up coding.',
+    defaultPrompt: 'Implement scoped changes with minimal diffs. Keep changes reviewable, inspect relevant files before editing, run focused validation when available, summarize changed files/tests/risks, and respond to review comments with follow-up coding.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'start-working', 'run-tests', 'summarize-files', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
   {
     id: 'assistant_ticket_sync',
     name: 'Ticket Sync Assistant',
-    responsibility: 'Sync Jira tickets into Pikiclaw tasks, append remote updates without overwriting local task history, and flag newly assigned or changed work.',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['jira-sync', 'jira-task'],
+    responsibility: 'Sync only Jira tickets assigned to the current user into Pikiclaw tasks, append remote updates without overwriting local task history, and flag newly assigned or changed work.',
+    prompt: 'Sync only Jira tickets assigned to the current user into Pikiclaw tasks. Append remote updates without overwriting local task history, flag newly assigned or changed work, and do not automatically close or transition remote Jira issues.',
+    defaultPrompt: 'Sync only Jira tickets assigned to the current user into Pikiclaw tasks. Append remote updates without overwriting local task history, flag newly assigned or changed work, and do not automatically close or transition remote Jira issues.',
     preferredAgents: ['codex'],
+    allowedActions: ['chat', 'sync-jira', 'summarize-sync', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
   {
     id: 'assistant_knowledge',
     name: 'Knowledge Assistant',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['knowledge', 'task-summary'],
     responsibility: 'After refinement completes, extract reusable concepts, terminology, assumptions, and basic knowledge points that help the user understand the task faster.',
-    preferredAgents: ['codex', 'claude'],
+    prompt: 'After refinement completes, extract reusable concepts, terminology, assumptions, and basic knowledge points that help the user understand the task faster. Keep notes concise, source-grounded, and reusable.',
+    defaultPrompt: 'After refinement completes, extract reusable concepts, terminology, assumptions, and basic knowledge points that help the user understand the task faster. Keep notes concise, source-grounded, and reusable.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'extract-knowledge', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
   {
     id: 'assistant_idea_guide',
     name: 'Idea Guide Assistant',
+    kind: 'creation',
+    surfaceId: 'dashboard',
+    objectTypes: ['idea', 'task'],
     responsibility: 'Guide the user from a rough intent to a clear idea. First research mainstream related products, implementations, patterns, and pitfalls; then ask step-by-step questions about goal, audience, boundary, workflow, constraints, risks, and acceptance points; finally synthesize a structured idea with options, tradeoffs, and next steps.',
-    preferredAgents: ['codex', 'claude'],
+    prompt: 'Guide the user from a rough intent to a clear idea. First research mainstream related products, implementations, patterns, and pitfalls when useful; then ask step-by-step questions about goal, audience, boundary, workflow, constraints, risks, and acceptance points; finally synthesize a structured idea with options, tradeoffs, and next steps.',
+    defaultPrompt: 'Guide the user from a rough intent to a clear idea. First research mainstream related products, implementations, patterns, and pitfalls when useful; then ask step-by-step questions about goal, audience, boundary, workflow, constraints, risks, and acceptance points; finally synthesize a structured idea with options, tradeoffs, and next steps.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'research', 'create-task', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-27T00:00:00.000Z',
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
   {
     id: 'assistant_mcp_creator',
     name: 'MCP Creator Assistant',
+    kind: 'creation',
+    surfaceId: 'mcp',
+    objectTypes: ['mcp-server', 'mcp-auth'],
     responsibility: 'Help the user create or configure MCP servers. Collect transport, command or URL, auth fields, scopes, environment variables, validation steps, and restart requirements; then create or update the MCP configuration when enough information is available.',
+    prompt: 'Help the user create or configure MCP servers. Collect transport, command or URL, auth fields, scopes, environment variables, validation steps, and restart requirements; then create or update the MCP configuration when enough information is available.',
+    defaultPrompt: 'Help the user create or configure MCP servers. Collect transport, command or URL, auth fields, scopes, environment variables, validation steps, and restart requirements; then create or update the MCP configuration when enough information is available.',
     preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-mcp', 'configure-auth', 'test-tools', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-28T00:00:00.000Z',
     updatedAt: '2026-05-28T00:00:00.000Z',
   },
   {
     id: 'assistant_skill_creator',
     name: 'Skill Creator Assistant',
+    kind: 'creation',
+    surfaceId: 'skills',
+    objectTypes: ['skill', 'skill-prompt'],
     responsibility: 'Help the user create Pikiclaw/Codex skills. Clarify the workflow, trigger phrases, required inputs, tools, scripts, safety boundaries, and expected outputs; then create or update the skill files and explain how to validate them.',
+    prompt: 'Help the user create Pikiclaw/Codex skills. Clarify the workflow, trigger phrases, required inputs, tools, scripts, safety boundaries, and expected outputs; then create or update the skill files and explain how to validate them.',
+    defaultPrompt: 'Help the user create Pikiclaw/Codex skills. Clarify the workflow, trigger phrases, required inputs, tools, scripts, safety boundaries, and expected outputs; then create or update the skill files and explain how to validate them.',
     preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-skill', 'edit-skill', 'test-skill', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-28T00:00:00.000Z',
     updatedAt: '2026-05-28T00:00:00.000Z',
   },
   {
     id: 'assistant_task_creator',
     name: 'Task Creator Assistant',
+    kind: 'creation',
+    surfaceId: 'dashboard',
+    objectTypes: ['task', 'jira-task'],
     responsibility: 'Help the user create useful tasks from rough intent. Clarify goal, boundary, assumptions, acceptance points, workspace, owner mode, direct or interactive execution mode, and expected evidence before creating or drafting the task.',
-    preferredAgents: ['codex', 'claude'],
+    prompt: 'Help the user create useful tasks from rough intent. Clarify goal, boundary, assumptions, acceptance points, workspace, owner mode, direct or interactive execution mode, and expected evidence before creating or drafting the task.',
+    defaultPrompt: 'Help the user create useful tasks from rough intent. Clarify goal, boundary, assumptions, acceptance points, workspace, owner mode, direct or interactive execution mode, and expected evidence before creating or drafting the task.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'create-task', 'edit-prompt', 'history'],
+    builtIn: true,
+    enabled: true,
     createdAt: '2026-05-28T00:00:00.000Z',
     updatedAt: '2026-05-28T00:00:00.000Z',
   },
@@ -219,8 +389,37 @@ function readFile(): WorkflowFile {
   }
 }
 
-function withAssistantAvatar(assistant: AgentAssistant): AgentAssistant {
-  return assistant.avatarSeed ? assistant : { ...assistant, avatarSeed: assistant.id };
+function normalizeStringList(value: unknown, maxItems = 12, maxLength = 160): string[] {
+  return Array.isArray(value)
+    ? value.map(item => normalizeText(item, maxLength)).filter(Boolean).slice(0, maxItems)
+    : [];
+}
+
+function normalizeAssistantKind(value: unknown): AgentAssistant['kind'] {
+  return value === 'page-owner' || value === 'task-stage' || value === 'creation' || value === 'automation' || value === 'custom'
+    ? value
+    : undefined;
+}
+
+function withAssistantDefaults(assistant: AgentAssistant): AgentAssistant {
+  const builtin = DEFAULT_ASSISTANTS.find(item => item.id === assistant.id);
+  const merged = builtin ? { ...builtin, ...assistant } : assistant;
+  const responsibility = normalizeText(merged.responsibility) || builtin?.responsibility || 'Handle a specific workflow when assigned.';
+  const defaultPrompt = normalizeText(merged.defaultPrompt) || builtin?.defaultPrompt || responsibility;
+  return {
+    ...merged,
+    kind: normalizeAssistantKind(merged.kind) || builtin?.kind || 'custom',
+    surfaceId: normalizeText(merged.surfaceId, 160) || builtin?.surfaceId,
+    objectTypes: normalizeStringList(merged.objectTypes, 16, 120),
+    responsibility,
+    prompt: normalizeText(merged.prompt, 48_000) || defaultPrompt,
+    defaultPrompt,
+    preferredAgents: normalizeStringList(merged.preferredAgents, 8, 60),
+    allowedActions: normalizeStringList(merged.allowedActions, 24, 120),
+    builtIn: builtin ? true : merged.builtIn === true,
+    enabled: merged.enabled !== false,
+    avatarSeed: merged.avatarSeed || merged.id,
+  };
 }
 
 function titleFromPrompt(prompt: string): string {
@@ -243,7 +442,26 @@ export function listAgentAssistants(): AgentAssistant[] {
   return [
     ...fileAssistants,
     ...DEFAULT_ASSISTANTS.filter(item => !customIds.has(item.id) && !deletedIds.has(item.id)),
-  ].map(withAssistantAvatar).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  ].map(withAssistantDefaults).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function getAgentAssistant(id: string): AgentAssistant | undefined {
+  const assistantId = normalizeText(id, 160);
+  if (!assistantId) return undefined;
+  return listAgentAssistants().find(item => item.id === assistantId);
+}
+
+export function getAssistantPrompt(id: string): { assistant: AgentAssistant; prompt: string; defaultPrompt: string; customized: boolean } {
+  const assistant = getAgentAssistant(id);
+  if (!assistant) throw new Error('assistant not found');
+  const defaultPrompt = assistant.defaultPrompt || assistant.responsibility;
+  const prompt = assistant.prompt || defaultPrompt;
+  return {
+    assistant,
+    prompt,
+    defaultPrompt,
+    customized: prompt.trim() !== defaultPrompt.trim(),
+  };
 }
 
 export function getJiraWorkflowConfig(): JiraWorkflowConfig {
@@ -287,17 +505,25 @@ export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): Ji
   return next;
 }
 
-export function createAgentAssistant(input: { name: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {
+export function createAgentAssistant(input: { name: unknown; responsibility?: unknown; preferredAgents?: unknown; kind?: unknown; surfaceId?: unknown; objectTypes?: unknown; prompt?: unknown; defaultPrompt?: unknown; allowedActions?: unknown; enabled?: unknown }): AgentAssistant {
   const name = normalizeText(input.name, 120);
   if (!name) throw new Error('name is required');
   const now = new Date().toISOString();
+  const responsibility = normalizeText(input.responsibility) || 'Handle a specific workflow when assigned.';
+  const defaultPrompt = normalizeText(input.defaultPrompt, 48_000) || normalizeText(input.prompt, 48_000) || responsibility;
   const assistant: AgentAssistant = {
     id: newId('assistant'),
     name,
-    responsibility: normalizeText(input.responsibility) || 'Handle a specific workflow when assigned.',
-    preferredAgents: Array.isArray(input.preferredAgents)
-      ? input.preferredAgents.map(agent => normalizeText(agent, 60)).filter(Boolean).slice(0, 8)
-      : [],
+    kind: normalizeAssistantKind(input.kind) || 'custom',
+    surfaceId: normalizeText(input.surfaceId, 160) || undefined,
+    objectTypes: normalizeStringList(input.objectTypes, 16, 120),
+    responsibility,
+    prompt: normalizeText(input.prompt, 48_000) || defaultPrompt,
+    defaultPrompt,
+    preferredAgents: normalizeStringList(input.preferredAgents, 8, 60),
+    allowedActions: normalizeStringList(input.allowedActions, 24, 120),
+    builtIn: false,
+    enabled: input.enabled !== false,
     avatarSeed: newAvatarSeed(),
     createdAt: now,
     updatedAt: now,
@@ -305,10 +531,10 @@ export function createAgentAssistant(input: { name: unknown; responsibility?: un
   const file = readFile();
   file.assistants.unshift(assistant);
   writeFile(file);
-  return assistant;
+  return withAssistantDefaults(assistant);
 }
 
-export function updateAgentAssistant(id: string, input: { name?: unknown; responsibility?: unknown; preferredAgents?: unknown }): AgentAssistant {
+export function updateAgentAssistant(id: string, input: { name?: unknown; responsibility?: unknown; preferredAgents?: unknown; kind?: unknown; surfaceId?: unknown; objectTypes?: unknown; prompt?: unknown; defaultPrompt?: unknown; allowedActions?: unknown; enabled?: unknown }): AgentAssistant {
   const assistantId = normalizeText(id, 160);
   if (!assistantId) throw new Error('assistant id is required');
   const file = readFile();
@@ -320,16 +546,35 @@ export function updateAgentAssistant(id: string, input: { name?: unknown; respon
     file.assistants.unshift(assistant);
     file.deletedAssistantIds = (file.deletedAssistantIds || []).filter(item => item !== assistantId);
   }
+  const builtin = DEFAULT_ASSISTANTS.find(item => item.id === assistantId);
   const name = normalizeText(input.name, 120);
   if (name) assistant.name = name;
   const responsibility = normalizeText(input.responsibility);
   if (responsibility) assistant.responsibility = responsibility;
-  if (Array.isArray(input.preferredAgents)) {
-    assistant.preferredAgents = input.preferredAgents.map(agent => normalizeText(agent, 60)).filter(Boolean).slice(0, 8);
-  }
+  const kind = normalizeAssistantKind(input.kind);
+  if (kind) assistant.kind = kind;
+  if (input.surfaceId !== undefined) assistant.surfaceId = normalizeText(input.surfaceId, 160) || undefined;
+  if (Array.isArray(input.objectTypes)) assistant.objectTypes = normalizeStringList(input.objectTypes, 16, 120);
+  if (input.defaultPrompt !== undefined) assistant.defaultPrompt = normalizeText(input.defaultPrompt, 48_000) || builtin?.defaultPrompt || assistant.responsibility;
+  if (input.prompt !== undefined) assistant.prompt = normalizeText(input.prompt, 48_000) || assistant.defaultPrompt || builtin?.defaultPrompt || assistant.responsibility;
+  if (Array.isArray(input.preferredAgents)) assistant.preferredAgents = normalizeStringList(input.preferredAgents, 8, 60);
+  if (Array.isArray(input.allowedActions)) assistant.allowedActions = normalizeStringList(input.allowedActions, 24, 120);
+  if (typeof input.enabled === 'boolean') assistant.enabled = input.enabled;
   assistant.updatedAt = new Date().toISOString();
   writeFile(file);
-  return withAssistantAvatar(assistant);
+  return withAssistantDefaults(assistant);
+}
+
+export function updateAgentAssistantPrompt(id: string, input: { prompt?: unknown }): AgentAssistant {
+  return updateAgentAssistant(id, { prompt: input.prompt });
+}
+
+export function resetAgentAssistantPrompt(id: string): AgentAssistant {
+  const assistantId = normalizeText(id, 160);
+  if (!assistantId) throw new Error('assistant id is required');
+  const current = getAgentAssistant(assistantId);
+  if (!current) throw new Error('assistant not found');
+  return updateAgentAssistant(assistantId, { prompt: current.defaultPrompt || current.responsibility });
 }
 
 export function deleteAgentAssistant(id: string): AgentAssistant {
@@ -346,7 +591,7 @@ export function deleteAgentAssistant(id: string): AgentAssistant {
     file.deletedAssistantIds = [...deleted];
   }
   writeFile(file);
-  return withAssistantAvatar(existing);
+  return withAssistantDefaults(existing);
 }
 
 export function listAutomationRules(): AutomationRule[] {
@@ -474,6 +719,24 @@ export function updateJiraSyncRun(id: string, patch: Partial<Omit<JiraSyncRun, '
   if (patch.sessionKey !== undefined) run.sessionKey = normalizeText(patch.sessionKey, 240) || undefined;
   if (typeof patch.ticketCount === 'number') run.ticketCount = Math.max(0, Math.floor(patch.ticketCount));
   if (typeof patch.taskCount === 'number') run.taskCount = Math.max(0, Math.floor(patch.taskCount));
+  if (patch.analysisSummary !== undefined) run.analysisSummary = normalizeText(patch.analysisSummary, 4000) || undefined;
+  if (Array.isArray(patch.issueKeys)) run.issueKeys = patch.issueKeys.map(key => normalizeText(key, 80)).filter(Boolean).slice(0, 80);
+  if (Array.isArray(patch.changes)) {
+    run.changes = patch.changes.slice(0, 100).map(change => ({
+      taskId: normalizeText(change.taskId, 160) || undefined,
+      jiraKey: normalizeText(change.jiraKey, 80) || undefined,
+      title: normalizeText(change.title, 240) || normalizeText(change.jiraKey, 80) || 'Untitled Jira issue',
+      action: change.action === 'created' || change.action === 'updated' || change.action === 'unchanged' ? change.action : 'updated',
+      summary: normalizeText(change.summary, 800) || undefined,
+      status: normalizeText(change.status, 120) || undefined,
+      kind: normalizeText(change.kind, 80) || undefined,
+      sprint: normalizeText(change.sprint, 120) || undefined,
+      assignee: normalizeText(change.assignee, 240) || undefined,
+      priority: normalizeText(change.priority, 120) || undefined,
+      dueDate: normalizeText(change.dueDate, 80) || undefined,
+      updatedAt: normalizeText(change.updatedAt, 80) || undefined,
+    }));
+  }
   if (patch.error !== undefined) run.error = normalizeText(patch.error, 2000) || undefined;
   if (patch.status === 'completed' || patch.status === 'failed') run.completedAt = now;
   const label = normalizeText(patch.event?.label, 240);

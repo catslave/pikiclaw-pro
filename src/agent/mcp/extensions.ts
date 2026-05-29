@@ -259,6 +259,23 @@ function isGenericDemoEntry(entry: McpExtensionEntry): boolean {
   return args.some(a => HIDDEN_GENERIC_DEMO_PACKAGES.has(a));
 }
 
+function inferCustomMcpIconSlug(entry: McpExtensionEntry): string | undefined {
+  const text = [
+    entry.name,
+    entry.config.type,
+    entry.config.command,
+    ...(entry.config.args || []),
+    entry.config.type === 'http' ? entry.config.url : '',
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (text.includes('clickhouse')) return 'clickhouse';
+  if (text.includes('postgres') || text.includes('postgresql')) return 'postgres';
+  if (text.includes('sqlite')) return 'sqlite';
+  if (text.includes('github')) return 'github';
+  if (text.includes('gitlab')) return 'gitlab';
+  if (text.includes('jira') || text.includes('atlassian') || text.includes('confluence')) return 'atlassian';
+  return undefined;
+}
+
 function transportSummary(transport: RecommendedMcpServer['transport']): string {
   if (transport.type === 'http') return transport.url;
   return [transport.command, ...transport.args.filter(a => a !== '-y')].join(' ');
@@ -416,6 +433,7 @@ export function getCatalogItems(opts: {
       description: cmdSummary(entry.config),
       descriptionZh: cmdSummary(entry.config),
       category: 'custom',
+      iconSlug: inferCustomMcpIconSlug(entry),
       transport: {
         type: entry.config.type === 'http' ? 'http' : 'stdio',
         summary: cmdSummary(entry.config),

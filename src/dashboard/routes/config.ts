@@ -156,6 +156,32 @@ function openPathWithTarget(filePath: string, target: OpenTarget, isDirectory: b
   }
 }
 
+function isSafeExternalUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function openExternalUrl(url: string) {
+  if (process.platform === 'darwin') {
+    try {
+      runOpenCommand('open', ['-a', 'Google Chrome', url]);
+      return;
+    } catch {
+      runOpenCommand('open', [url]);
+      return;
+    }
+  }
+  if (process.platform === 'win32') {
+    runOpenCommand('cmd', ['/c', 'start', '', url]);
+    return;
+  }
+  runOpenCommand('xdg-open', [url]);
+}
+
 const INLINE_FILE_MAX_BYTES = 512 * 1024;
 const INLINE_DIFF_MAX_BYTES = 1024 * 1024;
 
@@ -678,6 +704,21 @@ app.post('/api/open-in-editor', async (c) => {
   }
 });
 
+app.post('/api/open-external-url', async (c) => {
+  try {
+    const body = await c.req.json();
+    const url = typeof body?.url === 'string' ? body.url.trim() : '';
+    if (!url) return c.json({ ok: false, error: 'url is required' }, 400);
+    if (!isSafeExternalUrl(url)) return c.json({ ok: false, error: 'Only http(s) URLs can be opened externally' }, 400);
+    openExternalUrl(url);
+    return c.json({ ok: true });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    runtime.log(`[open-external-url] failed: ${detail}`);
+    return c.json({ ok: false, error: detail }, 500);
+  }
+});
+
 // Open git diff for a file in the selected editor
 app.post('/api/open-diff', async (c) => {
   try {
@@ -746,11 +787,12 @@ function readGitChanges(gitRoot: string, workspaceDir: string) {
     throw new Error(detail || 'Failed to read git status');
   }
 
-  const lines = String(result.stdout || '').split('\n').filter(line => line.trim().length > 0);
-  return lines.map(line => {
-    const statusCode = line.slice(0, 2);
-    const relFromGitRoot = parseGitStatusPath(line.slice(3));
-    const absPath = path.resolve(gitRoot, relFromGitRoot);
+	const lines = String(result.stdout || '').split('\n').filter(line => line.trim().length > 0);
+	return lines.map(line => {
+	  const statusCode = line.slice(0, 2);
+	  const relFromGitRoot = parseGitStatusPath(line.slice(3));
+	  if (relFromGitRoot === '.pikiclaw' || relFromGitRoot.startsWith('.pikiclaw/')) return null;
+	  const absPath = path.resolve(gitRoot, relFromGitRoot);
     if (!isPathInside(workspaceDir, absPath)) return null;
     return {
       status: normalizeGitChangeStatus(statusCode),

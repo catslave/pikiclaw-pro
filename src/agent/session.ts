@@ -159,6 +159,8 @@ export function setSessionRunState(record: ManagedSessionRecord, runState: Sessi
   record.runPid = runState === 'running' ? process.pid : null;
 }
 
+export const ORPHANED_RUNNING_RUN_DETAIL = 'Process exited before reporting completion.';
+
 function incompleteRunDetail(result: Pick<StreamResult, 'error' | 'stopReason' | 'message'>): string | null {
   if (result.stopReason === 'interrupted') return 'Interrupted by user.';
   if (result.stopReason === 'timeout') return 'Timed out before completion.';
@@ -212,23 +214,65 @@ export function isRunningSessionStale(
  * owning process is no longer alive (or that has gone stale past `ageThresholdMs`).
  * Returns the number of records downgraded. Safe to call at startup and periodically.
  */
-export function reconcileOrphanedRunningSessions(workdir: string, ageThresholdMs = 30 * 60_000): number {
+export interface ReconciledOrphanedRunningSession {
+  record: ManagedSessionRecord;
+  previousRunPid: number | null;
+  previousRunUpdatedAt: string | null;
+  reconciledAt: string;
+}
+
+export function reconcileAndCollectOrphanedRunningSessions(
+  workdir: string,
+  ageThresholdMs = 30 * 60_000,
+): ReconciledOrphanedRunningSession[] {
   const resolvedWorkdir = path.resolve(workdir);
   const index = loadSessionIndex(resolvedWorkdir);
-  const downgraded: ManagedSessionRecord[] = [];
+  const downgraded: ReconciledOrphanedRunningSession[] = [];
   for (const record of index.sessions) {
     if (!isRunningSessionStale(record, ageThresholdMs)) continue;
-    setSessionRunState(record, 'incomplete', 'Process exited before reporting completion.');
-    downgraded.push(record);
+    const previousRunPid = record.runPid ?? null;
+    const previousRunUpdatedAt = record.runUpdatedAt ?? null;
+    // Keep the original run timestamp. Reconcile time is only when we noticed
+    // the orphan; if we stamp it here, native transcripts that completed just
+    // before process death look older and cannot recover the session state.
+    setSessionRunState(record, 'incomplete', ORPHANED_RUNNING_RUN_DETAIL, previousRunUpdatedAt || undefined);
+    downgraded.push({
+      record,
+      previousRunPid,
+      previousRunUpdatedAt,
+      reconciledAt: new Date().toISOString(),
+    });
   }
   if (downgraded.length > 0) {
     writeSessionIndex(resolvedWorkdir, index.sessions);
-    for (const record of downgraded) {
-      try { writeSessionMeta(record); } catch {}
+    for (const item of downgraded) {
+      try { writeSessionMeta(item.record); } catch {}
     }
     agentLog(`[sessions] reconciled ${downgraded.length} orphaned running session(s) in ${resolvedWorkdir}`);
   }
-  return downgraded.length;
+  return downgraded;
+}
+
+export function reconcileOrphanedRunningSessions(workdir: string, ageThresholdMs = 30 * 60_000): number {
+  return reconcileAndCollectOrphanedRunningSessions(workdir, ageThresholdMs).length;
+}
+
+export function markSessionAutoResumeAttempt(
+  workdir: string,
+  agent: Agent,
+  sessionId: string,
+  error: string | null = null,
+  increment = true,
+): ManagedSessionRecord | null {
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const record = index.sessions.find(entry => entry.agent === agent && entry.sessionId === sessionId) || null;
+  if (!record) return null;
+  record.autoResumeAttempts = Math.max(0, record.autoResumeAttempts || 0) + (increment ? 1 : 0);
+  record.autoResumeLastAt = new Date().toISOString();
+  record.autoResumeLastError = error ? shortValue(error, 180) : null;
+  saveSessionRecord(resolvedWorkdir, record);
+  return record;
 }
 
 export function applySessionRunResult(
@@ -379,6 +423,11 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     runDetail: normalizeSessionRunDetail(raw?.runState, raw?.runDetail),
     runUpdatedAt: normalizeSessionRunUpdatedAt(raw?.runUpdatedAt, typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString()),
     runPid: typeof raw?.runPid === 'number' && Number.isFinite(raw.runPid) ? raw.runPid : null,
+    autoResumeAttempts: typeof raw?.autoResumeAttempts === 'number' && Number.isFinite(raw.autoResumeAttempts)
+      ? Math.max(0, Math.floor(raw.autoResumeAttempts))
+      : 0,
+    autoResumeLastAt: typeof raw?.autoResumeLastAt === 'string' && raw.autoResumeLastAt.trim() ? raw.autoResumeLastAt : null,
+    autoResumeLastError: typeof raw?.autoResumeLastError === 'string' && raw.autoResumeLastError.trim() ? raw.autoResumeLastError : null,
     classification: raw?.classification ?? null,
     userStatus: raw?.userStatus ?? null,
     userNote: typeof raw?.userNote === 'string' ? raw.userNote : null,
@@ -428,6 +477,9 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     title: record.title, titleSource: record.titleSource ?? null, model: record.model, thinkingEffort: record.thinkingEffort, stagedFiles: record.stagedFiles,
     runState: record.runState, runDetail: record.runDetail, runUpdatedAt: record.runUpdatedAt,
     runPid: record.runPid,
+    autoResumeAttempts: record.autoResumeAttempts || 0,
+    autoResumeLastAt: record.autoResumeLastAt ?? null,
+    autoResumeLastError: record.autoResumeLastError ?? null,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
@@ -585,6 +637,9 @@ export function updateSessionMeta(
       runDetail: null,
       runUpdatedAt: null,
       runPid: null,
+      autoResumeAttempts: 0,
+      autoResumeLastAt: null,
+      autoResumeLastError: null,
       classification: null,
       userStatus: null,
       userNote: null,
@@ -910,6 +965,9 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       title, titleSource: title ? 'prompt' : null, model: null, thinkingEffort: null, stagedFiles: [],
       runState: 'completed', runDetail: null, runUpdatedAt: now,
       runPid: null,
+      autoResumeAttempts: 0,
+      autoResumeLastAt: null,
+      autoResumeLastError: null,
       classification: null, userStatus: null, userNote: null, pinned: false,
       archived: false, archivedAt: null,
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
@@ -978,6 +1036,9 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
     runPid: record.runPid,
+    autoResumeAttempts: record.autoResumeAttempts || 0,
+    autoResumeLastAt: record.autoResumeLastAt ?? null,
+    autoResumeLastError: record.autoResumeLastError ?? null,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
@@ -1276,6 +1337,13 @@ function preferNativeSessionTimeline(managed: SessionInfo, native: SessionInfo):
   return nativeTs > managedTs;
 }
 
+function shouldRecoverOrphanedRunFromNative(managed: SessionInfo, native: SessionInfo): boolean {
+  return managed.runState === 'incomplete'
+    && managed.runDetail === ORPHANED_RUNNING_RUN_DETAIL
+    && native.runState === 'completed'
+    && !!native.lastAnswer?.trim();
+}
+
 export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], nativeSessions: SessionInfo[]): SessionInfo[] {
   const managedById = new Map<string, SessionInfo>();
   const merged: SessionInfo[] = [];
@@ -1294,7 +1362,8 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       merged.push(native);
       continue;
     }
-    const useNativeTimeline = preferNativeSessionTimeline(managed, native);
+    const recoverOrphanedRun = shouldRecoverOrphanedRunFromNative(managed, native);
+    const useNativeTimeline = recoverOrphanedRun || preferNativeSessionTimeline(managed, native);
     const adoptedTitle = canAdoptAgentTitle(managed) ? nativeAgentTitle(native) : null;
     merged.push({
       ...managed,
@@ -1302,11 +1371,13 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       workdir: native.workdir || managed.workdir,
       workspacePath: managed.workspacePath || native.workspacePath,
       threadId: managed.threadId ?? native.threadId ?? null,
-      running: managed.running || native.running,
-      runState: managed.runState === 'running'
+      running: recoverOrphanedRun ? native.running : (managed.running || native.running),
+      runState: recoverOrphanedRun
+        ? native.runState
+        : managed.runState === 'running'
         ? managed.runState
         : (useNativeTimeline ? native.runState : managed.runState),
-      runDetail: useNativeTimeline ? (native.runDetail ?? managed.runDetail) : (managed.runDetail ?? native.runDetail),
+      runDetail: useNativeTimeline ? native.runDetail : (managed.runDetail ?? native.runDetail),
       runUpdatedAt: useNativeTimeline ? (native.runUpdatedAt ?? managed.runUpdatedAt) : (managed.runUpdatedAt ?? native.runUpdatedAt),
       // User renames are explicit and stable. Prompt-derived placeholders may
       // be replaced once by an agent-native title generated after the first turn.

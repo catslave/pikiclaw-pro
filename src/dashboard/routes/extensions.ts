@@ -21,6 +21,7 @@ import {
   checkMcpHealth, getCachedHealth, cacheHealth,
   getRecommendedMcpServer,
   listSkills, installSkill, removeSkill,
+  getGlobalSkillsRoot,
   getRecommendedSkillRepos, searchSkillRepos, searchMcpServers,
   startAuthorization, completeAuthorization, deleteMcpToken, getMcpToken,
 } from '../../agent/index.js';
@@ -134,6 +135,29 @@ function isValidWorkdir(dir: string | undefined | null): dir is string {
   if (!dir || typeof dir !== 'string') return false;
   if (!path.isAbsolute(dir)) return false;
   try { return fs.statSync(dir).isDirectory(); } catch { return false; }
+}
+
+function resolveEditableSkillFile(opts: { name: string; global?: boolean; workdir?: string }): { ok: true; file: string } | { ok: false; error: string } {
+  const name = opts.name.trim();
+  if (!name || path.basename(name) !== name || name === '.' || name === '..') {
+    return { ok: false, error: 'invalid skill name' };
+  }
+  if (!opts.global && !isValidWorkdir(opts.workdir)) {
+    return { ok: false, error: 'valid workdir is required for workspace skill edits' };
+  }
+  const parent = opts.global
+    ? getGlobalSkillsRoot()
+    : path.join(opts.workdir!, '.pikiclaw', 'skills');
+  const file = path.join(parent, name, 'SKILL.md');
+  const resolvedFile = path.resolve(file);
+  const resolvedParent = path.resolve(parent) + path.sep;
+  if (!resolvedFile.startsWith(resolvedParent)) {
+    return { ok: false, error: 'invalid skill path' };
+  }
+  if (!fs.existsSync(file)) {
+    return { ok: false, error: `skill "${name}" not found` };
+  }
+  return { ok: true, file };
 }
 
 function getCallbackRedirectUri(c: { req: { url: string } }): string {
@@ -254,11 +278,12 @@ app.post('/api/extensions/mcp/toggle', async (c) => {
 app.post('/api/extensions/mcp/update', async (c) => {
   try {
     const body = await c.req.json();
-    const { name, patch, scope = 'global', workdir: reqWorkdir } = body as {
+    const { name, patch, scope = 'global', workdir: reqWorkdir, replace } = body as {
       name: string;
       patch: Partial<McpServerConfig>;
       scope?: 'global' | 'workspace';
       workdir?: string;
+      replace?: boolean;
     };
     if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
 
@@ -266,9 +291,19 @@ app.post('/api/extensions/mcp/update', async (c) => {
     if (scope === 'workspace') {
       const wd = reqWorkdir || runtime.getRequestWorkdir();
       if (!isValidWorkdir(wd)) return c.json({ ok: false, error: 'valid workdir is required' }, 400);
-      updated = updateWorkspaceMcpExtension(wd, name.trim(), patch);
+      if (replace) {
+        addWorkspaceMcpExtension(wd, name.trim(), patch as McpServerConfig);
+        updated = true;
+      } else {
+        updated = updateWorkspaceMcpExtension(wd, name.trim(), patch);
+      }
     } else {
-      updated = updateGlobalMcpExtension(name.trim(), patch);
+      if (replace) {
+        addGlobalMcpExtension(name.trim(), patch as McpServerConfig);
+        updated = true;
+      } else {
+        updated = updateGlobalMcpExtension(name.trim(), patch);
+      }
     }
     return c.json({ ok: true, updated });
   } catch (e: any) {
@@ -516,6 +551,8 @@ interface SkillCatalogItem {
   totalCount?: number;
   /** True when the remote listing was capped by GitHub Contents API. */
   partial?: boolean;
+  /** True for locally created skills that do not belong to a remote catalog repo. */
+  localOnly?: boolean;
 }
 
 /**
@@ -886,6 +923,31 @@ app.get('/api/extensions/skills/catalog', async (c) => {
     });
   }
 
+  const representedInstalled = new Set<string>();
+  for (const item of items) {
+    for (const name of item.installedNames) representedInstalled.add(name.toLowerCase());
+  }
+  for (const skill of scopedInstalled) {
+    if (representedInstalled.has(skill.name.toLowerCase())) continue;
+    const label = skill.label || skill.name;
+    const description = skill.description || `Local ${skill.scope === 'global' ? 'global' : 'workspace'} skill: ${skill.name}`;
+    items.push({
+      id: `local-${skill.scope}-${skill.name}`,
+      name: label,
+      description,
+      descriptionZh: description,
+      source: skill.scope === 'global' ? '~/.pikiclaw/skills' : '.pikiclaw/skills',
+      category: 'custom',
+      recommendedScope: skill.scope === 'global' ? 'global' : 'workspace',
+      installed: true,
+      scope: skill.scope,
+      installedNames: [skill.name],
+      totalCount: 1,
+      partial: false,
+      localOnly: true,
+    });
+  }
+
   // Authority = community popularity. Sort by stars desc, with no-data entries
   // sinking to the bottom so the most-loved repos surface first.
   items.sort((a, b) => (b.stars ?? -1) - (a.stars ?? -1));
@@ -943,6 +1005,47 @@ app.post('/api/extensions/skills/remove', async (c) => {
     return c.json(result);
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || 'removal failed' }, 500);
+  }
+});
+
+/** GET /api/extensions/skills/prompt — read a local skill's SKILL.md for editing. */
+app.get('/api/extensions/skills/prompt', async (c) => {
+  try {
+    const name = c.req.query('name') || '';
+    const isGlobal = c.req.query('global') === 'true';
+    const workdir = c.req.query('workdir') || runtime.getRequestWorkdir();
+    const resolved = resolveEditableSkillFile({ name, global: isGlobal, workdir });
+    if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, 400);
+    return c.json({
+      ok: true,
+      path: resolved.file,
+      content: fs.readFileSync(resolved.file, 'utf-8'),
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'read failed' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/prompt — replace a local skill's SKILL.md content. */
+app.post('/api/extensions/skills/prompt', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { name, global: isGlobal, workdir: reqWorkdir, content } = body as {
+      name: string;
+      global?: boolean;
+      workdir?: string;
+      content?: string;
+    };
+    if (typeof content !== 'string' || !content.trim()) {
+      return c.json({ ok: false, error: 'content is required' }, 400);
+    }
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    const resolved = resolveEditableSkillFile({ name, global: isGlobal, workdir });
+    if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, 400);
+    fs.writeFileSync(resolved.file, content.endsWith('\n') ? content : `${content}\n`, 'utf-8');
+    return c.json({ ok: true, path: resolved.file });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'save failed' }, 500);
   }
 });
 

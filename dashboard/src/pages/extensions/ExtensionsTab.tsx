@@ -45,12 +45,12 @@ function L(locale: string, zh: string, en: string): string {
   return locale === 'zh-CN' ? zh : en;
 }
 
-const JIRA_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
+const JIRA_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'done'];
 const JIRA_STATUS_LABEL: Record<ProTaskStatus, string> = {
   backlog: 'Backlog',
   refinement: 'Refinement',
-  coding: 'Coding',
-  resolved: 'Resolved',
+  coding: 'Working',
+  resolved: 'Done',
   done: 'Done',
 };
 
@@ -149,6 +149,7 @@ const BRAND_PALETTE: Record<string, { hex: string; letter?: string }> = {
   time:             { hex: '#10b981', letter: 'T' },
   sqlite:           { hex: '#0369a1', letter: 'SQ' },
   postgres:         { hex: '#336791', letter: 'PG' },
+  clickhouse:        { hex: '#ffcc01', letter: 'CH' },
 };
 
 const DEFAULT_BRAND: { hex: string; letter?: string } = { hex: '#6b7280' };
@@ -299,6 +300,7 @@ const ICONIFY_ICONS: Record<string, string> = {
   postgres:                  'logos:postgresql',
   postgresql:                'logos:postgresql',
   sqlite:                    'logos:sqlite',
+  clickhouse:                'logos:clickhouse-icon',
   vercel:                    'logos:vercel-icon',
   netlify:                   'logos:netlify-icon',
   supabase:                  'logos:supabase-icon',
@@ -1013,6 +1015,134 @@ function CustomMcpDialog({
   );
 }
 
+function configWithoutPrompt(config: McpServerConfig): McpServerConfig {
+  const next: McpServerConfig = JSON.parse(JSON.stringify(config || {}));
+  const instructions = next.instructions && typeof next.instructions === 'object'
+    ? { ...next.instructions }
+    : undefined;
+  if (instructions && 'prompt' in instructions) {
+    delete instructions.prompt;
+    if (Object.keys(instructions).length > 0) next.instructions = instructions;
+    else delete next.instructions;
+  }
+  return next;
+}
+
+function McpEditDialog({
+  open, onClose, locale, item, workdir, onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  locale: string;
+  item: McpCatalogItem | null;
+  workdir?: string;
+  onSaved: () => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [prompt, setPrompt] = useState('');
+  const [jsonText, setJsonText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open && item?.config) {
+      const rawPrompt = item.config.instructions?.prompt;
+      setPrompt(typeof rawPrompt === 'string' ? rawPrompt : '');
+      setJsonText(JSON.stringify(configWithoutPrompt(item.config), null, 2));
+      setError(null);
+    }
+  }, [open, item]);
+
+  const save = async () => {
+    if (!item?.installedKey) return;
+    let next: McpServerConfig;
+    try {
+      next = JSON.parse(jsonText) as McpServerConfig;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid JSON');
+      return;
+    }
+    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+      setError(L(locale, 'JSON 必须是一个对象', 'JSON must be an object'));
+      return;
+    }
+    if (prompt.trim()) {
+      next.instructions = { ...(next.instructions || {}), prompt };
+    } else if (next.instructions) {
+      delete next.instructions.prompt;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await api.updateMcpExtension(
+        item.installedKey,
+        next,
+        item.scope === 'workspace' ? 'workspace' : 'global',
+        workdir,
+        true,
+      );
+      if (!res.ok || res.updated === false) throw new Error(res.error || 'Failed to update MCP');
+      toast(L(locale, `${item.name} 已保存`, `${item.name} saved`), true);
+      onSaved();
+      onClose();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed';
+      setError(message);
+      toast(message, false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader
+        title={L(locale, `编辑 ${item?.name || 'MCP'}`, `Edit ${item?.name || 'MCP'}`)}
+        description={L(locale, '上面编辑使用提示词，下面编辑 MCP JSON 配置。新会话会读取保存后的配置。', 'Edit the usage prompt above and the MCP JSON config below. New sessions will read the saved config.')}
+        onClose={onClose}
+      />
+      <div className="space-y-3">
+        <div>
+          <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">
+            Prompt
+          </label>
+          <textarea
+            value={prompt}
+            onChange={event => setPrompt(event.target.value)}
+            spellCheck={false}
+            className="min-h-[150px] w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+        </div>
+        <div>
+          <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">
+            JSON
+          </label>
+        <textarea
+          value={jsonText}
+          onChange={event => {
+            setJsonText(event.target.value);
+            if (error) setError(null);
+          }}
+          spellCheck={false}
+          className="min-h-[300px] w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+        />
+        </div>
+        {error && (
+          <div className="rounded-md border border-err/20 bg-err/10 px-3 py-2 text-[12px] text-err">
+            {error}
+          </div>
+        )}
+        <div className="flex justify-end gap-2 border-t border-edge pt-3">
+          <Button variant="ghost" onClick={onClose} disabled={saving}>{L(locale, '取消', 'Cancel')}</Button>
+          <Button variant="primary" disabled={saving || !jsonText.trim()} onClick={() => void save()}>
+            {saving ? <Spinner /> : L(locale, '保存', 'Save')}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Custom Skill Dialog
 // ---------------------------------------------------------------------------
@@ -1076,6 +1206,98 @@ function CustomSkillDialog({
   );
 }
 
+function LocalSkillPromptDialog({
+  open, onClose, locale, name, scope, workdir, onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  locale: string;
+  name: string | null;
+  scope: 'global' | 'workspace';
+  workdir?: string;
+  onSaved: () => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [content, setContent] = useState('');
+  const [filePath, setFilePath] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !name) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void (async () => {
+      try {
+        const r = await api.getSkillPrompt(name, scope === 'global', workdir);
+        if (cancelled) return;
+        if (!r.ok) throw new Error(r.error || 'failed to load skill prompt');
+        setContent(r.content || '');
+        setFilePath(r.path || '');
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message || 'failed');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, name, scope, workdir]);
+
+  const save = async () => {
+    if (!name) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const r = await api.updateSkillPrompt(name, content, scope === 'global', workdir);
+      if (!r.ok) throw new Error(r.error || 'failed to save skill prompt');
+      toast(L(locale, 'Skill prompt 已保存', 'Skill prompt saved'), true);
+      onSaved();
+      onClose();
+    } catch (e: any) {
+      const message = e?.message || 'failed';
+      setError(message);
+      toast(message, false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader
+        title={L(locale, `编辑 ${name || 'Skill'} Prompt`, `Edit ${name || 'Skill'} Prompt`)}
+        description={filePath || L(locale, '编辑这个 skill 的 SKILL.md。保存后新会话会读取更新后的 prompt。', 'Edit this skill SKILL.md. New sessions will read the updated prompt.')}
+        onClose={onClose}
+      />
+      <div className="space-y-3">
+        {loading ? (
+          <div className="flex items-center justify-center py-10"><Spinner /></div>
+        ) : (
+          <textarea
+            value={content}
+            onChange={event => setContent(event.target.value)}
+            spellCheck={false}
+            className="min-h-[56vh] w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+        )}
+        {error && (
+          <div className="rounded-md border border-err/20 bg-err/10 px-3 py-2 text-[12px] text-err">
+            {error}
+          </div>
+        )}
+        <div className="flex justify-end gap-2 border-t border-edge pt-3">
+          <Button variant="ghost" onClick={onClose} disabled={saving}>{L(locale, '取消', 'Cancel')}</Button>
+          <Button variant="primary" disabled={loading || saving || !content.trim()} onClick={() => void save()}>
+            {saving ? <Spinner /> : L(locale, '保存', 'Save')}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // OAuth popup helper
 // ---------------------------------------------------------------------------
@@ -1115,7 +1337,7 @@ function openOAuthPopup(authUrl: string, expectedState: string): Promise<boolean
 
 function ConnectedCard({
   item, locale, busy, index,
-  onPrimary, onRemove, onReauth, onReconfigure, onSync,
+  onPrimary, onRemove, onReauth, onReconfigure, onEdit, onSync,
 }: {
   item: McpCatalogItem;
   locale: string;
@@ -1125,6 +1347,7 @@ function ConnectedCard({
   onRemove?: () => void;
   onReauth?: () => void;
   onReconfigure?: () => void;
+  onEdit?: () => void;
   onSync?: () => void;
 }) {
   const { hex } = brandInfo(item.iconSlug, item.name);
@@ -1190,8 +1413,8 @@ function ConnectedCard({
               {L(locale, '重新授权', 'Re-auth')}
             </Button>
           )}
-          {item.installed && item.state !== 'needs_auth' && onReconfigure && (
-            <Button variant="ghost" size="sm" onClick={onReconfigure} disabled={busy}>
+          {item.installed && (onEdit || onReconfigure) && (
+            <Button variant="ghost" size="sm" onClick={onEdit || onReconfigure} disabled={busy}>
               {L(locale, '编辑', 'Edit')}
             </Button>
           )}
@@ -1224,13 +1447,14 @@ function ConnectedCard({
 // ---------------------------------------------------------------------------
 
 function AvailableCard({
-  item, locale, busy, index, onPrimary,
+  item, locale, busy, index, onPrimary, onEdit,
 }: {
   item: McpCatalogItem;
   locale: string;
   busy: boolean;
   index: number;
   onPrimary: () => void;
+  onEdit?: () => void;
 }) {
   // Two-state button: needs setup vs zero-config. The OAuth/API-Key/none
   // distinction shows up in the auth-kind label at the card's bottom-left;
@@ -1273,10 +1497,17 @@ function AvailableCard({
         <span className="inline-flex items-center gap-1 text-[11px] text-fg-5">
           {authKindLabel(locale, item.auth)}
         </span>
-        <Button variant="outline" size="sm" onClick={onPrimary} disabled={busy}
-                className="group-hover:border-edge-h">
-          {busy ? <Spinner /> : primaryLabel}
-        </Button>
+        <div className="flex items-center gap-1">
+          {item.installed && onEdit && (
+            <Button variant="ghost" size="sm" onClick={onEdit} disabled={busy}>
+              {L(locale, '编辑', 'Edit')}
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={onPrimary} disabled={busy}
+                  className="group-hover:border-edge-h">
+            {busy ? <Spinner /> : primaryLabel}
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -1450,6 +1681,7 @@ function SkillDetailModal({
   const [busyName, setBusyName] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState<'install' | 'remove' | null>(null);
   const [query, setQuery] = useState('');
+  const [promptTarget, setPromptTarget] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open || !item) return;
@@ -1459,6 +1691,11 @@ function SkillDetailModal({
     setQuery('');
     void (async () => {
       try {
+        if (item.localOnly) {
+          setRemoteSkills(item.installedNames.map(name => ({ name, path: `${item.source}/${name}` })));
+          setRemotePartial(false);
+          return;
+        }
         const r = await api.listRepoSkills(item.source);
         if (cancelled) return;
         if (r.ok) {
@@ -1557,6 +1794,7 @@ function SkillDetailModal({
   if (!item) return null;
 
   return (
+    <>
     <Modal open={open} onClose={onClose} wide>
       <ModalHeader
         title={item.name}
@@ -1603,7 +1841,7 @@ function SkillDetailModal({
                 variant="outline"
                 size="sm"
                 onClick={handleInstallAll}
-                disabled={bulkBusy !== null || remoteLoading}
+                disabled={item.localOnly || bulkBusy !== null || remoteLoading}
               >
                 {bulkBusy === 'install' ? <Spinner /> : L(locale, '全部安装', 'Install all')}
               </Button>
@@ -1673,15 +1911,27 @@ function SkillDetailModal({
                       )}
                     </div>
                     {isInstalled ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void handleRemoveOne(skill.name)}
-                        disabled={busy || bulkBusy !== null}
-                        className="hover:!text-err"
-                      >
-                        {busy ? <Spinner /> : L(locale, '移除', 'Remove')}
-                      </Button>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {item.localOnly && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPromptTarget(skill.name)}
+                            disabled={busy || bulkBusy !== null}
+                          >
+                            {L(locale, '编辑 Prompt', 'Edit prompt')}
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void handleRemoveOne(skill.name)}
+                          disabled={busy || bulkBusy !== null}
+                          className="hover:!text-err"
+                        >
+                          {busy ? <Spinner /> : L(locale, '移除', 'Remove')}
+                        </Button>
+                      </div>
                     ) : (
                       <Button
                         variant="outline"
@@ -1708,6 +1958,16 @@ function SkillDetailModal({
         </section>
       </div>
     </Modal>
+    <LocalSkillPromptDialog
+      open={!!promptTarget}
+      onClose={() => setPromptTarget(null)}
+      locale={locale}
+      name={promptTarget}
+      scope={scope}
+      workdir={workdir}
+      onSaved={onChanged}
+    />
+    </>
   );
 }
 
@@ -1784,6 +2044,7 @@ function McpCatalogSection({
 
   const [search, setSearch] = useState('');
   const [credsTarget, setCredsTarget] = useState<McpCatalogItem | null>(null);
+  const [jsonEditTarget, setJsonEditTarget] = useState<McpCatalogItem | null>(null);
   const [syncTarget, setSyncTarget] = useState<McpCatalogItem | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
   const [agentCreateOpen, setAgentCreateOpen] = useState(false);
@@ -1931,6 +2192,12 @@ function McpCatalogSection({
           {loading && <Spinner className="h-3 w-3" />}
         </div>
         <div className="flex items-center gap-1.5">
+          <Button variant="outline" size="sm" onClick={() => setAgentCreateOpen(true)}>
+            + {L(locale, '用 Agent 创建 MCP', 'Create with Agent')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
+            + {L(locale, '添加自定义 MCP', 'Add custom MCP')}
+          </Button>
           <div className="relative">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-5">
@@ -1968,6 +2235,7 @@ function McpCatalogSection({
                       index={i}
                       onPrimary={() => handleConnectedPrimary(item)}
                       onReconfigure={item.id === 'pikiclaw-browser' ? onOpenBrowserSetup : undefined}
+                      onEdit={item.installedKey ? () => setJsonEditTarget(item) : undefined}
                     />
                   ) : (
                     <AvailableCard
@@ -2002,7 +2270,7 @@ function McpCatalogSection({
                     onPrimary={() => handleConnectedPrimary(item)}
                     onRemove={() => void runRemove(item)}
                     onReauth={item.auth.type === 'mcp-oauth' ? () => void runOAuth(item) : undefined}
-                    onReconfigure={item.auth.type === 'credentials' ? () => setCredsTarget(item) : undefined}
+                    onEdit={() => setJsonEditTarget(item)}
                     onSync={item.id === 'atlassian' ? () => setSyncTarget(item) : undefined}
                   />
                 ))}
@@ -2031,6 +2299,7 @@ function McpCatalogSection({
                           busy={busy === item.id}
                           index={i}
                           onPrimary={() => handleAvailablePrimary(item)}
+                          onEdit={item.installedKey ? () => setJsonEditTarget(item) : undefined}
                         />
                       ))}
                     </div>
@@ -2049,21 +2318,6 @@ function McpCatalogSection({
         </div>
       )}
 
-      <div className="mt-3 flex justify-end gap-2">
-        <button
-          className="text-[12px] font-medium text-primary hover:text-primary/80 transition-colors"
-          onClick={() => setAgentCreateOpen(true)}
-        >
-          + {L(locale, '用 Agent 创建 MCP', 'Create MCP with Agent')}
-        </button>
-        <button
-          className="text-[12px] text-fg-4 hover:text-fg-2 transition-colors"
-          onClick={() => setCustomOpen(true)}
-        >
-          + {L(locale, '添加自定义 MCP', 'Add custom MCP')}
-        </button>
-      </div>
-
       <CredentialsDialog
         open={!!credsTarget}
         onClose={() => setCredsTarget(null)}
@@ -2078,6 +2332,14 @@ function McpCatalogSection({
         locale={locale}
         workdir={workdir}
       />
+      <McpEditDialog
+        open={!!jsonEditTarget}
+        onClose={() => setJsonEditTarget(null)}
+        locale={locale}
+        item={jsonEditTarget}
+        workdir={workdir}
+        onSaved={() => void refresh()}
+      />
       <CustomMcpDialog
         open={customOpen}
         onClose={() => setCustomOpen(false)}
@@ -2088,7 +2350,10 @@ function McpCatalogSection({
       />
       <FeatureAgentDialog
         open={agentCreateOpen}
-        onClose={() => setAgentCreateOpen(false)}
+        onClose={() => {
+          setAgentCreateOpen(false);
+          void refresh();
+        }}
         workdir={workdir}
         config={{
           kind: 'mcp',

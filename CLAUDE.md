@@ -122,4 +122,5 @@ npx vitest run test/<file>.unit.test.ts
 - The Dashboard is part of the normal runtime, not just a setup helper
 - This machine always has a production / self-bootstrap path via `npx pikiclaw@latest`; do not kill, replace, or "clean up" that process when the task only concerns dev mode
 - `npm run dev` rewrites `~/.pikiclaw/dev/dev.log` on each launch. When invoked without a TTY (any tool-call / piped invocation) it auto-detaches into the background — no need for `run_in_background:true`. Force foreground with `PIKICLAW_DEV_FOREGROUND=1`, background with `PIKICLAW_DEV_BACKGROUND=1`.
+- After making changes, if the local dev service is stopped or was interrupted by validation, restart it with `npm run dev` and verify the dashboard URL is listening successfully before handing back to the user.
 - For full architecture / extension / testing guides, see `ARCHITECTURE.md`, `INTEGRATION.md`, `TESTING.md`.

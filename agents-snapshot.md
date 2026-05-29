@@ -1,0 +1,32 @@
+- generic [ref=e4] [box=0,0,1920,1080]:
+  - banner [ref=e5] [box=0,0,1920,59]:
+    - generic [ref=e6] [box=0,0,1920,58]:
+      - generic [ref=e7] [box=16,11,184,36]:
+        - img [ref=e9] [box=20,15,28,28]
+        - generic [ref=e21] [box=62,22,78,14]: Pikiclaw Pro
+        - generic [ref=e22] [box=150,19,50,21]: v0.4.0
+      - navigation [ref=e23] [box=216,8,1443,42]:
+        - generic [ref=e24] [box=216,8,206,42]:
+          - link "Workspace" [ref=e25] [cursor=pointer] [box=221,13,99,32]:
+            - /url: /
+          - link "Dashboard" [ref=e26] [cursor=pointer] [box=320,13,97,32]:
+            - /url: /dashboard
+        - generic [ref=e27] [box=430,8,228,42]:
+          - link "Agent" [ref=e28] [cursor=pointer] [box=435,13,61,32]:
+            - /url: /agents
+          - link "Extension" [ref=e29] [cursor=pointer] [box=496,13,86,32]:
+            - /url: /extensions
+          - link "System" [ref=e30] [cursor=pointer] [box=582,13,71,32]:
+            - /url: /system
+      - generic [ref=e31] [box=1669,13,235,32]:
+        - generic [ref=e34] [box=1692,21,33,17]: 运行中
+        - button "重启进程" [ref=e35] [cursor=pointer] [box=1740,13,32,32]:
+          - img [ref=e37] [box=1749,22,14,14]
+        - button "深色模式" [ref=e40] [cursor=pointer] [box=1776,15,88,28]:
+          - img [ref=e41] [box=1787,22,14,14]
+          - generic [ref=e43] [box=1809,21,44,16]: 深色模式
+        - button "EN" [ref=e44] [cursor=pointer] [box=1868,15,36,28]
+  - main [ref=e45] [box=0,59,1920,1021]:
+    - generic [ref=e47] [box=920,560,80,20]:
+      - img [ref=e48] [box=918,561,17,17]
+      - text: Loading...

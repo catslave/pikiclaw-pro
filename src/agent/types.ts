@@ -223,6 +223,9 @@ export interface StreamOpts {
   // `session/new`. The expected format is the ACP wire encoding
   // `<provider>:<model>` (e.g. `openrouter:gpt-5.4-mini`).
   hermesModel?: string;
+  // openclaw
+  openclawModel?: string;
+  openclawExtraArgs?: string[];
   /** Override stdin payload (used for stream-json multimodal input) */
   _stdinOverride?: string;
   /** MCP bridge: callback when agent requests file send via MCP tool. Enables MCP bridge when provided. */
@@ -406,6 +409,10 @@ export interface ManagedSessionRecord {
   runUpdatedAt: string | null;
   /** PID of the process that marked this session 'running'. Used for orphan detection across bot restarts. */
   runPid: number | null;
+  /** Number of automatic startup resume attempts after crash/orphan recovery. */
+  autoResumeAttempts: number;
+  autoResumeLastAt: string | null;
+  autoResumeLastError: string | null;
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote: string | null;
@@ -507,6 +514,9 @@ export interface SessionInfo {
   runDetail: string | null;
   runUpdatedAt: string | null;
   runPid?: number | null;
+  autoResumeAttempts?: number;
+  autoResumeLastAt?: string | null;
+  autoResumeLastError?: string | null;
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote: string | null;

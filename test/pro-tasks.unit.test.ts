@@ -3,10 +3,15 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
 import {
+  createProTask,
+  createTaskSpace,
+  archiveTaskSpace,
   addStageRun,
   createSubtask,
   finishVerificationRun,
+  getProTask,
   listProTasks,
+  listTaskSpaces,
   setExclusiveMode,
   startVerificationRun,
   syncJiraTask,
@@ -27,6 +32,67 @@ afterEach(() => {
   if (previousTaskFile == null) delete process.env.PIKICLAW_PRO_TASK_FILE;
   else process.env.PIKICLAW_PRO_TASK_FILE = previousTaskFile;
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+});
+
+describe('Pro task spaces', () => {
+  it('creates custom task spaces and archives them without removing built-ins', () => {
+    const space = createTaskSpace({ name: 'Pikiclaw Roadmap', defaultWorkdir: '/repo/pikiclaw', defaultAgent: 'codex' });
+
+    expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal', space.id]);
+    expect(listTaskSpaces()[2]).toMatchObject({ name: 'Pikiclaw Roadmap', kind: 'custom', defaultAgent: 'codex' });
+
+    archiveTaskSpace(space.id);
+    expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal']);
+  });
+
+  it('assigns legacy/default task kinds to Jira or Personal spaces', () => {
+    const jira = syncJiraTask({ title: 'Fix production bug', jiraKey: 'PRO-1', issueType: 'Bug' });
+    const manual = createProTask({ title: 'Write roadmap note', kind: 'manual' });
+
+    expect(jira.spaceId).toBe('jira');
+    expect(jira.origin).toMatchObject({ type: 'jira', key: 'PRO-1' });
+    expect(manual.spaceId).toBe('personal');
+    expect(manual.origin).toMatchObject({ type: 'manual' });
+    expect(listProTasks({ spaceId: 'jira' }).map(task => task.id)).toEqual([jira.id]);
+    expect(listProTasks({ spaceId: 'personal' }).map(task => task.id)).toEqual([manual.id]);
+  });
+
+  it('creates tasks in a selected custom space', () => {
+    const space = createTaskSpace({ name: 'Writing' });
+    const task = createProTask({ title: 'Draft launch post', spaceId: space.id });
+
+    expect(task.kind).toBe('manual');
+    expect(task.spaceId).toBe(space.id);
+    expect(listProTasks({ spaceId: space.id })).toHaveLength(1);
+  });
+
+  it('links stage runs to subtasks', () => {
+    const task = createProTask({ title: 'Large task' });
+    const updated = getProTask(task.id);
+    expect(updated).toBeTruthy();
+    updated!.subTasks.push({
+      id: 'subtask_1',
+      taskId: task.id,
+      title: 'Implement child stream',
+      status: 'todo',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      stageRunIds: [],
+    });
+    fs.writeFileSync(process.env.PIKICLAW_PRO_TASK_FILE!, JSON.stringify({ version: 1, tasks: [updated] }, null, 2));
+
+    const withRun = addStageRun({
+      taskId: task.id,
+      subtaskId: 'subtask_1',
+      stage: 'coding',
+      prompt: 'Do the child stream.',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-1' },
+    });
+
+    expect(withRun.stageRuns[0]).toMatchObject({ subtaskId: 'subtask_1' });
+    expect(withRun.subTasks[0].stageRunIds).toEqual([withRun.stageRuns[0].id]);
+    expect(withRun.subTasks[0].status).toBe('running');
+  });
 });
 
 describe('Pro task store', () => {

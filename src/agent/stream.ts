@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { restartManagedBrowser } from '../browser-supervisor.js';
 import { terminateProcessTree } from '../core/process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/constants.js';
+import { processEnvWithUserBins, resolveExecutablePath } from '../core/platform.js';
 import { getDriver, allDrivers, getAcceptedProviderKinds } from './driver.js';
 import {
   resolveAgentInjection, getActiveProfile, getProvider, updateProfile, listProfiles,
@@ -78,53 +79,8 @@ interface AgentDetectCacheEntry {
 
 const agentDetectCache = new Map<string, AgentDetectCacheEntry>();
 
-function isExecutableFile(filePath: string): boolean {
-  try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) return false;
-    if (process.platform === 'win32') return true;
-    fs.accessSync(filePath, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function executableCandidates(cmd: string): string[] {
-  if (process.platform !== 'win32') return [cmd];
-  const ext = path.extname(cmd).toLowerCase();
-  if (ext) return [cmd];
-  const pathExt = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
-    .split(';')
-    .map(value => value.trim())
-    .filter(Boolean);
-  return [cmd, ...pathExt.map(value => `${cmd}${value.toLowerCase()}`)];
-}
-
 function resolveAgentBinPath(cmd: string): string | null {
-  const raw = String(cmd || '').trim();
-  if (!raw) return null;
-
-  const hasPathSeparator = raw.includes('/') || raw.includes('\\');
-  if (hasPathSeparator) {
-    const absolutePath = path.resolve(raw);
-    for (const candidate of executableCandidates(absolutePath)) {
-      if (isExecutableFile(candidate)) return candidate;
-    }
-    return null;
-  }
-
-  const searchPaths = String(process.env.PATH || '')
-    .split(path.delimiter)
-    .map(entry => entry.trim())
-    .filter(Boolean);
-
-  for (const dir of searchPaths) {
-    for (const candidate of executableCandidates(path.join(dir, raw))) {
-      if (isExecutableFile(candidate)) return candidate;
-    }
-  }
-  return null;
+  return resolveExecutablePath(cmd);
 }
 
 function readAgentVersion(binPath: string, timeoutMs: number): string | null {
@@ -243,7 +199,7 @@ export async function run(
   agentLog(`[spawn] timeout: ${opts.timeout}s session: ${opts.sessionId || '(new)'}`);
   agentLog(`[spawn] prompt (stdin): "${opts.prompt.slice(0, 300)}${opts.prompt.length > 300 ? '…' : ''}"`);
 
-  const spawnEnv = { ...process.env, ...(opts.extraEnv || {}) };
+  const spawnEnv = processEnvWithUserBins({ ...process.env, ...(opts.extraEnv || {}) });
   delete spawnEnv.CLAUDECODE;
   const proc = spawn(shellCmd, {
     cwd: opts.workdir,

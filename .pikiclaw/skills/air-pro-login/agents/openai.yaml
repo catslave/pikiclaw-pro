@@ -1,0 +1,7 @@
+interface:
+  display_name: "AIR Pro Login"
+  short_description: "自动打开并登录 AIR lab 环境页面"
+  default_prompt: "Use $air-pro-login to open and sign in to the AIR lab01 worker and call-platform pages."
+
+policy:
+  allow_implicit_invocation: true

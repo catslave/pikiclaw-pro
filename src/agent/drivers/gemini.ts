@@ -22,8 +22,7 @@ import {
   appendSystemPrompt, pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
   sanitizeSessionUserPreviewText, emitSessionIdUpdate,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
-  adoptNativeSessionTitles,
-  mergeManagedAndNativeSessions, applyTurnWindow,
+  applyTurnWindow,
   stripInjectedPrompts, attachAgentImage,
   roundPercent, emptyUsage, Q,
 } from '../index.js';
@@ -729,7 +728,6 @@ function getNativeGeminiSessions(workdir: string): SessionInfo[] {
 
 function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
-  // Merge pikiclaw-tracked sessions with native Gemini sessions
   const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'gemini', undefined, { includeSideChats: true }).map(record => ({
     sessionId: record.sessionId,
     agent: 'gemini' as const,
@@ -761,15 +759,12 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
   }));
-  const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
-  const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'gemini', pikiclawSessions, nativeSessions);
-  const merged = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
-  const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
+  const sessions = typeof limit === 'number' ? pikiclawSessions.slice(0, limit) : pikiclawSessions;
   const projectName = geminiProjectName(resolvedWorkdir);
   const chatsDir = projectName ? geminiChatsDir(resolvedWorkdir) || '' : '';
   agentLog(
     `[sessions:gemini] workdir=${resolvedWorkdir} projectName=${projectName || '(none)'} chatsDir=${chatsDir || '(none)'} ` +
-    `chatsDirExists=${chatsDir ? fs.existsSync(chatsDir) : false} pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
+    `chatsDirExists=${chatsDir ? fs.existsSync(chatsDir) : false} pikiclaw=${pikiclawSessions.length} returned=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }

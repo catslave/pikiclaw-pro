@@ -25,8 +25,7 @@ import {
   normalizeStreamPreviewPlan,
   IMAGE_EXTS,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
-  adoptNativeSessionTitles,
-  mergeManagedAndNativeSessions,
+  adoptNativeSessionTitles, mergeManagedAndNativeSessions,
     stripInjectedPrompts, stripOaiMemoryCitations, sanitizeSessionUserPreviewText, computeContext, readTailLines, applyTurnWindow,
   roundPercent, toIsoFromEpochSeconds, labelFromWindowMinutes,
   usageWindowFromRateLimit, parseJsonTail, emptyUsage,
@@ -2322,7 +2321,6 @@ function getCodexSessionTailFromRollout(opts: SessionTailOpts): SessionTailResul
 
 function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
-  // Merge pikiclaw-tracked sessions with native Codex sessions
   const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'codex', undefined, { includeSideChats: true }).map(record => ({
     sessionId: record.sessionId,
     agent: 'codex' as const,
@@ -2356,8 +2354,8 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
   const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'codex', pikiclawSessions, nativeSessions);
-  const merged = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
-  const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
+  const mergedSessions = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
+  const sessions = typeof limit === 'number' ? mergedSessions.slice(0, limit) : mergedSessions;
   const sessionsDir = path.join(getHome(), '.codex', 'sessions');
   agentLog(
     `[sessions:codex] workdir=${resolvedWorkdir} sessionsDir=${sessionsDir} sessionsDirExists=${fs.existsSync(sessionsDir)} ` +
@@ -2388,7 +2386,8 @@ async function getCodexSessionTail(opts: SessionTailOpts): Promise<SessionTailRe
       if (item.type === 'userMessage') {
         const parts: string[] = [];
         for (const c of (item.content ?? [])) { if (c.type === 'text' && c.text) parts.push(c.text); }
-        if (parts.length) allMsgs.push({ role: 'user', text: stripInjectedPrompts(parts.join('\n')) });
+        const text = stripInjectedPrompts(parts.join('\n')).trim();
+        if (text) allMsgs.push({ role: 'user', text });
       } else if (item.type === 'agentMessage') {
         if (item.text) allMsgs.push({ role: 'assistant', text: item.text });
       }

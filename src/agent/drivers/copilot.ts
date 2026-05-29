@@ -27,6 +27,7 @@ import {
   simpleCliSessionTail,
   simpleUsage,
 } from './simple-cli.js';
+import { copilotAuthEnv } from '../copilot-auth.js';
 
 function copilotModel(opts: StreamOpts): string | null {
   return (opts.copilotModel || opts.model || '').trim() || null;
@@ -62,6 +63,7 @@ export async function doCopilotStream(opts: StreamOpts): Promise<StreamResult> {
       args: copilotArgs(runOpts, prompt),
       model: copilotModel(runOpts),
       prompt,
+      env: copilotAuthEnv(),
     }),
   });
 }

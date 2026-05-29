@@ -1,6 +1,6 @@
-import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useCallback, useRef, memo, useMemo, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useLayoutEffect, useCallback, useRef, memo, useMemo, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Link, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
@@ -23,14 +23,14 @@ import {
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
-import type { AppState, SessionInfo, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget } from '../../types';
+import type { AppState, SessionInfo, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
 import { InputComposer } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
-import type { FileLinkTarget, OpenFileLinkHandler } from './markdown';
+import type { FileLinkTarget } from './markdown';
 import type { SessionPanelChange } from './SessionPanel';
-import type { RestartPhase } from '../../components/Sidebar';
+import { ContextShelf, type ContextShelfTab } from './ContextShelf';
 
 // Kick off SessionPanel import the moment this module loads so the lazy boundary
 // resolves before the user can compose & send a new message. The previous
@@ -44,8 +44,13 @@ function preloadSessionPanel() {
 
 const SessionPanel = lazy(async () => ({ default: (await preloadSessionPanel()).SessionPanel }));
 
+function isSessionComposerFocused() {
+  if (typeof document === 'undefined') return false;
+  return !!document.activeElement?.closest('[data-session-composer]');
+}
+
 /* ── Constants ── */
-const PAGE_SIZE = 5;
+const PAGE_SIZE = 15;
 const AUTO_PREFETCH_DELAY_MS = 240;
 const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
@@ -53,6 +58,7 @@ const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 const STATUS_SUMMARY_RECENT_MS = 24 * 60 * 60 * 1000;
 const VISIBLE_WORKSPACE_REFRESH_MIN_INTERVAL_MS = 15_000;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
+const isPikiclawMetaPath = (value: string) => value === '.pikiclaw' || value.startsWith('.pikiclaw/');
 const MENU_ITEM_BASE_CLASS = 'mx-1 flex h-8 w-[calc(100%-0.5rem)] items-center gap-2 rounded px-2 text-left text-[12px] font-medium text-fg-3 transition-[background,color] duration-150 focus-visible:outline-none';
 const menuItemClass = (tone: 'default' | 'primary' | 'danger' = 'default') => cn(
   MENU_ITEM_BASE_CLASS,
@@ -68,36 +74,21 @@ const workspaceBaseName = (workspacePath: string) => {
   return parts[parts.length - 1] || workspacePath;
 };
 
-const IconSun = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>;
-const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
-const IconRestart = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>;
-
-function PikiclawLogo() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true" className="drop-shadow-[0_2px_6px_rgba(245,158,11,0.30)]">
-      <defs>
-        <linearGradient id="session-pikiclaw-face" x1="8" y1="5" x2="23" y2="26" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#fde68a" />
-          <stop offset="0.58" stopColor="#facc15" />
-          <stop offset="1" stopColor="#f59e0b" />
-        </linearGradient>
-        <linearGradient id="session-pikiclaw-bolt" x1="20" y1="4" x2="29" y2="24" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#fff7ed" />
-          <stop offset="1" stopColor="#f97316" />
-        </linearGradient>
-      </defs>
-      <path d="M21.6 12.4 27.4 5l-2.6 7.2h3.7L21.7 23l1.8-7.4h-3.3z" fill="url(#session-pikiclaw-bolt)" stroke="#92400e" strokeWidth="1.1" strokeLinejoin="round" />
-      <path d="M10.1 11.8 7.4 4.8l6.2 4.7z" fill="#fbbf24" stroke="#92400e" strokeWidth="1.2" strokeLinejoin="round" />
-      <path d="M21.9 11.8 24.6 4.8l-6.2 4.7z" fill="#fbbf24" stroke="#92400e" strokeWidth="1.2" strokeLinejoin="round" />
-      <circle cx="16" cy="17" r="10.4" fill="url(#session-pikiclaw-face)" stroke="#92400e" strokeWidth="1.25" />
-      <path d="M14.7 9.8 12.6 15h3.1l-1.1 4.4 4.8-6.4h-3.2l1.1-3.2z" fill="#fff7ed" opacity="0.74" />
-      <circle cx="12.2" cy="16.4" r="1.35" fill="#422006" />
-      <circle cx="19.8" cy="16.4" r="1.35" fill="#422006" />
-      <circle cx="9.7" cy="19.6" r="1.65" fill="#fb7185" opacity="0.78" />
-      <circle cx="22.3" cy="19.6" r="1.65" fill="#fb7185" opacity="0.78" />
-      <path d="M13.4 21.1c1.4 1.2 3.8 1.2 5.2 0" fill="none" stroke="#422006" strokeWidth="1.25" strokeLinecap="round" />
-    </svg>
-  );
+function fmtSidebarSessionTime(iso?: string): string {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return '—';
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  if (sameDay) {
+    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+  if (date.getFullYear() === now.getFullYear()) {
+    return date.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
+  }
+  return date.toLocaleDateString(undefined, { year: '2-digit', month: 'numeric', day: 'numeric' });
 }
 
 function TodoGlyph({ className }: { className?: string }) {
@@ -158,13 +149,22 @@ function isFileLinkInsideWorkspace(workdir: string, filePath: string): boolean {
   return target === root || target.startsWith(`${root}/`);
 }
 
-function ExitFocusIcon({ className }: { className?: string }) {
+function ThreeUpLayoutIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
-      <polyline points="4 14 10 14 10 20" />
-      <line x1="4" y1="20" x2="10" y2="14" />
-      <polyline points="20 10 14 10 14 4" />
-      <line x1="20" y1="4" x2="14" y2="10" />
+      <rect x="2.5" y="5" width="5.4" height="14" rx="1.5" />
+      <rect x="9.3" y="5" width="5.4" height="14" rx="1.5" />
+      <rect x="16.1" y="5" width="5.4" height="14" rx="1.5" />
+    </svg>
+  );
+}
+
+function SingleLayoutIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <rect x="4" y="5" width="16" height="14" rx="2.5" />
+      <path d="M8 9h8" />
+      <path d="M8 13h5" />
     </svg>
   );
 }
@@ -172,10 +172,22 @@ function ExitFocusIcon({ className }: { className?: string }) {
 function EnterFocusIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
-      <polyline points="15 3 21 3 21 9" />
-      <line x1="21" y1="3" x2="14" y2="10" />
-      <polyline points="9 21 3 21 3 15" />
-      <line x1="3" y1="21" x2="10" y2="14" />
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+      <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+      <path d="M9 9h6v6H9z" />
+    </svg>
+  );
+}
+
+function ExitFocusIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M9 3v4a2 2 0 0 1-2 2H3" />
+      <path d="M15 3v4a2 2 0 0 0 2 2h4" />
+      <path d="M9 21v-4a2 2 0 0 0-2-2H3" />
+      <path d="M15 21v-4a2 2 0 0 1 2-2h4" />
     </svg>
   );
 }
@@ -190,7 +202,75 @@ function SideChatCollapseIcon({ className }: { className?: string }) {
 }
 
 type SessionWithDepth = SessionInfo & { __forkDepth: number };
-type SessionSlot = { agent: string; sessionId: string; workdir: string; mountKey: string };
+type SessionSlot = { agent: string; sessionId: string; workdir: string; mountKey: string; archiveOnly?: boolean };
+type FocusFloatingSession = {
+  id: string;
+  workdir: string;
+  agent: string;
+  sessionId?: string;
+  mountKey: string;
+  hidden?: boolean;
+  x?: number;
+  y?: number;
+  pendingPrompt?: string | null;
+  pendingImageUrls?: string[];
+  pendingCreatedAt?: string | null;
+};
+type FocusFloatingDrag = {
+  itemId: string;
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+};
+type SlotPointerDrag = {
+  from: number;
+  over: number;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  title: string;
+  agent: string;
+  state: string;
+  visible: boolean;
+};
+type SlotDragLayoutItem = {
+  index: number;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+type MultiRowHeightDrag = {
+  pointerId: number;
+  startY: number;
+  startHeight: number;
+};
+type ContextCardMode = 'floating' | 'docked';
+type ContextCardPlacement = {
+  mode: ContextCardMode;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type ContextCardDrag = {
+  parentKey: string;
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+};
 type OpenSideChatsMap = Record<string, SessionSlot[]>;
 type ActiveSideChatsMap = Record<string, string>;
 type SideChatPanelOpenMap = Record<string, boolean>;
@@ -266,17 +346,28 @@ const ACTIVE_SLOT_STORAGE_KEY = 'pikiclaw:session-workspace:active-slot:v1';
 const FOCUSED_SLOT_STORAGE_KEY = 'pikiclaw:session-workspace:focused-slot:v1';
 const NEW_SESSION_STORAGE_KEY = 'pikiclaw:session-workspace:new-session-workdir:v1';
 const WORKSPACE_EXPANDED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-expanded:v1';
-const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-sidebar-collapsed:v1';
+const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-sidebar-collapsed:v2';
 const CHAT_LAYOUT_STORAGE_KEY = 'pikiclaw:session-workspace:chat-layout:v1';
+const MULTI_ROW_HEIGHT_STORAGE_KEY = 'pikiclaw:session-workspace:multi-row-height:v1';
+const CONTEXT_SHELF_TAB_STORAGE_KEY = 'pikiclaw:session-workspace:context-shelf-tabs:v1';
+const LOCAL_READ_SESSIONS_STORAGE_KEY = 'pikiclaw:session-workspace:local-read-sessions:v1';
 const LEGACY_OPEN_SESSIONS_STORAGE_KEY = 'pikiclaw-open-sessions';
 const LEGACY_ACTIVE_SLOT_STORAGE_KEY = 'pikiclaw-active-slot';
 const SIDE_CHAT_DEFAULT_WIDTH = 440;
 const SIDE_CHAT_MIN_WIDTH = 340;
 const SIDE_CHAT_MAX_WIDTH = 760;
+const FOCUS_FLOATING_DEFAULT_WIDTH = 430;
+const FOCUS_FLOATING_DEFAULT_HEIGHT = 620;
+const FOCUS_FLOATING_MARGIN = 24;
+const FOCUS_FLOATING_CASCADE_OFFSET = 28;
+const CONTEXT_CARD_DEFAULT_WIDTH = 420;
+const CONTEXT_CARD_DEFAULT_HEIGHT = 620;
+const CONTEXT_CARD_MIN_MARGIN = 12;
+const CONTEXT_CARD_DOCK_SNAP_PX = 112;
 const SESSION_GRID_MAX_VISIBLE_ROWS = 2;
-const SESSION_GRID_GAP_PX = 12;
-const WORKSPACE_SETTINGS_MENU_WIDTH = 188;
-const WORKSPACE_SETTINGS_MENU_HEIGHT = 312;
+const SESSION_GRID_GAP_PX = 16;
+const MULTI_ROW_HEIGHT_MIN_PX = 320;
+const MULTI_ROW_HEIGHT_MAX_PX = 900;
 
 function readBrowserStorage(key: string, legacyKey?: string): string | null {
   const keys = legacyKey ? [key, legacyKey] : [key];
@@ -300,6 +391,21 @@ function writeBrowserStorage(key: string, value: string | null) {
   }
 }
 
+function clampMultiRowHeightForViewport(value: number): number {
+  const viewportMax = typeof window === 'undefined'
+    ? MULTI_ROW_HEIGHT_MAX_PX
+    : Math.max(MULTI_ROW_HEIGHT_MIN_PX, Math.min(MULTI_ROW_HEIGHT_MAX_PX, window.innerHeight - 32));
+  return Math.round(Math.min(viewportMax, Math.max(MULTI_ROW_HEIGHT_MIN_PX, value)));
+}
+
+function readStoredMultiRowHeight(): number | null {
+  const raw = readBrowserStorage(MULTI_ROW_HEIGHT_STORAGE_KEY);
+  if (raw == null) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return clampMultiRowHeightForViewport(parsed);
+}
+
 function readStoredOpenSessions(): SessionSlot[] {
   try {
     const raw = readBrowserStorage(OPEN_SESSIONS_STORAGE_KEY, LEGACY_OPEN_SESSIONS_STORAGE_KEY);
@@ -318,6 +424,7 @@ function readStoredOpenSessions(): SessionSlot[] {
         sessionId: s.sessionId,
         workdir: s.workdir,
         mountKey: typeof s.mountKey === 'string' && s.mountKey ? s.mountKey : nextMountKey(),
+        archiveOnly: s.archiveOnly === true,
       }));
   } catch {
     return [];
@@ -423,6 +530,121 @@ function clampSideChatWidthForViewport(value: number): number {
   return Math.round(Math.min(sideChatViewportMaxWidth(), Math.max(SIDE_CHAT_MIN_WIDTH, value)));
 }
 
+function defaultContextCardPlacement(): ContextCardPlacement {
+  if (typeof window === 'undefined') {
+    return {
+      mode: 'floating',
+      x: 960,
+      y: 76,
+      width: CONTEXT_CARD_DEFAULT_WIDTH,
+      height: CONTEXT_CARD_DEFAULT_HEIGHT,
+    };
+  }
+  const width = Math.min(CONTEXT_CARD_DEFAULT_WIDTH, Math.max(340, window.innerWidth - 48));
+  const height = Math.min(CONTEXT_CARD_DEFAULT_HEIGHT, Math.max(420, window.innerHeight - 96));
+  return {
+    mode: 'floating',
+    x: Math.max(CONTEXT_CARD_MIN_MARGIN, window.innerWidth - width - 28),
+    y: Math.max(CONTEXT_CARD_MIN_MARGIN, Math.min(76, window.innerHeight - height - CONTEXT_CARD_MIN_MARGIN)),
+    width,
+    height,
+  };
+}
+
+function clampContextCardPlacement(placement: ContextCardPlacement): ContextCardPlacement {
+  if (typeof window === 'undefined' || placement.mode === 'docked') return placement;
+  const width = Math.min(Math.max(placement.width, 340), Math.max(340, window.innerWidth - CONTEXT_CARD_MIN_MARGIN * 2));
+  const height = Math.min(Math.max(placement.height, 420), Math.max(420, window.innerHeight - CONTEXT_CARD_MIN_MARGIN * 2));
+  return {
+    ...placement,
+    width,
+    height,
+    x: Math.max(CONTEXT_CARD_MIN_MARGIN, Math.min(placement.x, window.innerWidth - width - CONTEXT_CARD_MIN_MARGIN)),
+    y: Math.max(CONTEXT_CARD_MIN_MARGIN, Math.min(placement.y, window.innerHeight - height - CONTEXT_CARD_MIN_MARGIN)),
+  };
+}
+
+type FocusFloatingBounds = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
+function focusFloatingBounds(): FocusFloatingBounds {
+  if (typeof window === 'undefined') {
+    return { left: 0, top: 0, right: 1280, bottom: 800, width: 1280, height: 800 };
+  }
+  const host = document.querySelector<HTMLElement>('[data-focus-session-host="true"]');
+  const rect = host?.getBoundingClientRect();
+  if (rect && rect.width > 0 && rect.height > 0) {
+    return {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      width: rect.width,
+      height: rect.height,
+    };
+  }
+  return {
+    left: 0,
+    top: 0,
+    right: window.innerWidth,
+    bottom: window.innerHeight,
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+}
+
+function focusFloatingSize(bounds = focusFloatingBounds()) {
+  if (typeof window === 'undefined') {
+    return { width: FOCUS_FLOATING_DEFAULT_WIDTH, height: FOCUS_FLOATING_DEFAULT_HEIGHT };
+  }
+  return {
+    width: Math.min(FOCUS_FLOATING_DEFAULT_WIDTH, Math.max(280, bounds.width - FOCUS_FLOATING_MARGIN * 2)),
+    height: Math.min(FOCUS_FLOATING_DEFAULT_HEIGHT, Math.max(360, bounds.height - FOCUS_FLOATING_MARGIN * 2)),
+  };
+}
+
+function defaultFocusFloatingPosition(index = 0): { x: number; y: number } {
+  if (typeof window === 'undefined') return { x: 960, y: 260 };
+  const bounds = focusFloatingBounds();
+  const size = focusFloatingSize(bounds);
+  const offset = (index % 6) * FOCUS_FLOATING_CASCADE_OFFSET;
+  const baseX = bounds.right - size.width - FOCUS_FLOATING_MARGIN - offset;
+  const baseY = bounds.top
+    + Math.max(
+      58,
+      Math.min(
+        bounds.height - size.height - FOCUS_FLOATING_MARGIN,
+        Math.round(bounds.height * 0.28),
+      ),
+    )
+    + offset;
+  return clampFocusFloatingPosition(baseX, baseY, size.width, size.height, bounds);
+}
+
+function clampFocusFloatingPosition(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  bounds = focusFloatingBounds(),
+): { x: number; y: number } {
+  if (typeof window === 'undefined') return { x, y };
+  const minX = bounds.left + FOCUS_FLOATING_MARGIN;
+  const minY = bounds.top + FOCUS_FLOATING_MARGIN;
+  const maxX = Math.max(minX, bounds.right - width - FOCUS_FLOATING_MARGIN);
+  const maxY = Math.max(minY, bounds.bottom - height - FOCUS_FLOATING_MARGIN);
+  return {
+    x: Math.max(minX, Math.min(x, maxX)),
+    y: Math.max(minY, Math.min(y, maxY)),
+  };
+}
+
 function readStoredSideChatWidths(): SideChatWidthsMap {
   try {
     const raw = readBrowserStorage(SIDE_CHAT_WIDTHS_STORAGE_KEY);
@@ -433,6 +655,26 @@ function readStoredSideChatWidths(): SideChatWidthsMap {
     for (const [parentKey, width] of Object.entries(parsed)) {
       const normalized = normalizeStoredSideChatWidth(width);
       if (typeof parentKey === 'string' && normalized != null) out[parentKey] = normalized;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function isContextShelfTab(value: unknown): value is ContextShelfTab {
+  return value === 'outputs' || value === 'side-chats' || value === 'files' || value === 'browser' || value === 'status' || value === 'ticket';
+}
+
+function readStoredContextShelfTabs(): Record<string, ContextShelfTab> {
+  try {
+    const raw = readBrowserStorage(CONTEXT_SHELF_TAB_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, ContextShelfTab> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof key === 'string' && isContextShelfTab(value)) out[key] = value;
     }
     return out;
   } catch {
@@ -488,13 +730,21 @@ function readStoredNewSessionWorkdir(): string | null {
 }
 
 function readStoredWorkspaceSidebarCollapsed(): boolean {
-  return readBrowserStorage(WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true';
+  const raw = readBrowserStorage(WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY);
+  return raw === 'true';
 }
 
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'dashboard' | 'settings';
-type ChatLayoutMode = 'single' | 'multi';
-type DashboardScope = 'all' | string;
+
+type OpenAgentTestChatState = {
+  forceWorkspace?: boolean;
+  newSessionAgent?: string;
+  newSessionPrompt?: string;
+  newSessionAutoSend?: boolean;
+  newSessionNonce?: number;
+};
+type ChatLayoutMode = 'single' | 'multi-2' | 'multi-3';
 type DashboardColumnKey = 'running' | 'review' | 'incomplete' | 'done';
 type DashboardSessionItem = {
   key: string;
@@ -522,7 +772,17 @@ type WorkspaceStatusSummary = {
 function readStoredChatLayout(): ChatLayoutMode {
   const raw = readBrowserStorage(CHAT_LAYOUT_STORAGE_KEY);
   if (raw === 'single') return raw;
-  return 'multi';
+  if (raw === 'multi' || raw === 'multi-2' || raw === 'multi-3') return 'multi-3';
+  return 'single';
+}
+
+function isMultiChatLayout(layout: ChatLayoutMode): layout is 'multi-2' | 'multi-3' {
+  return layout === 'multi-2' || layout === 'multi-3';
+}
+
+function chatLayoutColumnCount(layout: ChatLayoutMode, visibleSlotCount: number): number {
+  if (!isMultiChatLayout(layout)) return 1;
+  return Math.max(1, Math.min(3, visibleSlotCount));
 }
 
 function isOpenTarget(value: string | null | undefined): value is OpenTarget {
@@ -567,6 +827,42 @@ function statusTimestampMs(session: SessionInfo): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+type LocalReadSessionMarkers = Record<string, number>;
+
+function readStoredLocalReadSessionMarkers(): LocalReadSessionMarkers {
+  try {
+    const raw = readBrowserStorage(LOCAL_READ_SESSIONS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: LocalReadSessionMarkers = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const ts = typeof value === 'number' ? value : Number(value);
+      if (key && Number.isFinite(ts) && ts > 0) out[key] = ts;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredLocalReadSessionMarkers(markers: LocalReadSessionMarkers) {
+  const entries = Object.entries(markers).filter(([, value]) => Number.isFinite(value) && value > 0);
+  writeBrowserStorage(
+    LOCAL_READ_SESSIONS_STORAGE_KEY,
+    entries.length ? JSON.stringify(Object.fromEntries(entries)) : null,
+  );
+}
+
+function isLocallyReadSession(session: SessionInfo, markers: LocalReadSessionMarkers): boolean {
+  const agent = session.agent || '';
+  if (!agent || !session.sessionId) return false;
+  const readAt = markers[localReadSessionKey(agent, session.sessionId)] || 0;
+  if (!readAt) return false;
+  const changedAt = statusTimestampMs(session) || 0;
+  return readAt >= changedAt;
+}
+
 function sessionRunningStartMs(session: SessionInfo): number | null {
   const raw = session.runStartedAt || session.runUpdatedAt || session.createdAt || '';
   if (!raw) return null;
@@ -596,34 +892,28 @@ function useElapsedNow(enabled: boolean): number {
   return now;
 }
 
-const DASHBOARD_COLUMNS: Array<{ key: DashboardColumnKey; titleKey: string; hintKey: string; variant: StripBadgeVariant }> = [
-  { key: 'running', titleKey: 'chat.columnRunning', hintKey: 'chat.columnRunningHint', variant: 'ok' },
-  { key: 'review', titleKey: 'chat.columnReview', hintKey: 'chat.columnReviewHint', variant: 'warn' },
-  { key: 'incomplete', titleKey: 'chat.columnBlocked', hintKey: 'chat.columnBlockedHint', variant: 'err' },
-  { key: 'done', titleKey: 'chat.columnActive', hintKey: 'chat.columnActiveHint', variant: 'muted' },
-];
-
 function dashboardColumnForSession(
   session: SessionInfo,
   live: LiveSessionState | null,
   recentCutoff: number,
 ): DashboardColumnKey | null {
-  if (live?.phase === 'queued') return 'running';
-  if (live?.phase === 'streaming') return 'running';
+  if (live?.phase === 'queued' || live?.phase === 'streaming') return null;
 
   const displayState = sessionDisplayState(session);
-  if (displayState === 'running') return 'running';
-  if (displayState === 'incomplete') return 'incomplete';
+  if (displayState === 'running') return null;
+  if (session.userStatus === 'done') return null;
+  if (session.userStatus === 'parked') return null;
+  if (displayState === 'incomplete') return 'review';
 
   const recentlyFinished = (statusTimestampMs(session) ?? 0) >= recentCutoff;
-  if (session.userStatus === 'done') return recentlyFinished ? 'done' : null;
-  if (session.userStatus === 'parked') return null;
-  if (session.userStatus === 'review' || recentlyFinished) return 'review';
+  if (session.userStatus === 'review') return 'review';
+  if (recentlyFinished && isUnreadCompletedSession(session)) return 'review';
   return null;
 }
 
 function sessionAttentionVariant(session: SessionInfo): 'ok' | 'warn' | null {
   const displayState = sessionDisplayState(session);
+  if (session.userStatus === 'done' || session.userStatus === 'parked') return null;
   if (displayState === 'running') return 'ok';
   if (displayState === 'incomplete') return 'warn';
   if (isUnreadCompletedSession(session)) return 'ok';
@@ -695,8 +985,103 @@ function workspaceGroupAttention(sessions: SessionInfo[]): { variant: 'ok' | 'wa
 }
 
 function shouldIgnoreFocusModeTarget(target: EventTarget | null): boolean {
-  const el = target instanceof HTMLElement ? target : null;
+  const el = target instanceof Element ? target : null;
   return !!el?.closest('button,a,input,textarea,select,[role="button"],[contenteditable="true"],[data-focus-ignore]');
+}
+
+function measureSessionSlotRects(): Map<number, DOMRect> {
+  const rects = new Map<number, DOMRect>();
+  if (typeof document === 'undefined') return rects;
+  document.querySelectorAll<HTMLElement>('[data-session-slot-index]').forEach(slotEl => {
+    const raw = slotEl.dataset.sessionSlotIndex;
+    if (raw == null) return;
+    const index = Number(raw);
+    if (!Number.isInteger(index)) return;
+    rects.set(index, slotEl.getBoundingClientRect());
+  });
+  return rects;
+}
+
+function readSessionSlotLayoutItems(): SlotDragLayoutItem[] {
+  if (typeof document === 'undefined') return [];
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-session-slot-index]'))
+    .map(slotEl => {
+      const raw = slotEl.dataset.sessionSlotIndex;
+      const index = raw == null ? Number.NaN : Number(raw);
+      const rect = slotEl.getBoundingClientRect();
+      return {
+        index,
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    })
+    .filter(item => (
+      Number.isInteger(item.index)
+      && item.width > 0
+      && item.height > 0
+    ));
+}
+
+function slotInsertionIndexFromLayout(
+  clientX: number,
+  clientY: number,
+  draggingIndex: number,
+  fallback: number,
+  layoutItems: SlotDragLayoutItem[],
+): number {
+  const items = layoutItems
+    .filter(item => item.index !== draggingIndex)
+    .sort((a, b) => {
+      const rowTolerance = Math.min(a.height, b.height) * 0.35;
+      if (Math.abs(a.top - b.top) > rowTolerance) return a.top - b.top;
+      return a.left - b.left;
+    });
+
+  if (!items.length) return fallback;
+
+  const rows: Array<{
+    start: number;
+    top: number;
+    bottom: number;
+    centerY: number;
+    items: typeof items;
+  }> = [];
+
+  for (const item of items) {
+    const centerY = item.top + item.height / 2;
+    const last = rows[rows.length - 1];
+    if (!last || Math.abs(centerY - last.centerY) > Math.max(24, item.height * 0.42)) {
+      rows.push({
+        start: rows.length ? rows[rows.length - 1].start + rows[rows.length - 1].items.length : 0,
+        top: item.top,
+        bottom: item.bottom,
+        centerY,
+        items: [item],
+      });
+    } else {
+      last.items.push(item);
+      last.top = Math.min(last.top, item.top);
+      last.bottom = Math.max(last.bottom, item.bottom);
+      last.centerY = (last.centerY * (last.items.length - 1) + centerY) / last.items.length;
+    }
+  }
+
+  const containingRow = rows.find(row => clientY >= row.top - 16 && clientY <= row.bottom + 16);
+  const row = containingRow || rows.reduce((best, current) => (
+    Math.abs(clientY - current.centerY) < Math.abs(clientY - best.centerY) ? current : best
+  ), rows[0]);
+
+  const beforeIndex = row.items.findIndex(item => {
+    const targetThreshold = item.index > draggingIndex
+      ? item.left + item.width * 0.45
+      : item.left + item.width * 0.55;
+    return clientX < targetThreshold;
+  });
+  return beforeIndex >= 0 ? row.start + beforeIndex : row.start + row.items.length;
 }
 
 function StatusMetric({
@@ -776,155 +1161,212 @@ function WorkspaceStatusStrip({
   );
 }
 
-function WorkspaceSidebarHeader({
-  onCollapse,
-  collapseLabel,
-  version,
+const TASK_STAGE_ORDER: ProTaskStage[] = ['focus', 'refinement', 'coding', 'verification', 'demo', 'bugfix', 'knowledge'];
+const TASK_STAGE_LABEL: Record<ProTaskStage, string> = {
+  focus: 'Focus',
+  refinement: 'Refine',
+  coding: 'Code',
+  verification: 'Verify',
+  demo: 'Demo',
+  bugfix: 'Bugfix',
+  knowledge: 'Knowledge',
+};
+const CONTEXT_QUICK_LABEL: Record<ContextShelfTab, string> = {
+  outputs: 'Outputs',
+  'side-chats': 'Side',
+  files: 'Files',
+  browser: 'Browser',
+  status: 'State',
+  ticket: 'Ticket',
+};
+const FOCUS_CONTEXT_SHELF_TABS = new Set<ContextShelfTab>(['side-chats', 'files', 'browser']);
+const FOCUS_CONTEXT_SHELF_TAB_ORDER: ContextShelfTab[] = ['files', 'browser', 'side-chats'];
+const FOCUS_CONTEXT_TAB_LABELS: Partial<Record<ContextShelfTab, string>> = {
+  'side-chats': 'Side Card',
+};
+
+function stageRunTime(run: StageRun): number {
+  const parsed = Date.parse(run.completedAt || run.startedAt || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sessionMatchesStageRun(slot: Pick<SessionSlot, 'workdir' | 'agent' | 'sessionId'>, run: StageRun): boolean {
+  return slot.workdir === run.session.workdir
+    && slot.agent === run.session.agent
+    && slot.sessionId === run.session.sessionId;
+}
+
+function TaskBriefCard({
+  task,
+  activeStageRun,
+  busyStage,
+  onClose,
+  onStartStage,
+  onOpenStageRun,
 }: {
-  onCollapse: () => void;
-  collapseLabel: string;
-  version: string;
+  task: ProTask;
+  activeStageRun: StageRun | null;
+  busyStage: ProTaskStage | null;
+  onClose: () => void;
+  onStartStage: (stage: ProTaskStage) => void;
+  onOpenStageRun: (run: StageRun) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const fields = task.jiraFields || {};
+  const latestRuns = useMemo(() => {
+    const map = new Map<ProTaskStage, StageRun>();
+    for (const run of [...(task.stageRuns || [])].sort((a, b) => stageRunTime(b) - stageRunTime(a))) {
+      if (!map.has(run.stage)) map.set(run.stage, run);
+    }
+    return map;
+  }, [task.stageRuns]);
+  const nextStage = TASK_STAGE_ORDER.find(stage => !latestRuns.has(stage)) || activeStageRun?.stage || 'focus';
+  const runButtonLabel = busyStage
+    ? TASK_STAGE_LABEL[busyStage]
+    : activeStageRun
+      ? `Run ${TASK_STAGE_LABEL[nextStage]}`
+      : `Start ${TASK_STAGE_LABEL[nextStage]}`;
   return (
-    <div className="shrink-0 border-b border-edge/30 bg-[linear-gradient(180deg,var(--th-sidebar),rgba(20,21,24,0.58))] px-3 py-3">
-      <div className="flex items-center gap-2.5">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-amber-300/40 bg-[linear-gradient(145deg,rgba(250,204,21,0.34),rgba(251,146,60,0.14))] shadow-[0_12px_30px_rgba(245,158,11,0.22),inset_0_1px_0_rgba(255,255,255,0.42)]">
-          <PikiclawLogo />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[14px] font-semibold tracking-tight text-gradient">Pikiclaw Pro</div>
-          <div className="mt-0.5 truncate text-[10px] font-medium text-fg-5">Agent workspace</div>
-        </div>
-        <div className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 font-mono text-[10px] text-fg-5/80">
-          v{version}
-        </div>
+    <div className="rounded-lg border border-edge/65 bg-panel/72 px-3 py-2.5 shadow-[0_8px_22px_rgba(2,6,23,0.10),inset_0_1px_0_rgba(255,255,255,0.035)]">
+      <div className="flex min-w-0 items-start gap-2.5">
         <button
           type="button"
-          onClick={onCollapse}
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-fg-5 transition-[background,color,transform] duration-200 hover:-translate-x-1 hover:bg-panel-h hover:text-fg-2 active:scale-95"
-          title={collapseLabel}
-          aria-label={collapseLabel}
+          onClick={() => setExpanded(v => !v)}
+          className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-edge/55 bg-panel-alt/70 text-fg-4 transition hover:border-edge-h hover:bg-panel-h hover:text-fg active:translate-y-px"
+          aria-label={expanded ? 'Collapse task brief' : 'Expand task brief'}
+          title={expanded ? 'Collapse' : 'Expand'}
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="m15 18-6-6 6-6" />
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={cn('transition-transform', expanded && 'rotate-90')}
+            aria-hidden="true"
+          >
+            <path d="m9 18 6-6-6-6" />
           </svg>
         </button>
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex min-w-0 flex-wrap items-center gap-1.5">
+            {task.jiraKey && <Badge variant="accent">{task.jiraKey}</Badge>}
+            <Badge variant={task.status === 'done' ? 'ok' : task.status === 'resolved' ? 'accent' : task.status === 'backlog' ? 'muted' : 'warn'}>
+              {task.status}
+            </Badge>
+            {activeStageRun && <Badge variant={activeStageRun.status === 'completed' ? 'ok' : activeStageRun.status === 'failed' ? 'warn' : 'muted'}>{TASK_STAGE_LABEL[activeStageRun.stage]}</Badge>}
+          </div>
+          <div className="truncate text-[13px] font-semibold tracking-tight text-fg" title={task.title}>{task.title}</div>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-fg-5">
+            <span className="truncate">Workspace {task.workdir ? workspaceBaseName(task.workdir) : 'Current'}</span>
+            <span>Next {TASK_STAGE_LABEL[nextStage]}</span>
+            {fields.assignee && <span className="truncate">Owner {fields.assignee}</span>}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!!busyStage}
+            onClick={() => onStartStage(nextStage)}
+            className="h-7 px-2.5"
+          >
+            {busyStage ? <Spinner className="h-3 w-3" /> : null}
+            {runButtonLabel}
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onClose} title="Back to board" aria-label="Back to board">
+            Board
+          </Button>
+        </div>
       </div>
+      {expanded && (
+        <div className="mt-3 border-t border-edge/45 pt-3">
+          <div className="grid gap-2 text-[11px] sm:grid-cols-2">
+            {[
+              ['Jira', task.jiraKey || '--'],
+              ['Remote status', fields.status || '--'],
+              ['Priority', fields.priority || '--'],
+              ['Reporter', fields.reporter || '--'],
+              ['Assignee', fields.assignee || '--'],
+              ['Sprint', task.sprint || '--'],
+            ].map(([label, value]) => (
+              <div key={label} className="flex min-w-0 gap-2">
+                <span className="w-24 shrink-0 text-fg-5">{label}</span>
+                <span className="min-w-0 truncate text-fg-3">{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {TASK_STAGE_ORDER.map(stage => {
+              const run = latestRuns.get(stage);
+              const active = activeStageRun?.id === run?.id;
+              return (
+                <button
+                  key={stage}
+                  type="button"
+                  onClick={() => run ? onOpenStageRun(run) : onStartStage(stage)}
+                  disabled={!!busyStage && !run}
+                  className={cn(
+                    'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[11px] font-semibold transition-[border-color,background,color,transform] active:translate-y-px disabled:cursor-not-allowed disabled:opacity-45',
+                    active
+                      ? 'border-primary/40 bg-primary/[0.10] text-primary'
+                      : run
+                        ? 'border-edge/65 bg-panel-alt text-fg-3 hover:border-edge-h hover:bg-panel-h hover:text-fg'
+                        : 'border-dashed border-edge/50 bg-transparent text-fg-5 hover:border-edge-h hover:text-fg-3',
+                  )}
+                >
+                  {TASK_STAGE_LABEL[stage]}
+                  {run && <span className="h-1.5 w-1.5 rounded-full bg-current opacity-55" />}
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-3 line-clamp-4 whitespace-pre-wrap text-[11.5px] leading-relaxed text-fg-4">
+            {task.description || 'No ticket description yet.'}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function WorkspaceSidebarRuntimeControls({
-  appStatus,
-  restartPhase,
-  onRestartClick,
-  restartLabel,
-  confirmRestartLabel,
-  restartingLabel,
-  theme,
-  onToggleTheme,
-  themeToggleLabel,
-  locale,
-  onToggleLocale,
-  settingsButtonRef,
-  onOpenSettings,
-  settingsLabel,
-  settingsOpen,
+function TaskFocusEmptyWorkbench({
+  task,
+  loading,
+  busyStage,
+  onStartStage,
+  onClose,
 }: {
-  appStatus: ReturnType<typeof resolveAppStatusBadge>;
-  restartPhase: RestartPhase;
-  onRestartClick?: () => void;
-  restartLabel: string;
-  confirmRestartLabel: string;
-  restartingLabel: string;
-  theme: string;
-  onToggleTheme: () => void;
-  themeToggleLabel: string;
-  locale: string;
-  onToggleLocale: () => void;
-  settingsButtonRef: { current: HTMLButtonElement | null };
-  onOpenSettings: () => void;
-  settingsLabel: string;
-  settingsOpen: boolean;
+  task: ProTask | null;
+  loading: boolean;
+  busyStage: ProTaskStage | null;
+  onStartStage: (stage: ProTaskStage) => void;
+  onClose: () => void;
 }) {
-  const restartBusy = restartPhase === 'restarting' || restartPhase === 'reconnecting';
-  const restartConfirming = restartPhase === 'confirm';
-  const restartTitle = restartBusy ? restartingLabel : restartConfirming ? confirmRestartLabel : restartLabel;
   return (
-    <div className="mt-2 flex items-center gap-1.5 rounded-lg border border-edge/45 bg-panel/55 px-2 py-1.5">
-      <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px] text-fg-4">
-        <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
-        <span className="min-w-0 flex-1 truncate font-medium text-fg-3">{appStatus.badgeContent}</span>
+    <div className="flex h-full min-h-0 items-center justify-center bg-[var(--th-session-bg)] px-4 py-8">
+      <div className="w-full max-w-[760px]">
+        {loading ? (
+          <div className="flex items-center justify-center py-24"><Spinner className="h-5 w-5 text-fg-4" /></div>
+        ) : task ? (
+          <TaskBriefCard
+            task={task}
+            activeStageRun={null}
+            busyStage={busyStage}
+            onClose={onClose}
+            onStartStage={onStartStage}
+            onOpenStageRun={() => {}}
+          />
+        ) : (
+          <div className="rounded-xl border border-edge/60 bg-panel/80 px-5 py-8 text-center">
+            <div className="text-[13px] font-semibold text-fg-3">Task not found</div>
+            <Button className="mt-4" size="sm" variant="outline" onClick={onClose}>Back to board</Button>
+          </div>
+        )}
       </div>
-      <Button
-        variant={restartConfirming ? 'secondary' : 'ghost'}
-        size="icon"
-        onClick={onRestartClick}
-        disabled={!onRestartClick || restartBusy}
-        title={restartTitle}
-        aria-label={restartTitle}
-        className={cn(
-          'h-7 w-7 shrink-0',
-          restartBusy && 'pointer-events-none opacity-70',
-          restartConfirming && 'border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/10 hover:text-amber-200',
-        )}
-      >
-        <span
-          className={restartBusy ? 'animate-spin' : ''}
-          style={restartBusy ? { animationDuration: '1s' } : undefined}
-          aria-hidden="true"
-        >
-          {IconRestart}
-        </span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onToggleTheme}
-        title={themeToggleLabel}
-        aria-label={themeToggleLabel}
-        className="h-7 w-7 shrink-0"
-      >
-        {theme === 'dark' ? IconSun : IconMoon}
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onToggleLocale}
-        title={locale === 'zh-CN' ? 'English' : '中文'}
-        aria-label={locale === 'zh-CN' ? 'English' : '中文'}
-        className="h-7 w-7 shrink-0 font-mono text-[11px] font-semibold tracking-wider"
-      >
-        {locale === 'zh-CN' ? 'EN' : '\u4e2d'}
-      </Button>
-      <button
-        ref={settingsButtonRef}
-        type="button"
-        onMouseDown={e => e.stopPropagation()}
-        onClick={e => {
-          e.stopPropagation();
-          onOpenSettings();
-        }}
-        className={cn(
-          'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-fg-4 transition-colors hover:bg-panel hover:text-fg-2',
-          settingsOpen && 'border-edge-h bg-panel-h text-fg-2',
-        )}
-        title={settingsLabel}
-        aria-label={settingsLabel}
-        aria-haspopup="menu"
-      >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M4 12h2" />
-          <path d="M18 12h2" />
-          <path d="M12 4v2" />
-          <path d="M12 18v2" />
-          <path d="m6.4 6.4 1.4 1.4" />
-          <path d="m16.2 16.2 1.4 1.4" />
-          <path d="m17.6 6.4-1.4 1.4" />
-          <path d="m7.8 16.2-1.4 1.4" />
-        </svg>
-      </button>
     </div>
   );
 }
@@ -937,31 +1379,24 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   mode = 'workspace',
   settingsContent = null,
   dashboardJiraContent = null,
-  version = '...',
-  restartPhase = null,
-  onRestartClick,
 }: {
   active?: boolean;
   mode?: SessionWorkspaceMode;
   settingsContent?: ReactNode;
   dashboardJiraContent?: ReactNode;
-  version?: string;
-  restartPhase?: RestartPhase;
-  onRestartClick?: () => void;
 }) {
   // Granular selectors — keep high-churn store slices out of this workspace.
   // `appState` is used only for the compact workspace status strip.
   const locale = useStore(s => s.locale);
-  const setLocale = useStore(s => s.setLocale);
-  const theme = useStore(s => s.theme);
-  const setTheme = useStore(s => s.setTheme);
   const appState = useStore(s => s.state);
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? null);
   const toastSession = useStore(s => s.toast);
   const navigate = useNavigate();
+  const location = useLocation();
   const t = useMemo(() => createT(locale), [locale]);
   const appStatus = resolveAppStatusBadge(appState, t);
-  const themeToggleLabel = theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode');
+  const [workspaceSidebarToggleHost, setWorkspaceSidebarToggleHost] = useState<HTMLElement | null>(null);
+  const [globalInboxHost, setGlobalInboxHost] = useState<HTMLElement | null>(null);
 
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [sessionsMap, setSessionsMap] = useState<Record<string, SessionInfo[]>>({});
@@ -975,13 +1410,27 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [activeSideChatByParent, setActiveSideChatByParentRaw] = useState<ActiveSideChatsMap>(readStoredActiveSideChats);
   const [sideChatPanelOpenByParent, setSideChatPanelOpenByParent] = useState<SideChatPanelOpenMap>({});
   const [sideChatWidthsByParent, setSideChatWidthsByParentRaw] = useState<SideChatWidthsMap>(readStoredSideChatWidths);
+  const [contextShelfTabByParent, setContextShelfTabByParentRaw] = useState<Record<string, ContextShelfTab>>(readStoredContextShelfTabs);
+  const [contextCardPlacementByParent, setContextCardPlacementByParent] = useState<Record<string, ContextCardPlacement>>({});
+  const [draggingContextCardKey, setDraggingContextCardKey] = useState<string | null>(null);
   const [sideChatRefsByParent, setSideChatRefsByParent] = useState<SideChatRefsMap>({});
   const [sideChatInfoMap, setSideChatInfoMap] = useState<Record<string, SessionInfo>>({});
   const [activeSlotIndex, setActiveSlotIndexRaw] = useState(readStoredActiveSlot);
   const [spotlightSlotIndex, setSpotlightSlotIndex] = useState<number | null>(null);
   const [focusedSlotIndex, setFocusedSlotIndex] = useState<number | null>(readStoredFocusedSlot);
+  const [focusFloatingSessions, setFocusFloatingSessions] = useState<FocusFloatingSession[]>([]);
+  const [focusFloatingDraggingId, setFocusFloatingDraggingId] = useState<string | null>(null);
   const [liveSessionStates, setLiveSessionStates] = useState<Record<string, LiveSessionState>>({});
-  const [locallyReadSessionKeys, setLocallyReadSessionKeys] = useState<Set<string>>(() => new Set());
+  const [locallyReadSessionMarkers, setLocallyReadSessionMarkersRaw] = useState<LocalReadSessionMarkers>(readStoredLocalReadSessionMarkers);
+  const setLocallyReadSessionMarkers = useCallback((
+    updater: LocalReadSessionMarkers | ((prev: LocalReadSessionMarkers) => LocalReadSessionMarkers),
+  ) => {
+    setLocallyReadSessionMarkersRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      writeStoredLocalReadSessionMarkers(next);
+      return next;
+    });
+  }, []);
   const spotlightSlotTimerRef = useRef<number | null>(null);
   const focusedOpenSessionsSnapshotRef = useRef<{ slots: SessionSlot[]; focusedIndex: number } | null>(null);
   const openSessionsRef = useRef(openSessions);
@@ -990,6 +1439,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   openSideChatsByParentRef.current = openSideChatsByParent;
   const sideChatWidthsByParentRef = useRef(sideChatWidthsByParent);
   sideChatWidthsByParentRef.current = sideChatWidthsByParent;
+  const contextCardDragRef = useRef<ContextCardDrag | null>(null);
   const sessionsMapRef = useRef(sessionsMap);
   sessionsMapRef.current = sessionsMap;
   const liveSessionStatesRef = useRef(liveSessionStates);
@@ -1031,6 +1481,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       return next;
     });
   }, []);
+  const setContextShelfTabByParent = useCallback((updater: Record<string, ContextShelfTab> | ((prev: Record<string, ContextShelfTab>) => Record<string, ContextShelfTab>)) => {
+    setContextShelfTabByParentRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      writeBrowserStorage(CONTEXT_SHELF_TAB_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let changed = false;
@@ -1067,6 +1524,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   // Floating file-tree panel — at most one open at a time
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [filePanelRequest, setFilePanelRequest] = useState<FilePanelRequest | null>(null);
+  const [filePanelWorkdir, setFilePanelWorkdir] = useState<string | null>(null);
   const filePanelRequestSeqRef = useRef(0);
 
   // Refs so setSelectedSession stays stable and all callers see current values
@@ -1111,11 +1569,34 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       line: target.line,
       nonce: ++filePanelRequestSeqRef.current,
     });
+    setFilePanelWorkdir(workdir);
     setFileTreeOpen(true);
   }, [setActiveSlotIndex, toastSession]);
 
+  const handleOpenOverlayFileLink = useCallback((workdir: string, target: FileLinkTarget) => {
+    if (!isFileLinkInsideWorkspace(workdir, target.path)) {
+      void api.openInEditor(target.path).then(res => {
+        if (!res.ok) toastSession(res.error || `Failed to open ${target.path}`, false);
+      }).catch((error: any) => {
+        toastSession(error?.message || String(error), false);
+      });
+      return;
+    }
+    setFilePanelRequest({
+      workdir,
+      path: target.path,
+      line: target.line,
+      nonce: ++filePanelRequestSeqRef.current,
+    });
+    setFilePanelWorkdir(workdir);
+    setFileTreeOpen(true);
+  }, [toastSession]);
+
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showNewSession, setShowNewSessionRaw] = useState<string | null>(readStoredNewSessionWorkdir);
+  const [newSessionTemplateAgent, setNewSessionTemplateAgent] = useState('');
+  const [newSessionInitialDraftPrompt, setNewSessionInitialDraftPrompt] = useState<string | null>(null);
+  const [newSessionInitialAutoSend, setNewSessionInitialAutoSend] = useState(false);
   const setShowNewSession = useCallback((updater: string | null | ((prev: string | null) => string | null)) => {
     setShowNewSessionRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
@@ -1131,18 +1612,25 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       return next;
     });
   }, []);
-  const [workspaceSettingsOpen, setWorkspaceSettingsOpen] = useState(false);
-  const workspaceSettingsButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [workspaceSettingsAnchor, setWorkspaceSettingsAnchor] = useState<DOMRect | null>(null);
-  const workspaceSettingsItems = useMemo(() => [
-    { to: '/', label: t('tab.sessions') },
-    { to: '/dashboard', label: t('tab.dashboard') },
-    { to: '/usage', label: t('tab.usage') },
-    { to: '/im', label: t('tab.im') },
-    { to: '/agents', label: t('tab.agent') },
-    { to: '/extensions', label: t('tab.extensions') },
-    { to: '/system', label: t('tab.system') },
-  ], [t]);
+  const [isNarrowWorkbench, setIsNarrowWorkbench] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const query = window.matchMedia('(max-width: 760px)');
+    const sync = () => setIsNarrowWorkbench(query.matches);
+    sync();
+    query.addEventListener?.('change', sync);
+    return () => query.removeEventListener?.('change', sync);
+  }, []);
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const syncHosts = () => {
+      setWorkspaceSidebarToggleHost(document.getElementById('workspace-sidebar-toggle-host'));
+      setGlobalInboxHost(document.getElementById('global-inbox-host'));
+    };
+    syncHosts();
+    const frame = window.requestAnimationFrame(syncHosts);
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   const [draggingWorkspacePath, setDraggingWorkspacePath] = useState<string | null>(null);
   const [dragOverWorkspacePath, setDragOverWorkspacePath] = useState<string | null>(null);
@@ -1150,18 +1638,37 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [renameWorkspaceName, setRenameWorkspaceName] = useState('');
   const [renamingWorkspace, setRenamingWorkspace] = useState(false);
   const [search, setSearch] = useState('');
-  const [dashboardScope, setDashboardScope] = useState<DashboardScope>('all');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [chatLayout, setChatLayoutRaw] = useState<ChatLayoutMode>(readStoredChatLayout);
-  const setChatLayout = useCallback((next: ChatLayoutMode) => {
-    setChatLayoutRaw(next);
-    writeBrowserStorage(CHAT_LAYOUT_STORAGE_KEY, next);
+  const setChatLayout = useCallback((updater: ChatLayoutMode | ((prev: ChatLayoutMode) => ChatLayoutMode)) => {
+    setChatLayoutRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      writeBrowserStorage(CHAT_LAYOUT_STORAGE_KEY, next);
+      return next;
+    });
+    setFocusedSlotIndex(null);
   }, []);
-  const [dashboardFocusedSlot, setDashboardFocusedSlot] = useState<SessionSlot | null>(null);
-  const [dashboardCreateTaskWorkdir, setDashboardCreateTaskWorkdir] = useState<string | null>(null);
-  const [dashboardPendingPrompt, setDashboardPendingPrompt] = useState<string | null>(null);
-  const [dashboardPendingImageUrls, setDashboardPendingImageUrls] = useState<string[]>([]);
-  const [dashboardPendingCreatedAt, setDashboardPendingCreatedAt] = useState<string | null>(null);
+  const [multiRowHeightPx, setMultiRowHeightPxRaw] = useState<number | null>(readStoredMultiRowHeight);
+  const setMultiRowHeightPx = useCallback((updater: number | null | ((prev: number | null) => number | null)) => {
+    setMultiRowHeightPxRaw(prev => {
+      const rawNext = typeof updater === 'function' ? updater(prev) : updater;
+      const next = rawNext == null ? null : clampMultiRowHeightForViewport(rawNext);
+      writeBrowserStorage(MULTI_ROW_HEIGHT_STORAGE_KEY, next == null ? null : String(next));
+      return next;
+    });
+  }, []);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxFocusedSlot, setInboxFocusedSlot] = useState<SessionSlot | null>(null);
+  const [checkedInboxItemKeys, setCheckedInboxItemKeys] = useState<Set<string>>(() => new Set());
+  const [inboxAttentionPulse, setInboxAttentionPulse] = useState(false);
+  const previousInboxAlertCountRef = useRef(-1);
+  const openInboxFromTrigger = useCallback(() => {
+    setInboxOpen(true);
+  }, []);
+  const closeInbox = useCallback(() => {
+    setInboxOpen(false);
+    setInboxFocusedSlot(null);
+  }, []);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [quickTodoText, setQuickTodoText] = useState('');
   const [quickTodoSaving, setQuickTodoSaving] = useState(false);
@@ -1169,11 +1676,34 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
   const [todoLoading, setTodoLoading] = useState(false);
   const [todoCreating, setTodoCreating] = useState(false);
+  const taskFocusId = useMemo(() => {
+    if (mode !== 'workspace') return null;
+    return new URLSearchParams(location.search).get('task');
+  }, [location.search, mode]);
+  const [taskWorkbench, setTaskWorkbench] = useState<ProTaskWorkbench | null>(null);
+  const [taskWorkbenchLoading, setTaskWorkbenchLoading] = useState(false);
+  const [taskStageBusy, setTaskStageBusy] = useState<ProTaskStage | null>(null);
+  const activeTaskFocusSessionRef = useRef<{ taskId: string; focusSessionId: string } | null>(null);
+
+  useEffect(() => {
+    const navState = location.state as { forceWorkspace?: boolean } | null;
+    if (mode === 'workspace' && navState?.forceWorkspace) {
+      setWorkspaceSidebarCollapsed(false);
+    }
+  }, [location.state, mode, setWorkspaceSidebarCollapsed]);
+
+  useEffect(() => {
+    if (!taskFocusId) return;
+    setFocusedSlotIndex(null);
+    setSideChatPanelOpenByParent({});
+  }, [setSideChatPanelOpenByParent, taskFocusId]);
+
   const deferredSearch = useDeferredValue(search);
   const initializedRef = useRef(false);
   const inflightLoadsRef = useRef<Record<string, boolean>>({});
   const autoPrefetchedSessionsRef = useRef<Set<string>>(new Set());
   const hoverPrefetchTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const handledAgentTestChatRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (showNewSession) return;
@@ -1187,28 +1717,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     for (const timer of Object.values(hoverPrefetchTimersRef.current)) {
       clearTimeout(timer);
     }
-  }, []);
-
-  useEffect(() => {
-    if (!workspaceSettingsOpen) return;
-    const close = () => setWorkspaceSettingsOpen(false);
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
-    window.addEventListener('mousedown', close);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('mousedown', close);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [workspaceSettingsOpen]);
-
-  const openWorkspaceSettings = useCallback(() => {
-    const rect = workspaceSettingsButtonRef.current?.getBoundingClientRect() || null;
-    setWorkspaceSettingsAnchor(rect);
-    setWorkspaceSettingsOpen(v => !v);
   }, []);
 
   /* ── Load workspaces (API already includes runtimeWorkdir) ── */
@@ -1286,6 +1794,24 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       void loadSessionsForWorkspace(ws.path, { force: true });
     }
   }, [loadSessionsForWorkspace, workspaces]);
+
+  useEffect(() => {
+    if (!active || !initializedRef.current || !workspaces.length) return;
+    const navState = location.state as OpenAgentTestChatState | null;
+    const agent = typeof navState?.newSessionAgent === 'string' ? navState.newSessionAgent.trim() : '';
+    if (!agent) return;
+    const key = `${agent}:${navState?.newSessionNonce || ''}:${navState?.newSessionPrompt || ''}`;
+    if (handledAgentTestChatRef.current === key) return;
+    const workdir = runtimeWorkdir || workspaces[0]?.path || '';
+    if (!workdir) return;
+    handledAgentTestChatRef.current = key;
+    setNewSessionTemplateAgent(agent);
+    setNewSessionInitialDraftPrompt(String(navState?.newSessionPrompt || 'Say OK only.').trim() || 'Say OK only.');
+    setNewSessionInitialAutoSend(navState?.newSessionAutoSend === true);
+    setShowNewSession(workdir);
+    setActiveSlotIndex(openSessionsRef.current.length);
+    navigate(location.pathname || '/', { replace: true, state: { forceWorkspace: true } });
+  }, [active, location.pathname, location.state, navigate, runtimeWorkdir, setActiveSlotIndex, setShowNewSession, workspaces]);
 
   // Re-fetch workspace list + sessions when the active workdir changes (e.g. user switches directory)
   const runtimeWorkdirRef = useRef(runtimeWorkdir);
@@ -1389,10 +1915,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const agent = session.agent || '';
     if (!agent || !session.sessionId) return session;
     const hydrated = applyLiveSessionState(session, liveSessionStates[sKey(agent, session.sessionId)] || null);
-    return locallyReadSessionKeys.has(localReadSessionKey(agent, session.sessionId))
+    return isLocallyReadSession(hydrated, locallyReadSessionMarkers)
       ? { ...hydrated, userStatus: 'done' as const }
       : hydrated;
-  }, [liveSessionStates, locallyReadSessionKeys]);
+  }, [liveSessionStates, locallyReadSessionMarkers]);
 
   useDashboardEvent(
     'stream-update',
@@ -1623,9 +2149,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     archived?: boolean;
     unread?: boolean;
   };
-  const [confirmDeleteSession, setConfirmDeleteSession] = useState<SessionActionTarget | null>(null);
-  const [deleteSessionPurgeNative, setDeleteSessionPurgeNative] = useState(false);
   const [deletingSession, setDeletingSession] = useState(false);
+  const [deleteConfirmKey, setDeleteConfirmKey] = useState<string | null>(null);
   const [renameSessionTarget, setRenameSessionTarget] = useState<SessionActionTarget | null>(null);
   const [renameSessionTitle, setRenameSessionTitle] = useState('');
   const [renamingSession, setRenamingSession] = useState(false);
@@ -1634,6 +2159,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [headerRenamingSession, setHeaderRenamingSession] = useState(false);
   const headerRenameInputRef = useRef<HTMLInputElement | null>(null);
   const skipHeaderRenameBlurRef = useRef(false);
+  const [createTaskTarget, setCreateTaskTarget] = useState<SessionActionTarget | null>(null);
+  const [createTaskTitle, setCreateTaskTitle] = useState('');
+  const [createTaskDescription, setCreateTaskDescription] = useState('');
+  const [createTaskKind, setCreateTaskKind] = useState<Extract<ProTaskKind, 'jira-ticket' | 'jira-bug'>>('jira-ticket');
+  const [createTaskStatus, setCreateTaskStatus] = useState<ProTaskStatus>('backlog');
+  const [creatingTask, setCreatingTask] = useState(false);
 
   /* ── Session row actions popover (anchored to kebab button) ─── */
   const [sessionMenu, setSessionMenu] = useState<{
@@ -1649,6 +2180,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const handleSessionMenuOpen = useCallback((anchor: DOMRect, session: SessionInfo, wsPath: string) => {
     setSlotMenu(null);
+    setDeleteConfirmKey(null);
     setSessionMenu({
       anchor: { right: anchor.right, bottom: anchor.bottom },
       target: {
@@ -1665,6 +2197,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const handleSlotMenuOpen = useCallback((anchor: DOMRect, slotIdx: number, slot: SessionSlot, info: SessionInfo) => {
     setSessionMenu(null);
+    setDeleteConfirmKey(null);
     if (slotMenu?.slotIdx === slotIdx) {
       setSlotMenu(null);
       return;
@@ -1685,10 +2218,55 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [slotMenu?.slotIdx]);
 
+  const openCreateTaskModal = useCallback((target: SessionActionTarget) => {
+    setSlotMenu(null);
+    setDeleteConfirmKey(null);
+    setCreateTaskTarget(target);
+    setCreateTaskTitle(target.title || 'Untitled chat task');
+    setCreateTaskDescription([
+      `Source chat: ${target.agent}:${target.sessionId}`,
+      `Workspace: ${target.workdir}`,
+      '',
+      target.title ? `Context: ${target.title}` : '',
+    ].filter(Boolean).join('\n'));
+    setCreateTaskKind('jira-ticket');
+    setCreateTaskStatus('backlog');
+  }, []);
+
+  const submitCreateTaskFromChat = useCallback(async () => {
+    if (!createTaskTarget || creatingTask) return;
+    const title = createTaskTitle.trim();
+    if (!title) {
+      toastSession(t('dashboard.createTaskTitleRequired'), false);
+      return;
+    }
+    setCreatingTask(true);
+    try {
+      const result = await api.createProTask({
+        title,
+        description: createTaskDescription.trim(),
+        kind: createTaskKind,
+        status: createTaskStatus,
+        workdir: createTaskTarget.workdir,
+        defaultAgent: createTaskTarget.agent || null,
+      });
+      if (!result.ok || !result.task) throw new Error(result.error || t('dashboard.createTaskFailed'));
+      setCreateTaskTarget(null);
+      toastSession(t('dashboard.createTaskCreated'));
+    } catch (err: any) {
+      toastSession(err?.message || t('dashboard.createTaskFailed'), false);
+    } finally {
+      setCreatingTask(false);
+    }
+  }, [createTaskDescription, createTaskKind, createTaskStatus, createTaskTarget, createTaskTitle, creatingTask, t, toastSession]);
+
   // Close popover on outside click, scroll, resize, or Escape.
   useEffect(() => {
     if (!sessionMenu) return;
-    const close = () => setSessionMenu(null);
+    const close = () => {
+      setSessionMenu(null);
+      setDeleteConfirmKey(null);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
     window.addEventListener('mousedown', close);
     window.addEventListener('scroll', close, true);
@@ -1704,7 +2282,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   useEffect(() => {
     if (!slotMenu) return;
-    const close = () => setSlotMenu(null);
+    const close = () => {
+      setSlotMenu(null);
+      setDeleteConfirmKey(null);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
     window.addEventListener('mousedown', close);
     window.addEventListener('scroll', close, true);
@@ -1723,6 +2304,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setRenameSessionTarget(target);
     setSessionMenu(null);
     setSlotMenu(null);
+    setDeleteConfirmKey(null);
   }, []);
 
   const openHeaderRenameSession = useCallback((target: SessionActionTarget) => {
@@ -1731,6 +2313,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setHeaderRenameTarget(target);
     setSessionMenu(null);
     setSlotMenu(null);
+    setDeleteConfirmKey(null);
   }, []);
 
   useEffect(() => {
@@ -1741,16 +2324,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [headerRenameTarget]);
 
-  const openDeleteSessionModal = useCallback((target: SessionActionTarget) => {
-    setDeleteSessionPurgeNative(false);
-    setConfirmDeleteSession(target);
-    setSessionMenu(null);
-    setSlotMenu(null);
-  }, []);
-
   const executePinSession = useCallback(async (target: SessionActionTarget, pinned: boolean) => {
     setSessionMenu(null);
     setSlotMenu(null);
+    setDeleteConfirmKey(null);
     setSessionsMap(prev => {
       const list = prev[target.workdir];
       if (!list) return prev;
@@ -1813,12 +2390,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setSessionMenu(null);
     setSlotMenu(null);
     const readKey = localReadSessionKey(target.agent, target.sessionId);
-    setLocallyReadSessionKeys(prev => {
-      if (prev.has(readKey)) return prev;
-      const next = new Set(prev);
-      next.add(readKey);
-      return next;
-    });
+    const readAt = Date.now();
+    setLocallyReadSessionMarkers(prev => ({ ...prev, [readKey]: readAt }));
     setSessionsMap(prev => {
       const list = prev[target.workdir];
       if (!list) return prev;
@@ -1857,10 +2430,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       const res = await api.updateSessionStatus(target.workdir, target.agent, target.sessionId, 'done');
       if (!res.ok || !res.updated) {
         if (!res.ok) toastSession(res.error || t('session.markReadFailed'), false);
-        setLocallyReadSessionKeys(prev => {
-          if (!prev.has(readKey)) return prev;
-          const next = new Set(prev);
-          next.delete(readKey);
+        setLocallyReadSessionMarkers(prev => {
+          if (!prev[readKey]) return prev;
+          const next = { ...prev };
+          delete next[readKey];
           return next;
         });
         void loadSessionsForWorkspace(target.workdir, { background: true, force: true });
@@ -1869,10 +2442,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       void loadSessionsForWorkspace(target.workdir, { background: true, force: true });
     } catch (err: any) {
       toastSession(err?.message || t('session.markReadFailed'), false);
-      setLocallyReadSessionKeys(prev => {
-        if (!prev.has(readKey)) return prev;
-        const next = new Set(prev);
-        next.delete(readKey);
+      setLocallyReadSessionMarkers(prev => {
+        if (!prev[readKey]) return prev;
+        const next = { ...prev };
+        delete next[readKey];
         return next;
       });
       void loadSessionsForWorkspace(target.workdir, { background: true, force: true });
@@ -1938,15 +2511,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, [headerRenameTarget, headerRenameTitle, headerRenamingSession, saveSessionTitle, t, toastSession]);
 
-  const executeDeleteSession = useCallback(async () => {
-    const target = confirmDeleteSession;
-    if (!target) return;
+  const executeDeleteSession = useCallback(async (target: SessionActionTarget) => {
+    if (deletingSession) return;
     setDeletingSession(true);
     try {
-      const res = await api.deleteSession(target.workdir, target.agent, target.sessionId, deleteSessionPurgeNative);
+      const res = await api.deleteSession(target.workdir, target.agent, target.sessionId, false);
       if (!res.ok) {
         const msg = res.error?.includes('still running') ? t('session.deleteRunningError') : (res.error || t('session.deleteFailed'));
         toastSession(msg, false);
+        setDeleteConfirmKey(null);
         return;
       }
       // Drop from the workspace's session list and any open slots.
@@ -1988,13 +2561,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         }
         return next;
       });
-      setConfirmDeleteSession(null);
+      setSessionMenu(null);
+      setSlotMenu(null);
+      setDeleteConfirmKey(null);
     } catch (err: any) {
       toastSession(err?.message || t('session.deleteFailed'), false);
+      setDeleteConfirmKey(null);
     } finally {
       setDeletingSession(false);
     }
-  }, [confirmDeleteSession, deleteSessionPurgeNative, setOpenSideChatsByParent, t, toastSession]);
+  }, [deletingSession, setOpenSideChatsByParent, t, toastSession]);
 
   /* ── New session — transition after InputComposer creates it ── */
   const [newSessionPendingPrompt, setNewSessionPendingPrompt] = useState<string | null>(null);
@@ -2043,6 +2619,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setNewSessionPendingPrompt(pendingPrompt || null);
       setNewSessionPendingImageUrls(pendingImageUrls && pendingImageUrls.length ? pendingImageUrls : []);
       setNewSessionPendingCreatedAt(createdAt);
+      setNewSessionInitialDraftPrompt(null);
+      setNewSessionInitialAutoSend(false);
       setShowNewSession(null);
       setOpenSessions(prev => {
         const existingIdx = prev.findIndex(s => s.workdir === slot.workdir && s.agent === slot.agent && s.sessionId === slot.sessionId);
@@ -2057,6 +2635,120 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
     void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
   }, [loadSessionsForWorkspace, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
+
+  const openStageRunSession = useCallback((run: StageRun) => {
+    const slot: SessionSlot = {
+      workdir: run.session.workdir,
+      agent: run.session.agent,
+      sessionId: run.session.sessionId,
+      mountKey: nextMountKey(),
+    };
+    warmSession({ agent: slot.agent, sessionId: slot.sessionId }, slot.workdir);
+    setShowNewSession(null);
+    setOpenSessions(prev => {
+      const existingIdx = prev.findIndex(s => s.workdir === slot.workdir && s.agent === slot.agent && s.sessionId === slot.sessionId);
+      if (existingIdx >= 0) {
+        setActiveSlotIndex(existingIdx);
+        return prev;
+      }
+      const next = [...prev, slot];
+      setActiveSlotIndex(next.length - 1);
+      return next;
+    });
+    void loadSessionsForWorkspace(slot.workdir, { background: true, force: true });
+  }, [loadSessionsForWorkspace, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
+
+  const refreshTaskWorkbench = useCallback(async (taskId: string, opts: { openActiveRun?: boolean } = {}) => {
+    setTaskWorkbenchLoading(true);
+    try {
+      const res = await api.getProTaskWorkbench(taskId);
+      if (!res.ok || !res.workbench) throw new Error(res.error || 'Failed to load task workbench');
+      setTaskWorkbench(res.workbench);
+      if (opts.openActiveRun && res.workbench.activeStageRun) openStageRunSession(res.workbench.activeStageRun);
+      return res.workbench;
+    } catch (err: any) {
+      toastSession(err?.message || 'Failed to load task workbench', false);
+      setTaskWorkbench(null);
+      return null;
+    } finally {
+      setTaskWorkbenchLoading(false);
+    }
+  }, [openStageRunSession, toastSession]);
+
+  useEffect(() => {
+    if (!taskFocusId) {
+      setTaskWorkbench(null);
+      setTaskWorkbenchLoading(false);
+      setTaskStageBusy(null);
+      return;
+    }
+    let cancelled = false;
+    setTaskWorkbenchLoading(true);
+    void api.getProTaskWorkbench(taskFocusId).then(res => {
+      if (cancelled) return;
+      if (!res.ok || !res.workbench) throw new Error(res.error || 'Failed to load task workbench');
+      setTaskWorkbench(res.workbench);
+      if (res.workbench.activeStageRun) openStageRunSession(res.workbench.activeStageRun);
+    }).catch((err: any) => {
+      if (!cancelled) {
+        toastSession(err?.message || 'Failed to load task workbench', false);
+        setTaskWorkbench(null);
+      }
+    }).finally(() => {
+      if (!cancelled) setTaskWorkbenchLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [openStageRunSession, taskFocusId, toastSession]);
+
+  useEffect(() => {
+    const activeFocus = activeTaskFocusSessionRef.current;
+    if (!taskFocusId) {
+      activeTaskFocusSessionRef.current = null;
+      if (activeFocus) {
+        void api.finishProTaskFocusSession(activeFocus.taskId, activeFocus.focusSessionId).catch(() => {});
+      }
+      return;
+    }
+    if (activeFocus?.taskId === taskFocusId) return;
+    if (activeFocus) {
+      void api.finishProTaskFocusSession(activeFocus.taskId, activeFocus.focusSessionId).catch(() => {});
+      activeTaskFocusSessionRef.current = null;
+    }
+    let cancelled = false;
+    void api.startProTaskFocusSession(taskFocusId, 'task-focus-workbench').then(result => {
+      if (cancelled || !result.ok || !result.focusSession) return;
+      activeTaskFocusSessionRef.current = { taskId: taskFocusId, focusSessionId: result.focusSession.id };
+      if (result.task) setTaskWorkbench(prev => prev && prev.task.id === result.task!.id ? { ...prev, task: result.task! } : prev);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [taskFocusId]);
+
+  const closeTaskFocusWorkbench = useCallback(() => {
+    navigate('/tasks', { replace: false });
+  }, [navigate]);
+
+  const startTaskStage = useCallback(async (stage: ProTaskStage) => {
+    const task = taskWorkbench?.task;
+    if (!task || taskStageBusy) return;
+    setTaskStageBusy(stage);
+    try {
+      const result = await api.startProTaskStage(task.id, stage, {
+        workdir: task.workdir || runtimeWorkdir,
+        agent: task.execution?.agent || task.defaultAgent || null,
+        assistantId: task.execution?.assistantId || task.defaultAssistantId || null,
+        executionMode: task.execution?.mode || 'direct',
+      });
+      if (!result.ok) throw new Error(result.error || 'Failed to start task stage');
+      const updated = await refreshTaskWorkbench(task.id, { openActiveRun: true });
+      const run = updated?.activeStageRun || result.task?.stageRuns?.[0] || null;
+      if (run) openStageRunSession(run);
+      toastSession(`${TASK_STAGE_LABEL[stage]} stage started`);
+    } catch (err: any) {
+      toastSession(err?.message || 'Failed to start task stage', false);
+    } finally {
+      setTaskStageBusy(null);
+    }
+  }, [openStageRunSession, refreshTaskWorkbench, runtimeWorkdir, taskStageBusy, taskWorkbench?.task, toastSession]);
 
   const handleMultiSessionCreated = useCallback((nextSessions: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => {
     const unique = nextSessions.filter((session, index, arr) => (
@@ -2104,10 +2796,219 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, [loadSessionsForWorkspace, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
 
+  const registerFocusFloatingSession = useCallback((
+    next: { agent: string; sessionId: string; workdir: string },
+    pendingPrompt?: string,
+    pendingImageUrls?: string[],
+    pendingCreatedAt?: string | null,
+  ) => {
+    warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
+    const createdAt = pendingCreatedAt || new Date().toISOString();
+    setSessionsMap(prev => {
+      const existing = prev[next.workdir] || [];
+      const alreadyPresent = existing.some(s => s.sessionId === next.sessionId && s.agent === next.agent);
+      if (alreadyPresent) return prev;
+      const stub: SessionInfo = {
+        sessionId: next.sessionId,
+        agent: next.agent,
+        runState: 'running',
+        lastQuestion: pendingPrompt,
+        createdAt,
+        runUpdatedAt: createdAt,
+      };
+      return { ...prev, [next.workdir]: [stub, ...existing] };
+    });
+    void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
+    return {
+      ...next,
+      pendingPrompt: pendingPrompt || null,
+      pendingImageUrls: pendingImageUrls && pendingImageUrls.length ? pendingImageUrls : [],
+      pendingCreatedAt: createdAt,
+    };
+  }, [loadSessionsForWorkspace, warmSession]);
+
+  const handleFocusFloatingSessionCreated = useCallback((
+    itemId: string,
+    next: { agent: string; sessionId: string; workdir: string },
+    pendingPrompt?: string,
+    pendingImageUrls?: string[],
+    pendingCreatedAt?: string | null,
+  ) => {
+    const registered = registerFocusFloatingSession(next, pendingPrompt, pendingImageUrls, pendingCreatedAt);
+    setFocusFloatingSessions(prev => prev.map(item => (
+      item.id === itemId
+        ? {
+          ...item,
+          workdir: registered.workdir,
+          agent: registered.agent,
+          sessionId: registered.sessionId,
+          hidden: false,
+          x: item.x,
+          y: item.y,
+          pendingPrompt: registered.pendingPrompt,
+          pendingImageUrls: registered.pendingImageUrls,
+          pendingCreatedAt: registered.pendingCreatedAt,
+        }
+        : item
+    )));
+  }, [registerFocusFloatingSession]);
+
+	  const handleFocusFloatingMultiSessionCreated = useCallback((itemId: string, nextSessions: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => {
+	    const unique = nextSessions.filter((session, index, arr) => (
+	      session.agent
+	      && session.sessionId
+	      && arr.findIndex(item => item.agent === session.agent && item.sessionId === session.sessionId && item.workdir === session.workdir) === index
+	    ));
+	    if (!unique.length) return;
+	    const createdAt = new Date().toISOString();
+	    const existingVisibleCount = focusFloatingSessions.filter(item => item.id !== itemId && !item.hidden).length;
+	    const registered = unique.map((session, index) => {
+	      const detail = registerFocusFloatingSession(session, prompt, [], createdAt);
+	      const previousPlacement = focusFloatingSessions.find(item => item.id === itemId);
+	      const fallbackPlacement = defaultFocusFloatingPosition(existingVisibleCount + index);
+      return {
+        id: index === 0 ? itemId : `focus-float-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+        workdir: detail.workdir,
+        agent: detail.agent,
+        sessionId: detail.sessionId,
+        mountKey: nextMountKey(),
+        hidden: false,
+        x: index === 0 ? previousPlacement?.x : fallbackPlacement.x,
+        y: index === 0 ? previousPlacement?.y : fallbackPlacement.y,
+        pendingPrompt: detail.pendingPrompt,
+        pendingImageUrls: detail.pendingImageUrls,
+        pendingCreatedAt: detail.pendingCreatedAt,
+      } satisfies FocusFloatingSession;
+    });
+    setFocusFloatingSessions(prev => {
+      const rest = prev.filter(item => item.id !== itemId);
+      return [...rest, ...registered];
+    });
+  }, [focusFloatingSessions, registerFocusFloatingSession]);
+
+  const openFloatingSessionDraft = useCallback((workdirOverride?: string, agentOverride?: string) => {
+    const baseSlot = focusedSlotIndex != null
+      ? openSessionsRef.current[focusedSlotIndex]
+      : openSessionsRef.current[activeSlotRef.current];
+    const workdir = workdirOverride || baseSlot?.workdir || selectedSession?.workdir || runtimeWorkdir || workspaces[0]?.path || '';
+    if (!workdir) return;
+    const item: FocusFloatingSession = {
+      id: `focus-draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      workdir,
+      agent: agentOverride ?? baseSlot?.agent ?? '',
+      mountKey: nextMountKey(),
+      hidden: false,
+    };
+    setFocusFloatingSessions(prev => {
+      const placement = defaultFocusFloatingPosition(prev.filter(current => !current.hidden).length);
+      return [...prev, { ...item, ...placement }];
+    });
+  }, [focusedSlotIndex, runtimeWorkdir, selectedSession?.workdir, workspaces]);
+
+  const handleFocusFloatingSessionRequest = useCallback(() => {
+    openFloatingSessionDraft();
+  }, [openFloatingSessionDraft]);
+
+  const closeFocusFloatingSession = useCallback((itemId: string) => {
+    setFocusFloatingSessions(prev => prev.filter(item => item.id !== itemId));
+  }, []);
+
+  const hideFocusFloatingSession = useCallback((itemId: string) => {
+    setFocusFloatingSessions(prev => prev.map(item => item.id === itemId ? { ...item, hidden: true } : item));
+  }, []);
+
+  const restoreFocusFloatingSessions = useCallback(() => {
+    setFocusFloatingSessions(prev => {
+      let restoredIndex = prev.filter(item => !item.hidden).length;
+      return prev.map(item => {
+        if (!item.hidden) return item;
+        const placement = defaultFocusFloatingPosition(restoredIndex);
+        restoredIndex += 1;
+        return { ...item, hidden: false, ...placement };
+      });
+    });
+  }, []);
+
+  const handleFocusFloatingDragStart = useCallback((itemId: string, event: ReactPointerEvent<HTMLElement>) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('button, select, input, textarea, a, [data-focus-floating-no-drag]')) return;
+    const panel = event.currentTarget.closest('[data-focus-floating-session]') as HTMLElement | null;
+    if (!panel) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = panel.getBoundingClientRect();
+    const drag: FocusFloatingDrag = {
+      itemId,
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    setFocusFloatingDraggingId(itemId);
+    setFocusFloatingSessions(prev => prev.map(item => item.id === itemId ? { ...item, x: rect.left, y: rect.top } : item));
+
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== drag.pointerId) return;
+      moveEvent.preventDefault();
+      const next = clampFocusFloatingPosition(moveEvent.clientX - drag.offsetX, moveEvent.clientY - drag.offsetY, drag.width, drag.height);
+      setFocusFloatingSessions(prev => prev.map(item => item.id === drag.itemId ? { ...item, ...next } : item));
+    };
+    const done = (doneEvent: PointerEvent) => {
+      if (doneEvent.pointerId !== drag.pointerId) return;
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      setFocusFloatingDraggingId(null);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
+    };
+    window.addEventListener('pointermove', move, { passive: false });
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
+  }, []);
+
   const handleNewSessionRequest = useCallback((wsPath: string) => {
+    const shouldFloatDraft = chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
+    const templateAgent = openSessionsRef.current[activeSlotRef.current]?.agent || '';
+    if (shouldFloatDraft) {
+      setNewSessionInitialDraftPrompt(null);
+      setNewSessionInitialAutoSend(false);
+      setShowNewSession(null);
+      openFloatingSessionDraft(wsPath, templateAgent);
+      return;
+    }
+    setNewSessionTemplateAgent(templateAgent);
     setShowNewSession(wsPath);
+    if (!shouldFloatDraft) setActiveSlotIndex(openSessionsRef.current.length);
+  }, [chatLayout, isNarrowWorkbench, openFloatingSessionDraft, setActiveSlotIndex, setShowNewSession, taskFocusId]);
+
+  const resolveNewSessionTemplate = useCallback(() => {
+    const slots = openSessionsRef.current;
+    const previousSlot = slots[slots.length - 1] || slots[activeSlotRef.current] || null;
+    const workdir = previousSlot?.workdir
+      || selectedSession?.workdir
+      || runtimeWorkdir
+      || workspaces[0]?.path
+      || '';
+    return {
+      workdir,
+      agent: previousSlot?.agent || '',
+    };
+  }, [runtimeWorkdir, selectedSession?.workdir, workspaces]);
+
+  const handleNewSessionPlaceholderClick = useCallback(() => {
+    const template = resolveNewSessionTemplate();
+    if (!template.workdir) return;
+    setNewSessionTemplateAgent(template.agent);
+    setShowNewSession(template.workdir);
     setActiveSlotIndex(openSessionsRef.current.length);
-  }, [setActiveSlotIndex, setShowNewSession]);
+  }, [resolveNewSessionTemplate, setActiveSlotIndex, setShowNewSession]);
 
   const handleCreateTodoChat = useCallback(async (todoIds: string[]) => {
     const ids = Array.from(new Set(todoIds.filter(Boolean)));
@@ -2119,7 +3020,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         workdir: todoItems.find(item => ids.includes(item.id) && item.source?.workdir)?.source?.workdir || runtimeWorkdir,
       });
       if (!res.ok) throw new Error(res.error || 'Failed to create todo chat');
-      if (res.items) setTodoItems(res.items.concat(todoItems.filter(item => !res.items?.some(updated => updated.id === item.id))));
+      setTodoItems(prev => prev.filter(item => !ids.includes(item.id)));
+      setTodoModalOpen(false);
       const session = parseSessionKeyValue(res.queued?.sessionKey);
       if (session) {
         const workdir = todoItems.find(item => ids.includes(item.id) && item.source?.workdir)?.source?.workdir || runtimeWorkdir;
@@ -2155,13 +3057,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const agent = session.agent || '';
     if (!agent || !session.sessionId || !shouldMarkSessionReadOnOpen(session)) return;
     const readKey = localReadSessionKey(agent, session.sessionId);
-
-    setLocallyReadSessionKeys(prev => {
-      if (prev.has(readKey)) return prev;
-      const next = new Set(prev);
-      next.add(readKey);
-      return next;
-    });
+    const readAt = Date.now();
+    setLocallyReadSessionMarkers(prev => ({ ...prev, [readKey]: readAt }));
 
     setSessionsMap(prev => {
       const list = prev[workdir];
@@ -2202,10 +3099,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       .then(res => {
         if (!res.ok || !res.updated) {
           if (!res.ok) toastSession(res.error || t('session.updateStatusFailed'), false);
-          setLocallyReadSessionKeys(prev => {
-            if (!prev.has(readKey)) return prev;
-            const next = new Set(prev);
-            next.delete(readKey);
+          setLocallyReadSessionMarkers(prev => {
+            if (!prev[readKey]) return prev;
+            const next = { ...prev };
+            delete next[readKey];
             return next;
           });
           void loadSessionsForWorkspace(workdir, { background: true, force: true });
@@ -2213,10 +3110,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       })
       .catch((err: any) => {
         toastSession(err?.message || t('session.updateStatusFailed'), false);
-        setLocallyReadSessionKeys(prev => {
-          if (!prev.has(readKey)) return prev;
-          const next = new Set(prev);
-          next.delete(readKey);
+        setLocallyReadSessionMarkers(prev => {
+          if (!prev[readKey]) return prev;
+          const next = { ...prev };
+          delete next[readKey];
           return next;
         });
         void loadSessionsForWorkspace(workdir, { background: true, force: true });
@@ -2228,10 +3125,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     warmSession(session, workdir);
     markSessionReadOnOpen(session, workdir);
     setShowNewSession(null);
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
+      setWorkspaceSidebarCollapsed(true);
+    }
     startTransition(() => {
       setSelectedSession({ agent: session.agent || '', sessionId: session.sessionId, workdir });
     });
-  }, [markSessionReadOnOpen, setSelectedSession, setShowNewSession, warmSession]);
+  }, [markSessionReadOnOpen, setSelectedSession, setShowNewSession, setWorkspaceSidebarCollapsed, warmSession]);
 
   const handlePanelSessionChange = useCallback((next: SessionPanelChange, fromSlotIdx?: number) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
@@ -2242,11 +3142,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           setOpenSessions(prev => {
             const existingIdx = prev.findIndex(s => s.workdir === next.workdir && s.agent === next.agent && s.sessionId === next.sessionId);
             if (existingIdx >= 0) {
-              setActiveSlotIndex(existingIdx);
+              if (activeSlotRef.current === fromSlotIdx || !isSessionComposerFocused()) setActiveSlotIndex(existingIdx);
               return prev;
             }
             const updated = [...prev, { agent: next.agent, sessionId: next.sessionId, workdir: next.workdir, mountKey: nextMountKey() }];
-            setActiveSlotIndex(updated.length - 1);
+            if (activeSlotRef.current === fromSlotIdx || !isSessionComposerFocused()) setActiveSlotIndex(updated.length - 1);
             return updated;
           });
           return;
@@ -2314,12 +3214,22 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, []);
 
-  const shouldInlineSideChat = openSessions.length <= 1 && !showNewSession;
+  const shouldInlineSideChat = (!!taskFocusId || !isMultiChatLayout(chatLayout) || openSessions.length <= 1) && !showNewSession;
+
+  const enterFocusMode = useCallback((slotIdx: number) => {
+    focusedOpenSessionsSnapshotRef.current = {
+      slots: openSessionsRef.current.map(slot => ({ ...slot })),
+      focusedIndex: slotIdx,
+    };
+    setActiveSlotIndex(slotIdx);
+    setSlotMenu(null);
+    setFocusedSlotIndex(slotIdx);
+  }, [setActiveSlotIndex]);
 
   const promoteSlotForSideChat = useCallback((slotIdx: number) => {
     setActiveSlotIndex(slotIdx);
-    if (!shouldInlineSideChat) setFocusedSlotIndex(slotIdx);
-  }, [setActiveSlotIndex, shouldInlineSideChat]);
+    if (!shouldInlineSideChat) enterFocusMode(slotIdx);
+  }, [enterFocusMode, setActiveSlotIndex, shouldInlineSideChat]);
 
   const createAndOpenSideChat = useCallback(async (
     slotIdx: number,
@@ -2361,12 +3271,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       if (existing.some(s => s.agent === sideSlot.agent && s.sessionId === sideSlot.sessionId)) return prev;
       return { ...prev, [parentKey]: dedupeSideChatSlots([...existing, sideSlot]) };
     });
-    if (shouldOpenPanel) setSideChatPanelOpenByParent(prev => ({ ...prev, [parentKey]: true }));
+    if (shouldOpenPanel) {
+      setContextShelfTabByParent(prev => ({ ...prev, [parentKey]: 'side-chats' }));
+      setSideChatPanelOpenByParent(prev => ({ ...prev, [parentKey]: true }));
+    }
     if (shouldActivate) setActiveSideChatByParent(prev => ({ ...prev, [parentKey]: sideKey }));
     warmSession(sideSession, slot.workdir);
     void loadSessionsForWorkspace(slot.workdir, { background: true, force: true });
     return { sideSlot, sideSession };
-  }, [loadSessionsForWorkspace, mergeSessionIntoWorkspaceMap, promoteSlotForSideChat, setActiveSideChatByParent, setOpenSideChatsByParent, t, warmSession]);
+  }, [loadSessionsForWorkspace, mergeSessionIntoWorkspaceMap, promoteSlotForSideChat, setActiveSideChatByParent, setContextShelfTabByParent, setOpenSideChatsByParent, t, warmSession]);
 
   const handleOpenSideChat = useCallback(async (slotIdx: number, slot: SessionSlot, info: SessionInfo) => {
     try {
@@ -2379,7 +3292,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const handleCreateSideChatFromSelection = useCallback(async (slotIdx: number, slot: SessionSlot, info: SessionInfo, request: SelectionSideChatRequest) => {
     if (!request.quote.trim() || !request.question.trim()) return;
     try {
-      const created = await createAndOpenSideChat(slotIdx, slot, info, { promote: false, openPanel: false, activate: false });
+      const created = await createAndOpenSideChat(slotIdx, slot, info, { promote: true, openPanel: true, activate: true });
       if (!created?.sideSlot.sessionId) throw new Error(t('session.sideChatFailed'));
       const prompt = buildSelectionSideChatPrompt(request, locale);
       const res = await api.sendSessionMessage(created.sideSlot.workdir, created.sideSlot.agent, created.sideSlot.sessionId, prompt);
@@ -2565,6 +3478,111 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     window.addEventListener('pointercancel', cleanup, { once: true });
   }, [setSideChatWidthsByParent]);
 
+  const setContextCardDockMode = useCallback((parentKey: string, mode: ContextCardMode) => {
+    setContextCardPlacementByParent(prev => {
+      const current = prev[parentKey] || defaultContextCardPlacement();
+      const next = mode === 'docked'
+        ? { ...current, mode: 'docked' as const }
+        : clampContextCardPlacement({
+          ...current,
+          mode: 'floating' as const,
+          x: typeof window === 'undefined' ? current.x : Math.max(CONTEXT_CARD_MIN_MARGIN, window.innerWidth - current.width - 28),
+          y: typeof window === 'undefined' ? current.y : Math.max(CONTEXT_CARD_MIN_MARGIN, Math.min(current.y, window.innerHeight - current.height - CONTEXT_CARD_MIN_MARGIN)),
+        });
+      return { ...prev, [parentKey]: next };
+    });
+  }, []);
+
+  const handleContextCardDragStart = useCallback((parentKey: string, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const card = event.currentTarget.closest('[data-context-card]') as HTMLElement | null;
+    const rect = card?.getBoundingClientRect();
+    const current = contextCardPlacementByParent[parentKey] || defaultContextCardPlacement();
+    const width = rect?.width || current.width;
+    const height = rect?.height || current.height;
+    const floatingX = rect?.left ?? current.x;
+    const floatingY = rect?.top ?? current.y;
+    contextCardDragRef.current = {
+      parentKey,
+      pointerId: event.pointerId,
+      offsetX: event.clientX - floatingX,
+      offsetY: event.clientY - floatingY,
+      width,
+      height,
+    };
+    setContextCardPlacementByParent(prev => ({
+      ...prev,
+      [parentKey]: clampContextCardPlacement({
+        mode: 'floating',
+        x: floatingX,
+        y: floatingY,
+        width,
+        height,
+      }),
+    }));
+    setDraggingContextCardKey(parentKey);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [contextCardPlacementByParent]);
+
+  useEffect(() => {
+    if (!draggingContextCardKey) return undefined;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+
+    const cleanup = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      contextCardDragRef.current = null;
+      setDraggingContextCardKey(null);
+    };
+    const onMove = (event: PointerEvent) => {
+      const drag = contextCardDragRef.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      event.preventDefault();
+      setContextCardPlacementByParent(prev => ({
+        ...prev,
+        [drag.parentKey]: clampContextCardPlacement({
+          mode: 'floating',
+          x: event.clientX - drag.offsetX,
+          y: event.clientY - drag.offsetY,
+          width: drag.width,
+          height: drag.height,
+        }),
+      }));
+    };
+    const onDone = (event: PointerEvent) => {
+      const drag = contextCardDragRef.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const shouldDock = typeof window !== 'undefined' && event.clientX >= window.innerWidth - CONTEXT_CARD_DOCK_SNAP_PX;
+      if (shouldDock) {
+        setContextCardPlacementByParent(prev => ({
+          ...prev,
+          [drag.parentKey]: {
+            ...(prev[drag.parentKey] || defaultContextCardPlacement()),
+            mode: 'docked',
+            width: drag.width,
+            height: drag.height,
+          },
+        }));
+      }
+      cleanup();
+    };
+
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onDone);
+    window.addEventListener('pointercancel', onDone);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onDone);
+      window.removeEventListener('pointercancel', onDone);
+      cleanup();
+    };
+  }, [draggingContextCardKey]);
+
   const handleShowSideChats = useCallback((parentSlot: SessionSlot, refs: SideChatRef[], slotIdx?: number) => {
     if (!refs.length) return;
     if (slotIdx != null) promoteSlotForSideChat(slotIdx);
@@ -2603,6 +3621,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       ...prev,
       [parentKey]: mergeSideChatRefs(prev[parentKey], refs),
     }));
+    setContextShelfTabByParent(prev => ({ ...prev, [parentKey]: 'side-chats' }));
     setSideChatPanelOpenByParent(prev => ({ ...prev, [parentKey]: true }));
     setOpenSideChatsByParent(prev => {
       const existing = prev[parentKey] || [];
@@ -2616,7 +3635,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         : sideChatSlotKey(slots[0]);
       return { ...prev, [parentKey]: nextActive };
     });
-  }, [promoteSlotForSideChat, setActiveSideChatByParent, setOpenSideChatsByParent, t, warmSession]);
+  }, [promoteSlotForSideChat, setActiveSideChatByParent, setContextShelfTabByParent, setOpenSideChatsByParent, t, warmSession]);
 
   const handleSideChatSessionChange = useCallback((parentSlot: SessionSlot, previousSideSlot: SessionSlot, next: { agent: string; sessionId: string; workdir: string }) => {
     const parentKey = sessionSlotStorageKey(parentSlot);
@@ -2818,30 +3837,22 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       configuredChannels,
     };
   }, [appState, hydrateSession, liveSessionStates, loadingMap, openSessions, sessionsMap, showNewSession, workspaces]);
-  useEffect(() => {
-    if (dashboardScope !== 'all' && !workspaces.some(ws => ws.path === dashboardScope)) {
-      setDashboardScope('all');
-    }
-  }, [dashboardScope, runtimeWorkdir, workspaces]);
-
   const dashboardItems = useMemo<DashboardSessionItem[]>(() => {
-    const scopedWorkspaces = dashboardScope === 'all'
-      ? workspaces
-      : workspaces.filter(ws => ws.path === dashboardScope);
     const recentCutoff = Date.now() - STATUS_SUMMARY_RECENT_MS;
     const items: DashboardSessionItem[] = [];
     const seen = new Set<string>();
 
-    for (const ws of scopedWorkspaces) {
+    for (const ws of workspaces) {
       for (const rawSession of sessionsMap[ws.path] || []) {
         const session = hydrateSession(rawSession);
         if (!session.agent || !session.sessionId) continue;
         const key = sKey(session.agent, session.sessionId);
         const live = liveSessionStates[key] || null;
-        const canonical = live?.resolvedKey && live.resolvedKey !== key ? live.resolvedKey : key;
-        const mapKey = `${ws.path}:${canonical}`;
-        if (seen.has(mapKey)) continue;
-        seen.add(mapKey);
+	        const canonical = live?.resolvedKey && live.resolvedKey !== key ? live.resolvedKey : key;
+	        const mapKey = `${ws.path}:${canonical}`;
+	        if (seen.has(mapKey)) continue;
+        if (checkedInboxItemKeys.has(mapKey)) continue;
+	        seen.add(mapKey);
 
         const column = dashboardColumnForSession(session, live, recentCutoff);
         if (!column) continue;
@@ -2857,185 +3868,223 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
 
     return items.sort((a, b) => (statusTimestampMs(b.session) || 0) - (statusTimestampMs(a.session) || 0));
-  }, [dashboardScope, hydrateSession, liveSessionStates, sessionsMap, workspaces]);
+  }, [checkedInboxItemKeys, hydrateSession, liveSessionStates, sessionsMap, workspaces]);
 
-	  const dashboardCounts = useMemo(() => {
-	    const counts: Record<DashboardColumnKey, number> = {
-	      running: 0,
-	      review: 0,
-	      incomplete: 0,
-	      done: 0,
-    };
-	    for (const item of dashboardItems) counts[item.column] += 1;
-	    return counts;
-	  }, [dashboardItems]);
-	  const inboxAlertCount = dashboardCounts.running + dashboardCounts.review + dashboardCounts.incomplete;
+	  const inboxAlertCount = dashboardItems.length;
 
-  const startDashboardTask = useCallback((workdir: string) => {
-    if (!workdir) {
-      toastSession(t('dashboard.chooseWorkspace'), false);
-      return;
+  useEffect(() => {
+    const previous = previousInboxAlertCountRef.current;
+    previousInboxAlertCountRef.current = inboxAlertCount;
+    if (inboxOpen || inboxAlertCount <= 0 || (previous >= 0 && inboxAlertCount <= previous)) {
+      if (inboxAlertCount === 0) setInboxAttentionPulse(false);
+      return undefined;
     }
-    setDashboardFocusedSlot(null);
-    setDashboardCreateTaskWorkdir(workdir);
-  }, [t, toastSession]);
+    setInboxAttentionPulse(true);
+    const timer = window.setTimeout(() => setInboxAttentionPulse(false), 4200);
+    return () => window.clearTimeout(timer);
+  }, [inboxAlertCount, inboxOpen]);
 
-  const handleDashboardCreateTask = useCallback(() => {
-    const preferred = dashboardScope !== 'all'
-      ? dashboardScope
-      : runtimeWorkdir || workspaces[0]?.path || '';
-    startDashboardTask(preferred);
-  }, [dashboardScope, runtimeWorkdir, startDashboardTask, workspaces]);
+  const revealWorkspaceSidebar = useCallback(() => {
+    setWorkspaceSidebarCollapsed(false);
+    navigate('/', { state: { forceWorkspace: true } });
+  }, [navigate, setWorkspaceSidebarCollapsed]);
 
-	  const handleOpenDashboardSession = useCallback((item: DashboardSessionItem) => {
+  const workspaceSidebarToggleAction = active && mode === 'workspace' && workspaceSidebarCollapsed && workspaceSidebarToggleHost
+    ? createPortal((
+      <button
+        type="button"
+        onClick={revealWorkspaceSidebar}
+        title={t('rail.workspace')}
+        aria-label={t('rail.workspace')}
+        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-edge/60 bg-panel-alt/80 text-fg-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[border-color,background,color,transform] hover:-translate-y-px hover:border-edge-h hover:bg-panel-h hover:text-fg-2 active:scale-95"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16" />
+        </svg>
+      </button>
+    ), workspaceSidebarToggleHost)
+    : null;
+
+  const toggleChatLayout = useCallback(() => {
+    focusedOpenSessionsSnapshotRef.current = null;
+    setFocusedSlotIndex(null);
+    setSlotMenu(null);
+    setChatLayout(prev => (isMultiChatLayout(prev) ? 'single' : 'multi-3'));
+  }, [setChatLayout]);
+
+  const workspaceLayoutToggleLabel = isMultiChatLayout(chatLayout)
+    ? t('hub.switchToSingleLayout')
+    : t('hub.switchToMultiLayout');
+
+  const globalInboxAction = active && globalInboxHost
+    ? createPortal((
+      <>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setTodoModalOpen(true)}
+          title={t('todo.workspaceTitle')}
+          aria-label={t('todo.workspaceTitle')}
+          className="relative !h-8 !w-8"
+        >
+          <TodoGlyph className="h-3.5 w-3.5" />
+          {todoItems.some(item => item.status === 'open') && (
+            <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_0_2px_var(--th-panel)]" />
+          )}
+        </Button>
+        <Button
+          variant={inboxAlertCount > 0 ? 'secondary' : 'ghost'}
+          size="icon"
+          onClick={openInboxFromTrigger}
+          title={t('rail.inbox')}
+          aria-label={t('rail.inbox')}
+          className={cn(
+            'relative !h-8 !w-8 !px-0',
+            inboxAlertCount > 0 && 'border-primary/45 text-primary',
+            inboxAttentionPulse && 'animate-pulse ring-2 ring-primary/30',
+          )}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+            <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z" />
+          </svg>
+          {inboxAlertCount > 0 && (
+            <span className="absolute -right-1.5 -top-1.5 min-w-[16px] rounded-full border border-panel bg-primary px-1 text-center font-mono text-[9px] font-semibold leading-4 text-primary-fg tabular-nums">
+              {Math.min(inboxAlertCount, 99)}
+            </span>
+          )}
+        </Button>
+      </>
+    ), globalInboxHost)
+    : null;
+
+  const markDashboardItemChecked = useCallback(async (item: DashboardSessionItem) => {
+    const agent = item.session.agent || '';
+    if (!agent || !item.session.sessionId) return;
+    const readKey = localReadSessionKey(agent, item.session.sessionId);
+    const readAt = Date.now();
+    setCheckedInboxItemKeys(prev => {
+      if (prev.has(item.key)) return prev;
+      const next = new Set(prev);
+      next.add(item.key);
+      return next;
+    });
+    setLocallyReadSessionMarkers(prev => ({ ...prev, [readKey]: readAt }));
+    setSessionsMap(prev => ({
+      ...prev,
+      [item.workdir]: (prev[item.workdir] || []).map(session => (
+        session.agent === agent && session.sessionId === item.session.sessionId
+          ? { ...session, userStatus: 'done' as const }
+          : session
+      )),
+    }));
+    try {
+      const res = await api.updateSessionStatus(item.workdir, agent, item.session.sessionId, 'done');
+      if (!res.ok) {
+        toastSession(res.error || t('dashboard.markDoneFailed'), false);
+        setCheckedInboxItemKeys(prev => {
+          if (!prev.has(item.key)) return prev;
+          const next = new Set(prev);
+          next.delete(item.key);
+          return next;
+        });
+        setLocallyReadSessionMarkers(prev => {
+          if (!prev[readKey]) return prev;
+          const next = { ...prev };
+          delete next[readKey];
+          return next;
+        });
+        void loadSessionsForWorkspace(item.workdir, { background: true, force: true });
+        return;
+      }
+      void loadSessionsForWorkspace(item.workdir, { background: true, force: true });
+    } catch (err: any) {
+      toastSession(err?.message || t('dashboard.markDoneFailed'), false);
+      setCheckedInboxItemKeys(prev => {
+        if (!prev.has(item.key)) return prev;
+        const next = new Set(prev);
+        next.delete(item.key);
+        return next;
+      });
+      setLocallyReadSessionMarkers(prev => {
+        if (!prev[readKey]) return prev;
+        const next = { ...prev };
+        delete next[readKey];
+        return next;
+      });
+      void loadSessionsForWorkspace(item.workdir, { background: true, force: true });
+    }
+  }, [loadSessionsForWorkspace, setLocallyReadSessionMarkers, t, toastSession]);
+
+  const handleMarkWorkspaceInboxRead = useCallback(async (workdir: string) => {
+    const targets = dashboardItems.filter(item => item.workdir === workdir && item.session.agent && item.session.sessionId);
+    if (!targets.length) return;
+    const targetKeys = new Set(targets.map(item => item.key));
+    const readAt = Date.now();
+    const readKeys = new Set(targets.map(item => localReadSessionKey(item.session.agent || '', item.session.sessionId)));
+
+    setCheckedInboxItemKeys(prev => {
+      const next = new Set(prev);
+      for (const key of targetKeys) next.add(key);
+      return next;
+    });
+    setLocallyReadSessionMarkers(prev => {
+      const next = { ...prev };
+      for (const key of readKeys) next[key] = readAt;
+      return next;
+    });
+    setSessionsMap(prev => ({
+      ...prev,
+      [workdir]: (prev[workdir] || []).map(session => (
+        targets.some(item => item.session.agent === session.agent && item.session.sessionId === session.sessionId)
+          ? { ...session, userStatus: 'done' as const }
+          : session
+      )),
+    }));
+
+    const results = await Promise.all(targets.map(item => (
+      api.updateSessionStatus(item.workdir, item.session.agent || '', item.session.sessionId, 'done')
+        .catch((err: any) => ({ ok: false, updated: false, error: err?.message || String(err) }))
+    )));
+    if (results.some(result => !result.ok)) {
+      toastSession(t('session.markReadFailed'), false);
+    }
+    void loadSessionsForWorkspace(workdir, { background: true, force: true });
+  }, [dashboardItems, loadSessionsForWorkspace, t, toastSession]);
+
+  const handleOpenInboxSession = useCallback((item: DashboardSessionItem) => {
 	    const agent = item.session.agent || '';
 	    if (!agent || !item.session.sessionId) return;
 	    warmSession(item.session, item.workdir);
 	    markSessionReadOnOpen(item.session, item.workdir);
-    setDashboardFocusedSlot({
-      agent,
-      sessionId: item.session.sessionId,
-      workdir: item.workdir,
-      mountKey: nextMountKey(),
-    });
-	  }, [markSessionReadOnOpen, warmSession]);
-
-	  const handleOpenInboxSession = useCallback((item: DashboardSessionItem) => {
-	    const agent = item.session.agent || '';
-	    if (!agent || !item.session.sessionId) return;
-	    warmSession(item.session, item.workdir);
-	    setInboxOpen(false);
+	    void markDashboardItemChecked(item);
 	    const slot: SessionSlot = {
 	      agent,
 	      sessionId: item.session.sessionId,
 	      workdir: item.workdir,
 	      mountKey: nextMountKey(),
 	    };
-	    setOpenSessions(prev => {
-	      const existingIdx = prev.findIndex(existing => (
-	        existing.workdir === slot.workdir
-	        && existing.agent === slot.agent
-	        && existing.sessionId === slot.sessionId
-	      ));
-	      const next = existingIdx >= 0 ? prev : [...prev, slot];
-	      const focusIndex = existingIdx >= 0 ? existingIdx : next.length - 1;
-	      focusedOpenSessionsSnapshotRef.current = {
-	        slots: next.map(item => ({ ...item })),
-	        focusedIndex: focusIndex,
-	      };
-	      setActiveSlotIndex(focusIndex);
-	      setFocusedSlotIndex(focusIndex);
-	      return next;
-	    });
-	  }, [setActiveSlotIndex, setOpenSessions, warmSession]);
+	    setInboxFocusedSlot(slot);
+	  }, [markDashboardItemChecked, markSessionReadOnOpen, warmSession]);
 
-  const handleMarkDashboardDone = useCallback(async (item: DashboardSessionItem) => {
-    const agent = item.session.agent || '';
-    if (!agent || !item.session.sessionId) return;
-    try {
-      const res = await api.updateSessionStatus(item.workdir, agent, item.session.sessionId, 'done');
-      if (!res.ok) {
-        toastSession(res.error || t('dashboard.markDoneFailed'), false);
-        return;
+  const handleInboxPanelSessionChange = useCallback((next: SessionPanelChange) => {
+    warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
+    setInboxFocusedSlot(prev => {
+      if (!prev || next.openInNewSlot) {
+        return { agent: next.agent, sessionId: next.sessionId, workdir: next.workdir, mountKey: nextMountKey() };
       }
-      setSessionsMap(prev => ({
-        ...prev,
-        [item.workdir]: (prev[item.workdir] || []).map(session => (
-          session.agent === agent && session.sessionId === item.session.sessionId
-            ? { ...session, userStatus: 'done' }
-            : session
-        )),
-      }));
-      void loadSessionsForWorkspace(item.workdir, { background: true, force: true });
-    } catch (err: any) {
-      toastSession(err?.message || t('dashboard.markDoneFailed'), false);
-    }
-  }, [loadSessionsForWorkspace, t, toastSession]);
-
-  const closeDashboardFocus = useCallback(() => setDashboardFocusedSlot(null), []);
-
-  const handleDashboardFocusedSessionChange = useCallback((next: { agent: string; sessionId: string; workdir: string }) => {
-    warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
-    setDashboardFocusedSlot(prev => ({
-      agent: next.agent,
-      sessionId: next.sessionId,
-      workdir: next.workdir,
-      mountKey: prev?.mountKey || nextMountKey(),
-    }));
-    void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
-  }, [loadSessionsForWorkspace, warmSession]);
-
-  const handleDashboardNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => {
-    warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
-    const createdAt = pendingCreatedAt || new Date().toISOString();
-    setSessionsMap(prev => {
-      const existing = prev[next.workdir] || [];
-      const alreadyPresent = existing.some(s => s.sessionId === next.sessionId && s.agent === next.agent);
-      if (alreadyPresent) return prev;
-      const stub: SessionInfo = {
-        sessionId: next.sessionId,
-        agent: next.agent,
-        runState: 'running',
-        lastQuestion: pendingPrompt,
-        createdAt,
-        runUpdatedAt: createdAt,
-      };
-      return { ...prev, [next.workdir]: [stub, ...existing] };
-    });
-    startTransition(() => {
-      setDashboardCreateTaskWorkdir(null);
-      setDashboardPendingPrompt(pendingPrompt || null);
-      setDashboardPendingImageUrls(pendingImageUrls && pendingImageUrls.length ? pendingImageUrls : []);
-      setDashboardPendingCreatedAt(createdAt);
-      setDashboardFocusedSlot({
-        agent: next.agent,
-        sessionId: next.sessionId,
-        workdir: next.workdir,
-        mountKey: nextMountKey(),
-      });
+      return { ...prev, agent: next.agent, sessionId: next.sessionId, workdir: next.workdir };
     });
     void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
   }, [loadSessionsForWorkspace, warmSession]);
 
-  const handleDashboardFocusFileLink = useCallback((workdir: string, target: FileLinkTarget) => {
-    if (!isFileLinkInsideWorkspace(workdir, target.path)) {
-      void api.openInEditor(target.path).then(res => {
-        if (!res.ok) toastSession(res.error || `Failed to open ${target.path}`, false);
-      }).catch((error: any) => {
-        toastSession(error?.message || String(error), false);
-      });
-      return;
-    }
-    setFilePanelRequest({
-      workdir,
-      path: target.path,
-      line: target.line,
-      nonce: ++filePanelRequestSeqRef.current,
-    });
-    setFileTreeOpen(true);
-  }, [toastSession]);
-
-  useEffect(() => {
-    if (mode === 'dashboard') return;
-    setDashboardFocusedSlot(null);
-    setDashboardCreateTaskWorkdir(null);
-  }, [mode]);
-
-	  useEffect(() => {
-	    if (mode !== 'dashboard' || (!dashboardFocusedSlot && !dashboardCreateTaskWorkdir)) return undefined;
-	    const onKeyDown = (event: KeyboardEvent) => {
-	      if (event.key !== 'Escape') return;
-	      setDashboardCreateTaskWorkdir(null);
-	      setDashboardFocusedSlot(null);
-	    };
-	    window.addEventListener('keydown', onKeyDown);
-	    return () => window.removeEventListener('keydown', onKeyDown);
-	  }, [dashboardCreateTaskWorkdir, dashboardFocusedSlot, mode]);
-  const closeFocusMode = useCallback(() => {
-    const snapshot = focusedOpenSessionsSnapshotRef.current;
-    focusedOpenSessionsSnapshotRef.current = null;
-    setFocusedSlotIndex(null);
-    if (!snapshot) return;
+	  const closeFocusMode = useCallback(() => {
+	    const snapshot = focusedOpenSessionsSnapshotRef.current;
+	    focusedOpenSessionsSnapshotRef.current = null;
+	    setFocusedSlotIndex(null);
+	    setFocusFloatingSessions([]);
+	    if (!snapshot) return;
 
     setOpenSessions(prev => {
       const currentByStorageKey = new Map(prev.map(slot => [sessionSlotStorageKey(slot), slot]));
@@ -3061,20 +4110,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
       return restoredMissingSlot ? orderedSlots : prev;
     });
-  }, [setOpenSessions]);
-  const enterFocusMode = useCallback((slotIdx: number) => {
-    focusedOpenSessionsSnapshotRef.current = {
-      slots: openSessionsRef.current.map(slot => ({ ...slot })),
-      focusedIndex: slotIdx,
-    };
-    setActiveSlotIndex(slotIdx);
-    setSlotMenu(null);
-    setFocusedSlotIndex(slotIdx);
-  }, [setActiveSlotIndex]);
+	  }, [setOpenSessions]);
+
   const handleSlotDoubleClick = useCallback((slotIdx: number, event: ReactMouseEvent<HTMLDivElement>) => {
     if (shouldIgnoreFocusModeTarget(event.target)) return;
-    enterFocusMode(slotIdx);
-  }, [enterFocusMode]);
+    if (isMultiChatLayout(chatLayout)) enterFocusMode(slotIdx);
+  }, [chatLayout, enterFocusMode]);
 
   useEffect(() => {
     if (focusedSlotIndex == null) return;
@@ -3095,6 +4136,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [closeFocusMode, focusedSlotIndex]);
   const [draggingSlotIndex, setDraggingSlotIndex] = useState<number | null>(null);
   const [dragOverSlotIndex, setDragOverSlotIndex] = useState<number | null>(null);
+  const [slotPointerDrag, setSlotPointerDrag] = useState<SlotPointerDrag | null>(null);
+  const slotPointerDragRef = useRef<SlotPointerDrag | null>(null);
+  const slotFlipRectsRef = useRef<Map<number, DOMRect> | null>(null);
+  const slotDragLayoutRef = useRef<SlotDragLayoutItem[]>([]);
+  const [multiRowHeightDrag, setMultiRowHeightDrag] = useState<MultiRowHeightDrag | null>(null);
+  const multiRowHeightDragRef = useRef<MultiRowHeightDrag | null>(null);
 
   /* ── Close a session slot ── */
   const handleCloseSlot = useCallback((index: number) => {
@@ -3123,137 +4170,249 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [setActiveSlotIndex, setOpenSessions, setOpenSideChatsByParent]);
 
-  const handleSlotDragStart = useCallback((index: number, event: ReactDragEvent<HTMLDivElement>) => {
-    setDraggingSlotIndex(index);
-    setDragOverSlotIndex(index);
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/pikiclaw-slot-index', String(index));
-    const slotEl = event.currentTarget.closest('[data-session-slot]') as HTMLElement | null;
-    if (slotEl) {
-      const rect = slotEl.getBoundingClientRect();
-      event.dataTransfer.setDragImage(slotEl, event.clientX - rect.left, event.clientY - rect.top);
-    }
-  }, []);
-
-  const handleSlotDragOver = useCallback((index: number, event: ReactDragEvent<HTMLDivElement>) => {
-    if (draggingSlotIndex == null) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-    setDragOverSlotIndex(index);
-  }, [draggingSlotIndex]);
-
-  const handleSlotDrop = useCallback((index: number, event: ReactDragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const raw = event.dataTransfer.getData('text/pikiclaw-slot-index');
-    const from = Number(raw);
-    setDraggingSlotIndex(null);
-    setDragOverSlotIndex(null);
-    if (!Number.isInteger(from) || from === index) return;
+  const moveSessionSlot = useCallback((from: number, index: number) => {
     setOpenSessions(prev => {
       if (from < 0 || from >= prev.length) return prev;
-      const to = index < prev.length ? index : prev.length - 1;
-      if (to < 0 || from === to) return prev;
+      const to = Math.max(0, Math.min(index, prev.length - 1));
+      if (from === to) return prev;
       const next = [...prev];
       const source = next[from];
-      next[from] = next[to];
-      next[to] = source;
+      next.splice(from, 1);
+      next.splice(to, 0, source);
       const active = activeSlotRef.current;
-      if (active === from) setActiveSlotIndex(to);
-      else if (active === to) setActiveSlotIndex(from);
+      if (active === from) {
+        setActiveSlotIndex(to);
+      } else if (from < active && active <= to) {
+        setActiveSlotIndex(active - 1);
+      } else if (to <= active && active < from) {
+        setActiveSlotIndex(active + 1);
+      }
       return next;
     });
+  }, [setActiveSlotIndex, setOpenSessions]);
+
+  const beginSlotPointerDrag = useCallback((
+    index: number,
+    event: ReactPointerEvent<HTMLDivElement>,
+    preview: Pick<SlotPointerDrag, 'title' | 'agent' | 'state'>,
+  ) => {
+    if (event.button !== 0) return;
+    if (shouldIgnoreFocusModeTarget(event.target)) return;
+    const slotEl = event.currentTarget.closest('[data-session-slot]') as HTMLElement | null;
+    if (!slotEl) return;
+    const rect = slotEl.getBoundingClientRect();
+    slotDragLayoutRef.current = readSessionSlotLayoutItems();
+    const next: SlotPointerDrag = {
+      from: index,
+      over: index,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      x: event.clientX,
+      y: event.clientY,
+      width: rect.width,
+      height: rect.height,
+      title: preview.title,
+      agent: preview.agent,
+      state: preview.state,
+      visible: false,
+    };
+    slotPointerDragRef.current = next;
+    setSlotPointerDrag(next);
+    setActiveSlotIndex(index);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }, [setActiveSlotIndex]);
+
+  const beginMultiRowHeightResize = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    const slotEl = event.currentTarget.closest('[data-session-slot]') as HTMLElement | null;
+    if (!slotEl) return;
+    const rect = slotEl.getBoundingClientRect();
+    const next: MultiRowHeightDrag = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: rect.height,
+    };
+    multiRowHeightDragRef.current = next;
+    setMultiRowHeightDrag(next);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
   }, []);
 
-  const handleSlotDragEnd = useCallback(() => {
+  const finishSlotPointerDrag = useCallback((commit: boolean) => {
+    const current = slotPointerDragRef.current;
+    slotPointerDragRef.current = null;
+    slotDragLayoutRef.current = [];
+    setSlotPointerDrag(null);
     setDraggingSlotIndex(null);
     setDragOverSlotIndex(null);
-  }, []);
+    if (!commit || !current?.visible || current.from === current.over) return;
+    moveSessionSlot(current.from, current.over);
+  }, [moveSessionSlot]);
 
+  useEffect(() => {
+    const activePointerId = slotPointerDrag?.pointerId;
+    if (activePointerId == null) return undefined;
+
+    const onPointerMove = (event: PointerEvent) => {
+      const current = slotPointerDragRef.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      event.preventDefault();
+      const visible = current.visible || Math.hypot(event.clientX - current.startX, event.clientY - current.startY) > 5;
+      const dragCenterX = event.clientX - current.offsetX + current.width / 2;
+      const dragCenterY = event.clientY - current.offsetY + current.height / 2;
+      const over = visible
+        ? slotInsertionIndexFromLayout(dragCenterX, dragCenterY, current.from, current.over, slotDragLayoutRef.current)
+        : current.over;
+      if (visible && (!current.visible || over !== current.over)) {
+        slotFlipRectsRef.current = measureSessionSlotRects();
+      }
+      const next: SlotPointerDrag = {
+        ...current,
+        over,
+        x: event.clientX,
+        y: event.clientY,
+        visible,
+      };
+      slotPointerDragRef.current = next;
+      setSlotPointerDrag(next);
+      if (visible) {
+        setDraggingSlotIndex(current.from);
+        setDragOverSlotIndex(over);
+      }
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const current = slotPointerDragRef.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      finishSlotPointerDrag(true);
+    };
+    const onPointerCancel = (event: PointerEvent) => {
+      const current = slotPointerDragRef.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      finishSlotPointerDrag(false);
+    };
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+    };
+  }, [finishSlotPointerDrag, slotPointerDrag?.pointerId]);
+
+  useEffect(() => {
+    const activePointerId = multiRowHeightDrag?.pointerId;
+    if (activePointerId == null) return undefined;
+
+    const onPointerMove = (event: PointerEvent) => {
+      const current = multiRowHeightDragRef.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      event.preventDefault();
+      setMultiRowHeightPx(current.startHeight + event.clientY - current.startY);
+    };
+    const finish = (event: PointerEvent) => {
+      const current = multiRowHeightDragRef.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      multiRowHeightDragRef.current = null;
+      setMultiRowHeightDrag(null);
+    };
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+    };
+  }, [multiRowHeightDrag?.pointerId, setMultiRowHeightPx]);
+
+  useEffect(() => {
+    if (!slotPointerDrag?.visible || typeof document === 'undefined') return undefined;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [slotPointerDrag?.pointerId, slotPointerDrag?.visible]);
+
+  useEffect(() => {
+    if (!multiRowHeightDrag || typeof document === 'undefined') return undefined;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [multiRowHeightDrag]);
+
+  const effectiveChatLayout: ChatLayoutMode = taskFocusId ? 'single' : chatLayout;
+  const multiWidgetGrid = isMultiChatLayout(effectiveChatLayout) && !isNarrowWorkbench;
   const renderedSlotEntries = useMemo(() => {
-    if (chatLayout === 'single') {
+    if (effectiveChatLayout === 'single') {
       const activeSlot = openSessions[activeSlotIndex] || null;
       return activeSlot ? [{ slot: activeSlot, slotIdx: activeSlotIndex }] : [];
     }
     return openSessions.map((slot, slotIdx) => ({ slot, slotIdx }));
-  }, [activeSlotIndex, chatLayout, openSessions]);
-  const singleNewSessionVisible = chatLayout === 'single' && !!showNewSession && activeSlotIndex >= openSessions.length;
-  const visibleSlotCount = Math.max(1, singleNewSessionVisible ? 1 : renderedSlotEntries.length + (showNewSession ? 1 : 0));
-  const gridColumnCount = chatLayout === 'single' ? 1 : Math.min(3, visibleSlotCount);
-  const gridRowCount = Math.ceil(visibleSlotCount / gridColumnCount);
+  }, [activeSlotIndex, effectiveChatLayout, openSessions]);
+  const slotVisualOrder = useMemo(() => {
+    const orderedIndexes = renderedSlotEntries.map(entry => entry.slotIdx);
+    if (multiWidgetGrid && slotPointerDrag?.visible && orderedIndexes.includes(slotPointerDrag.from)) {
+      const next = orderedIndexes.filter(index => index !== slotPointerDrag.from);
+      const insertionIndex = Math.max(0, Math.min(slotPointerDrag.over, next.length));
+      next.splice(insertionIndex, 0, slotPointerDrag.from);
+      return new Map(next.map((slotIdx, order) => [slotIdx, order]));
+    }
+    return new Map(orderedIndexes.map((slotIdx, order) => [slotIdx, order]));
+  }, [multiWidgetGrid, renderedSlotEntries, slotPointerDrag?.from, slotPointerDrag?.over, slotPointerDrag?.visible]);
+  const floatingNewSessionVisible = effectiveChatLayout === 'single'
+    && !!showNewSession
+    && !isNarrowWorkbench
+    && !taskFocusId
+    && openSessions.length > 0
+    && activeSlotIndex < openSessions.length;
+  const singleNewSessionVisible = effectiveChatLayout === 'single'
+    && !!showNewSession
+    && !floatingNewSessionVisible
+    && activeSlotIndex >= openSessions.length;
+  const showMultiNewSessionPlaceholder = isMultiChatLayout(effectiveChatLayout)
+    && !showNewSession
+    && !taskFocusId
+    && renderedSlotEntries.length !== 1;
+  const draftNewSessionSlotCount = showNewSession && !floatingNewSessionVisible ? 1 : 0;
+  const tailNewSessionSlotCount = showMultiNewSessionPlaceholder ? 1 : 0;
+  const layoutSlotCount = Math.max(1, singleNewSessionVisible ? 1 : renderedSlotEntries.length + draftNewSessionSlotCount);
+  const visibleSlotCount = Math.max(1, singleNewSessionVisible ? 1 : renderedSlotEntries.length + draftNewSessionSlotCount + tailNewSessionSlotCount);
+  const multiSingleChatPresentation = multiWidgetGrid
+    && renderedSlotEntries.length === 1
+    && draftNewSessionSlotCount === 0
+    && layoutSlotCount === 1;
+  const multiGridColumnCount = multiWidgetGrid
+    ? chatLayoutColumnCount(effectiveChatLayout, layoutSlotCount)
+    : 1;
+  const gridColumnCount = effectiveChatLayout === 'single' || isNarrowWorkbench ? 1 : multiGridColumnCount;
+  const gridRowCount = Math.ceil(layoutSlotCount / gridColumnCount);
   const gridNeedsVerticalScroll = gridRowCount > SESSION_GRID_MAX_VISIBLE_ROWS;
   const gridHeight = gridNeedsVerticalScroll
     ? `calc(${(gridRowCount / SESSION_GRID_MAX_VISIBLE_ROWS) * 100}% + ${Math.max(0, (gridRowCount / SESSION_GRID_MAX_VISIBLE_ROWS - 1) * SESSION_GRID_GAP_PX)}px)`
     : '100%';
-  const dashboardFocusedInfo = dashboardFocusedSlot ? resolveSlotInfo(dashboardFocusedSlot) : null;
-  const mainModeBar = (
-    <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-[18px] border border-edge/70 bg-panel/80 px-3 py-2 shadow-[var(--th-card-shadow)] backdrop-blur-md">
-      <div className="inline-flex min-w-0 rounded-xl border border-edge/70 bg-inset p-0.5">
-        {[
-          { to: '/', label: t('nav.chat'), active: mode === 'workspace' },
-          { to: '/dashboard?view=jira', label: t('nav.dashboard'), active: mode === 'dashboard' },
-        ].map(item => (
-          <Link
-            key={item.to}
-            to={item.to}
-            state={item.to === '/' ? { forceWorkspace: true } : undefined}
-            className={cn(
-              'inline-flex h-8 min-w-20 items-center justify-center rounded-lg px-3 text-[12px] font-semibold transition-[background,color,box-shadow]',
-              item.active ? 'bg-primary text-primary-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
-            )}
-          >
-            {item.label}
-          </Link>
-        ))}
-      </div>
-      {mode === 'workspace' && (
-        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-          <div className="hidden min-w-0 flex-1 text-right text-[11px] text-fg-5 md:block">{t('chat.layoutHint')}</div>
-          <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-xl border border-edge bg-panel-alt p-0.5">
-            {([
-              ['single', t('chat.singleWindow')],
-              ['multi', t('chat.multiWindow')],
-            ] as const).map(([view, label]) => (
-              <button
-                key={view}
-                type="button"
-                onClick={() => setChatLayout(view)}
-                className={cn(
-                  'h-7 rounded-lg px-3 text-[12px] font-semibold transition',
-                  chatLayout === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-4 hover:bg-panel hover:text-fg-2',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            onClick={() => setInboxOpen(true)}
-            className={cn(
-              'inline-flex h-8 shrink-0 items-center gap-2 rounded-xl border px-3 text-[12px] font-semibold shadow-sm transition-[border-color,background,color,box-shadow]',
-              inboxAlertCount > 0
-                ? 'border-primary/45 bg-primary/[0.10] text-primary hover:bg-primary/[0.14] hover:shadow-[0_0_0_3px_var(--th-glow-a)]'
-                : 'border-edge bg-panel-alt text-fg-4 hover:border-edge-h hover:bg-panel hover:text-fg-2',
-            )}
-            aria-label={t('inbox.open')}
-            title={t('inbox.open')}
-          >
-            <span>{t('inbox.title')}</span>
-            <span className="rounded-md border border-current/20 bg-panel/40 px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
-              {inboxAlertCount}
-            </span>
-            <span className="hidden items-center gap-1.5 text-[10px] font-medium text-fg-5 lg:inline-flex">
-              <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-ok" />{dashboardCounts.running}</span>
-              <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-err" />{dashboardCounts.incomplete}</span>
-              <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-warn" />{dashboardCounts.review}</span>
-            </span>
-          </button>
-        </div>
-      )}
-    </div>
-  );
-	  useEffect(() => {
+  const floatingSessionLayerVisible = focusedSlotIndex != null
+    || (effectiveChatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && renderedSlotEntries.length > 0);
+  const hiddenFocusFloatingSessionCount = focusFloatingSessions.filter(item => item.hidden).length;
+  useEffect(() => {
     if (focusedSlotIndex != null) return;
+    if (isSessionComposerFocused()) return;
     const timer = window.setTimeout(() => {
       const el = document.querySelector(`[data-session-slot-index="${activeSlotIndex}"]`) as HTMLElement | null;
       el?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
@@ -3261,88 +4420,112 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     return () => window.clearTimeout(timer);
   }, [activeSlotIndex, focusedSlotIndex, openSessions.length, showNewSession]);
 
+  useLayoutEffect(() => {
+    const previousRects = slotFlipRectsRef.current;
+    if (!previousRects) return;
+    slotFlipRectsRef.current = null;
+    if (typeof document === 'undefined') return;
+    const draggedIndex = slotPointerDrag?.visible ? slotPointerDrag.from : null;
+    document.querySelectorAll<HTMLElement>('[data-session-slot-index]').forEach(slotEl => {
+      const raw = slotEl.dataset.sessionSlotIndex;
+      if (raw == null) return;
+      const index = Number(raw);
+      if (!Number.isInteger(index) || index === draggedIndex) return;
+      const before = previousRects.get(index);
+      if (!before) return;
+      const after = slotEl.getBoundingClientRect();
+      const deltaX = before.left - after.left;
+      const deltaY = before.top - after.top;
+      if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1) return;
+      slotEl.animate(
+        [
+          { transform: `translate3d(${deltaX}px, ${deltaY}px, 0)` },
+          { transform: 'translate3d(0, 0, 0)' },
+        ],
+        { duration: 190, easing: 'cubic-bezier(0.2, 0, 0, 1)' },
+      );
+    });
+  }, [slotPointerDrag?.from, slotPointerDrag?.over, slotPointerDrag?.visible, slotVisualOrder]);
+
+  const workspaceSidebarVisible = mode === 'workspace' && !workspaceSidebarCollapsed && !isNarrowWorkbench;
+  const multiWideWorkbench = mode === 'workspace'
+    && multiWidgetGrid
+    && !workspaceSidebarVisible
+    && focusedSlotIndex == null;
+  const multiItemGapPx = multiWideWorkbench ? SESSION_GRID_GAP_PX : 12;
+  const multiItemFlexBasis = multiWidgetGrid
+    ? `calc((100% - ${(multiGridColumnCount - 1) * multiItemGapPx}px) / ${multiGridColumnCount})`
+    : undefined;
+  const multiItemTall = multiWideWorkbench || (multiWidgetGrid && multiGridColumnCount <= 2 && gridRowCount <= 1);
+  const canResizeMultiRows = multiWidgetGrid && !multiItemTall && multiGridColumnCount >= 3;
+  const compactMultiItemHeight = multiRowHeightPx == null
+    ? 'min(640px, calc(100dvh - 120px))'
+    : `${clampMultiRowHeightForViewport(multiRowHeightPx)}px`;
+  const multiItemHeight = multiItemTall
+    ? 'calc(100dvh - 32px)'
+    : compactMultiItemHeight;
+  const appRailVisible = mode === 'workspace' || mode === 'dashboard';
+  const workspaceCenterClass = mode === 'workspace'
+    ? workspaceSidebarVisible
+      ? 'py-2 pr-2 md:py-3 md:pr-3'
+      : multiWideWorkbench
+        ? 'p-4'
+      : 'px-2 pb-2 pt-2 md:px-3 md:pb-3 md:pt-3'
+    : mode === 'dashboard'
+      ? 'p-2 md:p-3'
+    : '';
+  const workspaceSingleChatCentered = mode === 'workspace'
+    && !workspaceSidebarVisible
+    && (effectiveChatLayout === 'single' || multiSingleChatPresentation)
+    && focusedSlotIndex == null;
+
   return (
-    <div className="relative h-full overflow-hidden p-2 md:p-4 flex gap-3 mx-auto">
+    <div className={cn(
+      'relative h-full overflow-hidden flex flex-col mx-auto',
+      appRailVisible ? 'gap-0 p-0 pl-14' : 'gap-3 p-2 md:p-4',
+    )}>
+      {workspaceSidebarToggleAction}
+      {globalInboxAction}
+      <div className="relative min-h-0 flex flex-1 gap-0">
+      {mode === 'workspace' && (
+      <>
       {/* ═══ Left Panel — Session Navigator ═══ */}
       <div
         className={cn(
-          'relative h-full shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out max-md:absolute max-md:inset-y-2 max-md:left-2 max-md:z-50',
-          workspaceSidebarCollapsed ? 'w-10' : 'w-[280px]',
-          focusedSlotIndex != null && 'pointer-events-none opacity-0',
+          'h-full shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out',
+          workspaceSidebarVisible
+            ? 'relative z-30 w-[312px] p-2 opacity-100 md:w-[324px] md:p-3'
+            : 'w-0 opacity-0 pointer-events-none',
         )}
       >
-        <button
-          type="button"
-          onClick={() => {
-            setWorkspaceSidebarCollapsed(false);
-            navigate('/', { state: { forceWorkspace: true } });
-          }}
-          className={cn(
-            'group absolute left-0 top-3 z-40 flex h-12 w-11 items-center justify-center overflow-hidden border border-l-0 border-edge/65 bg-panel/92 text-fg-5 shadow-[0_6px_18px_rgba(15,23,42,0.12)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[74px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
-            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-150' : '-translate-x-2 opacity-0 pointer-events-none',
-          )}
-          style={{ borderTopRightRadius: 16, borderBottomRightRadius: 12, clipPath: 'polygon(0 0, 100% 7%, 88% 100%, 0 100%)' }}
-          title={t('rail.workspace')}
-          aria-label={t('rail.workspace')}
-        >
-          <span className="-translate-x-1 rotate-[-10deg] scale-90 transition-transform duration-200 group-hover:translate-x-0 group-hover:rotate-0 group-hover:scale-100" aria-hidden="true">
-            <PikiclawLogo />
-          </span>
-          <span className="ml-1 hidden whitespace-nowrap text-[10px] font-semibold group-hover:inline">{t('rail.workspace')}</span>
-        </button>
-        <Link
-          to="/dashboard?view=jira"
-          className={cn(
-            'group absolute left-0 top-[68px] z-40 flex h-10 w-9 items-center justify-center overflow-hidden border border-l-0 border-edge/60 bg-panel/92 text-fg-5 shadow-[0_6px_16px_rgba(15,23,42,0.10)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[78px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
-            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-200' : '-translate-x-2 opacity-0 pointer-events-none',
-          )}
-          style={{ borderTopRightRadius: 12, borderBottomRightRadius: 15, clipPath: 'polygon(0 4%, 100% 0, 90% 92%, 0 100%)' }}
-          title={t('rail.dashboard')}
-          aria-label={t('rail.dashboard')}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="transition-transform duration-200 group-hover:scale-110" aria-hidden="true">
-            <rect x="3" y="3" width="7" height="7" rx="1.5" />
-            <rect x="14" y="3" width="7" height="7" rx="1.5" />
-            <rect x="3" y="14" width="7" height="7" rx="1.5" />
-            <rect x="14" y="14" width="7" height="7" rx="1.5" />
-          </svg>
-          <span className="ml-2 hidden whitespace-nowrap text-[10px] font-semibold group-hover:inline">{t('rail.dashboard')}</span>
-        </Link>
-        <button
-          type="button"
-          onClick={() => setQuickTodoOpen(true)}
-          className={cn(
-            'group absolute left-0 top-[116px] z-40 flex h-9 w-8 items-center justify-center overflow-hidden border border-l-0 border-edge/60 bg-panel/92 text-fg-5 shadow-[0_6px_16px_rgba(15,23,42,0.10)] transition-[opacity,transform,border-color,background-color,color,width] duration-200 hover:w-[62px] hover:border-edge-h hover:bg-panel-h hover:text-fg-2',
-            workspaceSidebarCollapsed ? 'translate-x-0 opacity-100 delay-[250ms]' : '-translate-x-2 opacity-0 pointer-events-none',
-          )}
-          style={{ borderTopRightRadius: 10, borderBottomRightRadius: 14, clipPath: 'polygon(0 0, 100% 8%, 100% 92%, 0 100%)' }}
-          title={t('rail.todo')}
-          aria-label={t('rail.todo')}
-        >
-          <TodoGlyph className="h-3.5 w-3.5 transition-transform duration-200 group-hover:scale-110" />
-          <span className="ml-2 hidden whitespace-nowrap text-[10px] font-semibold group-hover:inline">{t('rail.todo')}</span>
-        </button>
       <div
         className={cn(
-          'panel-isolated absolute inset-y-0 left-0 w-[280px] flex flex-col overflow-hidden rounded-[18px] border border-edge/70 bg-panel/88 backdrop-blur-md transition-[transform,opacity] duration-300 ease-out',
-          workspaceSidebarCollapsed ? '-translate-x-[292px] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100',
+          'panel-isolated flex h-full w-[300px] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-xl border border-edge/70 bg-panel/96 backdrop-blur-md transition-[transform,opacity] duration-300 ease-out',
+          workspaceSidebarVisible ? 'translate-x-0 opacity-100' : '-translate-x-[312px] opacity-0 pointer-events-none',
         )}
         style={{ boxShadow: 'var(--th-card-shadow)' }}
       >
-        <WorkspaceSidebarHeader
-          onCollapse={() => setWorkspaceSidebarCollapsed(true)}
-          collapseLabel={t('hub.hideWorkspaceSidebar')}
-          version={version}
-        />
-
         {/* Search */}
         <div className="border-b border-edge/20 bg-panel/45 px-3 py-3">
           <div className="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setWorkspaceSidebarCollapsed(true)}
+              title={t('hub.hideWorkspaceSidebar')}
+              aria-label={t('hub.hideWorkspaceSidebar')}
+              className="h-8 w-8 shrink-0"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="m15 18-6-6 6-6" />
+              </svg>
+            </Button>
             <div className="relative group min-w-0 flex-1">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-5/40 group-focus-within:text-fg-4 transition-colors">
                 <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
               </svg>
               <input
+                ref={searchInputRef}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder={t('hub.search')}
@@ -3371,6 +4554,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             </Button>
+            {!taskFocusId && (
+              <Button
+                variant={isMultiChatLayout(chatLayout) ? 'secondary' : 'ghost'}
+                size="icon"
+                onClick={toggleChatLayout}
+                title={workspaceLayoutToggleLabel}
+                aria-label={workspaceLayoutToggleLabel}
+                className={cn(
+                  'h-8 w-8 shrink-0',
+                  isMultiChatLayout(chatLayout) && 'border-primary/35 text-primary',
+                )}
+              >
+                {isMultiChatLayout(chatLayout)
+                  ? <SingleLayoutIcon className="h-3.5 w-3.5 shrink-0" />
+                  : <ThreeUpLayoutIcon className="h-3.5 w-3.5 shrink-0" />}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -3408,8 +4608,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   openSessionKeys={openSessionKeys}
                   onSelectSession={handleSelectSession}
                   onNewSession={handleNewSessionRequest}
-                  onRefresh={handleRefreshWorkspace}
-                  onRemove={handleRemoveWorkspace}
+	                  onRefresh={handleRefreshWorkspace}
+	                  onMarkAllRead={handleMarkWorkspaceInboxRead}
+                    inboxUnreadCount={dashboardItems.filter(item => item.workdir === ws.path).length}
+	                  onRemove={handleRemoveWorkspace}
                   onRename={openRenameWorkspaceModal}
                   onExtensions={setExtensionsWorkdir}
                   onWarmSession={scheduleSessionWarmup}
@@ -3431,39 +4633,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
         {/* Footer */}
         <div className="relative shrink-0 border-t border-edge/20 px-3 py-2">
-          {workspaceSettingsOpen && workspaceSettingsAnchor && createPortal((
-            <div
-              className="fixed z-[220] rounded-lg border border-edge bg-panel/98 py-1 shadow-[0_12px_32px_rgba(15,23,42,0.16),0_2px_8px_rgba(15,23,42,0.10)] backdrop-blur-md"
-              style={{
-                width: WORKSPACE_SETTINGS_MENU_WIDTH,
-                left: Math.min(
-                  workspaceSettingsAnchor.right + 8,
-                  window.innerWidth - WORKSPACE_SETTINGS_MENU_WIDTH - 8,
-                ),
-                top: Math.max(
-                  8,
-                  Math.min(
-                    workspaceSettingsAnchor.bottom - WORKSPACE_SETTINGS_MENU_HEIGHT,
-                    window.innerHeight - WORKSPACE_SETTINGS_MENU_HEIGHT - 8,
-                  ),
-                ),
-              }}
-              onMouseDown={e => e.stopPropagation()}
-              role="menu"
-            >
-              {workspaceSettingsItems.map(item => (
-                <Link
-                  key={item.to}
-                  to={item.to}
-                  onClick={() => setWorkspaceSettingsOpen(false)}
-                  className={cn(menuItemClass(), 'py-2 text-fg-3')}
-                  role="menuitem"
-                >
-                  {item.label}
-                </Link>
-              ))}
-            </div>
-          ), document.body)}
           {todoModalOpen && createPortal((
             <TodoCenterModal
               items={todoItems}
@@ -3510,97 +4679,143 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </div>
             </div>
           ), document.body)}
-          <WorkspaceSidebarRuntimeControls
-            appStatus={appStatus}
-            restartPhase={restartPhase}
-            onRestartClick={onRestartClick}
-            restartLabel={t('sidebar.restart')}
-            confirmRestartLabel={t('modal.confirmRestart')}
-            restartingLabel={t('modal.restarting')}
-            theme={theme}
-            onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            themeToggleLabel={themeToggleLabel}
-            locale={locale}
-            onToggleLocale={() => setLocale(locale === 'zh-CN' ? 'en' : 'zh-CN')}
-            settingsButtonRef={workspaceSettingsButtonRef}
-            onOpenSettings={openWorkspaceSettings}
-            settingsLabel={t('settings.menu')}
-            settingsOpen={workspaceSettingsOpen}
-          />
+          <div className="flex items-center gap-2 rounded-lg border border-edge/45 bg-panel/55 px-2 py-1.5 text-[11px] text-fg-4">
+            <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
+            <span className="min-w-0 flex-1 truncate font-medium text-fg-3">{appStatus.badgeContent}</span>
+          </div>
         </div>
       </div>
       </div>
+      </>
+      )}
 
       {/* ═══ Center Panel — Grid of session slots ═══ */}
       <div
         className={cn(
-          'flex-1 min-w-0 flex flex-col overflow-hidden gap-0',
+          'relative flex-1 min-w-0 flex flex-col overflow-hidden gap-0',
+          workspaceCenterClass,
         )}
       >
-              {mode === 'dashboard' ? (
-          <>
-            {mainModeBar}
-            <div className="mb-3 flex shrink-0 items-center justify-between gap-3 rounded-[18px] border border-edge/70 bg-panel/78 px-4 py-3 shadow-[var(--th-card-shadow)] backdrop-blur-md">
-              <div className="min-w-0">
-                <div className="text-[15px] font-semibold tracking-tight text-fg">{t('tab.dashboard')}</div>
-                <div className="mt-1 text-[12px] text-fg-5">{t('tabDesc.jira')}</div>
-              </div>
-              <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-edge/70 bg-inset p-0.5">
-                <button
-                  type="button"
-                  className="h-7 rounded-md bg-primary px-3 text-[12px] font-semibold text-primary-fg shadow-sm"
-                >
-                  {t('dashboard.viewJira')}
-                </button>
-              </div>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-[18px] border border-edge/70 bg-panel/78 p-3 shadow-[var(--th-card-shadow)] backdrop-blur-md">
-              {dashboardJiraContent}
-            </div>
-          </>
+        {mode === 'dashboard' ? (
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {dashboardJiraContent}
+          </div>
         ) : mode === 'settings' ? (
           <div className="min-h-0 flex-1 overflow-hidden rounded-[18px] border border-edge/70 bg-panel/78 shadow-[var(--th-card-shadow)] backdrop-blur-md">
             {settingsContent}
           </div>
+        ) : taskFocusId && (!taskWorkbench?.activeStageRun) ? (
+          <TaskFocusEmptyWorkbench
+            task={taskWorkbench?.task || null}
+            loading={taskWorkbenchLoading}
+            busyStage={taskStageBusy}
+            onStartStage={(stage) => { void startTaskStage(stage); }}
+            onClose={closeTaskFocusWorkbench}
+          />
         ) : (
           <>
-            {mainModeBar}
             {focusedSlotIndex != null && (
               <div
-                className="fixed inset-0 z-[60] bg-[var(--th-focus-backdrop)]"
+                className="fixed inset-0 z-[60] bg-black/45 backdrop-blur-[2px]"
                 aria-hidden="true"
                 onClick={closeFocusMode}
               />
             )}
-            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1 [scrollbar-gutter:stable]">
+            {slotPointerDrag?.visible && typeof document !== 'undefined' && createPortal((
               <div
-                className="grid min-h-full gap-3"
+                data-slot-drag-preview
+                className="pointer-events-none fixed left-0 top-0 z-[90] overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] opacity-95 ring-1 ring-[color:var(--th-chat-window-ring)] backdrop-blur-sm will-change-transform"
                 style={{
-                  height: gridHeight,
-                  gridTemplateColumns: `repeat(${gridColumnCount}, minmax(0, 1fr))`,
-                  gridTemplateRows: `repeat(${gridRowCount}, minmax(0, 1fr))`,
+                  width: slotPointerDrag.width,
+                  height: slotPointerDrag.height,
+                  transform: `translate3d(${slotPointerDrag.x - slotPointerDrag.offsetX}px, ${slotPointerDrag.y - slotPointerDrag.offsetY}px, 0)`,
+                  boxShadow: 'var(--th-chat-window-shadow-focus)',
+                }}
+              >
+                <div className="flex h-11 items-center gap-2 border-b border-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg-active)] px-3">
+                  <span className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
+                    <BrandIcon brand={slotPointerDrag.agent || ''} size={16} />
+                    {slotPointerDrag.state === 'running' && (
+                      <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-panel bg-ok" />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg">{slotPointerDrag.title}</span>
+                </div>
+                <div className="space-y-3 px-4 py-5">
+                  <div className="h-9 w-2/3 rounded-xl bg-panel-alt/80" />
+                  <div className="ml-auto h-10 w-3/5 rounded-xl bg-primary/[0.10]" />
+                  <div className="h-20 w-4/5 rounded-xl bg-panel-alt/70" />
+                  <div className="ml-auto h-9 w-1/2 rounded-xl bg-primary/[0.09]" />
+                </div>
+              </div>
+            ), document.body)}
+            <div className={cn(
+              'flex-1 min-h-0 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]',
+              multiWidgetGrid ? 'pr-3 md:pr-4' : 'pr-1',
+            )}>
+              <div
+                className={cn(
+                  multiWidgetGrid ? 'flex flex-wrap' : 'grid',
+                  multiWidgetGrid
+                    ? cn('min-h-full content-start items-stretch', multiWideWorkbench ? 'gap-4 py-0' : 'gap-3 py-1')
+                    : 'min-h-full gap-4',
+                  workspaceSingleChatCentered && 'mx-auto w-full max-w-[1120px]',
+                )}
+                style={{
+                  height: multiWidgetGrid ? 'auto' : gridHeight,
+                  width: multiWidgetGrid ? '100%' : undefined,
+                  gridTemplateColumns: multiWidgetGrid
+                    ? undefined
+                    : `repeat(${gridColumnCount}, minmax(0, 1fr))`,
+                  gridTemplateRows: multiWidgetGrid
+                    ? undefined
+                    : `repeat(${gridRowCount}, minmax(0, 1fr))`,
+                  gridAutoRows: multiWidgetGrid
+                    ? multiItemTall
+                      ? multiItemHeight
+                      : 'minmax(420px, min(640px, calc(100dvh - 120px)))'
+                    : undefined,
                 }}
               >
               {(() => {
-                const newSessionSlot = showNewSession ? renderedSlotEntries.length : -1;
+                const newSessionSlot = (showNewSession || showMultiNewSessionPlaceholder) ? renderedSlotEntries.length : -1;
+                const resolvedPlaceholderTemplate = showMultiNewSessionPlaceholder ? resolveNewSessionTemplate() : null;
+                const placeholderTemplate = resolvedPlaceholderTemplate?.workdir ? resolvedPlaceholderTemplate : null;
                 return Array.from({ length: visibleSlotCount }, (_, displaySlotIdx) => {
               if (showNewSession && (singleNewSessionVisible || displaySlotIdx === newSessionSlot)) {
                 return (
                   <div
                     key={`new-${showNewSession}`}
-                    className="min-w-0 overflow-hidden rounded-xl border border-edge bg-panel flex flex-col"
-                    style={{ boxShadow: 'var(--th-card-shadow)' }}
-                    onDragOver={e => handleSlotDragOver(activeSlotIndex, e)}
-                    onDrop={e => handleSlotDrop(activeSlotIndex, e)}
+                    className={cn(
+                      'min-w-0 overflow-hidden flex flex-col',
+                      multiWidgetGrid
+                        ? 'rounded-[18px] border border-dashed border-edge/60 bg-transparent'
+                        : 'rounded-xl border border-edge bg-panel',
+                    )}
+                    style={{
+                      order: newSessionSlot,
+                      boxShadow: multiWidgetGrid ? 'none' : 'var(--th-card-shadow)',
+                      ...(multiWidgetGrid
+                        ? {
+                          flex: `0 0 ${multiItemFlexBasis || '100%'}`,
+                          height: multiItemHeight,
+                        }
+                        : null),
+                    }}
                   >
                     <NewSessionView
                       key={showNewSession}
                       workdir={showNewSession}
                       workspaceName={workspaces.find(ws => ws.path === showNewSession)?.name || showNewSession.split('/').pop() || ''}
                       workspaces={workspaces}
+                      initialAgent={newSessionTemplateAgent}
+                      initialDraftPrompt={newSessionInitialDraftPrompt}
+                      initialAutoSend={newSessionInitialAutoSend}
                       onSessionCreated={handleNewSessionCreated}
                       onMultiSessionCreated={handleMultiSessionCreated}
                       onClose={() => {
+                        setNewSessionInitialDraftPrompt(null);
+                        setNewSessionInitialAutoSend(false);
                         setShowNewSession(null);
                         setActiveSlotIndex(prev => (
                           prev >= openSessionsRef.current.length
@@ -3611,6 +4826,25 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       t={t}
                     />
                   </div>
+                );
+              }
+              if (placeholderTemplate && displaySlotIdx === newSessionSlot) {
+                const placeholderWorkspaceName = workspaces.find(ws => ws.path === placeholderTemplate.workdir)?.name
+                  || workspaceBaseName(placeholderTemplate.workdir);
+                const placeholderAgentLabel = placeholderTemplate.agent ? getAgentMeta(placeholderTemplate.agent).label : '';
+                return (
+                  <MultiNewSessionPlaceholder
+                    key="multi-new-session-placeholder"
+                    workdir={placeholderTemplate.workdir}
+                    workspaceName={placeholderWorkspaceName}
+                    agent={placeholderTemplate.agent}
+                    agentLabel={placeholderAgentLabel}
+                    order={newSessionSlot}
+                    height={multiItemHeight}
+                    flexBasis={multiItemFlexBasis}
+                    onClick={handleNewSessionPlaceholderClick}
+                    t={t}
+                  />
                 );
               }
               const entry = renderedSlotEntries[displaySlotIdx] ?? null;
@@ -3625,8 +4859,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       'min-w-0 overflow-hidden rounded-xl border border-dashed bg-panel/30 flex items-center justify-center transition-colors',
                       dragOverSlotIndex === slotIdx ? 'border-primary/50 bg-primary/[0.06]' : 'border-edge/40',
                     )}
-                    onDragOver={e => handleSlotDragOver(slotIdx, e)}
-                    onDrop={e => handleSlotDrop(slotIdx, e)}
                   >
                     <div className="text-center px-4">
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="mx-auto text-fg-5/20 mb-2">
@@ -3657,19 +4889,53 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const isHeaderRenaming = headerRenameTarget?.workdir === slot.workdir
                 && headerRenameTarget.agent === slot.agent
                 && headerRenameTarget.sessionId === slot.sessionId;
-              const parentSlotKey = sessionSlotStorageKey(slot);
-              const openSideSlots = dedupeSideChatSlots(openSideChatsByParent[parentSlotKey] || []);
+	              const parentSlotKey = sessionSlotStorageKey(slot);
+	              const taskWorkbenchForSlot = taskWorkbench && taskWorkbench.task.stageRuns?.some(run => sessionMatchesStageRun(slot, run))
+	                ? taskWorkbench
+	                : null;
+	              const taskActiveStageRun = taskWorkbenchForSlot?.activeStageRun || null;
+	              const slotTaskBrief = taskWorkbenchForSlot
+	                ? (
+	                  <TaskBriefCard
+	                    task={taskWorkbenchForSlot.task}
+	                    activeStageRun={taskActiveStageRun}
+	                    busyStage={taskStageBusy}
+	                    onClose={closeTaskFocusWorkbench}
+	                    onStartStage={(stage) => { void startTaskStage(stage); }}
+	                    onOpenStageRun={openStageRunSession}
+	                  />
+	                )
+	                : null;
+	              const openSideSlots = dedupeSideChatSlots(openSideChatsByParent[parentSlotKey] || []);
               const sideChatRefs = mergeSideChatRefs(info.sideChats, sideChatRefsByParent[parentSlotKey]);
               const knownSideKeys = new Set(sideChatRefs.map(ref => `${ref.agent}:${ref.sessionId}`));
               const sideRefsKnown = Array.isArray(info.sideChats) || !!sideChatRefsByParent[parentSlotKey]?.length;
               const visibleOpenSideSlots = sideRefsKnown
                 ? openSideSlots.filter(sideSlot => knownSideKeys.has(sideChatSlotKey(sideSlot)))
                 : openSideSlots;
-              const activeSideKey = activeSideChatByParent[parentSlotKey];
-              const activeSideSlot = visibleOpenSideSlots.find(s => sideChatSlotKey(s) === activeSideKey) || visibleOpenSideSlots[0] || null;
-              const sideChatPanelOpen = sideChatPanelOpenByParent[parentSlotKey] === true;
-              const renderSidePanel = sideChatPanelOpen && (isFocused || shouldInlineSideChat);
-              const sideChatRefSlots = sideChatRefs.map(ref => ({
+	              const activeSideKey = activeSideChatByParent[parentSlotKey];
+	              const activeSideSlot = visibleOpenSideSlots.find(s => sideChatSlotKey(s) === activeSideKey) || visibleOpenSideSlots[0] || null;
+	              const sideChatPanelOpen = sideChatPanelOpenByParent[parentSlotKey] === true;
+	              const contextSurfaceOpen = sideChatPanelOpen && (isFocused || shouldInlineSideChat);
+		              const contextShelfTabs: ContextShelfTab[] = taskWorkbenchForSlot
+		                ? ['outputs', 'side-chats', 'files', 'browser', 'status', 'ticket']
+		                : ['outputs', 'side-chats', 'files', 'browser', 'status'];
+		              const activeContextShelfTab = contextShelfTabByParent[parentSlotKey] || (taskWorkbenchForSlot ? 'outputs' : 'side-chats');
+		              const visibleContextShelfTabs = isFocused
+		                ? FOCUS_CONTEXT_SHELF_TAB_ORDER.filter(tab => contextShelfTabs.includes(tab))
+		                : contextShelfTabs;
+		              const effectiveContextShelfTab = visibleContextShelfTabs.includes(activeContextShelfTab)
+		                ? activeContextShelfTab
+		                : visibleContextShelfTabs[0] || activeContextShelfTab;
+		              const contextCardPlacement = contextCardPlacementByParent[parentSlotKey] || defaultContextCardPlacement();
+	              const renderContextCard = contextSurfaceOpen
+	                && shouldInlineSideChat
+	                && effectiveChatLayout === 'single'
+	                && !isFocused
+	                && activeContextShelfTab === 'side-chats'
+	                && contextCardPlacement.mode !== 'docked';
+	              const taskOutputCount = taskWorkbenchForSlot?.outputs.length || 0;
+	              const sideChatRefSlots = sideChatRefs.map(ref => ({
                 agent: ref.agent || slot.agent,
                 sessionId: ref.sessionId,
                 workdir: slot.workdir,
@@ -3686,52 +4952,167 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const hasSideChats = uniqueSideChatKnownSlots.length > 0;
               const sideChatsHaveRunning = uniqueSideChatKnownSlots.some(sideSlot => sessionDisplayState(resolveSideSlotInfo(info, sideSlot)) === 'running');
               const sideChatsHaveUnread = uniqueSideChatKnownSlots.some(sideSlot => shouldMarkSessionReadOnOpen(resolveSideSlotInfo(info, sideSlot)));
-              const sideChatToggleLabel = renderSidePanel
+              const sideChatToggleLabel = contextSurfaceOpen
                 ? t('session.hideSideChat')
                 : hasSideChats
                   ? t('session.showSideChats')
                   : t('session.newSideChat');
               const sideChatWidth = sideChatWidthsByParent[parentSlotKey] || SIDE_CHAT_DEFAULT_WIDTH;
+              const contextFileCount = taskWorkbenchForSlot?.files.length || 0;
+              const quickContextTabs: ContextShelfTab[] = taskWorkbenchForSlot
+                ? ['outputs', 'side-chats', 'files', 'browser', 'ticket']
+                : ['side-chats', 'files', 'browser', 'status'];
+	              const contextCountForTab = (tab: ContextShelfTab) => {
+	                if (tab === 'outputs') return taskOutputCount;
+	                if (tab === 'side-chats') return uniqueSideChatKnownSlots.length;
+	                if (tab === 'files') return contextFileCount;
+	                if (tab === 'browser') return 0;
+	                if (tab === 'ticket') return taskWorkbenchForSlot ? 1 : 0;
+	                return slotState === 'running' || slotState === 'incomplete' || hasUnreadCompletedState ? 1 : 0;
+	              };
+	              const focusSideCardTabButtons = isFocused && visibleOpenSideSlots.length > 0
+	                ? (
+	                  <>
+	                    {visibleOpenSideSlots.map((sideSlot, sideSlotIdx) => {
+	                      const sideInfo = resolveSideSlotInfo(info, sideSlot);
+	                      const sideTitle = sideChatDisplayTitle(sideSlotIdx, t('session.sideChat'));
+	                      const sideKey = sideChatSlotKey(sideSlot);
+	                      const tabActive = effectiveContextShelfTab === 'side-chats'
+	                        && !!activeSideSlot
+	                        && sideKey === sideChatSlotKey(activeSideSlot);
+	                      const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
+	                      return (
+	                        <button
+	                          key={sideSlot.mountKey || sessionSlotStorageKey(sideSlot)}
+	                          type="button"
+	                          data-focus-side-card-tab
+	                          onClick={() => {
+	                            setContextShelfTabByParent(prev => ({ ...prev, [parentSlotKey]: 'side-chats' }));
+	                            setActiveSideChatByParent(prev => ({ ...prev, [parentSlotKey]: sideKey }));
+	                            markSessionReadOnOpen(sideInfo, sideSlot.workdir);
+	                          }}
+	                          className={cn(
+	                            'inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-semibold transition-[background,color,transform] active:translate-y-px',
+	                            tabActive ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-5 hover:bg-panel-h/70 hover:text-fg-3',
+	                          )}
+	                          title={sideTitle}
+	                          aria-label={sideTitle}
+	                        >
+	                          {sideUnread && <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_6px_var(--th-ok-glow)]" />}
+	                          <span>{sideTitle}</span>
+	                        </button>
+	                      );
+	                    })}
+	                  </>
+	                )
+	                : undefined;
+	              const openContextShelf = (tab: ContextShelfTab) => {
+                setActiveSlotIndex(slotIdx);
+                setContextShelfTabByParent(prev => ({ ...prev, [parentSlotKey]: tab }));
+                if (tab === 'side-chats') {
+                  if (sideChatRefs.length > 0) {
+                    handleShowSideChats(slot, sideChatRefs, slotIdx);
+                    return;
+                  }
+                  if (hasSideChats) {
+                    visibleOpenSideSlots.forEach(sideSlot => {
+                      warmSession(resolveSideSlotInfo(info, sideSlot), sideSlot.workdir);
+                    });
+                  }
+                  setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: true }));
+                  promoteSlotForSideChat(slotIdx);
+                  return;
+                }
+                setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: true }));
+                promoteSlotForSideChat(slotIdx);
+              };
+              const visualOrder = slotVisualOrder.get(slotIdx) ?? displaySlotIdx;
+              const isMultiWidget = isMultiChatLayout(effectiveChatLayout) && !isFocused && !multiSingleChatPresentation;
+              const isSingleFullscreen = (effectiveChatLayout === 'single' || multiSingleChatPresentation) && !isFocused;
+              const useFocusToolbar = isFocused || isSingleFullscreen;
+              const useFloatingSessionToolbar = isFocused
+                || (effectiveChatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && isSingleFullscreen);
               const slotFrameClass = isFocused
-                ? 'fixed inset-y-4 left-1/2 z-[70] w-[calc(100vw-24px)] -translate-x-1/2 rounded-2xl border-edge-h/80 bg-[var(--th-modal-bg)] ring-[1px] ring-inset ring-white/[0.06] sm:w-[min(1080px,calc(100vw-48px))] md:inset-y-8 md:w-[min(1180px,calc(100vw-64px))]'
+                ? 'z-[70] border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] ring-1 ring-[color:var(--th-chat-window-ring)]'
+                : isMultiWidget
+                ? cn(
+                  'border-[color:var(--th-chat-window-border)] bg-[var(--th-chat-window-bg)] ring-1 ring-[color:var(--th-chat-window-ring)] hover:border-[color:var(--th-chat-window-border-active)]',
+                  isActive && 'border-[color:var(--th-chat-window-border-active)]',
+                  slotState === 'running' && 'border-ok/34',
+                )
+                : multiSingleChatPresentation
+                ? 'border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] ring-1 ring-[color:var(--th-chat-window-ring)]'
+                : isSingleFullscreen
+                ? 'border-transparent bg-[var(--th-chat-window-bg)]'
                 : isActive
-                ? 'border-[color:var(--th-selection-border)] bg-panel-h/60'
-                : 'border-edge/70 hover:border-edge-h hover:bg-panel-h/35';
-              const slotHeaderClass = isActive
-                ? 'border-b-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)]'
-                : 'bg-panel/95';
+                ? 'border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] ring-1 ring-[color:var(--th-chat-window-ring)]'
+                  : slotState === 'running'
+                    ? 'border-[color:var(--th-chat-window-border-running)] bg-[var(--th-chat-window-bg)] hover:border-[color:var(--th-chat-window-border-active)]'
+                    : 'border-[color:var(--th-chat-window-border)] bg-[var(--th-chat-window-bg)] hover:border-[color:var(--th-chat-window-border-active)]';
+              const slotHeaderClass = isFocused
+                ? 'border-b-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg-active)] backdrop-blur-sm'
+                : isMultiWidget
+                ? cn('border-b-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg)]', isActive && 'bg-[var(--th-chat-header-bg-active)]')
+                : multiSingleChatPresentation
+                ? 'border-b-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg-active)] backdrop-blur-sm'
+                : isSingleFullscreen
+                ? 'border-b-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg)]'
+                : isActive
+                ? 'border-b-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg-active)]'
+                : 'border-b-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg)]';
               const slotShadow = isFocused
-                ? 'var(--th-elevated-shadow)'
+                ? 'var(--th-chat-window-shadow-focus)'
+                : isMultiWidget
+                ? isActive
+                  ? 'var(--th-chat-window-shadow), 0 0 0 1px var(--th-chat-window-ring)'
+                  : 'var(--th-chat-window-shadow)'
+                : multiSingleChatPresentation
+                ? 'var(--th-chat-window-shadow), 0 0 0 1px var(--th-chat-window-ring)'
+                : isSingleFullscreen
+                ? 'none'
                 : isActive
-                ? 'var(--th-card-shadow), 0 0 0 1px var(--th-selection-ring)'
-                : 'var(--th-card-shadow)';
+                ? 'var(--th-chat-window-shadow), 0 0 0 1px var(--th-chat-window-ring)'
+                : 'var(--th-chat-window-shadow)';
               return (
                 <div
                   key={slot.mountKey || sKey(slot.agent, slot.sessionId)}
                   data-session-slot
                   data-session-slot-index={slotIdx}
+                  data-focus-session-host={useFloatingSessionToolbar ? 'true' : undefined}
                   className={cn(
-                    'min-w-0 overflow-hidden rounded-xl border bg-panel flex flex-col transition-[border-color,box-shadow,transform,opacity,background-color] duration-200',
+                    'group/session-slot min-h-0 min-w-0 overflow-hidden border flex flex-col transition-[border-color,box-shadow,opacity,background-color,transform] duration-200',
+                    isFocused ? 'rounded-[20px]' : multiSingleChatPresentation ? 'rounded-[18px]' : isSingleFullscreen ? 'rounded-none' : isMultiWidget ? 'rounded-[18px]' : 'rounded-xl',
                     isFocused ? 'fixed' : 'relative',
+                    isMultiWidget && 'hover:-translate-y-0.5',
                     slotFrameClass,
-                    !isFocused && 'hover:-translate-y-[1px]',
-                    hasUnreadCompletedState && !isActive && !isFocused && 'border-ok/55 bg-ok/[0.035] ring-2 ring-ok/15',
-                    draggingSlotIndex === slotIdx && 'opacity-75 scale-[0.985] ring-2 ring-[color:var(--th-selection-ring)]',
+                    hasUnreadCompletedState && !isActive && !isFocused && !isSingleFullscreen && 'border-ok/35 ring-1 ring-ok/10',
+                    draggingSlotIndex === slotIdx && 'pointer-events-none opacity-20 scale-[0.985] ring-2 ring-[color:var(--th-selection-ring)]',
                     dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selected-bg)] ring-2 ring-[color:var(--th-selection-ring)]',
                   )}
-                  style={{ boxShadow: slotShadow }}
+                  style={{
+                    order: visualOrder,
+                    boxShadow: slotShadow,
+	                    ...(isFocused
+	                      ? isNarrowWorkbench
+	                        ? { top: 8, bottom: 8, left: 8, right: 8 }
+	                        : { top: 28, bottom: 28, left: '50%', right: 'auto', width: 'min(1512px, calc(100vw - 56px))', transform: 'translateX(-50%)' }
+	                      : null),
+                    ...(multiWidgetGrid && !isFocused
+                      ? {
+                        flex: `0 0 ${multiItemFlexBasis || '100%'}`,
+                        height: multiItemHeight,
+                      }
+                      : null),
+                  }}
                   onClick={() => {
                     if (window.getSelection()?.toString().trim()) return;
                     setActiveSlotIndex(slotIdx);
                     markSessionReadOnOpen(info, slot.workdir);
                   }}
                   onDoubleClick={e => handleSlotDoubleClick(slotIdx, e)}
-                  onDragOver={e => handleSlotDragOver(slotIdx, e)}
-                  onDrop={e => handleSlotDrop(slotIdx, e)}
                 >
-                  {isActive && !isFocused && (
+                  {isActive && !isFocused && !isSingleFullscreen && (
                     <>
-                      <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-px rounded-l-xl bg-[var(--th-selection-accent)]" aria-hidden="true" />
                       <div
                         className={cn(
                           'pointer-events-none absolute inset-0 z-20 rounded-xl border border-[color:var(--th-selection-border)] bg-[var(--th-selection-soft)] transition-opacity duration-700',
@@ -3743,20 +5124,22 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   )}
                   {/* Tab bar: [● workdir / title          created  updated  turns  📁  ×] */}
                   <div className={cn(
-                    'group shrink-0 flex items-center gap-2 px-3 h-9 border-b border-edge/45 shadow-[0_1px_0_var(--th-inset-hl)]',
-                    'cursor-grab active:cursor-grabbing',
+                    'group shrink-0 flex items-center gap-2 border-b shadow-[0_1px_0_var(--th-inset-hl)]',
+                    isMultiWidget ? 'h-11 px-3' : 'h-9 px-3',
+                    isMultiWidget ? 'cursor-grab select-none touch-none active:cursor-grabbing' : 'cursor-default',
                     slotHeaderClass,
-                    hasUnreadCompletedState && !isFocused && 'border-b-ok/35 bg-ok/[0.055]',
-                    isFocused && 'border-edge-h/70 bg-[var(--th-header)]',
+                    hasUnreadCompletedState && !isFocused && 'border-b-ok/25',
                     dragOverSlotIndex === slotIdx && draggingSlotIndex !== slotIdx && 'bg-[var(--th-selected-bg)]',
                   )}
-                    draggable
-                    onDragStart={e => handleSlotDragStart(slotIdx, e)}
-                    onDragEnd={handleSlotDragEnd}
-                    title={t('hub.dragSession')}
+                    onPointerDown={isMultiWidget ? (e) => beginSlotPointerDrag(slotIdx, e, {
+                      title: slotTitle,
+                      agent: slot.agent,
+                      state: slotState,
+                    }) : undefined}
+                    title={isMultiWidget ? t('hub.dragSession') : undefined}
                   >
                     {/* Left: status · workdir / title */}
-                    {slotState === 'running' ? (
+                    {!isMultiWidget && (slotState === 'running' ? (
                       <Dot variant="ok" pulse />
                     ) : slotState === 'incomplete' ? (
                       <Dot variant="warn" />
@@ -3765,11 +5148,28 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                         aria-hidden="true"
                         className="h-2.5 w-2.5 shrink-0 rounded-full bg-ok shadow-[0_0_0_3px_var(--th-panel),0_0_8px_var(--th-ok-glow)] ring-1 ring-ok/25"
                       />
-                    ) : null}
+                    ) : null)}
+                    {isMultiWidget && (
+                      <span
+                        aria-hidden="true"
+                        className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm"
+                      >
+                        <BrandIcon brand={slot.agent || ''} size={16} />
+                        {(slotState === 'running' || slotState === 'incomplete' || hasUnreadCompletedState) && (
+                          <span
+                            className={cn(
+                              'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-panel',
+                              slotState === 'running' ? 'animate-pulse bg-ok' : slotState === 'incomplete' ? 'bg-warn' : 'bg-ok',
+                            )}
+                          />
+                        )}
+                      </span>
+                    )}
                     <div className="flex-1 min-w-0 flex items-center gap-1.5">
                       <span
                         className={cn(
                           'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold shadow-sm transition-colors',
+                          isMultiWidget && 'hidden',
                           isActive
                             ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)] text-fg'
                             : 'border-edge/45 bg-control/70 text-fg-4',
@@ -3778,7 +5178,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       >
                         {workspaceDisplayName}
                       </span>
-                      <span className="shrink-0 text-fg-6 text-[10px]">/</span>
+                      <span className={cn('shrink-0 text-fg-6 text-[10px]', isMultiWidget && 'hidden')}>/</span>
                       {isHeaderRenaming ? (
                         <input
                           ref={headerRenameInputRef}
@@ -3813,8 +5213,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       ) : (
                         <div
                           className={cn(
-                            'min-w-0 flex items-center gap-1 rounded-md px-1 py-0.5 text-[11px] font-semibold transition-colors',
-                            isActive ? 'bg-[var(--th-selected-bg)] text-fg shadow-sm' : 'text-fg',
+                            'min-w-0 flex items-center gap-1 rounded-md font-semibold transition-colors',
+                            isMultiWidget ? 'px-0 py-0 text-[12px]' : 'px-1 py-0.5 text-[11px]',
+                            isActive && !isMultiWidget ? 'bg-[var(--th-selected-bg)] text-fg shadow-sm' : 'text-fg',
                           )}
                           title={slotTitle}
                         >
@@ -3833,7 +5234,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                               setActiveSlotIndex(slotIdx);
                               openHeaderRenameSession(slotActionTarget);
                             }}
-                            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-fg-5/60 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover:opacity-100"
+	                          className={cn(
+	                            'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-fg-5/60 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover:opacity-100',
+	                            isMultiWidget && 'hidden',
+	                            isFocused && 'hidden',
+	                          )}
                             title={t('session.rename')}
                             aria-label={t('session.rename')}
                           >
@@ -3846,120 +5251,224 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       )}
                     </div>
                     {/* Right: compact meta + explicit action menu */}
-                    <div className="shrink-0 flex items-center gap-2 text-[9px] text-fg-5/50 tabular-nums">
-                      <span title={t('hub.created')}>{fmtTime(info.createdAt)}</span>
-                      {info.runUpdatedAt && <span title={t('hub.updated')}>{fmtRelative(info.runUpdatedAt)}</span>}
-                      {!!info.numTurns && (
-                        <span className="flex items-center gap-0.5">
+                    <div className="shrink-0 flex items-center gap-1.5 text-[9px] text-fg-5/50 tabular-nums">
+		                      {!isFocused && !isMultiWidget && !useFocusToolbar && (isActive || effectiveChatLayout === 'single') && (
+		                        <div data-focus-ignore className="hidden min-w-0 items-center gap-0.5 rounded-md border border-edge/45 bg-control/60 p-0.5 lg:flex">
+                          {quickContextTabs.map(tab => {
+                            const count = contextCountForTab(tab);
+                            const tabActive = contextSurfaceOpen && activeContextShelfTab === tab;
+                            return (
+                              <button
+                                key={tab}
+                                type="button"
+                                onMouseDown={e => e.stopPropagation()}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  if (tab === 'side-chats') {
+                                    setContextCardDockMode(parentSlotKey, 'floating');
+                                    if (!hasSideChats) {
+                                      void handleOpenSideChat(slotIdx, slot, info);
+                                      return;
+                                    }
+                                  }
+                                  openContextShelf(tab);
+                                }}
+                                className={cn(
+                                  'inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10.5px] font-semibold transition-[background,color,transform] active:translate-y-px',
+                                  tabActive ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-5 hover:bg-panel-h/70 hover:text-fg-2',
+                                )}
+                                title={CONTEXT_QUICK_LABEL[tab]}
+                                aria-label={CONTEXT_QUICK_LABEL[tab]}
+                              >
+                                <span>{CONTEXT_QUICK_LABEL[tab]}</span>
+                                {count > 0 && (
+                                  <span className={cn(
+                                    'min-w-[14px] rounded px-1 text-center font-mono text-[9px] leading-4',
+                                    tabActive ? 'bg-inset text-fg-3' : 'bg-panel text-fg-5',
+                                  )}>
+                                    {Math.min(count, 99)}
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+		                      {!isFocused && !isMultiWidget && !useFocusToolbar && <span title={t('hub.created')}>{fmtTime(info.createdAt)}</span>}
+		                      {!isFocused && !isMultiWidget && !useFocusToolbar && info.runUpdatedAt && <span title={t('hub.updated')}>{fmtRelative(info.runUpdatedAt)}</span>}
+			                      {!isFocused && !isMultiWidget && !useFocusToolbar && !!info.numTurns && (
+		                        <span className="flex items-center gap-0.5">
                           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-60">
                             <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
                           </svg>
-                          {info.numTurns}
-                        </span>
-                      )}
-                      <button
-                        data-focus-ignore
-                        type="button"
-                        onMouseDown={e => e.stopPropagation()}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setActiveSlotIndex(slotIdx);
-                          if (renderSidePanel) {
-                            setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: false }));
-                            return;
-                          }
-                          if (sideChatRefs.length > 0) {
-                            handleShowSideChats(slot, sideChatRefs, slotIdx);
-                            return;
-                          }
-                          if (hasSideChats) {
-                            visibleOpenSideSlots.forEach(sideSlot => {
-                              warmSession(resolveSideSlotInfo(info, sideSlot), sideSlot.workdir);
-                            });
-                            setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: true }));
-                            promoteSlotForSideChat(slotIdx);
-                            return;
-                          }
-                          setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: true }));
-                          promoteSlotForSideChat(slotIdx);
-                        }}
-                        className={cn(
-                          'relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg',
-                          renderSidePanel && 'bg-[var(--th-selected-bg)] text-fg',
-                        )}
-                        title={sideChatToggleLabel}
-                        aria-label={sideChatToggleLabel}
-                      >
-                        <SideChatCollapseIcon className="h-3.5 w-3.5 shrink-0" />
-                        {!renderSidePanel && (sideChatsHaveRunning || sideChatsHaveUnread) && (
-                          <span
-                            className={cn(
-                              'absolute right-1 top-1 rounded-full',
-                              sideChatsHaveRunning
-                                ? 'h-2 w-2 animate-pulse bg-primary shadow-[0_0_8px_var(--th-selection-ring)]'
-                                : 'h-2 w-2 bg-ok shadow-[0_0_8px_var(--th-ok-glow)]',
-                            )}
-                            aria-hidden="true"
-                          />
-                        )}
-                      </button>
-                      {isFocused && (
-                        <button
-                          data-focus-ignore
-                          type="button"
+	                          {info.numTurns}
+	                        </span>
+	                      )}
+		                      {useFocusToolbar && (
+		                        <button
+		                          data-focus-ignore
+		                          data-focus-new-session
+		                          type="button"
+		                          onMouseDown={e => e.stopPropagation()}
+		                          onClick={e => {
+		                            e.stopPropagation();
+		                            if (useFloatingSessionToolbar) {
+		                              handleFocusFloatingSessionRequest();
+		                              return;
+		                            }
+		                            handleNewSessionRequest(slot.workdir);
+		                          }}
+		                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-edge/45 bg-control/60 text-[15px] font-semibold leading-none text-fg-4 transition-colors hover:bg-panel-h hover:text-fg"
+	                          title={t('hub.newSession')}
+	                          aria-label={t('hub.newSession')}
+	                        >
+	                          +
+	                        </button>
+	                      )}
+	                      {useFloatingSessionToolbar && hiddenFocusFloatingSessionCount > 0 && (
+	                        <button
+	                          data-focus-ignore
+	                          data-focus-floating-tray
+	                          type="button"
+	                          onMouseDown={e => e.stopPropagation()}
+	                          onClick={e => {
+	                            e.stopPropagation();
+	                            restoreFocusFloatingSessions();
+	                          }}
+	                          className="inline-flex h-6 shrink-0 items-center gap-1 rounded border border-edge/45 bg-control/60 px-1.5 text-[10px] font-semibold text-fg-4 transition-colors hover:bg-panel-h hover:text-fg"
+	                          title="Restore hidden sessions"
+	                          aria-label="Restore hidden sessions"
+	                        >
+	                          <span className="grid h-3.5 w-3.5 place-items-center">
+	                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+	                              <rect x="4" y="5" width="16" height="14" rx="2" />
+	                              <path d="M8 9h8" />
+	                            </svg>
+	                          </span>
+	                          {hiddenFocusFloatingSessionCount}
+	                        </button>
+	                      )}
+		                      {!isMultiWidget && (
+		                        <button
+	                          data-focus-ignore
+	                          data-context-sidebar-toggle
+	                          type="button"
                           onMouseDown={e => e.stopPropagation()}
-                          onClick={e => { e.stopPropagation(); closeFocusMode(); }}
-                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-edge/45 bg-panel/60 text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
-                          title={t('hub.exitFocusMode')}
-                          aria-label={t('hub.exitFocusMode')}
+                          onClick={e => {
+                            e.stopPropagation();
+                            if (contextSurfaceOpen) {
+                              setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: false }));
+                              return;
+                            }
+	                            const nextTab = isFocused
+	                              ? FOCUS_CONTEXT_SHELF_TABS.has(activeContextShelfTab)
+	                                ? activeContextShelfTab
+	                                : 'side-chats'
+	                              : taskWorkbenchForSlot && taskOutputCount > 0
+	                                ? 'outputs'
+	                                : activeContextShelfTab;
+	                            openContextShelf(nextTab);
+	                          }}
+		                          className={cn(
+		                            'relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg',
+		                            !useFocusToolbar && (isActive || effectiveChatLayout === 'single') && 'lg:hidden',
+		                            useFocusToolbar && 'border border-edge/45 bg-control/60 text-fg-4',
+		                            contextSurfaceOpen && 'bg-[var(--th-selected-bg)] text-fg',
+		                          )}
+                          title={sideChatToggleLabel}
+                          aria-label={sideChatToggleLabel}
                         >
-                          <ExitFocusIcon className="h-3.5 w-3.5 shrink-0" />
+                          <SideChatCollapseIcon className="h-3.5 w-3.5 shrink-0" />
+                          {!contextSurfaceOpen && taskOutputCount > 0 && (
+                            <span className="absolute -right-1 -top-1 min-w-[14px] rounded-full border border-panel bg-primary px-0.5 text-center text-[8px] font-semibold leading-[13px] text-primary-fg">
+                              {Math.min(taskOutputCount, 9)}
+                            </span>
+                          )}
+                          {!contextSurfaceOpen && (sideChatsHaveRunning || sideChatsHaveUnread) && (
+                            <span
+                              className={cn(
+                                'absolute right-1 top-1 rounded-full',
+                                sideChatsHaveRunning
+                                  ? 'h-2 w-2 animate-pulse bg-primary shadow-[0_0_8px_var(--th-selection-ring)]'
+                                  : 'h-2 w-2 bg-ok shadow-[0_0_8px_var(--th-ok-glow)]',
+                              )}
+                              aria-hidden="true"
+                            />
+                          )}
                         </button>
                       )}
-                      {!isFocused && (
-                        <>
-                          <button
-                            data-focus-ignore
-                            type="button"
-                            onMouseDown={e => e.stopPropagation()}
-                            onClick={e => {
-                              e.stopPropagation();
-                              enterFocusMode(slotIdx);
-                            }}
-                            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg"
-                            title={t('hub.enterFocusMode')}
-                            aria-label={t('hub.enterFocusMode')}
-                          >
-                            <EnterFocusIcon className="h-3.5 w-3.5 shrink-0" />
-                          </button>
-                          <button
-                            data-focus-ignore
-                            type="button"
-                            onMouseDown={e => e.stopPropagation()}
-                            onClick={e => {
-                              e.stopPropagation();
-                              handleSlotMenuOpen(e.currentTarget.getBoundingClientRect(), slotIdx, slot, info);
-                            }}
-                            className={cn(
-                              'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] font-semibold leading-none text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg-2',
-                              slotMenu?.slotIdx === slotIdx && 'bg-panel-h text-fg-2',
-                            )}
-                            title={t('session.openActions')}
-                            aria-label={t('session.openActions')}
-                            aria-haspopup="menu"
-                          >
-                            ...
-                          </button>
-                          <button
-                            data-focus-ignore
-                            type="button"
+	                      {isFocused ? (
+	                        <button
+	                          data-focus-ignore
+	                          data-focus-exit
+	                          type="button"
+	                          onPointerDown={e => e.stopPropagation()}
+	                          onMouseDown={e => e.stopPropagation()}
+	                          onClick={e => {
+	                            e.stopPropagation();
+	                            closeFocusMode();
+	                          }}
+	                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-edge/45 bg-control/60 text-fg-4 transition-colors hover:bg-panel-h hover:text-fg"
+	                          title={t('hub.exitFocusMode')}
+	                          aria-label={t('hub.exitFocusMode')}
+	                        >
+	                          <ExitFocusIcon className="h-3.5 w-3.5 shrink-0" />
+	                        </button>
+		                      ) : isMultiWidget ? (
+		                        <button
+	                          data-focus-ignore
+                          type="button"
+                          onPointerDown={e => e.stopPropagation()}
+                          onMouseDown={e => e.stopPropagation()}
+                          onClick={e => {
+                            e.stopPropagation();
+                            enterFocusMode(slotIdx);
+                          }}
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg"
+                          title={t('hub.enterFocusMode')}
+                          aria-label={t('hub.enterFocusMode')}
+                        >
+                          <EnterFocusIcon className="h-3.5 w-3.5 shrink-0" />
+                        </button>
+                      ) : null}
+	                      {!isFocused && (
+	                        <>
+	                          {!multiSingleChatPresentation && (
+	                            <button
+	                              data-focus-ignore
+	                              type="button"
+	                              onMouseDown={e => e.stopPropagation()}
+	                              onClick={e => {
+	                                e.stopPropagation();
+	                                handleSlotMenuOpen(e.currentTarget.getBoundingClientRect(), slotIdx, slot, info);
+	                              }}
+	                              className={cn(
+	                                'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] font-semibold leading-none text-fg-5/70 transition-colors hover:bg-panel-h hover:text-fg-2',
+	                                useFocusToolbar && 'border border-edge/45 bg-control/60 text-fg-4 hover:text-fg',
+	                                slotMenu?.slotIdx === slotIdx && 'bg-panel-h text-fg-2',
+	                              )}
+	                              title={t('session.openActions')}
+	                              aria-label={t('session.openActions')}
+	                              aria-haspopup="menu"
+	                            >
+	                              ...
+	                            </button>
+	                          )}
+	                          <button
+	                            data-focus-ignore
+	                            type="button"
                             onMouseDown={e => e.stopPropagation()}
                             onClick={e => {
                               e.stopPropagation();
                               setSlotMenu(null);
                               handleCloseSlot(slotIdx);
                             }}
-                            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/70 transition-colors hover:bg-err/10 hover:text-err"
+	                            className={cn(
+	                              'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors',
+	                              useFocusToolbar
+	                                ? 'border border-edge/45 bg-control/60 text-fg-4 hover:bg-panel-h hover:text-fg'
+	                                : 'text-fg-5/70 hover:bg-err/10 hover:text-err',
+	                            )}
                             title={t('hub.closePanel')}
                             aria-label={t('hub.closePanel')}
                           >
@@ -3972,193 +5481,510 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       )}
                     </div>
                   </div>
-                  <div className={cn('flex-1 min-h-0 flex flex-col overflow-hidden', isFocused && 'bg-[var(--th-modal-bg)]')}>
-                    <div className={cn('flex-1 min-h-0 flex overflow-hidden', isFocused && 'bg-[var(--th-session-bg)]')}>
-                      <div className={cn('min-h-0 min-w-0 flex flex-1 flex-col overflow-hidden', isFocused && 'bg-[var(--th-session-bg)]')}>
+                  <div className={cn('flex-1 min-h-0 flex flex-col overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
+                    <div className={cn('flex-1 min-h-0 flex overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
+                      <div className={cn('min-h-0 min-w-0 flex flex-1 flex-col overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
                         <Suspense fallback={<div className="h-full" />}>
                           <SessionPanel
                             key={slot.mountKey}
-                            session={info}
-                            workdir={slot.workdir}
-                            active={active && isActive}
-                            onSessionChange={(next) => handlePanelSessionChange(next, slotIdx)}
-                            onMultiSessionChange={handleMultiSessionCreated}
+	                            session={info}
+	                            workdir={slot.workdir}
+	                            active={active && isActive && !inboxOpen}
+	                            readOnly={slot.archiveOnly === true}
+	                            compact={isMultiWidget}
+	                            transcriptHeader={slotTaskBrief}
+	                            onSessionChange={slot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, slotIdx)}
+                            onMultiSessionChange={slot.archiveOnly ? undefined : handleMultiSessionCreated}
                             onOpenFileLink={(target) => handleOpenFileLink(slotIdx, slot.workdir, target)}
-                            onCreateSideChatFromSelection={(request) => handleCreateSideChatFromSelection(slotIdx, slot, info, request)}
-                            onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(slot, request)}
-                            onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(slot, request)}
-                            initialPendingPrompt={isActive ? newSessionPendingPrompt : null}
-                            initialPendingImageUrls={isActive ? newSessionPendingImageUrls : undefined}
-                            initialPendingCreatedAt={isActive ? newSessionPendingCreatedAt : null}
-                            onPendingPromptConsumed={isActive ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
+                            onCreateSideChatFromSelection={slot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(slotIdx, slot, info, request)}
+                            onCreateTodoFromSelection={slot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(slot, request)}
+                            onCreateReviewCommentFromSelection={slot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(slot, request)}
+                            initialPendingPrompt={!slot.archiveOnly && isActive ? newSessionPendingPrompt : null}
+                            initialPendingImageUrls={!slot.archiveOnly && isActive ? newSessionPendingImageUrls : undefined}
+                            initialPendingCreatedAt={!slot.archiveOnly && isActive ? newSessionPendingCreatedAt : null}
+                            onPendingPromptConsumed={!slot.archiveOnly && isActive ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
                           />
                         </Suspense>
                       </div>
-                      {renderSidePanel && (
-                        <div
-                          data-side-chat-panel
-                          className="relative min-h-0 shrink-0 border-l border-edge-h/80 bg-[var(--th-modal-bg)] shadow-[-16px_0_42px_rgba(2,6,23,0.22)] flex flex-col"
-                          style={{
-                            width: sideChatWidth,
-                            minWidth: SIDE_CHAT_MIN_WIDTH,
-                            maxWidth: `min(${SIDE_CHAT_MAX_WIDTH}px, 46vw)`,
-                          }}
-                          onClick={e => e.stopPropagation()}
-                        >
-                          <div
-                            data-focus-ignore
-                            role="separator"
-                            aria-orientation="vertical"
-                            title={t('session.resizeSideChat')}
-                            aria-label={t('session.resizeSideChat')}
-                            onPointerDown={e => handleSideChatResizeStart(parentSlotKey, e)}
-                            className="group absolute left-0 top-0 z-20 h-full w-4 -translate-x-1/2 cursor-col-resize touch-none"
-                          >
-                            <div className="mx-auto h-full w-px bg-edge-h/60 transition-colors group-hover:w-[2px] group-hover:bg-fg-5/70" />
-                          </div>
-                          <div className="h-10 shrink-0 flex items-end gap-1 bg-panel-alt/70 px-2 pt-1">
-                            <div className="min-w-0 flex-1 overflow-hidden">
-                              <div className="flex w-full min-w-0 items-end gap-0.5">
-                                {visibleOpenSideSlots.map((sideSlot, sideSlotIdx) => {
-                                  const sideInfo = resolveSideSlotInfo(info, sideSlot);
-                                  const sideTitle = sideChatDisplayTitle(sideSlotIdx, t('session.sideChat'));
-                                  const sideKey = sideChatSlotKey(sideSlot);
-                                  const tabActive = !!activeSideSlot && sideKey === sideChatSlotKey(activeSideSlot);
-                                  const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
-                                  const crowdedSideTabs = visibleOpenSideSlots.length > 2;
-                                  return (
-                                    <div
-                                      key={sideSlot.mountKey || sessionSlotStorageKey(sideSlot)}
-                                      className={cn(
-                                        'relative flex h-8 min-w-0 items-center rounded-t-lg border px-0 transition-colors',
-                                        crowdedSideTabs ? 'flex-1 basis-0' : 'w-[148px] shrink-0',
-                                        tabActive
-                                          ? 'z-10 border-edge-h border-b-0 bg-[var(--th-session-bg)] text-fg shadow-[0_-1px_0_var(--th-inset-hl)]'
-                                          : 'border-edge/55 bg-panel/65 text-fg-3 hover:border-edge-h hover:bg-panel-h/70 hover:text-fg',
-                                      )}
-                                      title={sideTitle}
-                                    >
-                                      <button
-                                        type="button"
-                                        onClick={e => {
-                                          e.stopPropagation();
-                                          setActiveSideChatByParent(prev => ({ ...prev, [parentSlotKey]: sideKey }));
-                                          markSessionReadOnOpen(sideInfo, sideSlot.workdir);
-                                        }}
-                                        className="min-w-0 flex-1 px-2 text-left text-[11px]"
-                                      >
-                                        <span className="flex min-w-0 items-center gap-1.5">
-                                          {sideUnread && (
-                                            <span
-                                              aria-hidden="true"
-                                              className="h-1.5 w-1.5 shrink-0 rounded-full bg-ok shadow-[0_0_6px_var(--th-ok-glow)]"
-                                            />
-                                          )}
-                                          <span className="min-w-0 truncate">{sideTitle}</span>
-                                        </span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={e => { e.stopPropagation(); void handleDeleteSideChat(slot, sideSlot); }}
-                                        className={cn(
-                                          'mr-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors',
-                                          tabActive ? 'text-fg-4 hover:bg-panel-alt hover:text-fg' : 'text-fg-5 hover:bg-panel-h hover:text-fg',
-                                        )}
-                                        title={t('hub.closePanel')}
-                                        aria-label={t('hub.closePanel')}
-                                      >
-                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-                                          <path d="M18 6 6 18" />
-                                          <path d="M6 6l12 12" />
-                                        </svg>
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
-                              className="mb-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-edge/60 bg-panel/75 text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
-                              title={t('session.newSideChat')}
-                              aria-label={t('session.newSideChat')}
-                            >
-                              +
-                            </button>
-                          </div>
-                          <div className="min-h-0 flex flex-1 flex-col overflow-hidden bg-[var(--th-session-bg)]">
-                            {activeSideSlot ? (() => {
-                              const sideInfo = resolveSideSlotInfo(info, activeSideSlot);
-                              return (
-                                <Suspense fallback={<div className="h-full" />}>
-                                  <SessionPanel
-                                    key={activeSideSlot.mountKey}
-                                    session={sideInfo}
-                                    workdir={activeSideSlot.workdir}
-                                    active={active && isActive}
-                                    onSessionChange={(next) => handleSideChatSessionChange(slot, activeSideSlot, next)}
-                                    onOpenFileLink={(target) => handleOpenFileLink(slotIdx, activeSideSlot.workdir, target)}
-                                    onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(activeSideSlot, request)}
-                                    onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(activeSideSlot, request)}
-                                  />
-                                </Suspense>
-                              );
-                            })() : (
-                              <div className="flex h-full items-center justify-center px-6 text-center">
-                                <div className="max-w-[260px]">
-                                  <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl border border-edge/60 bg-panel/70 text-fg-5/70">
-                                    <SideChatCollapseIcon className="h-5 w-5" />
-                                  </div>
-                                  <div className="text-[13px] font-semibold text-fg-3">{t('session.noSideChatYet')}</div>
-                                  <div className="mt-1 text-[11px] leading-relaxed text-fg-5">{t('session.noSideChatYetHint')}</div>
-                                  <button
-                                    type="button"
-                                    onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
-                                    className="mt-4 inline-flex h-8 items-center justify-center rounded-lg border border-edge/70 bg-panel px-3 text-[12px] font-semibold text-fg-3 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
-                                  >
-                                    +
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
+		                      {contextSurfaceOpen && (
+		                        <ContextShelf
+		                          tabs={visibleContextShelfTabs}
+		                          activeTab={effectiveContextShelfTab}
+		                          onTabChange={(tab) => setContextShelfTabByParent(prev => ({ ...prev, [parentSlotKey]: tab }))}
+		                          onClose={() => setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: false }))}
+		                          onResizeStart={(e) => handleSideChatResizeStart(parentSlotKey, e)}
+		                          width={sideChatWidth}
+		                          surface={renderContextCard ? 'card' : 'inline'}
+		                          cardTitle={effectiveContextShelfTab === 'side-chats'
+		                            ? activeSideSlot
+		                              ? sideChatDisplayTitle(Math.max(0, visibleOpenSideSlots.findIndex(sideSlot => sameSideChatIdentity(sideSlot, activeSideSlot))), t('session.sideChat'))
+		                              : 'Side Card'
+		                            : CONTEXT_QUICK_LABEL[effectiveContextShelfTab]}
+		                          cardPlacement={contextCardPlacement}
+		                          cardDragging={draggingContextCardKey === parentSlotKey}
+		                          onCardDragStart={(e) => handleContextCardDragStart(parentSlotKey, e)}
+		                          onCardDock={() => setContextCardDockMode(parentSlotKey, 'docked')}
+		                          onCardFloat={() => setContextCardDockMode(parentSlotKey, 'floating')}
+			                          minimalHeader={isFocused}
+			                          tabLabels={isFocused ? FOCUS_CONTEXT_TAB_LABELS : undefined}
+				                          hiddenTabs={isFocused && visibleOpenSideSlots.length > 0 ? { 'side-chats': true } : undefined}
+				                          afterTabButtons={focusSideCardTabButtons}
+				                          onCreateSideCard={isFocused ? () => { void handleOpenSideChat(slotIdx, slot, info); } : undefined}
+			                          createSideCardLabel={t('session.newSideChat')}
+			                          filesContent={<WorkspaceFilesShelfPane workdir={slot.workdir} request={filePanelRequest?.workdir === slot.workdir ? filePanelRequest : null} t={t} />}
+			                          outputs={taskWorkbenchForSlot?.outputs || []}
+		                          files={taskWorkbenchForSlot?.files || []}
+	                          ticket={taskWorkbenchForSlot?.ticketSnapshot || null}
+	                          onOpenPath={(path, workdir) => handleOpenFileLink(slotIdx, workdir || slot.workdir, { path })}
+	                          statusContent={(
+	                            <div className="space-y-3">
+	                              <div className="rounded-lg border border-edge/55 bg-panel/70 px-3 py-3">
+	                                <div className="text-[12px] font-semibold text-fg">Chat status</div>
+	                                <dl className="mt-2 grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
+	                                  <dt className="text-fg-5">Session</dt>
+	                                  <dd className="min-w-0 truncate font-mono text-fg-3">{slot.agent}:{slot.sessionId}</dd>
+	                                  <dt className="text-fg-5">State</dt>
+	                                  <dd className="min-w-0 text-fg-3">{slotState}</dd>
+	                                  <dt className="text-fg-5">Updated</dt>
+	                                  <dd className="min-w-0 text-fg-3">{info.runUpdatedAt ? fmtRelative(info.runUpdatedAt) : '--'}</dd>
+	                                </dl>
+	                              </div>
+	                              {taskWorkbenchForSlot && (
+	                                <div className="rounded-lg border border-edge/55 bg-panel/70 px-3 py-3">
+	                                  <div className="text-[12px] font-semibold text-fg">Task status</div>
+	                                  <dl className="mt-2 grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
+	                                    <dt className="text-fg-5">Task</dt>
+	                                    <dd className="min-w-0 truncate text-fg-3">{taskWorkbenchForSlot.task.jiraKey || taskWorkbenchForSlot.task.title}</dd>
+	                                    <dt className="text-fg-5">Board</dt>
+	                                    <dd className="min-w-0 text-fg-3">{taskWorkbenchForSlot.task.status}</dd>
+	                                    <dt className="text-fg-5">Stage</dt>
+	                                    <dd className="min-w-0 text-fg-3">{taskActiveStageRun ? `${taskActiveStageRun.stage} · ${taskActiveStageRun.status}` : '--'}</dd>
+	                                  </dl>
+	                                </div>
+	                              )}
+	                            </div>
+	                          )}
+	                          sideCardContent={(
+	                            <div className="h-full min-h-0 overflow-hidden bg-[var(--th-session-bg)]">
+	                              {activeSideSlot ? (() => {
+	                                const sideInfo = resolveSideSlotInfo(info, activeSideSlot);
+	                                return (
+	                                  <Suspense fallback={<div className="h-full" />}>
+	                                    <SessionPanel
+	                                      key={activeSideSlot.mountKey}
+	                                      session={sideInfo}
+	                                      workdir={activeSideSlot.workdir}
+	                                      active={active && isActive && !inboxOpen}
+	                                      onSessionChange={(next) => handleSideChatSessionChange(slot, activeSideSlot, next)}
+	                                      onOpenFileLink={(target) => handleOpenFileLink(slotIdx, activeSideSlot.workdir, target)}
+	                                      onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(activeSideSlot, request)}
+	                                      onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(activeSideSlot, request)}
+	                                    />
+	                                  </Suspense>
+		                                );
+		                              })() : (
+		                                <div className="flex h-full items-center justify-center px-6 text-center">
+		                                  {isFocused ? (
+		                                    <button
+		                                      type="button"
+		                                      data-side-card-empty-create
+		                                      onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
+		                                      className="grid h-12 w-12 place-items-center rounded-2xl border border-edge/70 bg-panel/75 text-2xl font-semibold leading-none text-fg-4 shadow-sm transition-[border-color,background,color,transform] hover:-translate-y-0.5 hover:border-edge-h hover:bg-panel-h hover:text-fg active:translate-y-0"
+		                                      title={t('session.newSideChat')}
+		                                      aria-label={t('session.newSideChat')}
+		                                    >
+		                                      +
+		                                    </button>
+		                                  ) : (
+		                                    <div className="max-w-[260px]">
+		                                      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl border border-edge/60 bg-panel/70 text-fg-5/70">
+		                                        <SideChatCollapseIcon className="h-5 w-5" />
+		                                      </div>
+		                                      <div className="text-[13px] font-semibold text-fg-3">{t('session.noSideChatYet')}</div>
+		                                      <div className="mt-1 text-[11px] leading-relaxed text-fg-5">{t('session.noSideChatYetHint')}</div>
+		                                      <button
+		                                        type="button"
+		                                        onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
+		                                        className="mt-4 inline-flex h-8 items-center justify-center rounded-lg border border-edge/70 bg-panel px-3 text-[12px] font-semibold text-fg-3 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+		                                      >
+		                                        +
+		                                      </button>
+		                                    </div>
+		                                  )}
+		                                </div>
+		                              )}
+	                            </div>
+	                          )}
+		                          sideChatContent={(
+		                            <div className="flex h-full min-h-0 flex-col">
+			                              {!isFocused && (
+		                                <div className="h-10 shrink-0 flex items-end gap-1 bg-panel-alt/70 px-2 pt-1">
+		                                <div className="min-w-0 flex-1 overflow-hidden">
+		                                  <div className="flex w-full min-w-0 items-end gap-0.5">
+	                                    {visibleOpenSideSlots.map((sideSlot, sideSlotIdx) => {
+	                                      const sideInfo = resolveSideSlotInfo(info, sideSlot);
+	                                      const sideTitle = sideChatDisplayTitle(sideSlotIdx, t('session.sideChat'));
+	                                      const sideKey = sideChatSlotKey(sideSlot);
+	                                      const tabActive = !!activeSideSlot && sideKey === sideChatSlotKey(activeSideSlot);
+	                                      const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
+	                                      const crowdedSideTabs = visibleOpenSideSlots.length > 2;
+	                                      return (
+	                                        <div
+	                                          key={sideSlot.mountKey || sessionSlotStorageKey(sideSlot)}
+	                                          className={cn(
+	                                            'relative flex h-8 min-w-0 items-center rounded-t-lg border px-0 transition-colors',
+	                                            crowdedSideTabs ? 'flex-1 basis-0' : 'w-[148px] shrink-0',
+	                                            tabActive
+	                                              ? 'z-10 border-edge-h border-b-0 bg-[var(--th-session-bg)] text-fg shadow-[0_-1px_0_var(--th-inset-hl)]'
+	                                              : 'border-edge/55 bg-panel/65 text-fg-3 hover:border-edge-h hover:bg-panel-h/70 hover:text-fg',
+	                                          )}
+	                                          title={sideTitle}
+	                                        >
+	                                          <button
+	                                            type="button"
+	                                            onClick={e => {
+	                                              e.stopPropagation();
+	                                              setActiveSideChatByParent(prev => ({ ...prev, [parentSlotKey]: sideKey }));
+	                                              markSessionReadOnOpen(sideInfo, sideSlot.workdir);
+	                                            }}
+	                                            className="min-w-0 flex-1 px-2 text-left text-[11px]"
+	                                          >
+	                                            <span className="flex min-w-0 items-center gap-1.5">
+	                                              {sideUnread && (
+	                                                <span
+	                                                  aria-hidden="true"
+	                                                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-ok shadow-[0_0_6px_var(--th-ok-glow)]"
+	                                                />
+	                                              )}
+	                                              <span className="min-w-0 truncate">{sideTitle}</span>
+	                                            </span>
+	                                          </button>
+	                                          <button
+	                                            type="button"
+	                                            onClick={e => { e.stopPropagation(); void handleDeleteSideChat(slot, sideSlot); }}
+	                                            className={cn(
+	                                              'mr-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors',
+	                                              tabActive ? 'text-fg-4 hover:bg-panel-alt hover:text-fg' : 'text-fg-5 hover:bg-panel-h hover:text-fg',
+	                                            )}
+	                                            title={t('hub.closePanel')}
+	                                            aria-label={t('hub.closePanel')}
+	                                          >
+	                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+	                                              <path d="M18 6 6 18" />
+	                                              <path d="M6 6l12 12" />
+	                                            </svg>
+	                                          </button>
+	                                        </div>
+	                                      );
+	                                    })}
+	                                  </div>
+	                                </div>
+		                                {!isFocused && (
+		                                  <button
+		                                    type="button"
+		                                    onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
+		                                    className="mb-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-edge/60 bg-panel/75 text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+		                                    title={t('session.newSideChat')}
+		                                    aria-label={t('session.newSideChat')}
+		                                  >
+		                                    +
+		                                  </button>
+		                                )}
+		                                </div>
+		                              )}
+		                              <div className="min-h-0 flex flex-1 flex-col overflow-hidden bg-[var(--th-session-bg)]">
+	                                {activeSideSlot ? (() => {
+	                                  const sideInfo = resolveSideSlotInfo(info, activeSideSlot);
+	                                  return (
+	                                    <Suspense fallback={<div className="h-full" />}>
+	                                      <SessionPanel
+	                                        key={activeSideSlot.mountKey}
+	                                        session={sideInfo}
+	                                        workdir={activeSideSlot.workdir}
+	                                        active={active && isActive && !inboxOpen}
+	                                        onSessionChange={(next) => handleSideChatSessionChange(slot, activeSideSlot, next)}
+	                                        onOpenFileLink={(target) => handleOpenFileLink(slotIdx, activeSideSlot.workdir, target)}
+	                                        onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(activeSideSlot, request)}
+	                                        onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(activeSideSlot, request)}
+	                                      />
+	                                    </Suspense>
+	                                  );
+		                                })() : (
+		                                  <div className="flex h-full items-center justify-center px-6 text-center">
+		                                    {isFocused ? (
+		                                      <button
+		                                        type="button"
+		                                        data-side-card-empty-create
+		                                        onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
+		                                        className="grid h-12 w-12 place-items-center rounded-2xl border border-edge/70 bg-panel/75 text-2xl font-semibold leading-none text-fg-4 shadow-sm transition-[border-color,background,color,transform] hover:-translate-y-0.5 hover:border-edge-h hover:bg-panel-h hover:text-fg active:translate-y-0"
+		                                        title={t('session.newSideChat')}
+		                                        aria-label={t('session.newSideChat')}
+		                                      >
+		                                        +
+		                                      </button>
+		                                    ) : (
+		                                      <div className="max-w-[260px]">
+		                                        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl border border-edge/60 bg-panel/70 text-fg-5/70">
+		                                          <SideChatCollapseIcon className="h-5 w-5" />
+		                                        </div>
+		                                        <div className="text-[13px] font-semibold text-fg-3">{t('session.noSideChatYet')}</div>
+		                                        <div className="mt-1 text-[11px] leading-relaxed text-fg-5">{t('session.noSideChatYetHint')}</div>
+		                                        <button
+		                                          type="button"
+		                                          onClick={e => { e.stopPropagation(); void handleOpenSideChat(slotIdx, slot, info); }}
+		                                          className="mt-4 inline-flex h-8 items-center justify-center rounded-lg border border-edge/70 bg-panel px-3 text-[12px] font-semibold text-fg-3 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+		                                        >
+		                                          +
+		                                        </button>
+		                                      </div>
+		                                    )}
+		                                  </div>
+		                                )}
+	                              </div>
+	                            </div>
+	                          )}
+	                        />
                       )}
                     </div>
                   </div>
+                  {canResizeMultiRows && (
+                    <button
+                      data-focus-ignore
+                      type="button"
+                      onPointerDown={beginMultiRowHeightResize}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={e => e.stopPropagation()}
+                      className={cn(
+                        'absolute bottom-1 left-1/2 z-30 h-2.5 w-16 -translate-x-1/2 cursor-row-resize rounded-full border border-transparent bg-fg-5/10 opacity-0 transition-[opacity,background,border-color] hover:border-primary/20 hover:bg-primary/30 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover/session-slot:opacity-100',
+                        multiRowHeightDrag && 'border-primary/20 bg-primary/30 opacity-100',
+                      )}
+                      title={t('hub.resizeWindowHeight')}
+                      aria-label={t('hub.resizeWindowHeight')}
+                    />
+                  )}
                 </div>
               );
                 });
-              })()}
-              </div>
+	              })()}
+	              </div>
+		              {floatingSessionLayerVisible && focusFloatingSessions.map((item) => {
+		                const visibleFloatingItems = focusFloatingSessions.filter(floatingItem => !floatingItem.hidden);
+		                const visibleIndex = Math.max(0, visibleFloatingItems.findIndex(floatingItem => floatingItem.id === item.id));
+		                const floatingBounds = focusFloatingBounds();
+		                const floatingSize = focusFloatingSize(floatingBounds);
+		                const rawFloatingPosition = item.x != null && item.y != null
+		                  ? { x: item.x, y: item.y }
+		                  : defaultFocusFloatingPosition(visibleIndex);
+		                const floatingPosition = clampFocusFloatingPosition(
+		                  rawFloatingPosition.x,
+		                  rawFloatingPosition.y,
+		                  floatingSize.width,
+		                  floatingSize.height,
+		                  floatingBounds,
+		                );
+	                const floatingSlot: SessionSlot | null = item.sessionId
+	                  ? {
+	                    workdir: item.workdir,
+	                    agent: item.agent,
+	                    sessionId: item.sessionId,
+	                    mountKey: item.mountKey,
+	                  }
+	                  : null;
+	                const floatingInfo = floatingSlot ? resolveSlotInfo(floatingSlot) : null;
+	                const floatingTitle = floatingInfo
+	                  ? floatingInfo.title || floatingInfo.lastQuestion?.slice(0, 120) || floatingInfo.sessionId.slice(0, 12)
+	                  : t('hub.newSession');
+	                return (
+	                  <div
+	                    key={item.id}
+	                    data-focus-floating-session
+	                    className={cn(
+	                      'fixed z-[84] flex h-[min(620px,calc(100dvh-86px))] w-[min(430px,calc(100vw-92px))] overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[0_24px_72px_rgba(2,6,23,0.22)] ring-1 ring-[color:var(--th-chat-window-ring)] transition-shadow',
+	                      focusFloatingDraggingId === item.id && 'shadow-[0_32px_90px_rgba(2,6,23,0.30)] ring-primary/30',
+	                      item.hidden && 'hidden',
+	                    )}
+		                    style={{
+		                      left: floatingPosition.x,
+		                      top: floatingPosition.y,
+		                      width: floatingSize.width,
+		                      height: floatingSize.height,
+		                      zIndex: 84 + visibleIndex,
+		                    }}
+	                    onClick={event => event.stopPropagation()}
+	                  >
+	                    {floatingSlot && floatingInfo ? (
+	                      <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
+	                        <div
+	                          onPointerDown={event => handleFocusFloatingDragStart(item.id, event)}
+	                          className={cn(
+	                            'flex h-10 shrink-0 touch-none select-none items-center gap-2 border-b border-edge/50 bg-panel/55 px-3 backdrop-blur-md',
+	                            focusFloatingDraggingId === item.id ? 'cursor-grabbing' : 'cursor-grab',
+	                          )}
+	                        >
+	                          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
+	                            <BrandIcon brand={floatingSlot.agent || ''} size={16} />
+	                          </span>
+	                          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2" title={floatingTitle}>
+	                            {floatingTitle}
+	                          </span>
+	                          <button
+	                            type="button"
+	                            onClick={event => {
+	                              event.stopPropagation();
+	                              hideFocusFloatingSession(item.id);
+	                            }}
+	                            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
+	                            title="Hide"
+	                            aria-label="Hide"
+	                          >
+	                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+	                              <path d="M5 12h14" />
+	                            </svg>
+	                          </button>
+	                          <button
+	                            type="button"
+	                            onClick={event => {
+	                              event.stopPropagation();
+	                              closeFocusFloatingSession(item.id);
+	                            }}
+	                            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-err/10 hover:text-err"
+	                            title={t('hub.closePanel')}
+	                            aria-label={t('hub.closePanel')}
+	                          >
+	                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+	                              <path d="M18 6 6 18" />
+	                              <path d="M6 6l12 12" />
+	                            </svg>
+	                          </button>
+	                        </div>
+	                        <div className="min-h-0 flex-1 overflow-hidden">
+	                          <Suspense fallback={<div className="h-full" />}>
+	                            <SessionPanel
+	                              key={floatingSlot.mountKey}
+	                              session={floatingInfo}
+	                              workdir={floatingSlot.workdir}
+	                              active={active && !item.hidden && !inboxOpen}
+	                              onSessionChange={(next) => {
+	                                mergeSessionIntoWorkspaceMap(floatingSlot.workdir, next);
+	                                setFocusFloatingSessions(prev => prev.map(current => (
+	                                  current.id === item.id
+	                                    ? {
+	                                      ...current,
+	                                      agent: next.agent || current.agent,
+	                                      sessionId: next.sessionId || current.sessionId,
+	                                    }
+	                                    : current
+	                                )));
+	                              }}
+	                              onOpenFileLink={(target) => handleOpenOverlayFileLink(floatingSlot.workdir, target)}
+	                              onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(floatingSlot, request)}
+	                              onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(floatingSlot, request)}
+	                              initialPendingPrompt={item.pendingPrompt || null}
+	                              initialPendingImageUrls={item.pendingImageUrls}
+	                              initialPendingCreatedAt={item.pendingCreatedAt || null}
+	                              onPendingPromptConsumed={() => {
+	                                setFocusFloatingSessions(prev => prev.map(current => (
+	                                  current.id === item.id
+	                                    ? { ...current, pendingPrompt: null, pendingImageUrls: [], pendingCreatedAt: null }
+	                                    : current
+	                                )));
+	                              }}
+	                            />
+	                          </Suspense>
+	                        </div>
+	                      </div>
+	                    ) : (
+	                      <NewSessionView
+	                        key={item.mountKey}
+	                        workdir={item.workdir}
+	                        workspaceName={workspaces.find(ws => ws.path === item.workdir)?.name || item.workdir.split('/').pop() || ''}
+	                        workspaces={workspaces}
+	                        initialAgent={item.agent}
+	                        onSessionCreated={(next, pendingPrompt, pendingImageUrls, pendingCreatedAt) => handleFocusFloatingSessionCreated(item.id, next, pendingPrompt, pendingImageUrls, pendingCreatedAt)}
+	                        onMultiSessionCreated={(nextSessions, prompt) => handleFocusFloatingMultiSessionCreated(item.id, nextSessions, prompt)}
+	                        onClose={() => closeFocusFloatingSession(item.id)}
+	                        onHide={() => hideFocusFloatingSession(item.id)}
+	                        onHeaderPointerDown={event => handleFocusFloatingDragStart(item.id, event)}
+	                        dragging={focusFloatingDraggingId === item.id}
+	                        t={t}
+	                      />
+	                    )}
+	                  </div>
+	                );
+	              })}
+	              {floatingNewSessionVisible && showNewSession && (
+	                <div
+                  className="fixed bottom-5 right-6 z-[84] flex h-[min(620px,calc(100dvh-72px))] w-[min(430px,calc(100vw-92px))] overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[0_24px_72px_rgba(2,6,23,0.22)] ring-1 ring-[color:var(--th-chat-window-ring)]"
+                  onClick={event => event.stopPropagation()}
+                >
+                  <NewSessionView
+                    key={`floating-new-${showNewSession}`}
+                    workdir={showNewSession}
+                    workspaceName={workspaces.find(ws => ws.path === showNewSession)?.name || showNewSession.split('/').pop() || ''}
+                    workspaces={workspaces}
+                    initialAgent={newSessionTemplateAgent}
+                    initialDraftPrompt={newSessionInitialDraftPrompt}
+                    initialAutoSend={newSessionInitialAutoSend}
+                    onSessionCreated={handleNewSessionCreated}
+                    onMultiSessionCreated={handleMultiSessionCreated}
+                    onClose={() => {
+                      setNewSessionInitialDraftPrompt(null);
+                      setNewSessionInitialAutoSend(false);
+                      setShowNewSession(null);
+                    }}
+                    t={t}
+                  />
+                </div>
+              )}
             </div>
           </>
         )}
 	      </div>
+      </div>
 
-	      {mode === 'workspace' && inboxOpen && (
-	        <InboxDrawer
-	          items={dashboardItems}
-	          counts={dashboardCounts}
-	          loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
-	          onClose={() => setInboxOpen(false)}
-	          onOpenFocus={handleOpenInboxSession}
-	          onMarkDone={handleMarkDashboardDone}
-	          t={t}
-	        />
+	      {inboxOpen && (
+		        <InboxDrawer
+		          items={dashboardItems}
+		          loading={sidebarLoading || workspaceStatusSummary.loadingWorkspaces > 0}
+              focusedSlot={inboxFocusedSlot}
+              focusedSession={inboxFocusedSlot ? resolveSlotInfo(inboxFocusedSlot) : null}
+		          onClose={closeInbox}
+		          onOpenFocus={handleOpenInboxSession}
+              onSessionChange={handleInboxPanelSessionChange}
+              onOpenFileLink={handleOpenOverlayFileLink}
+              onCreateSideChatFromSelection={(request) => {
+                if (!inboxFocusedSlot) return;
+                const info = resolveSlotInfo(inboxFocusedSlot);
+                return handleCreateSideChatFromSelection(activeSlotRef.current, inboxFocusedSlot, info, request);
+              }}
+              onCreateTodoFromSelection={(request) => {
+                if (!inboxFocusedSlot) return;
+                return handleCreateTodoFromSelection(inboxFocusedSlot, request);
+              }}
+              onCreateReviewCommentFromSelection={(request) => {
+                if (!inboxFocusedSlot) return;
+                return handleCreateReviewCommentFromSelection(inboxFocusedSlot, request);
+              }}
+              onCloseFocus={() => setInboxFocusedSlot(null)}
+		          t={t}
+		        />
 	      )}
 	
 	      {/* ═══ Floating File Tree ═══ */}
-      {fileTreeOpen && (filePanelRequest?.workdir || selectedSession?.workdir) && (
-        <FloatingFileTree
-          workdir={filePanelRequest?.workdir || selectedSession!.workdir}
-          request={filePanelRequest}
-          onClose={() => setFileTreeOpen(false)}
-          t={t}
-          elevated={focusedSlotIndex != null}
-        />
-      )}
+	      {fileTreeOpen && (filePanelWorkdir || filePanelRequest?.workdir) && (
+	        <FloatingFileTree
+            key={filePanelWorkdir || filePanelRequest!.workdir}
+	          workdir={filePanelWorkdir || filePanelRequest!.workdir}
+	          request={filePanelRequest}
+	          onClose={() => {
+              setFileTreeOpen(false);
+              setFilePanelWorkdir(null);
+              setFilePanelRequest(null);
+            }}
+	          t={t}
+	          elevated={focusedSlotIndex != null || inboxOpen}
+	        />
+	      )}
 
       {/* Add workspace modal */}
       <AddWorkspaceModal
@@ -4230,13 +6056,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
       {/* Session row actions popover — anchored under the kebab button */}
       {sessionMenu && (() => {
-        const MENU_WIDTH = 160;
+        const MENU_WIDTH = 176;
         // Right-align to the kebab; clamp to viewport with 8px margins.
         const left = Math.max(8, Math.min(sessionMenu.anchor.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
         const top = Math.min(sessionMenu.anchor.bottom + 4, window.innerHeight - 60);
+        const canResetMultiRowHeight = isMultiChatLayout(effectiveChatLayout) && !taskFocusId && multiRowHeightPx != null;
+        const deleteKey = sessionSlotStorageKey(sessionMenu.target);
+        const deleteArmed = deleteConfirmKey === deleteKey;
         return (
           <div
-            className="fixed z-[60] min-w-[160px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
+            className="fixed z-[60] min-w-[176px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
             style={{
               left,
               top,
@@ -4273,6 +6102,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {t('session.rename')}
             </button>
+            {canResetMultiRowHeight && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setSessionMenu(null);
+                  setMultiRowHeightPx(null);
+                }}
+                className={menuItemClass()}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 1 0 3-6.7" />
+                  <path d="M3 4v6h6" />
+                </svg>
+                {t('hub.resetWindowHeight')}
+              </button>
+            )}
             {sessionMenu.target.unread && (
               <button
                 type="button"
@@ -4300,13 +6146,24 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             <button
               type="button"
               role="menuitem"
-              onClick={() => openDeleteSessionModal(sessionMenu.target)}
-              className={menuItemClass('danger')}
+              disabled={deletingSession && deleteArmed}
+              onClick={() => {
+                if (!deleteArmed) {
+                  setDeleteConfirmKey(deleteKey);
+                  return;
+                }
+                void executeDeleteSession(sessionMenu.target);
+              }}
+              className={cn(
+                menuItemClass('danger'),
+                deleteArmed && 'bg-red-500 text-white hover:bg-red-500 hover:text-white focus-visible:bg-red-500 focus-visible:text-white',
+                deletingSession && deleteArmed && 'cursor-wait opacity-80',
+              )}
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
               </svg>
-              {t('session.delete')}
+              {deleteArmed ? (deletingSession ? t('session.deleting') : t('session.confirmDelete')) : t('session.delete')}
             </button>
           </div>
         );
@@ -4323,6 +6180,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         };
         const menuSlot = openSessions[slotMenu.slotIdx] || null;
         const menuInfo = menuSlot ? resolveSlotInfo(menuSlot) : null;
+        const isMultiSlotMenu = isMultiChatLayout(effectiveChatLayout) && !taskFocusId && !multiSingleChatPresentation;
+        const hideDuplicateSlotMenuActions = !isMultiSlotMenu && (effectiveChatLayout === 'single' || multiSingleChatPresentation);
+        const deleteKey = sessionSlotStorageKey(slotMenu.target);
+        const deleteArmed = deleteConfirmKey === deleteKey;
         return (
           <div
             className="fixed z-[60] min-w-[176px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
@@ -4334,46 +6195,62 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             onMouseDown={e => e.stopPropagation()}
             role="menu"
           >
+            {!isMultiSlotMenu && !hideDuplicateSlotMenuActions && (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => runSlotAction(() => handleNewSessionRequest(slotMenu.target.workdir))}
+                  className={menuItemClass('primary')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  {t('hub.newSession')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!menuSlot || !menuInfo}
+                  onClick={() => runSlotAction(() => {
+                    if (menuSlot && menuInfo) void handleOpenSideChat(slotMenu.slotIdx, menuSlot, menuInfo);
+                  })}
+                  className={cn(menuItemClass('primary'), 'disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-fg-2')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M14 4v16" /><path d="M7 9h4" /><path d="M7 13h4" />
+                  </svg>
+                  {t('session.newSideChat')}
+                </button>
+              </>
+            )}
             <button
               type="button"
               role="menuitem"
-              onClick={() => runSlotAction(() => handleNewSessionRequest(slotMenu.target.workdir))}
+              onClick={() => runSlotAction(() => openCreateTaskModal(slotMenu.target))}
               className={menuItemClass('primary')}
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              {t('hub.newSession')}
+              <TodoGlyph className="h-3 w-3 shrink-0" />
+              {t('dashboard.createTask')}
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              disabled={!menuSlot || !menuInfo}
-              onClick={() => runSlotAction(() => {
-                if (menuSlot && menuInfo) void handleOpenSideChat(slotMenu.slotIdx, menuSlot, menuInfo);
-              })}
-              className={cn(menuItemClass('primary'), 'disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-fg-2')}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M14 4v16" /><path d="M7 9h4" /><path d="M7 13h4" />
-              </svg>
-              {t('session.newSideChat')}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => runSlotAction(() => {
-                setActiveSlotIndex(slotMenu.slotIdx);
-                setFilePanelRequest(null);
-                setFileTreeOpen(true);
-              })}
-              className={menuItemClass()}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-              </svg>
-              {t('hub.files')}
-            </button>
+            {!isMultiSlotMenu && !hideDuplicateSlotMenuActions && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => runSlotAction(() => {
+                  setActiveSlotIndex(slotMenu.slotIdx);
+                  setFilePanelRequest(null);
+                  setFilePanelWorkdir(slotMenu.target.workdir);
+                  setFileTreeOpen(true);
+                })}
+                className={menuItemClass()}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M2 6a2 2 0 012-2h5l2 2h9a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                </svg>
+                {t('hub.files')}
+              </button>
+            )}
             <div role="separator" className="my-1 border-t border-edge/70" />
             <button
               type="button"
@@ -4386,9 +6263,98 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {slotMenu.target.archived ? t('session.restore') : t('session.archive')}
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={deletingSession && deleteArmed}
+              onClick={() => {
+                if (!deleteArmed) {
+                  setDeleteConfirmKey(deleteKey);
+                  return;
+                }
+                void executeDeleteSession(slotMenu.target);
+              }}
+              className={cn(
+                menuItemClass('danger'),
+                deleteArmed && 'bg-red-500 text-white hover:bg-red-500 hover:text-white focus-visible:bg-red-500 focus-visible:text-white',
+                deletingSession && deleteArmed && 'cursor-wait opacity-80',
+              )}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
+              </svg>
+              {deleteArmed ? (deletingSession ? t('session.deleting') : t('session.confirmDelete')) : t('session.delete')}
+            </button>
           </div>
         );
       })()}
+
+      {/* Create local task from chat */}
+      <Modal open={!!createTaskTarget} onClose={() => !creatingTask && setCreateTaskTarget(null)}>
+        <ModalHeader title={t('dashboard.createTask')} onClose={() => !creatingTask && setCreateTaskTarget(null)} />
+        <div className="space-y-3">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('dashboard.createTaskTitle')}</span>
+            <input
+              value={createTaskTitle}
+              onChange={e => setCreateTaskTitle(e.target.value)}
+              autoFocus
+              disabled={creatingTask}
+              className="w-full rounded-md border border-edge bg-inset px-3 py-2 text-[13px] text-fg outline-none placeholder:text-fg-5/40 focus:border-primary/40"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('dashboard.createTaskType')}</span>
+              <select
+                value={createTaskKind}
+                onChange={e => setCreateTaskKind(e.target.value as Extract<ProTaskKind, 'jira-ticket' | 'jira-bug'>)}
+                disabled={creatingTask}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2 text-[13px] text-fg outline-none focus:border-primary/40"
+              >
+                <option value="jira-ticket">{t('dashboard.createTaskTypeTask')}</option>
+                <option value="jira-bug">{t('dashboard.createTaskTypeBug')}</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('dashboard.createTaskStatus')}</span>
+              <select
+                value={createTaskStatus}
+                onChange={e => setCreateTaskStatus(e.target.value as ProTaskStatus)}
+                disabled={creatingTask}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2 text-[13px] text-fg outline-none focus:border-primary/40"
+              >
+                <option value="backlog">{t('dashboard.taskStatus.backlog')}</option>
+                <option value="refinement">{t('dashboard.taskStatus.refinement')}</option>
+                <option value="coding">{t('dashboard.taskStatus.coding')}</option>
+                <option value="resolved">{t('dashboard.taskStatus.resolved')}</option>
+                <option value="done">{t('dashboard.taskStatus.done')}</option>
+              </select>
+            </label>
+          </div>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('dashboard.createTaskDescription')}</span>
+            <textarea
+              value={createTaskDescription}
+              onChange={e => setCreateTaskDescription(e.target.value)}
+              disabled={creatingTask}
+              rows={7}
+              className="w-full resize-none rounded-md border border-edge bg-inset px-3 py-2 text-[13px] leading-relaxed text-fg outline-none placeholder:text-fg-5/40 focus:border-primary/40"
+            />
+          </label>
+          {createTaskTarget && (
+            <div className="truncate text-[11px] text-fg-5">
+              {createTaskTarget.agent}:{createTaskTarget.sessionId}
+            </div>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setCreateTaskTarget(null)} disabled={creatingTask}>{t('modal.cancel')}</Button>
+          <Button variant="primary" onClick={() => void submitCreateTaskFromChat()} disabled={creatingTask || !createTaskTitle.trim()}>
+            {creatingTask ? t('dashboard.creatingTask') : t('dashboard.createTask')}
+          </Button>
+        </div>
+      </Modal>
 
       {/* Rename session modal */}
       <Modal
@@ -4427,70 +6393,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           </Button>
           <Button variant="primary" onClick={() => void executeRenameSession()} disabled={renamingSession}>
             {renamingSession ? t('session.renaming') : t('modal.save')}
-          </Button>
-        </div>
-      </Modal>
-
-      {/* Confirm delete session modal — choose between pikiclaw-only and purge-native */}
-      <Modal
-        open={!!confirmDeleteSession}
-        onClose={() => !deletingSession && setConfirmDeleteSession(null)}
-      >
-        <ModalHeader
-          title={t('session.deleteTitle')}
-          onClose={() => !deletingSession && setConfirmDeleteSession(null)}
-        />
-        <div className="text-[13px] text-fg-3 leading-relaxed">
-          {t('session.deleteHint')}
-        </div>
-        {confirmDeleteSession && (
-          <div className="mt-3 rounded-md bg-inset/50 border border-edge/30 px-3 py-2 text-[11px] text-fg-4 break-all">
-            <span className="font-mono text-fg-5">{confirmDeleteSession.agent}</span>
-            <span className="mx-1.5 text-fg-5/50">·</span>
-            <span>{confirmDeleteSession.title}</span>
-          </div>
-        )}
-        <div className="mt-4 space-y-2">
-          <label className="flex items-start gap-2 cursor-pointer">
-            <input
-              type="radio"
-              name="delete-session-scope"
-              checked={!deleteSessionPurgeNative}
-              onChange={() => setDeleteSessionPurgeNative(false)}
-              disabled={deletingSession}
-              className="mt-0.5"
-            />
-            <div className="flex-1">
-              <div className="text-[12px] text-fg-2">{t('session.deletePikiclawOnly')}</div>
-              <div className="text-[11px] text-fg-5 leading-snug mt-0.5">{t('session.deletePikiclawOnlyHint')}</div>
-            </div>
-          </label>
-          <label className="flex items-start gap-2 cursor-pointer">
-            <input
-              type="radio"
-              name="delete-session-scope"
-              checked={deleteSessionPurgeNative}
-              onChange={() => setDeleteSessionPurgeNative(true)}
-              disabled={deletingSession}
-              className="mt-0.5"
-            />
-            <div className="flex-1">
-              <div className="text-[12px] text-fg-2">{t('session.deletePurgeNative')}</div>
-              <div className="text-[11px] text-fg-5 leading-snug mt-0.5">{t('session.deletePurgeNativeHint')}</div>
-            </div>
-          </label>
-        </div>
-        <div className="flex justify-end gap-2 mt-4">
-          <Button variant="ghost" onClick={() => setConfirmDeleteSession(null)} disabled={deletingSession}>
-            {t('modal.cancel')}
-          </Button>
-          <Button
-            variant="primary"
-            onClick={executeDeleteSession}
-            disabled={deletingSession}
-            className="!bg-red-500/90 !border-red-500/50 hover:!bg-red-500 !text-white"
-          >
-            {deletingSession ? t('session.deleting') : t('modal.remove')}
           </Button>
         </div>
       </Modal>
@@ -4555,25 +6457,116 @@ function AddWorkspaceModal({
 }
 
 /* ══════════════════════════════════════════════════════
+   New Session Placeholder — tail card in multi-window layout
+   ══════════════════════════════════════════════════════ */
+function MultiNewSessionPlaceholder({
+  workdir,
+  workspaceName,
+  agent,
+  agentLabel,
+  order,
+  height,
+  flexBasis,
+  onClick,
+  t,
+}: {
+  workdir: string;
+  workspaceName: string;
+  agent: string;
+  agentLabel: string;
+  order: number;
+  height: string;
+  flexBasis?: string;
+  onClick: () => void;
+  t: (key: string) => string;
+}) {
+  const inheritedLabel = agentLabel ? `${workspaceName} · ${agentLabel}` : workspaceName;
+  return (
+    <button
+      type="button"
+      data-new-session-placeholder
+      onClick={onClick}
+      className={cn(
+        'group flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-dashed border-edge/60 bg-transparent text-left transition-[border-color,transform,background-color] duration-200',
+        'hover:-translate-y-0.5 hover:border-[color:var(--th-chat-window-border-active)] hover:bg-panel/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+      )}
+      style={{
+        order,
+        flex: flexBasis ? `0 0 ${flexBasis}` : undefined,
+        boxShadow: 'none',
+        height,
+      }}
+      title={`${t('hub.newSession')} · ${inheritedLabel}`}
+      aria-label={`${t('hub.newSession')} · ${inheritedLabel}`}
+    >
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-dashed border-edge/40 bg-transparent px-3 text-fg-4">
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-dashed border-edge/65 bg-panel/30 text-fg-5 transition-colors group-hover:border-[color:var(--th-selection-border)] group-hover:text-primary">
+          {agent ? <BrandIcon brand={agent} size={16} /> : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-3">
+          {t('hub.newSessionPlaceholder')}
+        </span>
+      </div>
+      <div className="flex flex-1 items-center justify-center px-6">
+        <div className="max-w-[260px] text-center">
+          <span className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl border border-dashed border-edge/65 bg-panel/35 text-primary transition-transform duration-200 group-hover:scale-105 group-hover:bg-panel/55">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </span>
+          <div className="text-[13px] font-semibold text-fg">{t('hub.newSession')}</div>
+          <div className="mt-1 text-[11px] leading-snug text-fg-5">
+            {t('hub.newSessionInherits')
+              .replace('{workspace}', workspaceName)
+              .replace('{agent}', agentLabel ? ` · ${agentLabel}` : '')}
+          </div>
+          <div className="mt-3 truncate rounded-md border border-dashed border-edge/45 bg-transparent px-2 py-1 font-mono text-[10px] text-fg-5" title={workdir}>
+            {workspaceBaseName(workdir)}
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
    New Session View — empty chat + InputComposer
    Looks identical to a regular session: header, empty
    message area, and the standard input bar at the bottom.
    ══════════════════════════════════════════════════════ */
-function NewSessionView({
+export function NewSessionView({
   workdir,
   workspaceName,
   workspaces,
+  initialAgent = '',
+  initialDraftPrompt = null,
+  initialAutoSend = false,
   onSessionCreated,
   onMultiSessionCreated,
   onClose,
+  onHide,
+  onHeaderPointerDown,
+  dragging = false,
   t,
 }: {
   workdir: string;
   workspaceName: string;
   workspaces: WorkspaceEntry[];
+  initialAgent?: string;
+  initialDraftPrompt?: string | null;
+  initialAutoSend?: boolean;
   onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => void;
   onMultiSessionCreated: (next: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => void;
   onClose: () => void;
+  onHide?: () => void;
+  onHeaderPointerDown?: (event: ReactPointerEvent<HTMLElement>) => void;
+  dragging?: boolean;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(workdir);
@@ -4583,6 +6576,7 @@ function NewSessionView({
   const pendingRef = useRef<string | null>(null);
   const pendingImageUrlsRef = useRef<string[]>([]);
   const pendingCreatedAtRef = useRef<string | null>(null);
+  const autoSendKeyRef = useRef('');
   const workspaceChoices = useMemo(() => {
     const byPath = new Map<string, WorkspaceEntry>();
     for (const ws of workspaces) byPath.set(ws.path, ws);
@@ -4596,9 +6590,9 @@ function NewSessionView({
 
   const stubSession = useMemo((): SessionInfo => ({
     sessionId: '',
-    agent: '',
+    agent: initialAgent,
     runState: 'completed',
-  }), []);
+  }), [initialAgent]);
 
   useEffect(() => {
     setSelectedWorkdir(workdir);
@@ -4625,12 +6619,40 @@ function NewSessionView({
     onSessionCreated(next, pendingRef.current || undefined, urls.length ? urls : undefined, pendingCreatedAtRef.current);
   }, [onSessionCreated]);
 
+  useEffect(() => {
+    const prompt = String(initialDraftPrompt || '').trim();
+    if (!initialAutoSend || !prompt || !initialAgent || !selectedWorkdir) return;
+    const key = `${selectedWorkdir}:${initialAgent}:${prompt}`;
+    if (autoSendKeyRef.current === key) return;
+    autoSendKeyRef.current = key;
+    handleSendStart(prompt);
+    api.sendSessionMessage(selectedWorkdir, initialAgent, '', prompt)
+      .then(res => {
+        if (!res.ok) throw new Error(res.error || 'Failed to start test chat');
+        const nextSession = parseSessionKeyValue(res.sessionKey);
+        if (!nextSession) throw new Error('Test chat started but no session id was returned');
+        handleSessionCreated({ ...nextSession, workdir: selectedWorkdir });
+      })
+      .catch(() => {
+        setPendingPrompt(null);
+        setPendingCreatedAt(null);
+        pendingRef.current = null;
+        pendingCreatedAtRef.current = null;
+      });
+  }, [handleSendStart, handleSessionCreated, initialAgent, initialAutoSend, initialDraftPrompt, selectedWorkdir]);
+
   const hasPending = !!pendingPrompt || pendingImageUrls.length > 0;
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden">
       {/* ── Header ── */}
-      <div className="shrink-0 flex items-center gap-2 px-4 h-10 border-b border-edge/50 bg-panel/40 backdrop-blur-md z-10">
+      <div
+        onPointerDown={onHeaderPointerDown}
+        className={cn(
+          'z-10 flex h-10 shrink-0 touch-none select-none items-center gap-2 border-b border-edge/50 bg-panel/40 px-4 backdrop-blur-md',
+          onHeaderPointerDown && (dragging ? 'cursor-grabbing' : 'cursor-grab'),
+        )}
+      >
         <span className="flex-1 min-w-0 text-[13px] font-medium text-fg truncate">{t('hub.newSession')}</span>
         <label className={cn(
           'flex min-w-0 shrink-0 items-center gap-1 rounded-md border border-transparent px-1.5 py-0.5 text-[10px] text-fg-5/70 transition-colors',
@@ -4660,6 +6682,19 @@ function NewSessionView({
           )}
         </label>
         <Dot variant={hasPending ? 'ok' : 'idle'} pulse={hasPending} />
+        {onHide && (
+          <button
+            type="button"
+            onClick={onHide}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
+            title="Hide"
+            aria-label="Hide"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M5 12h14" />
+            </svg>
+          </button>
+        )}
         {!hasPending && (
           <button
             type="button"
@@ -4685,9 +6720,9 @@ function NewSessionView({
             </div>
           </div>
         ) : (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center space-y-1.5">
-              <div className="text-[13px] text-fg-5">{t('hub.newSessionHint')}</div>
+          <div className="flex h-full w-full items-center justify-center px-8">
+            <div className="mx-auto w-full max-w-[300px] space-y-1.5 text-center">
+              <div className="mx-auto w-full break-words text-center text-[13px] leading-relaxed text-fg-5">{t('hub.newSessionHint')}</div>
             </div>
           </div>
         )}
@@ -4697,6 +6732,7 @@ function NewSessionView({
       <InputComposer
         session={stubSession}
         workdir={selectedWorkdir}
+        initialDraftPrompt={initialDraftPrompt}
         onStreamQueued={noop}
         onSendStart={handleSendStart}
         onSessionChange={handleSessionCreated}
@@ -4705,140 +6741,6 @@ function NewSessionView({
         streamPhase={null}
       />
     </div>
-  );
-}
-
-function DashboardCreateTaskModal({
-  workdir,
-  workspaceName,
-  workspaces,
-  onClose,
-  onSessionCreated,
-  t,
-}: {
-  workdir: string;
-  workspaceName: string;
-  workspaces: WorkspaceEntry[];
-  onClose: () => void;
-  onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => void;
-  t: (key: string) => string;
-}) {
-  const state = useStore(s => s.state);
-  const toast = useStore(s => s.toast);
-  const [selectedWorkdir, setSelectedWorkdir] = useState(workdir);
-  const [agent, setAgent] = useState(state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex');
-  const [taskText, setTaskText] = useState('');
-  const [creating, setCreating] = useState(false);
-  const workspaceChoices = useMemo(() => {
-    const byPath = new Map<string, WorkspaceEntry>();
-    for (const ws of workspaces) byPath.set(ws.path, ws);
-    if (selectedWorkdir && !byPath.has(selectedWorkdir)) {
-      byPath.set(selectedWorkdir, { path: selectedWorkdir, name: workspaceName || workspaceBaseName(selectedWorkdir) });
-    }
-    return Array.from(byPath.values());
-  }, [selectedWorkdir, workspaceName, workspaces]);
-
-  useEffect(() => setSelectedWorkdir(workdir), [workdir]);
-
-  const generatedTitle = useMemo(() => {
-    const firstLine = taskText.trim().split('\n').find(Boolean) || '';
-    const normalized = firstLine.replace(/\s+/g, ' ');
-    return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
-  }, [taskText]);
-
-  const createTask = useCallback(async () => {
-    const body = taskText.trim();
-    if (!body || creating) return;
-    setCreating(true);
-    const title = generatedTitle || 'New task';
-    const createdAt = new Date().toISOString();
-    const prompt = [
-      `Task: ${title}`,
-      '',
-      body,
-      '',
-      'Please start by clarifying the goal, boundary, and acceptance points, then proceed with the task when ready.',
-    ].join('\n');
-    try {
-      const result = await api.sendSessionMessage(selectedWorkdir, agent, '', prompt);
-      if (!result.ok) throw new Error(result.error || 'Failed to create task');
-      onSessionCreated(
-        { agent, sessionId: result.sessionKey || result.taskId || '', workdir: selectedWorkdir },
-        prompt,
-        undefined,
-        createdAt,
-      );
-      onClose();
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Failed to create task', false);
-    } finally {
-      setCreating(false);
-    }
-  }, [agent, creating, generatedTitle, onClose, onSessionCreated, selectedWorkdir, taskText, toast]);
-
-  return (
-    <>
-      <div
-        className="fixed inset-0 z-[60] bg-[var(--th-overlay)] backdrop-blur-[2px]"
-        aria-hidden="true"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('dashboard.createTask')}
-        className="fixed left-1/2 top-16 z-[70] flex w-[calc(100vw-24px)] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-primary/50 bg-panel shadow-[0_24px_80px_rgba(0,0,0,0.35)] ring-[4px] ring-primary/[0.10] sm:w-[min(620px,calc(100vw-48px))]"
-      >
-        <div className="border-b border-edge px-4 py-3">
-          <div className="text-[15px] font-semibold text-fg">{t('dashboard.createTask')}</div>
-          <div className="mt-1 text-[12px] text-fg-5">{t('dashboard.createTaskHint')}</div>
-        </div>
-        <div className="space-y-3 px-4 py-4">
-          <textarea
-            autoFocus
-            value={taskText}
-            onChange={event => setTaskText(event.target.value)}
-            placeholder={t('dashboard.createTaskPlaceholder')}
-            className="min-h-32 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
-          />
-          <div className="rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-4">
-            <span className="text-fg-5">{t('dashboard.generatedTitle')}: </span>
-            <span className="font-medium text-fg-2">{generatedTitle || '--'}</span>
-          </div>
-          <div className="grid gap-2 md:grid-cols-2">
-            <label className="space-y-1">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{t('dashboard.defaultWorkspace')}</div>
-              <select
-                value={selectedWorkdir}
-                onChange={event => setSelectedWorkdir(event.target.value)}
-                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
-              >
-                {workspaceChoices.map(ws => (
-                  <option key={ws.path} value={ws.path}>{ws.name || workspaceBaseName(ws.path)}</option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{t('dashboard.defaultAgent')}</div>
-              <select
-                value={agent}
-                onChange={event => setAgent(event.target.value)}
-                className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
-              >
-                {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(item => <option key={item} value={item}>{item}</option>)}
-              </select>
-            </label>
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 border-t border-edge px-4 py-3">
-          <Button variant="ghost" onClick={onClose} disabled={creating}>{t('modal.cancel')}</Button>
-          <Button variant="primary" onClick={() => void createTask()} disabled={!taskText.trim() || creating}>
-            {creating ? <Spinner /> : null}
-            {t('dashboard.createTask')}
-          </Button>
-        </div>
-      </div>
-    </>
   );
 }
 
@@ -4865,7 +6767,7 @@ function TodoCenterModal({
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [menu, setMenu] = useState<null | { itemId: string; anchor: DOMRect }>(null);
-  const activeItems = items.filter(item => item.status === 'open' || item.status === 'chat-created');
+  const activeItems = items.filter(item => item.status === 'open');
   const closeMenu = useCallback(() => setMenu(null), []);
   const openMenu = useCallback((event: ReactMouseEvent<HTMLButtonElement>, itemId: string) => {
     event.stopPropagation();
@@ -5003,19 +6905,31 @@ function TodoCenterModal({
 
 function InboxDrawer({
   items,
-  counts,
   loading,
+  focusedSlot,
+  focusedSession,
   onClose,
   onOpenFocus,
-  onMarkDone,
+  onSessionChange,
+  onOpenFileLink,
+  onCreateSideChatFromSelection,
+  onCreateTodoFromSelection,
+  onCreateReviewCommentFromSelection,
+  onCloseFocus,
   t,
 }: {
   items: DashboardSessionItem[];
-  counts: Record<DashboardColumnKey, number>;
   loading: boolean;
+  focusedSlot: SessionSlot | null;
+  focusedSession: SessionInfo | null;
   onClose: () => void;
   onOpenFocus: (item: DashboardSessionItem) => void;
-  onMarkDone: (item: DashboardSessionItem) => void;
+  onSessionChange: (next: SessionPanelChange) => void;
+  onOpenFileLink: (target: FileLinkTarget) => void;
+  onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
+  onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  onCloseFocus: () => void;
   t: (key: string) => string;
 }) {
   const groups = useMemo(() => {
@@ -5028,21 +6942,80 @@ function InboxDrawer({
     for (const item of items) grouped[item.column].push(item);
     return grouped;
   }, [items]);
-  const orderedColumns: Array<{ key: DashboardColumnKey; labelKey: string; hintKey: string; variant: StripBadgeVariant }> = [
-    { key: 'incomplete', labelKey: 'inbox.needsMe', hintKey: 'inbox.needsMeHint', variant: 'err' },
-    { key: 'review', labelKey: 'inbox.ready', hintKey: 'inbox.readyHint', variant: 'warn' },
-    { key: 'running', labelKey: 'inbox.running', hintKey: 'inbox.runningHint', variant: 'ok' },
-    { key: 'done', labelKey: 'inbox.openLoops', hintKey: 'inbox.openLoopsHint', variant: 'muted' },
+	  const orderedColumns: Array<{ key: DashboardColumnKey; hintKey: string }> = [
+	    { key: 'review', hintKey: 'inbox.unreadHint' },
   ];
-  const alertCount = counts.running + counts.review + counts.incomplete;
+  const alertCount = items.length;
+  const visibleItemCount = items.length;
+  const focusedTitle = focusedSession
+    ? sessionListDisplayText(focusedSession).slice(0, 180) || focusedSession.sessionId.slice(0, 16)
+    : '';
+  const focusedMeta = focusedSession ? getAgentMeta(focusedSession.agent || '') : null;
+  const focusedDisplayState = focusedSession ? sessionDisplayState(focusedSession) : 'completed';
 
   return createPortal((
-    <div className="fixed inset-0 z-[210] flex justify-end bg-black/18 backdrop-blur-[2px]" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[210]">
+      <div className="absolute inset-0 bg-black/24 backdrop-blur-[2px]" aria-hidden="true" />
+      {focusedSlot && focusedSession && (
+        <div
+          className="pointer-events-auto absolute bottom-6 right-[492px] top-6 hidden w-[min(780px,calc(100vw-548px))] min-w-[620px] overflow-hidden rounded-2xl border border-edge-h/90 bg-[var(--th-modal-bg)] shadow-[0_28px_90px_rgba(0,0,0,0.34),0_0_0_1px_rgba(255,255,255,0.08)_inset] ring-1 ring-primary/[0.08] backdrop-blur-xl lg:flex lg:flex-col"
+          onMouseDown={event => event.stopPropagation()}
+          role="dialog"
+          aria-modal="false"
+          aria-label={focusedTitle}
+        >
+          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge/45 bg-panel/82 px-3 backdrop-blur-md">
+            <Dot
+              variant={focusedDisplayState === 'running' ? 'ok' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
+              pulse={focusedDisplayState === 'running'}
+            />
+            {focusedMeta && (
+              <BrandIcon brand={focusedSession.agent || ''} size={14} />
+            )}
+            <span className="shrink-0 text-[11px] font-semibold" style={{ color: focusedMeta?.color }}>
+              {focusedMeta?.shortLabel || focusedSession.agent}
+            </span>
+            <span className="h-3 w-px shrink-0 bg-edge/70" />
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2" title={focusedTitle}>
+              {focusedTitle}
+            </span>
+            <span className="hidden shrink-0 rounded-md border border-edge/50 bg-inset px-1.5 py-0.5 font-mono text-[10px] text-fg-5 md:inline">
+              {focusedSession.sessionId.slice(0, 8)}
+            </span>
+            <button
+              type="button"
+              onClick={onCloseFocus}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-edge/45 bg-panel/70 text-fg-5 transition-colors hover:border-primary/30 hover:bg-primary/[0.08] hover:text-primary"
+              aria-label={t('common.close')}
+              title={t('common.close')}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden bg-[var(--th-session-bg)]">
+            <Suspense fallback={<div className="h-full flex-1 bg-[var(--th-session-bg)]" />}>
+              <SessionPanel
+                key={focusedSlot.mountKey}
+                session={focusedSession}
+                workdir={focusedSlot.workdir}
+                active={true}
+                onSessionChange={onSessionChange}
+                onOpenFileLink={onOpenFileLink}
+                onCreateSideChatFromSelection={onCreateSideChatFromSelection}
+                onCreateTodoFromSelection={onCreateTodoFromSelection}
+                onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection}
+              />
+            </Suspense>
+          </div>
+        </div>
+      )}
       <aside
-        className="flex h-full w-[min(460px,calc(100vw-18px))] flex-col overflow-hidden border-l border-edge-h bg-panel/96 shadow-[-24px_0_72px_rgba(0,0,0,0.28)]"
+        className="pointer-events-auto absolute inset-y-0 right-0 flex h-full w-[min(460px,calc(100vw-18px))] flex-col overflow-hidden border-l border-edge-h bg-panel/96 shadow-[-24px_0_72px_rgba(0,0,0,0.28)] backdrop-blur-md"
         onMouseDown={event => event.stopPropagation()}
         role="dialog"
-        aria-modal="true"
+        aria-modal="false"
         aria-label={t('inbox.title')}
       >
         <div className="shrink-0 border-b border-edge/45 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),transparent)] px-4 py-3">
@@ -5069,16 +7042,11 @@ function InboxDrawer({
               </svg>
             </button>
           </div>
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            <StatusMetric label={t('inbox.running')} value={counts.running} variant={counts.running > 0 ? 'ok' : 'muted'} />
-            <StatusMetric label={t('inbox.needsMe')} value={counts.incomplete} variant={counts.incomplete > 0 ? 'err' : 'muted'} />
-            <StatusMetric label={t('inbox.ready')} value={counts.review} variant={counts.review > 0 ? 'warn' : 'muted'} />
-          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {loading && items.length === 0 ? (
             <div className="flex h-32 items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>
-          ) : items.length === 0 ? (
+          ) : visibleItemCount === 0 ? (
             <div className="rounded-xl border border-dashed border-edge/45 px-4 py-12 text-center text-[13px] text-fg-5">{t('inbox.empty')}</div>
           ) : (
             <div className="space-y-3">
@@ -5087,22 +7055,17 @@ function InboxDrawer({
                 if (!columnItems.length) return null;
                 return (
                   <section key={column.key} className="rounded-xl border border-edge/50 bg-panel-alt/30 p-2.5">
-                    <div className="mb-2 flex items-center gap-2 px-0.5">
-                      <Badge variant={column.variant} className="h-5 px-2 text-[10px] tabular-nums">{columnItems.length}</Badge>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[12px] font-semibold text-fg-2">{t(column.labelKey)}</div>
-                        <div className="truncate text-[10px] text-fg-5">{t(column.hintKey)}</div>
-                      </div>
-                    </div>
+	                    <div className="mb-2 px-0.5">
+	                      <div className="truncate text-[10px] text-fg-5">{t(column.hintKey)}</div>
+	                    </div>
                     <div className="space-y-2">
                       {columnItems.map(item => (
-                        <DashboardTaskCard
-                          key={item.key}
-                          item={item}
-                          onOpen={() => onOpenFocus(item)}
-                          onMarkDone={() => onMarkDone(item)}
-                          t={t}
-                        />
+	                        <DashboardTaskCard
+	                          key={item.key}
+		                          item={item}
+	                            selected={!!focusedSlot && focusedSlot.workdir === item.workdir && focusedSlot.agent === item.session.agent && focusedSlot.sessionId === item.session.sessionId}
+		                          onOpen={() => onOpenFocus(item)}
+		                        />
                       ))}
                     </div>
                   </section>
@@ -5116,221 +7079,26 @@ function InboxDrawer({
   ), document.body);
 }
 
-function WorkspaceTaskDashboard({
-  workspaces,
-  scope,
-  onScopeChange,
-  items,
-  counts,
-  loading,
-  onCreateTask,
-  onOpenSession,
-  onMarkDone,
-  t,
-}: {
-  workspaces: WorkspaceEntry[];
-  scope: DashboardScope;
-  onScopeChange: (scope: DashboardScope) => void;
-  items: DashboardSessionItem[];
-  counts: Record<DashboardColumnKey, number>;
-  loading: boolean;
-  onCreateTask: () => void;
-  onOpenSession: (item: DashboardSessionItem) => void;
-  onMarkDone: (item: DashboardSessionItem) => void;
-  t: (key: string) => string;
-}) {
-  const byColumn = useMemo(() => {
-	    const grouped: Record<DashboardColumnKey, DashboardSessionItem[]> = {
-	      running: [],
-	      review: [],
-	      incomplete: [],
-	      done: [],
-    };
-    for (const item of items) grouped[item.column].push(item);
-    return grouped;
-  }, [items]);
-
-  return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[16px] border border-edge/65 bg-panel/70" style={{ boxShadow: 'var(--th-card-shadow)' }}>
-      <div className="shrink-0 border-b border-edge/35 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),transparent)] px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="text-[15px] font-semibold tracking-tight text-fg">{t('chat.columnBoardTitle')}</div>
-            <div className="mt-1 text-[12px] text-fg-5">{t('chat.columnBoardSubtitle')}</div>
-          </div>
-          <select
-            value={scope}
-            onChange={e => onScopeChange(e.target.value || 'all')}
-            className="h-8 min-w-[150px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
-          >
-            <option value="all">{t('dashboard.allWorkspaces')}</option>
-            {workspaces.map(ws => (
-              <option key={ws.path} value={ws.path}>
-                {ws.name || workspaceBaseName(ws.path)}
-              </option>
-            ))}
-          </select>
-          <Button variant="primary" size="sm" onClick={onCreateTask} disabled={!workspaces.length}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            {t('dashboard.createTask')}
-          </Button>
-        </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-hidden p-3">
-        <div className="dashboard-board-grid grid h-full min-h-0 gap-3">
-          {DASHBOARD_COLUMNS.map(column => (
-            <div key={column.key} className="min-h-0 rounded-xl border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-              <div className="shrink-0 border-b border-edge/25 bg-panel/30 px-3 py-2.5">
-                <div className="flex items-center gap-2">
-                  <Badge variant={column.variant} className="h-5 px-2 text-[10px] tabular-nums">
-                    {counts[column.key]}
-                  </Badge>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12px] font-semibold text-fg-2">{t(column.titleKey)}</div>
-                    <div className="truncate text-[10px] text-fg-5">{t(column.hintKey)}</div>
-                  </div>
-                </div>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-                {loading && items.length === 0 ? (
-                  <div className="flex h-24 items-center justify-center">
-                    <Spinner className="h-3.5 w-3.5 text-fg-5" />
-                  </div>
-                ) : byColumn[column.key].length === 0 ? (
-                  <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-edge/35 bg-inset/30 text-[11px] text-fg-5/60">
-                    {t('dashboard.emptyColumn')}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {byColumn[column.key].map(item => (
-                      <DashboardTaskCard
-                        key={item.key}
-                        item={item}
-                        onOpen={() => onOpenSession(item)}
-                        onMarkDone={() => onMarkDone(item)}
-                        t={t}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DashboardSessionFocusModal({
-  slot,
-  session,
-  workspaceName,
-  active,
-  onClose,
-  onSessionChange,
-  onOpenFileLink,
-  initialPendingPrompt,
-  initialPendingImageUrls,
-  initialPendingCreatedAt,
-  onPendingPromptConsumed,
-  t,
-}: {
-  slot: SessionSlot;
-  session: SessionInfo;
-  workspaceName: string;
-  active: boolean;
-  onClose: () => void;
-  onSessionChange: (next: { agent: string; sessionId: string; workdir: string }) => void;
-  onOpenFileLink: OpenFileLinkHandler;
-  initialPendingPrompt?: string | null;
-  initialPendingImageUrls?: string[];
-  initialPendingCreatedAt?: string | null;
-  onPendingPromptConsumed?: () => void;
-  t: (key: string) => string;
-}) {
-  const displayState = sessionDisplayState(session);
-  const title = sessionListDisplayText(session).slice(0, 180) || slot.sessionId.slice(0, 16);
-  const stateVariant = displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'warn' : 'idle';
-
-  return (
-    <>
-      <div
-        className="fixed inset-0 z-[60] bg-[var(--th-overlay)] backdrop-blur-[2px]"
-        aria-hidden="true"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className="fixed inset-y-4 left-1/2 z-[70] flex w-[calc(100vw-24px)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border border-primary/50 bg-panel shadow-[0_24px_80px_rgba(0,0,0,0.35)] ring-[4px] ring-primary/[0.10] sm:w-[min(1080px,calc(100vw-48px))] md:inset-y-8 md:w-[min(1180px,calc(100vw-64px))]"
-      >
-        <div className="shrink-0 flex items-center gap-2 border-b border-edge/35 bg-panel/80 px-3 h-9 backdrop-blur-sm">
-          <Dot variant={stateVariant} pulse={displayState === 'running'} />
-          <span className="shrink-0 text-[10px] font-medium text-fg-5">{workspaceName}</span>
-          <span className="shrink-0 text-fg-6 text-[10px]">/</span>
-          <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-2" title={title}>{title}</span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-edge/45 bg-panel/60 text-fg-4 transition-colors hover:border-primary/30 hover:bg-primary/[0.08] hover:text-primary"
-            title={t('hub.exitFocusMode')}
-            aria-label={t('hub.exitFocusMode')}
-          >
-            <ExitFocusIcon className="h-3.5 w-3.5 shrink-0" />
-          </button>
-        </div>
-        <div className="flex-1 min-h-0">
-          <Suspense fallback={<div className="h-full" />}>
-            <SessionPanel
-              key={slot.mountKey}
-              session={session}
-              workdir={slot.workdir}
-              active={active}
-              onSessionChange={onSessionChange}
-              onOpenFileLink={onOpenFileLink}
-              initialPendingPrompt={initialPendingPrompt}
-              initialPendingImageUrls={initialPendingImageUrls}
-              initialPendingCreatedAt={initialPendingCreatedAt}
-              onPendingPromptConsumed={onPendingPromptConsumed}
-            />
-          </Suspense>
-        </div>
-      </div>
-    </>
-  );
-}
-
 function DashboardTaskCard({
   item,
+  selected,
   onOpen,
-  onMarkDone,
-  t,
 }: {
   item: DashboardSessionItem;
+  selected?: boolean;
   onOpen: () => void;
-  onMarkDone: () => void;
-  t: (key: string) => string;
 }) {
   const meta = getAgentMeta(item.session.agent || '');
   const title = sessionListDisplayText(item.session).slice(0, 180) || item.session.sessionId.slice(0, 16);
   const detail = sessionListContextText(item.session, title).slice(0, 160);
   const displayState = sessionDisplayState(item.session);
-  const statusTone: StripBadgeVariant = item.column === 'running'
-    ? 'ok'
-    : item.column === 'incomplete'
-      ? 'err'
-	    : item.column === 'review'
-	      ? 'warn'
-	      : 'muted';
   const time = fmtRelative(item.session.runUpdatedAt || item.session.createdAt);
 
   return (
-    <div className="rounded-lg border border-edge/50 bg-panel/78 px-3 py-2.5 shadow-[0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-panel-h/55">
+    <div className={cn(
+      'rounded-lg border px-3 py-2.5 shadow-[0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-panel-h/55',
+      selected ? 'border-primary/60 bg-primary/[0.09] ring-1 ring-primary/25' : 'border-edge/50 bg-panel/78',
+    )}>
       <button type="button" onClick={onOpen} className="block w-full text-left">
         <div className="flex items-center gap-1.5 text-[10px] text-fg-5">
           <BrandIcon brand={item.session.agent || ''} size={11} />
@@ -5338,32 +7106,16 @@ function DashboardTaskCard({
           <span className="min-w-0 truncate">{item.workspaceName}</span>
           <span className="ml-auto shrink-0 tabular-nums">{time}</span>
         </div>
-        <div className="mt-1.5 flex items-start gap-2">
-          <Dot variant={displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />
-          <div className="min-w-0 flex-1">
-            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
-            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
-          </div>
-        </div>
-      </button>
-      <div className="mt-2.5 flex items-center gap-1.5">
-        <Badge variant={statusTone} className="h-5 px-1.5 text-[10px]">{t(`chat.columnLabel.${item.column}`)}</Badge>
-        {item.live?.phase === 'queued' && (
-          <span className="text-[10px] text-fg-5">{t('dashboard.queued')}</span>
-        )}
-        <div className="flex-1" />
-        {item.column === 'review' && (
-          <button
-            type="button"
-            onClick={onMarkDone}
-            className="rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[10px] text-fg-3 transition-colors hover:border-ok/40 hover:bg-ok/10 hover:text-ok"
-          >
-            {t('dashboard.markDone')}
-          </button>
-        )}
-      </div>
-    </div>
-  );
+	        <div className="mt-1.5 flex items-start gap-2">
+	          {!selected && <Dot variant={displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
+	          <div className="min-w-0 flex-1">
+	            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
+	            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
+	          </div>
+	        </div>
+	      </button>
+	    </div>
+	  );
 }
 
 /* ══════════════════════════════════════════════════════
@@ -5382,6 +7134,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onSelectSession,
   onNewSession,
   onRefresh,
+  onMarkAllRead,
+  inboxUnreadCount,
   onRemove,
   onRename,
   onExtensions,
@@ -5407,6 +7161,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onSelectSession: (s: SessionInfo, wsPath: string) => void;
   onNewSession: (wsPath: string) => void;
   onRefresh: (wsPath: string) => void;
+  onMarkAllRead: (wsPath: string) => void;
+  inboxUnreadCount: number;
   onRemove: (wsPath: string) => void;
   onRename: (workspace: WorkspaceEntry) => void;
   onExtensions: (wsPath: string) => void;
@@ -5477,18 +7233,18 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   };
 
   return (
-    <div className="border-b border-edge-h/45 py-2 last:border-b-0">
+    <div className="border-b border-edge/25 py-2 last:border-b-0">
       {/* Workspace header */}
       <div
         data-workspace-path={wsPath}
         draggable
         className={cn(
-          'mx-2 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-[background,border-color,box-shadow,opacity,transform] duration-150 hover:translate-x-0.5',
+          'group/workspace mx-2 flex h-8 items-center gap-1.5 rounded-md px-2 cursor-pointer transition-[background,border-color,opacity] duration-150',
           groupHeaderSelected
-            ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-1 ring-[color:var(--th-selection-ring)] shadow-[inset_3px_0_0_var(--th-selection-accent)] hover:bg-[var(--th-selection-bg-h)]'
+            ? 'bg-panel-h/72 text-fg'
             : isActive
-              ? 'border-edge-h/70 bg-panel-h/75 hover:border-edge-h hover:bg-panel-h'
-            : 'border-transparent bg-transparent hover:border-edge/70 hover:bg-panel-h/45',
+              ? 'bg-panel-alt/42 text-fg-2 hover:bg-panel-h/58'
+            : 'bg-transparent text-fg-3 hover:bg-panel-h/45',
           draggingPath === wsPath && 'opacity-60',
           dragOverPath === wsPath && draggingPath !== wsPath && 'bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]',
         )}
@@ -5503,19 +7259,14 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
         onDrop={e => onWorkspaceDrop(wsPath, e)}
         onDragEnd={onWorkspaceDragEnd}
       >
-        <svg width="9" height="13" viewBox="0 0 12 18" fill="currentColor" className="shrink-0 text-fg-6/50">
-          <circle cx="3" cy="4" r="1.2" /><circle cx="9" cy="4" r="1.2" />
-          <circle cx="3" cy="9" r="1.2" /><circle cx="9" cy="9" r="1.2" />
-          <circle cx="3" cy="14" r="1.2" /><circle cx="9" cy="14" r="1.2" />
-        </svg>
         <svg
           width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-          className={cn('shrink-0 text-fg-5 transition-transform duration-150', expanded && 'rotate-90')}
+          className={cn('shrink-0 text-fg-5/70 transition-transform duration-150', expanded && 'rotate-90')}
         >
           <polyline points="9 6 15 12 9 18" />
         </svg>
         <div className="flex-1 min-w-0 flex items-baseline gap-2 overflow-hidden">
-          <span className={cn('shrink-0 whitespace-nowrap text-[12px] font-semibold', groupHeaderSelected ? 'text-fg' : 'text-fg-2')}>
+          <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold">
             {displayName}
           </span>
           {hasAlias && (
@@ -5527,10 +7278,26 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
         {groupAttention && <Dot variant={groupAttention.variant} pulse={groupAttention.pulse} />}
         <button
           type="button"
+          onClick={e => {
+            e.stopPropagation();
+            onNewSession(wsPath);
+          }}
+          onMouseDown={e => e.stopPropagation()}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-5/75 transition-[background,color,opacity] hover:bg-panel-h hover:text-fg-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+          title={t('hub.newSessionHere')}
+          aria-label={t('hub.newSessionHere')}
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </button>
+        <button
+          type="button"
           onClick={openActions}
           onMouseDown={e => e.stopPropagation()}
           className={cn(
-            'ml-auto inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] font-semibold leading-none text-fg-5 transition-colors hover:bg-panel-h hover:text-fg-2',
+            'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] font-semibold leading-none text-fg-5 opacity-0 transition-[background,color,opacity] hover:bg-panel-h hover:text-fg-2 hover:opacity-100 group-hover/workspace:opacity-100 focus-visible:opacity-100',
             actionsAnchor && 'bg-panel-h text-fg-2',
           )}
           title={t('session.openActions')}
@@ -5541,7 +7308,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
         </button>
         {actionsAnchor && (() => {
           const MENU_WIDTH = 168;
-          const MENU_HEIGHT = 174;
+	          const MENU_HEIGHT = 206;
           const panelInset = 8;
           const availableWidth = Math.max(132, actionsAnchor.panelRight - actionsAnchor.panelLeft - panelInset * 2);
           const menuWidth = Math.min(MENU_WIDTH, availableWidth);
@@ -5594,9 +7361,9 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
             </svg>
             {t('hub.extensions')}
           </button>
-          <button
-            onClick={e => runAction(e, () => onRefresh(wsPath))}
-            className={menuItemClass()}
+	          <button
+	            onClick={e => runAction(e, () => onRefresh(wsPath))}
+	            className={menuItemClass()}
             title={t('hub.refresh')}
             aria-label={t('hub.refresh')}
             role="menuitem"
@@ -5604,9 +7371,28 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0">
               <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
-            {t('hub.refresh')}
-          </button>
-          {!isActive && (
+	            {t('hub.refresh')}
+	          </button>
+	          <button
+	            onClick={e => runAction(e, () => onMarkAllRead(wsPath))}
+	            className={cn(menuItemClass(), !inboxUnreadCount && 'pointer-events-none opacity-45')}
+	            title={t('inbox.markAllRead')}
+	            aria-label={t('inbox.markAllRead')}
+	            aria-disabled={!inboxUnreadCount}
+	            role="menuitem"
+	          >
+	            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+	              <path d="M20 6 9 17l-5-5" />
+	              <path d="m22 10-9 9-2-2" />
+	            </svg>
+	            <span className="min-w-0 flex-1 truncate">{t('inbox.markAllRead')}</span>
+	            {inboxUnreadCount > 0 && (
+	              <span className="rounded-md border border-current/15 bg-panel-alt px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-fg-5">
+	                {inboxUnreadCount}
+	              </span>
+	            )}
+	          </button>
+	          {!isActive && (
             <button
               onClick={e => runAction(e, () => onRemove(wsPath))}
               className={menuItemClass('danger')}
@@ -5628,7 +7414,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
 
       {/* Sessions */}
       {expanded && (
-        <div className="mt-1 space-y-1 px-2 pb-1">
+        <div className="mt-0.5 space-y-[1px] px-2 pb-1">
           {loading ? (
             <div className="flex items-center justify-center py-4">
               <Spinner className="h-3 w-3 text-fg-5" />
@@ -5659,7 +7445,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
               {remaining > 0 && (
                 <button
                   onClick={() => setVisibleCount(v => v + PAGE_SIZE)}
-                  className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent px-3 py-1.5 text-[11px] text-fg-5 transition-colors hover:border-edge/50 hover:bg-panel-h/45 hover:text-fg-3"
+                  className="flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-transparent px-3 text-[10.5px] text-fg-5 transition-colors hover:bg-panel-h/45 hover:text-fg-3"
                 >
                   <span>+ {t('hub.nMore').replace('{n}', String(remaining))}</span>
                   <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -5676,7 +7462,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
 });
 
 /* ══════════════════════════════════════════════════════
-   Session Card — 3 lines: agent+time, question, status dot
+   Session Card — compact chat index row
    ══════════════════════════════════════════════════════ */
 const SessionCard = memo(function SessionCard({
   session,
@@ -5704,146 +7490,114 @@ const SessionCard = memo(function SessionCard({
   menuLabel: string;
   t: (key: string) => string;
 }) {
-  const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
-  const now = useElapsedNow(displayState === 'running');
-  const runningStartedAt = displayState === 'running' ? sessionRunningStartMs(session) : null;
-  const runningElapsed = runningStartedAt ? formatElapsedDuration(now - runningStartedAt) : null;
-  const statusLabel = displayState === 'running'
-    ? `${t('session.statusRunning')}${runningElapsed ? ` ${runningElapsed}` : ''}`
-    : displayState === 'incomplete'
-      ? t('session.statusIncomplete')
-      : t('session.statusCompleted');
   const displayText = sessionListDisplayText(session).slice(0, 500) || session.sessionId.slice(0, 16);
-  const contextText = sessionListContextText(session, displayText).slice(0, 500);
-  const modelShort = session.model ? shortenModel(session.model) : null;
-  const originLabel = sessionOriginLabel(session);
+  const lastActivityIso = session.runUpdatedAt || session.createdAt || undefined;
+  const lastActivityLabel = fmtSidebarSessionTime(lastActivityIso);
   const attentionVariant = sessionAttentionVariant(session);
-  const showUnreadDot = !!attentionVariant && displayState !== 'running';
+  const showStateDot = !!attentionVariant;
   const indentPx = forkDepth > 0 ? Math.min(forkDepth, 3) * 14 : 0;
-  const baseLeftPx = 12;
+  const baseLeftPx = 14;
+  const rowStateClass = isSelected
+    ? 'bg-primary/[0.075] text-fg ring-1 ring-inset ring-primary/12 hover:bg-primary/[0.09]'
+    : isOpen
+      ? 'bg-primary/[0.045] text-fg-2 ring-1 ring-inset ring-primary/8 hover:bg-primary/[0.065]'
+      : displayState === 'running'
+        ? 'bg-transparent text-fg-3 hover:bg-ok/[0.035]'
+        : displayState === 'incomplete'
+          ? 'bg-transparent text-fg-3 hover:bg-warn/[0.035]'
+          : 'bg-transparent text-fg-3 hover:bg-panel-h/52';
 
   const kebabRef = useRef<HTMLButtonElement | null>(null);
 
   return (
-    <div className="relative group/session">
-    <span
-      aria-hidden="true"
-      className={cn(
-        'pointer-events-none absolute inset-y-2 left-0 w-[2px] rounded-full opacity-0 transition-opacity duration-150',
-        displayState === 'running' ? 'bg-ok' : displayState === 'incomplete' ? 'bg-warn' : 'bg-primary',
-        (isSelected || isOpen) && 'opacity-100',
-        !isSelected && !isOpen && 'group-hover/session:opacity-60',
-      )}
+	    <div className="relative group/session">
+	    <span
+	      aria-hidden="true"
+	      className={cn(
+	        'pointer-events-none absolute inset-y-1 left-0 w-[2px] rounded-full opacity-0 transition-opacity duration-150',
+	        isSelected || isOpen
+	          ? 'bg-primary'
+	          : displayState === 'running'
+	            ? 'bg-ok'
+	            : displayState === 'incomplete'
+	              ? 'bg-warn'
+	              : 'bg-primary',
+	        (isSelected || isOpen) && 'opacity-100',
+	        !isSelected && !isOpen && 'group-hover/session:opacity-60',
+	      )}
     />
     <button
       data-session-card
+      aria-pressed={isSelected}
       onClick={onClick}
       onMouseEnter={onWarm}
       onFocus={onWarm}
-      onMouseLeave={onCancelWarm}
-      onBlur={onCancelWarm}
-      className={cn(
-        'h-[88px] w-full overflow-hidden rounded-lg border pr-3 py-2 text-left transition-[background,border-color,box-shadow,transform] duration-150',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
-        isSelected
-          ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)] hover:bg-[var(--th-selection-bg-h)] shadow-[0_8px_18px_rgba(0,0,0,0.12)]'
-          : isOpen
-            ? 'border-[color:var(--th-selection-ring)] bg-[var(--th-selection-soft)] hover:border-[color:var(--th-selection-border)] hover:bg-[var(--th-selection-bg)] hover:ring-2 hover:ring-inset hover:ring-[color:var(--th-selection-ring)]'
-            : 'border-edge/40 bg-panel/42 hover:border-edge-h hover:bg-panel-h/62 hover:shadow-[0_8px_18px_rgba(0,0,0,0.10)]',
-        !isSelected && 'hover:translate-x-1',
-        isSelected && 'shadow-[inset_4px_0_0_var(--th-selection-accent)]',
-      )}
+	      onMouseLeave={onCancelWarm}
+	      onBlur={onCancelWarm}
+	      className={cn(
+	        'h-8 w-full overflow-hidden rounded-md border border-transparent py-0 pr-1.5 text-left transition-[background,box-shadow,transform] duration-150',
+	        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+	        rowStateClass,
+	        !isSelected && 'hover:translate-x-0.5',
+	      )}
       style={{
         paddingLeft: baseLeftPx + indentPx,
       }}
     >
-      {/* Row 1: agent + model + turns + time */}
-      <div className="flex h-4 items-center gap-1.5 text-[10px] text-fg-5">
-        {forkDepth > 0 && (
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-fg-5/60 shrink-0" aria-label="Fork">
-            <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
-            <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
-          </svg>
-        )}
-        <BrandIcon brand={session.agent || ''} size={10} />
-        <span className="font-medium shrink-0" style={{ color: meta.color }}>{meta.shortLabel}</span>
-        {session.pinned && (
-          <span title={t('session.pinned')} className="inline-flex h-3 w-3 shrink-0 items-center justify-center text-primary/85">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M14 2l8 8-2 2-1.5-1.5-4.7 4.7.2 4.8-1.5 1.5-4.2-4.2L3 22l-1-1 4.2-4.8L2 12l1.5-1.5 4.8.2 4.7-4.7L12 4z" />
-            </svg>
-          </span>
-        )}
-        {modelShort && (
-          <span className="truncate max-w-[72px] font-mono text-fg-5/40 text-[9px]">{modelShort}</span>
-        )}
-        {originLabel && (
-          <span
-            title={sessionOriginTitle(session)}
-            className="shrink-0 rounded border border-edge/50 bg-fg-5/[0.06] px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-fg-5/70"
-          >
-            {originLabel}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1.5 shrink-0 transition-opacity group-hover/session:opacity-0 group-focus-within/session:opacity-0">
-          {!!session.numTurns && (
-            <span className="flex items-center gap-0.5 text-fg-5/50 tabular-nums">
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-50">
-                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-              </svg>
-              {session.numTurns}
+		      <div className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_46px] items-center gap-2 overflow-hidden">
+	        <span className="flex min-w-0 items-center gap-1.5">
+	          {forkDepth > 0 && (
+	            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-fg-5/55" aria-label="Fork">
+	              <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
+	              <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
+	            </svg>
+	          )}
+	          {session.pinned && (
+	            <span title={t('session.pinned')} className="inline-flex h-3 w-3 shrink-0 items-center justify-center text-primary/80">
+	              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+	                <path d="M14 2l8 8-2 2-1.5-1.5-4.7 4.7.2 4.8-1.5 1.5-4.2-4.2L3 22l-1-1 4.2-4.8L2 12l1.5-1.5 4.8.2 4.7-4.7L12 4z" />
+	              </svg>
             </span>
+	          )}
+		          <span
+		            className={cn(
+		              'min-w-0 flex-1 truncate text-[11.5px] font-medium leading-none',
+		              (isSelected || isOpen || showStateDot) && 'font-semibold text-fg',
+		            )}
+	            title={displayText}
+	          >
+	            {displayText}
+	          </span>
+	        </span>
+		        <span className="flex shrink-0 items-center justify-end gap-1.5 text-[10px] font-medium leading-none text-fg-5/70 transition-opacity group-hover/session:opacity-0 group-focus-within/session:opacity-0">
+	          <span className="max-w-[40px] truncate text-right tabular-nums" title={lastActivityIso ? new Date(lastActivityIso).toLocaleString() : undefined}>
+	            {lastActivityLabel}
+          </span>
+          {showStateDot ? (
+            <span
+              aria-hidden="true"
+              className={cn(
+                'h-2 w-2 rounded-full shadow-[0_0_0_2px_var(--th-panel)]',
+                attentionVariant === 'ok'
+                  ? 'bg-ok'
+                  : attentionVariant === 'warn'
+                    ? 'bg-warn'
+                    : 'bg-primary',
+                displayState === 'running' && 'animate-pulse',
+              )}
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className={cn(
+                'h-1.5 w-1.5 rounded-full border border-edge/55 opacity-0 transition-opacity',
+                (isSelected || isOpen) && 'opacity-70',
+              )}
+            />
           )}
-          <span className="tabular-nums">{fmtRelative(session.runUpdatedAt || session.createdAt)}</span>
-        </div>
-      </div>
-      {/* Row 2: unread/attention dot + title */}
-      <div className="mt-1 flex h-[34px] items-start gap-1.5 overflow-hidden">
-        {showUnreadDot && (
-          <span
-            aria-hidden="true"
-            className={cn(
-              'mt-[5px] h-2 w-2 shrink-0 rounded-full shadow-[0_0_0_2px_var(--th-panel)]',
-              attentionVariant === 'ok'
-                ? 'bg-ok'
-                : attentionVariant === 'warn'
-                  ? 'bg-warn'
-                  : 'bg-primary',
-            )}
-          />
-        )}
-        <span
-          className={cn(
-            'min-w-0 flex-1 break-words text-[12px] font-semibold leading-snug text-fg',
-            showUnreadDot && 'font-bold',
-          )}
-          title={displayText}
-          style={{
-            display: '-webkit-box',
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical',
-            overflow: 'hidden',
-          }}
-        >
-          {displayText}
-        </span>
-        <span className={cn(
-          'mt-0.5 shrink-0 whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[9px] font-semibold leading-none',
-          displayState === 'running'
-            ? 'border-ok/20 bg-ok/15 text-ok'
-            : displayState === 'incomplete'
-              ? 'border-warn/20 bg-warn/15 text-warn'
-              : 'border-edge/40 bg-fg-5/10 text-fg-3',
-        )}>
-          {statusLabel}
         </span>
       </div>
-      {contextText && (
-        <div className="mt-0.5 h-[14px] pl-[11px]">
-          <span className="block truncate text-[10px] leading-snug text-fg-5">{contextText}</span>
-        </div>
-      )}
     </button>
       {/* Kebab — hidden by default, fades in on row hover/focus. Anchors the
           actions popover via getBoundingClientRect, so it never spawns at the
@@ -5860,7 +7614,7 @@ const SessionCard = memo(function SessionCard({
           if (kebabRef.current) onShowMenu(kebabRef.current.getBoundingClientRect());
         }}
         title={menuLabel}
-        className="absolute top-1.5 right-1.5 inline-flex h-6 w-6 items-center justify-center rounded border border-edge/40 bg-panel/95 text-fg-5 opacity-0 shadow-sm transition-opacity group-hover/session:opacity-100 focus-visible:opacity-100 hover:bg-panel-h hover:text-fg-2"
+        className="absolute top-1/2 right-1.5 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md border border-edge/35 bg-panel/95 text-fg-5 opacity-0 shadow-sm transition-opacity group-hover/session:opacity-100 focus-visible:opacity-100 hover:bg-panel-h hover:text-fg-2"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="shrink-0">
           <circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" />
@@ -5886,6 +7640,176 @@ type PreviewState = {
   truncated?: boolean;
   size?: number;
 };
+
+const WorkspaceFilesShelfPane = memo(function WorkspaceFilesShelfPane({
+  workdir,
+  request,
+  t,
+}: {
+  workdir: string;
+  request?: FilePanelRequest | null;
+  t: (key: string) => string;
+}) {
+  const hostApp = useStore(s => s.state?.hostApp ?? null);
+  const platform = useStore(s => s.state?.platform ?? null);
+  const toast = useStore(s => s.toast);
+  const [openTarget, setOpenTarget] = useState<OpenTarget>(() => inferOpenTarget(hostApp, platform));
+  const [panelMode, setPanelMode] = useState<FilePanelMode>('changes');
+  const [changes, setChanges] = useState<GitChange[]>([]);
+  const [changesLoading, setChangesLoading] = useState(false);
+  const [changesIsGit, setChangesIsGit] = useState(true);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const previewSeqRef = useRef(0);
+
+  const handleOpenPath = useCallback(async (targetPath: string) => {
+    try {
+      const res = await api.openInEditor(targetPath, openTarget);
+      if (!res.ok) throw new Error(res.error || `Failed to open ${targetPath}`);
+    } catch (error: any) {
+      toast(error?.message || String(error), false);
+    }
+  }, [openTarget, toast]);
+
+  const loadChanges = useCallback(async () => {
+    setChangesLoading(true);
+    setChanges([]);
+    try {
+      const res = await api.gitChanges(workdir);
+      setChanges(res.ok ? res.changes.filter(change => !isPikiclawMetaPath(change.file)) : []);
+      setChangesIsGit(res.ok ? res.isGit : false);
+    } catch {
+      setChanges([]);
+      setChangesIsGit(false);
+    } finally {
+      setChangesLoading(false);
+    }
+  }, [workdir]);
+
+  const handlePreviewPath = useCallback(async (targetPath: string, mode: PreviewMode = 'file', line?: number) => {
+    const seq = ++previewSeqRef.current;
+    setPreview({ path: targetPath, mode, loading: true, line });
+    try {
+      const res = mode === 'diff'
+        ? await api.gitDiffContent(workdir, targetPath)
+        : await api.fileContent(workdir, targetPath);
+      if (seq !== previewSeqRef.current) return;
+      if (!res.ok) {
+        setPreview({
+          path: res.path || targetPath,
+          mode,
+          loading: false,
+          relativePath: res.relativePath,
+          error: res.error || t('hub.previewUnavailable'),
+          size: res.size,
+          line,
+        });
+        return;
+      }
+      setPreview({
+        path: res.path || targetPath,
+        mode,
+        loading: false,
+        relativePath: res.relativePath,
+        content: res.content || '',
+        truncated: mode === 'diff' ? res.truncated : false,
+        size: mode === 'file' ? res.size : undefined,
+        line,
+      });
+    } catch (error: any) {
+      if (seq !== previewSeqRef.current) return;
+      setPreview({
+        path: targetPath,
+        mode,
+        loading: false,
+        error: error?.message || String(error),
+        line,
+      });
+    }
+  }, [t, workdir]);
+
+  useEffect(() => {
+    void loadChanges();
+    setPreview(null);
+    setPanelMode('changes');
+  }, [loadChanges]);
+
+  useEffect(() => {
+    if (!request || request.workdir !== workdir) return;
+    setPanelMode('files');
+    void handlePreviewPath(request.path, 'file', request.line);
+  }, [handlePreviewPath, request, workdir]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[var(--th-session-bg)]">
+      <div className="shrink-0 border-b border-edge/45 bg-panel/65 px-2.5 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <IconPicker
+            value={openTarget}
+            options={(platform === 'darwin' ? ['vscode', 'finder'] : ['vscode']).map(v => ({
+              value: v,
+              label: t(targetLabelKey(v as OpenTarget)),
+            }))}
+            onChange={value => { if (isOpenTarget(value)) setOpenTarget(value); }}
+            renderIcon={v => <OpenTargetIcon target={v as OpenTarget} size={14} />}
+          />
+          <Button size="sm" variant="ghost" onClick={() => handleOpenPath(workdir)} className="min-w-0 flex-1 text-[11px]">
+            {t('hub.openProject')}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => void loadChanges()} disabled={changesLoading} className="shrink-0 text-[11px]">
+            {changesLoading ? <Spinner className="h-3 w-3" /> : null}
+            {t('hub.refresh')}
+          </Button>
+        </div>
+        <div className="mt-2 flex items-center rounded-md border border-edge/30 bg-inset/35 p-0.5">
+          {(['changes', 'files'] as FilePanelMode[]).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setPanelMode(mode)}
+              className={cn(
+                'h-7 flex-1 rounded px-2 text-[11px] font-medium transition-colors',
+                panelMode === mode ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-5 hover:text-fg-3',
+              )}
+            >
+              {mode === 'changes' ? t('hub.changes') : t('hub.files')}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="grid min-h-0 flex-1 grid-rows-[minmax(150px,0.48fr)_minmax(220px,0.52fr)]">
+        <div className="min-h-0 overflow-y-auto border-b border-edge/45 px-1 py-1.5">
+          {panelMode === 'changes' ? (
+            <ChangeList
+              changes={changes}
+              loading={changesLoading}
+              isGit={changesIsGit}
+              onPreview={handlePreviewPath}
+              onOpenPath={handleOpenPath}
+              onRefresh={loadChanges}
+              t={t}
+            />
+          ) : (
+            <FileTree
+              basePath={workdir}
+              openTarget={openTarget}
+              selectedPath={preview?.path || null}
+              onOpenPath={handleOpenPath}
+              onPreviewPath={handlePreviewPath}
+              t={t}
+            />
+          )}
+        </div>
+        <div className="min-h-0 overflow-hidden">
+          <CodePreviewPane
+            preview={preview}
+            onOpenPath={handleOpenPath}
+            t={t}
+          />
+        </div>
+      </div>
+    </div>
+  );
+});
 
 const FloatingFileTree = memo(function FloatingFileTree({
   workdir,
@@ -5924,9 +7848,10 @@ const FloatingFileTree = memo(function FloatingFileTree({
 
   const loadChanges = useCallback(async () => {
     setChangesLoading(true);
+    setChanges([]);
     try {
       const res = await api.gitChanges(workdir);
-      setChanges(res.ok ? res.changes : []);
+      setChanges(res.ok ? res.changes.filter(change => !isPikiclawMetaPath(change.file)) : []);
       setChangesIsGit(res.ok ? res.isGit : false);
     } catch {
       setChanges([]);
@@ -6884,14 +8809,14 @@ function CodePreviewPane({
 
   if (!preview) {
     return (
-      <div className="flex-1 min-w-0 flex items-center justify-center text-[12px] text-fg-5">
+      <div className="flex h-full flex-1 min-w-0 items-center justify-center text-[12px] text-fg-5">
         {t('hub.selectFile')}
       </div>
     );
   }
 
   return (
-    <div className="flex-1 min-w-0 flex flex-col min-h-0">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
       <div className="shrink-0 flex items-center gap-2 border-b border-edge/20 px-3 py-2">
         <span className="shrink-0 rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[10px] font-medium text-fg-4">
           {preview.mode === 'diff' ? t('hub.diff') : t('hub.preview')}

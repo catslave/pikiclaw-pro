@@ -1,0 +1,40 @@
+{
+  "defaultMcpServer": "clickhouse-lab",
+  "defaultDatabase": "gen_eva_trace_v2",
+  "defaultTable": "gen_eva_trace_v2.otel_traces_main",
+  "primaryLookupKeys": [
+    "TraceId",
+    "ConversationId"
+  ],
+  "idNormalization": {
+    "conversationIdToTraceId": "remove hyphens",
+    "traceIdToConversationId": "not reversible without source grouping"
+  },
+  "defaultPreviewColumns": [
+    "Timestamp",
+    "TraceId",
+    "ConversationId",
+    "SessionId",
+    "SpanId",
+    "ParentSpanId",
+    "ServiceName",
+    "SpanName",
+    "Duration",
+    "StatusCode",
+    "StatusMessage"
+  ],
+  "defaultLimit": 20,
+  "topSpanLimit": 10,
+  "analysisOutput": {
+    "sections": [
+      "lookup",
+      "summary",
+      "analysis",
+      "slow_spans",
+      "risk_or_anomaly",
+      "next_steps"
+    ],
+    "durationUnit": "ms",
+    "highlightThresholdMs": 1000
+  }
+}

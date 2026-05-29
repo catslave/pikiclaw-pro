@@ -18,6 +18,7 @@ export const AGENT_ACCEPTED_PROVIDER_KINDS: Record<Agent, readonly string[]> = {
   cursor: [],
   gemini: ['google'],
   hermes: ['anthropic', 'openai', 'openai-compatible', 'google'],
+  openclaw: [],
 };
 
 export function fmtBytes(b: number): string {
@@ -143,6 +144,16 @@ export const agentMeta: Record<string, AgentMeta> = {
     border: 'rgba(251,191,36,0.2)',
     advantageKey: 'config.agentAdvantageHermes',
   },
+  openclaw: {
+    label: 'OpenClaw',
+    shortLabel: 'OpenClaw',
+    color: '#5eead4',
+    bg: 'rgba(94,234,212,0.12)',
+    letter: 'OC',
+    glow: 'rgba(94,234,212,0.2)',
+    border: 'rgba(94,234,212,0.2)',
+    advantageKey: 'config.agentAdvantageOpenClaw',
+  },
 };
 
 export function getAgentMeta(agent: string): AgentMeta {
@@ -159,6 +170,7 @@ export const EFFORT_OPTIONS: Record<Agent, string[]> = {
   // upstream may or may not act on it depending on the bound model, but we
   // surface the standard knob so users can change it from any picker.
   hermes: ['low', 'medium', 'high', 'xhigh'],
+  openclaw: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'],
 };
 
 /**

@@ -71,7 +71,7 @@ function isStoppedError(error: string | null | undefined): boolean {
 
 function Badge({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <span title={title} className="shrink-0 whitespace-nowrap rounded-md border border-edge/80 bg-inset px-1.5 py-0.5 text-[10px] leading-none font-mono text-fg-5/75">
+    <span title={title} className="shrink-0 whitespace-nowrap rounded-md border border-edge/80 bg-inset px-1.5 py-0.5 text-[10px] leading-none font-mono tabular-nums text-fg-5/75">
       {children}
     </span>
   );
@@ -414,6 +414,7 @@ export function CompletedWorkDisclosure({
   startedAt,
   completedAt,
   updatedAt,
+  error,
   defaultOpen = false,
   children,
 }: {
@@ -421,6 +422,7 @@ export function CompletedWorkDisclosure({
   startedAt?: number | string | null;
   completedAt?: number | string | null;
   updatedAt?: number | string | null;
+  error?: string | null;
   defaultOpen?: boolean;
   children?: ReactNode;
 }) {
@@ -430,23 +432,51 @@ export function CompletedWorkDisclosure({
   const duration = startMs != null && doneMs != null
     ? formatDuration(Math.max(0, doneMs - startMs))
     : null;
-  const label = duration
-    ? replaceVars(t('hub.workedFor'), { time: duration })
-    : t('hub.executionRecord');
+  const detail = String(error || '').trim();
+  const stopped = isStoppedError(detail);
+  const stillRunning = !detail && doneMs == null;
+  const label = stillRunning
+    ? t('hub.executionRecord')
+    : detail
+    ? (duration
+        ? replaceVars(t(stopped ? 'hub.stoppedAfter' : 'hub.failedAfter'), { time: duration })
+        : t(stopped ? 'hub.statusStopped' : 'hub.statusFailed'))
+    : duration
+      ? replaceVars(t('hub.workedFor'), { time: duration })
+      : t('hub.executionRecord');
 
   return (
     <section className="border-b border-edge/50 pb-2">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 py-0.5 text-left text-[13px] leading-none text-fg-5/85 transition-colors hover:text-fg-3"
+        className={cn(
+          'flex w-full items-center gap-1.5 py-0.5 text-left text-[13px] leading-none hover:text-fg-3',
+          detail ? (stopped ? 'text-amber-300/90' : 'text-rose-300/90') : 'text-fg-5/85',
+        )}
         onClick={() => setOpen(v => !v)}
         aria-expanded={open}
       >
         <span>{label}</span>
         <ChevronIcon open={open} className="h-3.5 w-3.5" />
       </button>
-      {open && children && (
+      {open && (children || detail) && (
         <div className="pt-3 pb-1">
+          {detail && (
+            <div className={cn(
+              'mb-3 rounded-md border px-3 py-2 text-[12px] leading-[1.6]',
+              stopped
+                ? 'border-amber-500/35 bg-amber-500/[0.08] text-amber-700 dark:text-amber-100/90'
+                : 'border-rose-500/35 bg-rose-500/[0.08] text-rose-700 dark:text-rose-100/90',
+            )}>
+              <div className={cn(
+                'mb-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]',
+                stopped ? 'text-amber-700/80 dark:text-amber-200/80' : 'text-rose-700/80 dark:text-rose-200/80',
+              )}>
+                {t(stopped ? 'hub.statusStopped' : 'hub.statusFailed')}
+              </div>
+              <div className="break-words">{detail}</div>
+            </div>
+          )}
           {children}
         </div>
       )}
@@ -472,7 +502,7 @@ export function WorkingSection({
       <section className="space-y-1.5">
         <button
           type="button"
-          className="flex w-full items-center gap-2 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5/75 hover:text-fg-4 transition-colors"
+          className="flex w-full items-center gap-2 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5/75 hover:text-fg-4"
           onClick={() => setOpen(v => !v)}
           aria-expanded={open}
         >

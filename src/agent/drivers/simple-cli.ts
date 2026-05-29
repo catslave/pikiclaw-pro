@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { terminateProcessTree } from '../../core/process-control.js';
 import { AGENT_STREAM_HARD_KILL_GRACE_MS } from '../../core/constants.js';
+import { processEnvWithUserBins, resolveExecutablePath } from '../../core/platform.js';
 import type {
   Agent,
   ManagedSessionRecord,
@@ -62,10 +63,18 @@ export interface SimpleCliCommand {
   env?: Record<string, string>;
 }
 
+export interface SimpleCliParsedOutput {
+  message: string;
+  model?: string | null;
+  thinking?: string | null;
+}
+
 export interface SimpleCliRunOptions {
   agent: Agent;
   label: string;
   buildCommand: (opts: StreamOpts, prompt: string, sessionId: string) => SimpleCliCommand;
+  includeHistory?: boolean;
+  parseOutput?: (stdout: string, stderr: string, command: SimpleCliCommand) => SimpleCliParsedOutput;
 }
 
 const TRANSCRIPT_DIR = path.join('.pikiclaw', 'simple-cli-transcripts');
@@ -239,7 +248,9 @@ export async function runSimpleCliStream(opts: StreamOpts, runOptions: SimpleCli
   }
 
   const priorTranscript = readTranscript(opts.workdir, runOptions.agent, sessionId);
-  const prompt = buildPromptWithHistory(opts, priorTranscript);
+  const prompt = runOptions.includeHistory === false
+    ? opts.prompt
+    : buildPromptWithHistory(opts, priorTranscript);
   const command = runOptions.buildCommand(opts, prompt, sessionId);
   const shellLine = [command.cmd, ...command.args].map(Q).join(' ');
   agentLog(`[${runOptions.agent}] full command: cd ${Q(opts.workdir)} && ${shellLine}`);
@@ -249,8 +260,9 @@ export async function runSimpleCliStream(opts: StreamOpts, runOptions: SimpleCli
   let timedOut = false;
   let interrupted = false;
   let finished = false;
-  const spawnEnv = { ...process.env, ...(opts.extraEnv || {}), ...(command.env || {}) };
-  const child = spawn(command.cmd, command.args, {
+  const spawnEnv = processEnvWithUserBins({ ...process.env, ...(opts.extraEnv || {}), ...(command.env || {}) });
+  const resolvedCmd = resolveExecutablePath(command.cmd, spawnEnv) || command.cmd;
+  const child = spawn(resolvedCmd, command.args, {
     cwd: opts.workdir,
     env: spawnEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -304,16 +316,30 @@ export async function runSimpleCliStream(opts: StreamOpts, runOptions: SimpleCli
   });
   opts.abortSignal?.removeEventListener('abort', abortStream);
 
-  const text = stripAnsi(stdout).trim();
+  const rawText = stripAnsi(stdout).trim();
+  let parsed: SimpleCliParsedOutput | null = null;
+  let parseError: string | null = null;
+  if (procOk && !timedOut && !interrupted && runOptions.parseOutput) {
+    try {
+      parsed = runOptions.parseOutput(rawText, stderr, command);
+    } catch (e: any) {
+      parseError = e?.message || String(e);
+    }
+  }
+  const text = parsed?.message?.trim() || rawText;
   const error = interrupted
     ? 'Interrupted by user.'
     : timedOut
       ? `Timed out after ${opts.timeout}s before the agent reported completion.`
+      : parseError
+        ? parseError
       : !procOk
         ? (normalizeErrorMessage(stderr) || normalizeErrorMessage(stdout) || `Failed (exit=${code}).`)
         : null;
-  const ok = procOk && !timedOut && !interrupted;
-  const message = text || (ok ? '(no textual response)' : (error || `Failed (exit=${code}).`));
+  const ok = procOk && !timedOut && !interrupted && !parseError;
+  const message = parseError
+    ? (error || parseError)
+    : text || (ok ? '(no textual response)' : (error || `Failed (exit=${code}).`));
 
   if (ok) {
     const now = new Date().toISOString();
@@ -330,7 +356,7 @@ export async function runSimpleCliStream(opts: StreamOpts, runOptions: SimpleCli
     transcript.turns.push({
       user: opts.prompt,
       assistant: message,
-      model: command.model,
+      model: parsed?.model ?? command.model,
       createdAt: now,
     });
     try { writeTranscript(transcript); } catch (e: any) {
@@ -341,11 +367,11 @@ export async function runSimpleCliStream(opts: StreamOpts, runOptions: SimpleCli
   return {
     ok,
     message,
-    thinking: null,
+    thinking: parsed?.thinking || null,
     plan: null,
     sessionId,
     workspacePath: null,
-    model: command.model,
+    model: parsed?.model ?? command.model,
     thinkingEffort: opts.thinkingEffort,
     elapsedS: (Date.now() - start) / 1000,
     inputTokens: null,

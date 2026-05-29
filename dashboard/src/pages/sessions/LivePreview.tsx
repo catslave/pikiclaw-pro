@@ -11,6 +11,7 @@ import type { StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPre
 
 export interface LiveStreamView {
   taskId?: string | null;
+  prompt?: string | null;
   phase: 'streaming' | 'done';
   text: string;
   thinking: string;
@@ -57,12 +58,17 @@ function cleanWorkingPreview(line: string): string {
 /* ── Live streaming preview ── */
 export function LivePreview({
   stream,
+  streamActive = false,
   t,
   onOpenFileLink,
   workdir,
   onStopAll,
 }: {
   stream: LiveStreamView;
+  /** True while the session still owns an in-flight task. Keeps the live card on
+   *  "Working" during the done→history handoff instead of flickering to
+   *  "Worked for" when the backend briefly replays terminal snapshots. */
+  streamActive?: boolean;
   t: (k: string) => string;
   onOpenFileLink?: OpenFileLinkHandler;
   workdir?: string;
@@ -104,21 +110,22 @@ export function LivePreview({
     || (showPlan ? stream.plan.steps.length : 0)
     || (subAgents?.length ?? 0)
     || (stream.thinking ? 1 : 0);
-  const showWorking = (
-    !!stream.thinking
+  const terminalError = !!String(stream.error || '').trim();
+  const showLiveWorking = streamActive || stream.phase === 'streaming';
+  const showWorking = showLiveWorking
+    || !!stream.thinking
     || showPlan
     || !!(subAgents && subAgents.length)
     || !!stream.previewMeta?.diagnostics?.length
     || activityLines.length > 0
-    || structuredStepCount > 0
-  );
+    || structuredStepCount > 0;
 
   return (
-    <div className="space-y-3 animate-in">
+    <div className="space-y-3">
       {showWorking && (
-        stream.phase === 'streaming' ? (
+        showLiveWorking && !terminalError ? (
           <WorkingCard
-            phase={stream.phase}
+            phase="streaming"
             t={t}
             resetKey={stream.taskId || null}
             startedAt={stream.startedAt ?? null}
@@ -162,6 +169,7 @@ export function LivePreview({
             startedAt={stream.startedAt ?? null}
             completedAt={stream.completedAt ?? null}
             updatedAt={stream.updatedAt ?? null}
+            error={stream.error ?? null}
           >
             <div className="space-y-3 px-3.5 py-3">
               <WorkingPlanList plan={stream.plan} t={t} />

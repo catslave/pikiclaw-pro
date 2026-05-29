@@ -48,6 +48,8 @@ export const DASHBOARD_TIMEOUTS = {
   agentStatusCacheTtl: 30_000,
   /** Timeout for agent npm install via the dashboard. */
   agentInstall: 10 * 60_000,
+  /** Timeout for manual agent health checks from the dashboard. */
+  agentHealth: 45_000,
   /** Default timeout for dashboard-spawned shell commands. */
   runCommand: 30_000,
 };

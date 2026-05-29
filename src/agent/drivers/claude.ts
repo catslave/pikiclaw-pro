@@ -23,8 +23,6 @@ import {
   emitSessionIdUpdate,
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
-  adoptNativeSessionTitles,
-  mergeManagedAndNativeSessions,
   readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText, SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE,
   CLAUDE_AT_MENTION_IMAGE_RE, extractClaudeAtMentionImagePaths, stripClaudeAtMentionImages,
   attachAgentImage,
@@ -1137,7 +1135,6 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
 
 function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
-  // Merge pikiclaw-tracked sessions with native Claude sessions
   const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'claude', undefined, { includeSideChats: true }).map(record => ({
     sessionId: record.sessionId,
     agent: 'claude' as const,
@@ -1169,14 +1166,11 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     sideChats: record.sideChats ?? [],
     numTurns: record.numTurns ?? null,
   }));
-  const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);
-  const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'claude', pikiclawSessions, nativeSessions);
-  const merged = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
-  const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
+  const sessions = typeof limit === 'number' ? pikiclawSessions.slice(0, limit) : pikiclawSessions;
   const projectDir = path.join(getHome(), '.claude', 'projects', claudeProjectDirName(resolvedWorkdir));
   agentLog(
     `[sessions:claude] workdir=${resolvedWorkdir} projectDir=${projectDir} projectDirExists=${fs.existsSync(projectDir)} ` +
-    `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
+    `pikiclaw=${pikiclawSessions.length} returned=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }

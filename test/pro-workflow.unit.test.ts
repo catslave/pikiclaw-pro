@@ -5,11 +5,17 @@ import { makeTmpDir } from './support/env.ts';
 import {
   createAgentAssistant,
   createAutomationRule,
+  createJiraSyncRun,
   createKnowledgeEntry,
+  getAssistantPrompt,
+  getJiraSyncRun,
   listAgentAssistants,
   listAutomationRules,
   listKnowledgeEntries,
   markAutomationRun,
+  resetAgentAssistantPrompt,
+  updateAgentAssistantPrompt,
+  updateJiraSyncRun,
 } from '../src/pro/workflow.ts';
 
 let tmpDir: string;
@@ -28,13 +34,36 @@ afterEach(() => {
 });
 
 describe('Pro workflow store', () => {
+  it('exposes assistant-owned menu defaults and prompt management', () => {
+    const assistants = listAgentAssistants();
+    const ownerSurfaceIds = assistants
+      .filter(item => item.kind === 'page-owner')
+      .map(item => item.surfaceId)
+      .sort();
+    expect(ownerSurfaceIds).toEqual(['agents', 'dashboard', 'extensions', 'mcp', 'skills']);
+    expect(ownerSurfaceIds).not.toContain('usage');
+    expect(ownerSurfaceIds).not.toContain('system');
+
+    const promptInfo = getAssistantPrompt('assistant_dashboard_owner');
+    expect(promptInfo.prompt).toContain('backlog -> refinement -> working -> done');
+    expect(promptInfo.customized).toBe(false);
+
+    const updated = updateAgentAssistantPrompt('assistant_dashboard_owner', { prompt: 'custom dashboard prompt' });
+    expect(updated.prompt).toBe('custom dashboard prompt');
+    expect(getAssistantPrompt('assistant_dashboard_owner').customized).toBe(true);
+
+    const reset = resetAgentAssistantPrompt('assistant_dashboard_owner');
+    expect(reset.prompt).toBe(reset.defaultPrompt);
+    expect(getAssistantPrompt('assistant_dashboard_owner').customized).toBe(false);
+  });
+
   it('persists assistants, automations, and knowledge entries', () => {
     const assistant = createAgentAssistant({
       name: 'Bug refinery',
       responsibility: 'Analyze bugs and estimate user understanding time.',
       preferredAgents: ['codex', 'claude'],
     });
-    expect(listAgentAssistants()[0].id).toBe(assistant.id);
+    expect(listAgentAssistants().some(item => item.id === assistant.id)).toBe(true);
 
     const automation = createAutomationRule({
       name: 'Daily Jira sync',
@@ -52,5 +81,34 @@ describe('Pro workflow store', () => {
       tags: ['jira', 'estimate'],
     });
     expect(listKnowledgeEntries()[0]).toMatchObject({ id: entry.id, tags: ['jira', 'estimate'] });
+  });
+
+  it('persists Jira sync run status and analysis summary', () => {
+    const run = createJiraSyncRun({ assistantId: 'assistant_ticket_sync', agent: 'codex', workdir: '/repo/app' });
+    const updated = updateJiraSyncRun(run.id, {
+      status: 'completed',
+      ticketCount: 2,
+      taskCount: 2,
+      issueKeys: ['PRO-1', 'PRO-2'],
+      analysisSummary: 'Synced 2 tickets: one bug and one task.',
+      changes: [
+        { jiraKey: 'PRO-1', title: 'New task', action: 'created', summary: 'Jira issue PRO-1 synced.' },
+        { jiraKey: 'PRO-2', title: 'Existing bug', action: 'updated', summary: 'Jira issue PRO-2 updated: priority.' },
+      ],
+      event: { label: 'Synced 2 Pikiclaw tasks', detail: 'created=1, updated=1' },
+    });
+
+    expect(updated.completedAt).toBeTruthy();
+    expect(getJiraSyncRun(run.id)).toMatchObject({
+      status: 'completed',
+      ticketCount: 2,
+      taskCount: 2,
+      issueKeys: ['PRO-1', 'PRO-2'],
+      analysisSummary: 'Synced 2 tickets: one bug and one task.',
+      changes: [
+        { jiraKey: 'PRO-1', title: 'New task', action: 'created', summary: 'Jira issue PRO-1 synced.' },
+        { jiraKey: 'PRO-2', title: 'Existing bug', action: 'updated', summary: 'Jira issue PRO-2 updated: priority.' },
+      ],
+    });
   });
 });

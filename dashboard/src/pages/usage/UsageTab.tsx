@@ -8,7 +8,7 @@ import type { Agent, AgentRuntimeStatus, AgentStatusResponse, AppState, ProUsage
 import { formatUsageSummary, usageBadgeText, usageTone } from '../../usage';
 import { cn, getAgentMeta } from '../../utils';
 
-const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'];
+const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'];
 
 type Tone = 'ok' | 'warn' | 'err' | 'muted';
 

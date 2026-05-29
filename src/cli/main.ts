@@ -12,6 +12,7 @@ import path from 'node:path';
 import { startAgentAutoUpdate } from '../agent/auto-update.js';
 import { envBool, DEFAULT_RUN_TIMEOUT_S } from '../bot/bot.js';
 import { DAEMON_TIMEOUTS } from '../core/constants.js';
+import { isInsideContainer } from '../core/platform.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './channels.js';
 import { ChannelSupervisor } from './channel-supervisor.js';
 import { listAgents } from '../agent/index.js';
@@ -525,7 +526,7 @@ async function runSetupPhase(
     // the user explicitly set PIKICLAW_OPEN_BROWSER=0.
     const openBrowser =
       !process.env[FROM_LAUNCHD_ENV]
-      && !envBool('PIKICLAW_DOCKER', false)
+      && !isInsideContainer()
       && envBool('PIKICLAW_OPEN_BROWSER', true);
     dashboard = await startDashboard({
       port: args.dashboardPort || 3939,

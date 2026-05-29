@@ -9,6 +9,7 @@ const AGENT_PACKAGES: Record<Agent, string> = {
   codex: '@openai/codex',
   copilot: '@github/copilot',
   gemini: '@google/gemini-cli',
+  openclaw: 'openclaw',
 };
 
 /** Known Homebrew cask tokens for agents that publish brew casks. */
@@ -24,6 +25,7 @@ const AGENT_LABELS: Record<Agent, string> = {
   cursor: 'Cursor Agent',
   gemini: 'Gemini CLI',
   hermes: 'Hermes',
+  openclaw: 'OpenClaw',
 };
 
 export function getAgentPackage(agent: string): string | null {

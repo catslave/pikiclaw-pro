@@ -32,7 +32,7 @@ const tools: McpToolModule['tools'] = [
       properties: {
         issues: {
           type: 'array',
-          description: 'Jira issues to sync. Each item should include key/jiraKey, title/summary, description, issueType, url/jiraUrl, sprint.',
+          description: 'Jira issues to sync. Each item should include key/jiraKey, title/summary, description, issueType, url/jiraUrl, sprint, reporter, assignee, status, dueDate, priority, labels, and updatedAt when available.',
           items: {
             type: 'object',
             properties: {
@@ -50,7 +50,11 @@ const tools: McpToolModule['tools'] = [
               dueDate: { type: 'string' },
               priority: { type: 'string' },
               labels: { type: 'array', items: { type: 'string' } },
+              updatedAt: { type: 'string' },
+              updated: { type: 'string' },
               jiraUrl: { type: 'string' },
+              prUrl: { type: 'string' },
+              mergeRequestUrl: { type: 'string' },
               url: { type: 'string' },
               sprint: { type: 'string' },
               workdir: { type: 'string' },
@@ -115,6 +119,30 @@ function namedValue(value: unknown): string {
   return '';
 }
 
+function buildSyncAnalysis(tasks: Array<{ title: string; status: string; kind: string; jiraKey?: string; sprint?: string; syncAction: string }>, counts: { created: number; updated: number; unchanged: number }): string {
+  if (!tasks.length) return 'No Jira tickets were converted into Pikiclaw tasks.';
+  const byKind = new Map<string, number>();
+  const byStatus = new Map<string, number>();
+  const bySprint = new Map<string, number>();
+  for (const task of tasks) {
+    byKind.set(task.kind, (byKind.get(task.kind) || 0) + 1);
+    byStatus.set(task.status, (byStatus.get(task.status) || 0) + 1);
+    if (task.sprint) bySprint.set(task.sprint, (bySprint.get(task.sprint) || 0) + 1);
+  }
+  const formatCounts = (items: Map<string, number>) => [...items.entries()].map(([key, count]) => `${key}: ${count}`).join(', ') || 'none';
+  const highlights = tasks
+    .slice(0, 8)
+    .map(task => `${task.jiraKey || 'No key'} - ${task.title}`)
+    .join('\n');
+  return [
+    `Synced ${tasks.length} Jira ticket${tasks.length === 1 ? '' : 's'}: created ${counts.created}, updated ${counts.updated}, unchanged ${counts.unchanged}.`,
+    `Types: ${formatCounts(byKind)}.`,
+    `Pikiclaw statuses: ${formatCounts(byStatus)}.`,
+    bySprint.size ? `Sprints: ${formatCounts(bySprint)}.` : '',
+    highlights ? `Tickets:\n${highlights}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): ToolResult {
   const issues = Array.isArray(args.issues) ? args.issues : [];
   if (!issues.length) return toolResult('Error: issues array is required', true);
@@ -147,6 +175,7 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         issueType,
         jiraKey,
         jiraUrl: text(issueField(issue, 'jiraUrl', 'url', 'browseUrl', 'webUrl'), 2048),
+        prUrl: text(issueField(issue, 'prUrl', 'mergeRequestUrl', 'pullRequestUrl', 'mrUrl'), 2048),
         sprint: text(issueField(issue, 'sprint', 'sprintName'), 120),
         workdir: text(issueField(issue, 'workdir'), 2048) || workdir,
         reporter: personName(issueField(issue, 'reporter')),
@@ -155,6 +184,7 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         dueDate: text(issueField(issue, 'dueDate', 'duedate'), 80),
         priority: namedValue(issueField(issue, 'priority')),
         labels: Array.isArray(issueField(issue, 'labels')) ? (issueField(issue, 'labels') as unknown[]).map(label => text(label, 120)).filter(Boolean) : undefined,
+        updatedAt: text(issueField(issue, 'updatedAt', 'updated'), 80),
         rawFields: issue.fields && typeof issue.fields === 'object' ? issue.fields as Record<string, unknown> : undefined,
       });
       const latestEvent = task.events?.[0];
@@ -171,8 +201,12 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         kind: task.kind,
         jiraKey: task.jiraKey,
         sprint: task.sprint,
+        assignee: task.jiraFields?.assignee,
+        priority: task.jiraFields?.priority,
+        dueDate: task.jiraFields?.dueDate,
         updatedAt: task.updatedAt,
         syncAction: action,
+        summary: latestEvent?.summary,
       });
     } catch (e: any) {
       errors.push(e?.message || String(e));
@@ -180,12 +214,30 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
   }
 
   toolLog('pikiclaw_pro_sync_jira_issues', `synced=${tasks.length} errors=${errors.length}`);
+  const analysisSummary = buildSyncAnalysis(tasks, counts);
+  const issueKeys = tasks.map(task => task.jiraKey).filter((key): key is string => !!key);
   if (runId) {
     try {
       updateJiraSyncRun(runId, {
         status: errors.length ? 'failed' : 'completed',
         ticketCount: issues.length,
         taskCount: tasks.length,
+        analysisSummary,
+        issueKeys,
+        changes: tasks.map(task => ({
+          taskId: task.id,
+          jiraKey: task.jiraKey,
+          title: task.title,
+          action: task.syncAction as 'created' | 'updated' | 'unchanged',
+          summary: task.summary,
+          status: task.status,
+          kind: task.kind,
+          sprint: task.sprint,
+          assignee: task.assignee,
+          priority: task.priority,
+          dueDate: task.dueDate,
+          updatedAt: task.updatedAt,
+        })),
         error: errors.join('; ') || undefined,
         event: {
           label: errors.length ? 'Jira task sync failed' : `Synced ${tasks.length} Pikiclaw task${tasks.length === 1 ? '' : 's'}`,
@@ -196,7 +248,7 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
       });
     } catch { /* progress is best effort */ }
   }
-  return toolResult(JSON.stringify({ ok: errors.length === 0, synced: tasks.length, counts, tasks, errors }, null, 2), errors.length > 0 && tasks.length === 0);
+  return toolResult(JSON.stringify({ ok: errors.length === 0, synced: tasks.length, counts, analysisSummary, tasks, errors }, null, 2), errors.length > 0 && tasks.length === 0);
 }
 
 function handleReportProgress(args: Record<string, unknown>): ToolResult {

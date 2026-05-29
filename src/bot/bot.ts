@@ -1217,6 +1217,11 @@ export class Bot {
         reasoningEffort: resolveAgentEffort(config, 'hermes') || 'medium',
         extraArgs: shellSplit(process.env.HERMES_EXTRA_ARGS || ''),
       },
+      openclaw: {
+        model: resolveAgentModel(config, 'openclaw'),
+        reasoningEffort: resolveAgentEffort(config, 'openclaw') || 'medium',
+        extraArgs: shellSplit(process.env.OPENCLAW_EXTRA_ARGS || ''),
+      },
     };
 
     this.defaultAgent = normalizeAgent('codex');
@@ -2865,6 +2870,7 @@ export class Bot {
         else if (agent === 'cursor') patch.cursorModel = value;
         else if (agent === 'gemini') patch.geminiModel = value;
         else if (agent === 'hermes') patch.hermesModel = value;
+        else if (agent === 'openclaw') patch.openclawModel = value;
       } else {
         if (agent === 'claude') patch.claudeReasoningEffort = value;
         else if (agent === 'codex') patch.codexReasoningEffort = value;
@@ -2872,6 +2878,7 @@ export class Bot {
         else if (agent === 'cursor') patch.cursorReasoningEffort = value;
         else if (agent === 'gemini') patch.geminiReasoningEffort = value;
         else if (agent === 'hermes') patch.hermesReasoningEffort = value;
+        else if (agent === 'openclaw') patch.openclawReasoningEffort = value;
       }
       if (Object.keys(patch).length) updateUserConfig(patch);
     } catch (e: any) {
@@ -3033,7 +3040,7 @@ export class Bot {
     if (opts.initial) this.defaultAgent = nextDefaultAgent;
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
 
-    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'] as Agent[]) {
+    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'] as Agent[]) {
       const nextModel = resolveAgentModel(config, agent);
       if (nextModel && this.modelForAgent(agent) !== nextModel) {
         if (opts.initial) this.agentConfigs[agent].model = nextModel;
@@ -3178,6 +3185,9 @@ export class Bot {
       // stream.ts overrides this with the ACP-encoded `provider:model` when
       // a Profile is bound).
       hermesModel: cs.agent === 'hermes' && resolvedModel ? resolvedModel : undefined,
+      // openclaw-specific
+      openclawModel: cs.agent === 'openclaw' ? resolvedModel : (this.agentConfigs.openclaw?.model || ''),
+      openclawExtraArgs: (this.agentConfigs.openclaw?.extraArgs || []).length ? this.agentConfigs.openclaw.extraArgs : undefined,
       // MCP bridge
       mcpSendFile,
       abortSignal,

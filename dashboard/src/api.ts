@@ -1,6 +1,9 @@
 import type {
   AgentStatusResponse,
+  AgentHealthResult,
   AgentAssistant,
+  AssistantPromptInfo,
+  AssistantHistoryItem,
   AppState,
   AutomationRule,
   BrowserSetupResponse,
@@ -18,6 +21,7 @@ import type {
   KnowledgeEntry,
   JiraSyncRun,
   JiraWorkflowConfig,
+  JiraCycle,
   LocalModelsProbeResponse,
   LsDirResult,
   McpCatalogItem,
@@ -28,10 +32,12 @@ import type {
   PlatformSkillInfo,
   ProUsageSummary,
   ProTask,
+  ProTaskWorkbench,
   ProTaskKind,
   ProTaskStage,
   ProTaskStatus,
   ProSubtaskStatus,
+  TaskSpace,
   TodoItem,
   TodoItemKind,
   TodoItemSource,
@@ -149,6 +155,8 @@ export const api = {
     post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/agent-check-update', { agent }, { timeoutMs: 30_000, ...opts }),
   updateAgent: (agent: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/agent-update', { agent }, { timeoutMs: 600_000, ...opts }),
+  checkAgentHealth: (agent: string, opts?: ApiRequestOptions) =>
+    post<AgentHealthResult>('/api/agent-health', { agent }, { timeoutMs: 60_000, ...opts }),
   saveConfig: (patch: Record<string, unknown>) => post<{ ok: boolean; configPath?: string }>('/api/config', patch),
   validateTelegramConfig: (token: string, allowedChatIds = '', opts?: ApiRequestOptions) =>
     post<{ ok: boolean; error?: string | null; bot?: { username: string; displayName?: string }; normalizedAllowedChatIds?: string }>(
@@ -253,8 +261,8 @@ export const api = {
       '/api/extensions/mcp/toggle',
       { name, enabled, scope, workdir },
     ),
-  updateMcpExtension: (name: string, patch: Partial<McpServerConfig>, scope: 'global' | 'workspace', workdir?: string) =>
-    post<{ ok: boolean; updated?: boolean; error?: string }>('/api/extensions/mcp/update', { name, patch, scope, workdir }),
+  updateMcpExtension: (name: string, patch: Partial<McpServerConfig>, scope: 'global' | 'workspace', workdir?: string, replace = false) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>('/api/extensions/mcp/update', { name, patch, scope, workdir, replace }),
   removeMcp: (name: string, scope: 'global' | 'workspace', catalogId?: string, workdir?: string) =>
     post<{ ok: boolean; removed?: boolean; error?: string }>(
       '/api/extensions/mcp/remove',
@@ -298,6 +306,18 @@ export const api = {
     ),
   removeExtensionSkill: (name: string, global?: boolean, workdir?: string) =>
     post<{ ok: boolean; error?: string }>('/api/extensions/skills/remove', { name, global, workdir }),
+  getSkillPrompt: (name: string, global?: boolean, workdir?: string) => {
+    const params = new URLSearchParams({ name, global: String(!!global) });
+    if (workdir) params.set('workdir', workdir);
+    return json<{ ok: boolean; path?: string; content?: string; error?: string }>(
+      `/api/extensions/skills/prompt?${params.toString()}`,
+    );
+  },
+  updateSkillPrompt: (name: string, content: string, global?: boolean, workdir?: string) =>
+    post<{ ok: boolean; path?: string; error?: string }>(
+      '/api/extensions/skills/prompt',
+      { name, content, global, workdir },
+    ),
   listRepoSkills: (source: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; skills: RemoteSkillInfo[]; partial?: boolean; error?: string }>(
       `/api/extensions/skills/list?source=${encodeURIComponent(source)}`,
@@ -498,6 +518,8 @@ export const api = {
   // Editor integration
   openInEditor: (filePath: string, target?: OpenTarget) =>
     post<{ ok: boolean; error?: string }>('/api/open-in-editor', { filePath, target }),
+  openExternalUrl: (url: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string }>('/api/open-external-url', { url }, opts),
 
   // Session interaction
   sendSessionMessage: (
@@ -638,8 +660,47 @@ export const api = {
     ),
 
   // Pikiclaw Pro task workflow
-  getProTasks: (opts?: ApiRequestOptions) =>
-    json<{ ok: boolean; tasks: ProTask[]; error?: string }>('/api/pro/tasks', opts),
+  getTaskSpaces: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; spaces: TaskSpace[]; error?: string }>('/api/pro/task-spaces', opts),
+  createTaskSpace: (space: { name: string; defaultWorkdir?: string; defaultAgent?: string | null }, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; space?: TaskSpace; error?: string }>('/api/pro/task-spaces', space, opts),
+  updateTaskSpace: (spaceId: string, space: { name?: string; defaultWorkdir?: string | null; defaultAgent?: string | null; archived?: boolean }, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; space?: TaskSpace; error?: string }>(
+      `/api/pro/task-spaces/${encodeURIComponent(spaceId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(space),
+        ...opts,
+      },
+    ),
+  archiveTaskSpace: (spaceId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; space?: TaskSpace; error?: string }>(
+      `/api/pro/task-spaces/${encodeURIComponent(spaceId)}`,
+      { method: 'DELETE', ...opts },
+    ),
+  getProTasks: (optsOrSpaceId?: ApiRequestOptions | string) => {
+    const spaceId = typeof optsOrSpaceId === 'string' ? optsOrSpaceId : '';
+    const opts = typeof optsOrSpaceId === 'string' ? undefined : optsOrSpaceId;
+    const query = spaceId && spaceId !== 'all' ? `?spaceId=${encodeURIComponent(spaceId)}` : '';
+    return json<{ ok: boolean; tasks: ProTask[]; error?: string }>(`/api/pro/tasks${query}`, opts);
+  },
+  getProTaskWorkbench: (taskId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; workbench?: ProTaskWorkbench; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/workbench`,
+      opts,
+    ),
+  getJiraCycles: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; cycles: JiraCycle[]; error?: string }>('/api/pro/jira/cycles', opts),
+  kickOffJiraCycle: (body?: { name?: string; startDate?: string; endDate?: string; taskIds?: string[] }, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; cycle?: JiraCycle; tasks?: ProTask[]; error?: string }>('/api/pro/jira/cycles/kickoff', body || {}, opts),
+  closeActiveJiraCycle: (opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; cycle?: JiraCycle | null; error?: string }>('/api/pro/jira/cycles/close-active', {}, opts),
+  deleteJiraCycle: (cycleId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; cycle?: JiraCycle; error?: string }>(
+      `/api/pro/jira/cycles/${encodeURIComponent(cycleId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   getProTodos: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; items: TodoItem[]; error?: string }>('/api/pro/todos', opts),
   createProTodo: (
@@ -677,6 +738,11 @@ export const api = {
     ),
   getProAssistants: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; assistants: AgentAssistant[]; error?: string }>('/api/pro/assistants', opts),
+  getProAssistantHistory: (limit: number | 'all' = 3, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; history: Record<string, AssistantHistoryItem[]>; error?: string }>(
+      `/api/pro/assistants/history?limit=${encodeURIComponent(String(limit))}`,
+      opts,
+    ),
   getProUsageSummary: (limit = 240, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; summary: ProUsageSummary; error?: string }>(
       `/api/pro/usage-summary?limit=${encodeURIComponent(String(limit))}`,
@@ -695,13 +761,35 @@ export const api = {
       },
     ),
   createProAssistant: (
-    body: { name: string; responsibility?: string; preferredAgents?: string[] },
+    body: {
+      name: string;
+      responsibility?: string;
+      preferredAgents?: string[];
+      kind?: AgentAssistant['kind'];
+      surfaceId?: string;
+      objectTypes?: string[];
+      prompt?: string;
+      defaultPrompt?: string;
+      allowedActions?: string[];
+      enabled?: boolean;
+    },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; assistant?: AgentAssistant; error?: string }>('/api/pro/assistants', body, opts),
   updateProAssistant: (
     assistantId: string,
-    body: { name?: string; responsibility?: string; preferredAgents?: string[] },
+    body: {
+      name?: string;
+      responsibility?: string;
+      preferredAgents?: string[];
+      kind?: AgentAssistant['kind'];
+      surfaceId?: string;
+      objectTypes?: string[];
+      prompt?: string;
+      defaultPrompt?: string;
+      allowedActions?: string[];
+      enabled?: boolean;
+    },
     opts?: ApiRequestOptions,
   ) =>
     json<{ ok: boolean; assistant?: AgentAssistant; error?: string }>(
@@ -712,6 +800,27 @@ export const api = {
         body: JSON.stringify(body),
         ...opts,
       },
+    ),
+  getProAssistantPrompt: (assistantId: string, opts?: ApiRequestOptions) =>
+    json<AssistantPromptInfo>(
+      `/api/pro/assistants/${encodeURIComponent(assistantId)}/prompt`,
+      opts,
+    ),
+  updateProAssistantPrompt: (assistantId: string, body: { prompt: string }, opts?: ApiRequestOptions) =>
+    json<AssistantPromptInfo>(
+      `/api/pro/assistants/${encodeURIComponent(assistantId)}/prompt`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        ...opts,
+      },
+    ),
+  resetProAssistantPrompt: (assistantId: string, opts?: ApiRequestOptions) =>
+    post<AssistantPromptInfo>(
+      `/api/pro/assistants/${encodeURIComponent(assistantId)}/reset-prompt`,
+      {},
+      opts,
     ),
   deleteProAssistant: (assistantId: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; assistant?: AgentAssistant; error?: string }>(
@@ -746,6 +855,15 @@ export const api = {
     json<{ ok: boolean; run?: JiraSyncRun; error?: string }>(
       `/api/pro/jira/mcp-sync/runs/${encodeURIComponent(runId)}`,
       opts,
+    ),
+  analyzeJiraTicket: (
+    body: { query: string; workdir?: string; agent?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+      '/api/pro/jira/analyze-ticket',
+      body,
+      { timeoutMs: 30_000, ...opts },
     ),
   scheduleJiraMcpSync: (
     body: { schedule: string; assistantId?: string | null; workdir?: string; enabled?: boolean },
@@ -787,7 +905,9 @@ export const api = {
       description?: string;
       kind?: ProTaskKind;
       status?: ProTaskStatus;
+      spaceId?: string;
       workdir?: string;
+      prUrl?: string;
       defaultAgent?: string | null;
       defaultAssistantId?: string | null;
       jiraKey?: string;
@@ -805,13 +925,26 @@ export const api = {
       jiraKey?: string;
       jiraUrl?: string;
       sprint?: string;
+      spaceId?: string;
       workdir?: string;
+      prUrl?: string;
+      reporter?: string;
+      assignee?: string;
+      ticketStatus?: string;
+      status?: string;
+      dueDate?: string;
+      priority?: string;
+      labels?: string[];
+      updatedAt?: string;
+      updated?: string;
+      rawFields?: Record<string, unknown>;
+      fields?: Record<string, unknown>;
     }>,
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; tasks?: ProTask[]; error?: string }>('/api/pro/jira/sync', { issues }, opts),
   syncJiraFromRemote: (
-    config: { baseUrl: string; token: string; email?: string; jql?: string; sprint?: string; workdir?: string },
+    config: { baseUrl: string; token: string; email?: string; jql?: string; sprint?: string; workdir?: string; spaceId?: string },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; tasks?: ProTask[]; error?: string }>('/api/pro/jira/sync', config, { timeoutMs: 60_000, ...opts }),
@@ -827,7 +960,7 @@ export const api = {
     ),
   updateProTaskJiraFields: (
     taskId: string,
-    fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] | string },
+    fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] | string; issueType?: string; updatedAt?: string },
     opts?: ApiRequestOptions,
   ) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
@@ -868,6 +1001,26 @@ export const api = {
         ...opts,
       },
     ),
+  updateProTaskCycle: (taskId: string, cycleId: string | null, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/cycle`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cycleId }),
+        ...opts,
+      },
+    ),
+  updateProTaskMeta: (taskId: string, meta: { workdir?: string | null; prUrl?: string | null }, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/meta`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(meta),
+        ...opts,
+      },
+    ),
   startProTaskFocusSession: (taskId: string, source?: string, opts?: ApiRequestOptions) =>
     post<{
       ok: boolean;
@@ -892,7 +1045,7 @@ export const api = {
   startProTaskStage: (
     taskId: string,
     stage: ProTaskStage,
-    options: { prompt?: string; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null; executionMode?: 'direct' | 'interactive' } = {},
+    options: { prompt?: string; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null; executionMode?: 'direct' | 'interactive'; subtaskId?: string | null } = {},
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; task?: ProTask; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
@@ -906,6 +1059,7 @@ export const api = {
         ...(options.effort ? { effort: options.effort } : {}),
         ...(options.workdir ? { workdir: options.workdir } : {}),
         ...(options.executionMode ? { executionMode: options.executionMode } : {}),
+        ...(options.subtaskId ? { subtaskId: options.subtaskId } : {}),
       },
       { timeoutMs: 30_000, ...opts },
     ),
@@ -1052,6 +1206,9 @@ export const api = {
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
+  prompt?: string;
+  /** Number of live tasks ahead of this task when phase is queued. */
+  queuePosition?: number;
   /** Wall-clock timestamp when the active task started streaming. */
   startedAt?: number;
   /** Wall-clock timestamp when the active task finished. */

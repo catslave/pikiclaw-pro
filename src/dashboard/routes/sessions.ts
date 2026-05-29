@@ -358,7 +358,7 @@ app.patch('/api/workspaces', async (c) => {
       const runtimeWorkdir = runtime.getRuntimeWorkdir(config);
       if (runtimeWorkdir && path.resolve(wsPath) === path.resolve(runtimeWorkdir)) {
         addWorkspace(wsPath, typeof body?.name === 'string' ? body.name : undefined);
-        updated = updateWorkspace(wsPath, body);
+        updated = updateWorkspace(wsPath, { ...body, order: typeof body?.order === 'number' ? body.order : -1 });
       }
     }
     if (!updated) return c.json({ ok: false, error: 'workspace not found' }, 404);
@@ -500,7 +500,7 @@ app.post('/api/session-hub/session/delete', async (c) => {
     const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
     const agent = typeof body?.agent === 'string' ? body.agent.trim() : '';
     const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
-    const purgeNative = body?.purgeNative === true;
+    const purgeNative = false;
     if (!workdir || !agent || !sessionId) {
       return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
     }
@@ -533,7 +533,7 @@ app.post('/api/session-hub/session/side-chat/delete', async (c) => {
     const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
     const parentAgent = typeof body?.parentAgent === 'string' ? body.parentAgent.trim() : '';
     const parentSessionId = typeof body?.parentSessionId === 'string' ? body.parentSessionId.trim() : '';
-    const purgeNative = body?.purgeNative === true;
+    const purgeNative = false;
     if (!workdir || !agent || !sessionId || !parentAgent || !parentSessionId) {
       return c.json({ ok: false, error: 'workdir, agent, sessionId, parentAgent, and parentSessionId are required' }, 400);
     }

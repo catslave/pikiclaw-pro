@@ -2,7 +2,7 @@ import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef, type
 import { Routes, Route, useLocation, Navigate, useNavigate } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
-import type { RestartPhase } from './components/Sidebar';
+import { Sidebar, type RestartPhase } from './components/Sidebar';
 import { Spinner, Toasts } from './components/ui';
 import { BrowserPanelModal } from './components/BrowserPanelModal';
 import { api } from './api';
@@ -13,7 +13,7 @@ import type { BrowserPanelSnapshot } from './types';
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
-const JiraTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).JiraTab }));
+const TasksTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).TasksTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
@@ -51,6 +51,7 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/dashboard': 'dashboard',
+    '/tasks': 'dashboard',
     '/jira': 'dashboard',
     '/usage': 'usage',
     '/archive': 'system',
@@ -68,9 +69,10 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/') return '/';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
-  if (pathname === '/jira') return '/dashboard';
+  if (pathname === '/dashboard') return '/tasks';
+  if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/dashboard', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/tasks', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -116,6 +118,7 @@ function RouteFallback() {
 
 function HoverLinkCopyButton({ t, toast }: { t: (key: string) => string; toast: (message: string, ok?: boolean) => void }) {
   const [hovered, setHovered] = useState<HoveredLinkState | null>(null);
+  const [copiedHref, setCopiedHref] = useState<string | null>(null);
   const activeLinkRef = useRef<Element | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const hideTimerRef = useRef<number | null>(null);
@@ -132,19 +135,28 @@ function HoverLinkCopyButton({ t, toast }: { t: (key: string) => string; toast: 
     hideTimerRef.current = window.setTimeout(() => {
       activeLinkRef.current = null;
       setHovered(null);
+      setCopiedHref(null);
       hideTimerRef.current = null;
     }, 140);
   }, [clearHideTimer]);
 
-  const positionForPointer = useCallback((clientX: number, clientY: number, href: string) => {
-    const x = Math.min(window.innerWidth - 34, Math.max(8, clientX + 10));
-    const y = Math.min(window.innerHeight - 30, Math.max(8, clientY - 28));
+  const positionForLink = useCallback((link: Element, href: string) => {
+    const rect = link.getBoundingClientRect();
+    const buttonSize = 22;
+    const gap = 6;
+    const canSitRight = rect.right + gap + buttonSize <= window.innerWidth - 8;
+    const x = canSitRight
+      ? rect.right + gap
+      : Math.min(window.innerWidth - buttonSize - 8, Math.max(8, rect.left));
+    const y = canSitRight
+      ? rect.top + (rect.height - buttonSize) / 2
+      : rect.top - buttonSize - 4;
     setHovered({ href, x, y });
   }, []);
 
   useEffect(() => {
     const readCopyTarget = (element: Element | null): { link: Element; href: string } | null => {
-      const link = element?.closest('a[href],button[data-copy-path]');
+      const link = element?.closest('[data-chat-output-copy="true"]');
       if (!link) return null;
       const href = link instanceof HTMLAnchorElement
         ? link.getAttribute('href') || ''
@@ -158,19 +170,20 @@ function HoverLinkCopyButton({ t, toast }: { t: (key: string) => string; toast: 
       const copyTarget = readCopyTarget(target);
       if (!copyTarget) return;
       clearHideTimer();
+      if (activeLinkRef.current !== copyTarget.link) setCopiedHref(null);
       activeLinkRef.current = copyTarget.link;
-      positionForPointer(event.clientX, event.clientY, copyTarget.href);
+      positionForLink(copyTarget.link, copyTarget.href);
     };
 
     const onMouseMove = (event: MouseEvent) => {
       const active = activeLinkRef.current;
       if (!active) return;
       const target = event.target instanceof Node ? event.target : null;
-      if (!target || (!active.contains(target) && !buttonRef.current?.contains(target))) return;
+      if (!target || !active.contains(target)) return;
       const href = active instanceof HTMLAnchorElement
         ? active.getAttribute('href') || ''
         : active.getAttribute('data-copy-path') || '';
-      if (href) positionForPointer(event.clientX, event.clientY, href);
+      if (href) positionForLink(active, href);
     };
 
     const onMouseOut = (event: MouseEvent) => {
@@ -196,24 +209,30 @@ function HoverLinkCopyButton({ t, toast }: { t: (key: string) => string; toast: 
       window.removeEventListener('resize', scheduleHide);
       clearHideTimer();
     };
-  }, [clearHideTimer, positionForPointer, scheduleHide]);
+  }, [clearHideTimer, positionForLink, scheduleHide]);
 
   const copyLink = useCallback(() => {
     if (!hovered?.href) return;
     void navigator.clipboard.writeText(hovered.href)
-      .then(() => toast(t('hub.copied')))
+      .then(() => setCopiedHref(hovered.href))
       .catch(() => toast('Copy failed', false));
-  }, [hovered?.href, t, toast]);
+  }, [hovered?.href, toast]);
 
   if (!hovered) return null;
+  const copied = copiedHref === hovered.href;
   return (
     <button
       ref={buttonRef}
       type="button"
-      className="fixed z-[9500] inline-flex h-6 w-6 items-center justify-center rounded-md border border-edge bg-dropdown text-fg-4 shadow-lg transition-colors hover:border-primary/50 hover:text-primary"
+      className={cn(
+        'fixed z-[9500] inline-flex h-[22px] w-[22px] items-center justify-center rounded-md border shadow-[0_6px_18px_rgba(2,6,23,0.18)] ring-1 ring-white/[0.04] backdrop-blur transition-[border-color,background,color,transform] hover:-translate-y-px',
+        copied
+          ? 'border-ok/45 bg-ok/[0.12] text-ok'
+          : 'border-edge/70 bg-panel/95 text-fg-5 hover:border-primary/45 hover:bg-panel-h hover:text-primary',
+      )}
       style={{ left: hovered.x, top: hovered.y }}
-      aria-label={t('ext.copyPath')}
-      title={t('ext.copyPath')}
+      aria-label={copied ? t('hub.copied') : t('ext.copyPath')}
+      title={copied ? t('hub.copied') : t('ext.copyPath')}
       onMouseEnter={clearHideTimer}
       onMouseLeave={scheduleHide}
       onClick={e => {
@@ -222,10 +241,16 @@ function HoverLinkCopyButton({ t, toast }: { t: (key: string) => string; toast: 
         copyLink();
       }}
     >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <rect x="9" y="9" width="13" height="13" rx="2" />
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-      </svg>
+      {copied ? (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
     </button>
   );
 }
@@ -248,6 +273,7 @@ export function App() {
     : tab === 'sessions'
       ? 'workspace'
       : 'settings';
+  const workspaceImmersive = sessionShellActive;
   const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
   const initialPathRestoreCheckedRef = useRef(false);
   const [browserSnapshot, setBrowserSnapshot] = useState<BrowserPanelSnapshot | null>(null);
@@ -323,8 +349,8 @@ export function App() {
 
   useEffect(() => {
     const navState = location.state as { forceWorkspace?: boolean } | null;
-    if (location.pathname === '/jira') {
-      navigate('/dashboard?view=jira', { replace: true });
+    if (location.pathname === '/jira' || location.pathname === '/dashboard') {
+      navigate('/tasks', { replace: true });
       return;
     }
     const normalized = normalizeDashboardPath(location.pathname);
@@ -425,7 +451,8 @@ export function App() {
             <UsageTab />
           </PageWrapper>
         } />
-        <Route path="/jira" element={<Navigate to="/dashboard?view=jira" replace />} />
+        <Route path="/jira" element={<Navigate to="/tasks" replace />} />
+        <Route path="/dashboard" element={<Navigate to="/tasks" replace />} />
         <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
         <Route path="/permissions" element={<Navigate to="/system" replace />} />
         <Route path="/extensions" element={
@@ -449,8 +476,14 @@ export function App() {
         <div className="grid-bg absolute inset-0 opacity-45" />
       </div>
 
-      <div className="relative h-screen overflow-hidden">
-        <main className="h-full overflow-hidden">
+      <div className="relative flex h-[100dvh] min-h-0 flex-col overflow-hidden">
+        <Sidebar
+          version={version}
+          restartPhase={restartPhase}
+          onRestartClick={onRestartClick}
+          immersive={workspaceImmersive}
+        />
+        <main className="min-h-0 flex-1 overflow-hidden">
           {sessionsTabReady && (
             <Suspense fallback={<RouteFallback />}>
               <div
@@ -461,10 +494,7 @@ export function App() {
                   active={sessionShellActive}
                   mode={sessionWorkspaceMode}
                   settingsContent={settingsContent}
-                  dashboardJiraContent={<JiraTab />}
-                  version={version}
-                  restartPhase={restartPhase}
-                  onRestartClick={onRestartClick}
+                  dashboardJiraContent={<TasksTab />}
                 />
               </div>
             </Suspense>

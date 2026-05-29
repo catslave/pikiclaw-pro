@@ -53,6 +53,15 @@ function defaultOpenFileLink(target: FileLinkTarget) {
   void api.openInEditor(target.path);
 }
 
+function openExternalChatUrl(href: string) {
+  void api.openExternalUrl(href).then(result => {
+    if (result.ok) return;
+    window.open(href, '_blank', 'noopener,noreferrer');
+  }).catch(() => {
+    window.open(href, '_blank', 'noopener,noreferrer');
+  });
+}
+
 function fileLinkTitle(target: FileLinkTarget): string {
   return target.line ? `${target.path}:${target.line}` : target.path;
 }
@@ -187,15 +196,14 @@ function RemoteBranchCode({ text, workdir, className }: { text: string; workdir:
   if (!url) return <code className={className}>{text}</code>;
   return (
     <TargetTooltip label={url}>
-      <a
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
+      <button
+        type="button"
         className={cn(className, 'inline-flex cursor-pointer items-center hover:brightness-125')}
         aria-label={url}
+        onClick={() => openExternalChatUrl(url)}
       >
         {text}
-      </a>
+      </button>
     </TargetTooltip>
   );
 }
@@ -213,7 +221,17 @@ export function createMdComponents({ onOpenFileLink, workdir }: { onOpenFileLink
     if (href && isWebUrl(href)) {
       return (
         <TargetTooltip label={href}>
-          <a href={href} target="_blank" rel="noopener noreferrer" aria-label={href} className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors">{children}</a>
+          <button
+            type="button"
+            data-external-browser="true"
+            data-chat-output-copy="true"
+            data-copy-path={href}
+            aria-label={href}
+            className="inline cursor-pointer bg-transparent p-0 text-left text-blue-400 underline decoration-blue-400/30 underline-offset-2 transition-colors hover:text-blue-300"
+            onClick={() => openExternalChatUrl(href)}
+          >
+            {children}
+          </button>
         </TargetTooltip>
       );
     }
@@ -224,6 +242,7 @@ export function createMdComponents({ onOpenFileLink, workdir }: { onOpenFileLink
         <TargetTooltip label={title}>
           <button
             type="button"
+            data-chat-output-copy="true"
             data-copy-path={title}
             className="inline cursor-pointer rounded-sm bg-transparent p-0 text-left text-blue-400 underline decoration-blue-400/30 underline-offset-2 transition-colors hover:text-blue-300"
             aria-label={title}

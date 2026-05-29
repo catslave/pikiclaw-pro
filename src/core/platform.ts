@@ -4,12 +4,19 @@
  */
 
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import which from 'which';
+import { envBool } from './utils.js';
 
 export const IS_WIN = process.platform === 'win32';
 export const IS_MAC = process.platform === 'darwin';
 export const IS_LINUX = process.platform === 'linux';
+
+/** Detect if running inside a Docker container. */
+export function isInsideContainer(): boolean {
+  return envBool('PIKICLAW_DOCKER', false);
+}
 
 /**
  * User home directory. Re-reads each call so runtime `$HOME`/`$USERPROFILE`
@@ -34,7 +41,81 @@ export function expandTilde(p: string): string {
 
 /** Locate an executable on PATH, honoring PATHEXT on Windows. */
 export function whichSync(cmd: string): string | null {
-  return which.sync(cmd, { nothrow: true }) || null;
+  return which.sync(cmd, { nothrow: true, path: processEnvWithUserBins().PATH }) || null;
+}
+
+function isExecutableFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return false;
+    if (IS_WIN) return true;
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function executableCandidates(cmd: string): string[] {
+  if (!IS_WIN) return [cmd];
+  const ext = path.extname(cmd).toLowerCase();
+  if (ext) return [cmd];
+  const pathExt = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map(value => value.trim())
+    .filter(Boolean);
+  return [cmd, ...pathExt.map(value => `${cmd}${value.toLowerCase()}`)];
+}
+
+/** User-level bin dirs that GUI-launched processes often miss. */
+export function userBinDirs(home = getHome()): string[] {
+  return [
+    path.join(home, '.local', 'bin'),
+    path.join(home, 'bin'),
+    path.dirname(process.execPath),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ].filter(dir => {
+    try { return fs.statSync(dir).isDirectory(); } catch { return false; }
+  });
+}
+
+/** Return an env with common user bin dirs appended to PATH. */
+export function processEnvWithUserBins(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const current = String(env.PATH || '');
+  const parts = current.split(path.delimiter).filter(Boolean);
+  const seen = new Set(parts.map(part => path.resolve(part)));
+  const append = userBinDirs()
+    .filter(dir => !seen.has(path.resolve(dir)));
+  if (!append.length) return { ...env };
+  return { ...env, PATH: [...parts, ...append].join(path.delimiter) };
+}
+
+/** Resolve a command using PATH plus common user bin dirs. */
+export function resolveExecutablePath(cmd: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = String(cmd || '').trim();
+  if (!raw) return null;
+
+  const hasPathSeparator = raw.includes('/') || raw.includes('\\');
+  if (hasPathSeparator) {
+    const absolutePath = path.resolve(expandTilde(raw));
+    for (const candidate of executableCandidates(absolutePath)) {
+      if (isExecutableFile(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  const expandedEnv = processEnvWithUserBins(env);
+  const searchPaths = String(expandedEnv.PATH || '')
+    .split(path.delimiter)
+    .map(entry => entry.trim())
+    .filter(Boolean);
+  for (const dir of searchPaths) {
+    for (const candidate of executableCandidates(path.join(dir, raw))) {
+      if (isExecutableFile(candidate)) return candidate;
+    }
+  }
+  return null;
 }
 
 /**

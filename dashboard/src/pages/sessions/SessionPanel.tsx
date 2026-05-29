@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo, useMemo, type ReactNode } from 'react';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
@@ -132,12 +132,15 @@ function bridgePendingImagesIntoHistory(history: TurnHistoryWindow, pendingPromp
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, readOnly = false, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
   readOnly?: boolean;
+  compact?: boolean;
+  transcriptHeader?: ReactNode;
+  transcriptFooter?: ReactNode;
   onSessionChange?: (next: SessionPanelChange) => void;
   onMultiSessionChange?: (next: SessionPanelChange[], prompt: string) => void;
   onOpenFileLink?: OpenFileLinkHandler;
@@ -1410,9 +1413,12 @@ export const SessionPanel = memo(function SessionPanel({
     scrollToBottomRef.current = false;
     forceScrollToBottomRef.current = false;
   }, [transcriptTailKey, scheduleBottomScroll]);
+  const transcriptClass = compact
+    ? 'max-w-[520px] mx-auto px-3 pt-3 pb-6 space-y-0'
+    : 'max-w-[860px] mx-auto px-6 pt-6 pb-12 space-y-0';
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]">
+    <div className={cn('flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]', compact && 'text-[12px]')}>
       {/* ── Messages ── */}
       <div
         ref={scrollRef}
@@ -1423,9 +1429,16 @@ export const SessionPanel = memo(function SessionPanel({
         {loading && !hasImmediateMessageContent ? (
           <div className="flex items-center justify-center py-20"><Spinner className="h-5 w-5 text-fg-4" /></div>
         ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !effectiveLiveStream ? (
-          <div className="py-20 text-center text-[13px] text-fg-5">{t('hub.noMessages')}</div>
+          <div className={transcriptClass}>
+            {transcriptHeader && (
+              <div className="mb-4">
+                {transcriptHeader}
+              </div>
+            )}
+            <div className={cn('text-center text-fg-5', compact ? 'py-12 text-[12px]' : 'py-20 text-[13px]')}>{t('hub.noMessages')}</div>
+          </div>
         ) : (
-          <div className="max-w-[860px] mx-auto px-6 pt-6 pb-12 space-y-0">
+          <div className={transcriptClass}>
             {(history?.hasOlder || loadingOlder) && !hasActiveTurn && (
               <div className="mb-4 flex items-center justify-center gap-2 text-[11px] text-fg-5">
                 {loadingOlder ? <Spinner className="h-3 w-3 text-fg-5" /> : <span className="h-1.5 w-1.5 rounded-full bg-fg-5/35" />}
@@ -1453,6 +1466,11 @@ export const SessionPanel = memo(function SessionPanel({
                   <span className="text-fg-5/70">· {t('hub.forkBadgeAt').replace('{turn}', String(session.migratedFrom.forkedAtTurn + 1))}</span>
                 )}
               </button>
+            )}
+            {transcriptHeader && (
+              <div className="mb-4">
+                {transcriptHeader}
+              </div>
             )}
             {displayTurnItems.map(({ turn, sourceIndex }) => {
               const absoluteTurnIndex = (history?.startTurn || 0) + sourceIndex;
@@ -1530,22 +1548,31 @@ export const SessionPanel = memo(function SessionPanel({
                 <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
               </div>
             )}
+            {transcriptFooter && (
+              <div className="mb-6">
+                {transcriptFooter}
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {/* ── Input ── */}
       {readOnly ? (
-        <div className="shrink-0 border-t border-edge/40 bg-[var(--th-session-bg)] px-4 py-3 shadow-[0_-12px_28px_rgba(15,23,42,0.04)]">
-          <div className="mx-auto flex max-w-[860px] items-center justify-center rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-5">
+        <div className={cn('shrink-0 border-t border-edge/40 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]', compact ? 'px-3 py-2' : 'px-4 py-3')}>
+          <div className={cn('mx-auto flex items-center justify-center rounded-md border border-edge bg-panel-alt px-3 py-2 text-fg-5', compact ? 'max-w-[520px] text-[11px]' : 'max-w-[860px] text-[12px]')}>
             Archived assistant history. This chat is read-only.
           </div>
         </div>
       ) : (
-      <div className="shrink-0 border-t border-edge/30 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]">
+      <div className={cn(
+        'shrink-0 border-t border-edge/30 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]',
+        compact && 'border-edge/45 bg-panel/85',
+      )}>
           <InputComposer
             session={session}
             workdir={workdir}
+            compact={compact}
             onStreamQueued={requestStreamPolling}
             onSendStart={handleSendStart}
             onSendTaskAssigned={handleSendTaskAssigned}
