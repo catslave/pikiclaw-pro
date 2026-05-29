@@ -13,6 +13,7 @@ vi.mock('../src/agent/index.ts', async importOriginal => {
 import { doStream } from '../src/agent/index.ts';
 import { ensureManagedSession } from '../src/agent/index.ts';
 import { Bot } from '../src/bot/bot.ts';
+import { applyUserConfig } from '../src/core/config/user-config.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 
@@ -34,6 +35,7 @@ beforeEach(() => {
   process.env.PIKICLAW_TASK_QUEUE_FILE = `${tmpConfig}/task-queue.json`;
   process.env.PIKICLAW_WORKDIR = makeTmpDir('bot-unit-workdir-');
   process.env.DEFAULT_AGENT = 'codex';
+  applyUserConfig({ workdir: process.env.PIKICLAW_WORKDIR }, undefined, { notify: false });
 });
 
 afterEach(() => {
@@ -182,6 +184,15 @@ describe('Bot steering handoff', () => {
 });
 
 describe('Bot emitStream queue tracking', () => {
+  it('does not expose a zero-position queued event as a visible queue', () => {
+    const bot = new Bot() as any;
+    const sessionKey = 'codex:sess-startup-handshake';
+
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'run-1', position: 0 });
+
+    expect(bot.getStreamSnapshot(sessionKey)).toBeNull();
+  });
+
   it('accumulates multiple queued task ids while a task is streaming', () => {
     const bot = new Bot() as any;
     const sessionKey = 'claude:sess-multi-queue';
@@ -256,6 +267,41 @@ describe('Bot emitStream queue tracking', () => {
       { taskId: 'q-1', prompt: 'prompt 1' },
       { taskId: 'q-2', prompt: 'prompt 2' },
     ]);
+  });
+
+  it('exposes the active task prompt after a queued task starts streaming', () => {
+    const bot = new Bot() as any;
+    const sessionKey = 'codex:sess-queued-active-prompt';
+
+    for (const [taskId, prompt] of [['run-1', 'first prompt'], ['q-1', 'queued prompt']] as const) {
+      bot.beginTask({
+        taskId,
+        chatId: 'dashboard',
+        agent: 'codex',
+        sessionKey,
+        prompt,
+        attachments: [],
+        startedAt: Date.now(),
+        sourceMessageId: taskId,
+      });
+    }
+
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'run-1', agent: 'codex', sessionId: 'sess-queued-active-prompt' });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-1', position: 1 });
+    expect(bot.getStreamSnapshot(sessionKey)).toMatchObject({
+      taskId: 'run-1',
+      prompt: 'first prompt',
+      queuedTasks: [{ taskId: 'q-1', prompt: 'queued prompt' }],
+    });
+
+    bot.emitStream(sessionKey, { type: 'done', taskId: 'run-1', sessionId: 'sess-queued-active-prompt' });
+    bot.finishTask('run-1');
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'q-1', agent: 'codex', sessionId: 'sess-queued-active-prompt' });
+    expect(bot.getStreamSnapshot(sessionKey)).toMatchObject({
+      phase: 'streaming',
+      taskId: 'q-1',
+      prompt: 'queued prompt',
+    });
   });
 
   it('cancelling the active task drops the whole snapshot', () => {
@@ -599,6 +645,76 @@ describe('Bot external session control', () => {
     expect(prompts).toEqual(['first restored', 'second restored']);
     expect(bot.activeTasks.size).toBe(0);
     expect(JSON.parse(fs.readFileSync(queueFile, 'utf8')).tasks).toEqual([]);
+  });
+
+  it('marks recent crash-orphaned running sessions incomplete without injecting a recovery prompt', async () => {
+    const workdir = process.env.PIKICLAW_WORKDIR!;
+    ensureManagedSession({
+      agent: 'codex',
+      sessionId: 'sess-orphan',
+      workdir,
+      title: 'original task',
+    });
+    const indexPath = path.join(workdir, '.pikiclaw', 'sessions', 'index.json');
+    const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    index.sessions[0] = {
+      ...index.sessions[0],
+      runState: 'running',
+      runDetail: null,
+      runPid: null,
+      runUpdatedAt: new Date(Date.now() - 40 * 60_000).toISOString(),
+      autoResumeAttempts: 0,
+      userStatus: 'active',
+    };
+    fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+
+    const bot = new Bot();
+    await new Promise(resolve => setImmediate(resolve));
+
+    const updated = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    expect(updated.sessions[0]).toMatchObject({
+      sessionId: 'sess-orphan',
+      autoResumeAttempts: 0,
+      runState: 'incomplete',
+      runDetail: 'Process exited before reporting completion.',
+    });
+    expect(vi.mocked(doStream)).not.toHaveBeenCalled();
+    expect(bot.activeTasks.size).toBe(0);
+  });
+
+  it('does not auto-resume orphaned sessions that were already attempted', async () => {
+    const workdir = process.env.PIKICLAW_WORKDIR!;
+    ensureManagedSession({
+      agent: 'codex',
+      sessionId: 'sess-attempted',
+      workdir,
+      title: 'already tried',
+    });
+    const indexPath = path.join(workdir, '.pikiclaw', 'sessions', 'index.json');
+    const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    index.sessions[0] = {
+      ...index.sessions[0],
+      runState: 'running',
+      runDetail: null,
+      runPid: null,
+      runUpdatedAt: new Date(Date.now() - 40 * 60_000).toISOString(),
+      autoResumeAttempts: 1,
+      userStatus: 'active',
+    };
+    fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+
+    const bot = new Bot();
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(vi.mocked(doStream)).not.toHaveBeenCalled();
+    const updated = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    expect(updated.sessions[0]).toMatchObject({
+      sessionId: 'sess-attempted',
+      autoResumeAttempts: 1,
+      runState: 'incomplete',
+      runDetail: 'Process exited before reporting completion.',
+    });
+    expect(bot.activeTasks.size).toBe(0);
   });
 
   it('submits dashboard session tasks through the public API and publishes stream state', async () => {

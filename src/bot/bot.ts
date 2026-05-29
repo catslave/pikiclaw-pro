@@ -10,7 +10,8 @@ import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
 import {
   doStream, ensureManagedSession, findManagedThreadSession, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
-  reconcileOrphanedRunningSessions, getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
+  reconcileAndCollectOrphanedRunningSessions,
+  getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
   readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
   setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
@@ -22,6 +23,7 @@ import {
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
   type ThreadGoal, type GoalStatus, type CodexThreadGoal, type ClaudeNativeGoal,
   type HandoverRef, type SessionOrigin,
+  type ReconciledOrphanedRunningSession,
 } from '../agent/index.js';
 import { compactForHandover, describeHandoverRef } from '../agent/handover.js';
 import { getActiveProfileId, setActiveProfile, getProfile } from '../model/index.js';
@@ -211,6 +213,10 @@ export type StreamEvent =
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
+  /** Prompt for the currently displayed task. Used by dashboard clients to render the user bubble after a queued task starts. */
+  prompt?: string;
+  /** Number of live tasks ahead of this task when phase is queued. */
+  queuePosition?: number;
   /** Wall-clock timestamp when the active task started streaming. */
   startedAt?: number;
   /** Wall-clock timestamp when the active task finished. */
@@ -255,6 +261,7 @@ export interface RunningTask {
   agent: Agent;
   sessionKey: string;
   prompt: string;
+  displayPrompt?: string | null;
   attachments?: string[];
   startedAt: number;
   sourceMessageId: number | string;
@@ -357,6 +364,8 @@ export interface SubmitSessionTaskOpts {
   sessionId: string;
   workdir: string;
   prompt: string;
+  /** Optional UI-facing prompt. `null` hides internal recovery tasks from chat history previews. */
+  displayPrompt?: string | null;
   attachments?: string[];
   modelId?: string | null;
   thinkingEffort?: string | null;
@@ -502,7 +511,59 @@ export class Bot {
   getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
     const key = this.resolveSessionKey(sessionKey);
     const snap = this.pruneDeadStreamSnapshot(key);
-    return snap ? this.enrichSnapshot(snap) : null;
+    if (snap) return this.enrichSnapshot(snap);
+    const recovered = this.recoverLiveStreamSnapshot(key);
+    return recovered ? this.enrichSnapshot(recovered) : null;
+  }
+
+  private recoverLiveStreamSnapshot(sessionKey: string): StreamSnapshot | null {
+    const session = this.getSessionRuntimeByKey(sessionKey, { allowAnyWorkdir: true });
+    if (!session || !session.runningTaskIds.size) return null;
+    const liveTasks = [...session.runningTaskIds]
+      .map(taskId => this.activeTasks.get(taskId))
+      .filter((task): task is RunningTask => !!task && !task.cancelled)
+      .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+    if (!liveTasks.length) return null;
+    const running = liveTasks.find(task => task.status === 'running');
+    const now = Date.now();
+    if (running) {
+      const queuedTaskIds = liveTasks
+        .filter(task => task.taskId !== running.taskId && task.status === 'queued')
+        .map(task => task.taskId);
+      const recovered: StreamSnapshot = {
+        phase: 'streaming',
+        taskId: running.taskId,
+        sessionId: session.sessionId,
+        prompt: this.displayPromptForTask(running),
+        text: '',
+        thinking: '',
+        activity: '',
+        plan: null,
+        startedAt: running.startedAt || now,
+        updatedAt: now,
+        model: session.modelId ?? null,
+        effort: session.thinkingEffort ?? null,
+        previewMeta: null,
+        queuedTaskIds: queuedTaskIds.length ? queuedTaskIds : undefined,
+      };
+      this.streamSnapshots.set(session.key, recovered);
+      return recovered;
+    }
+    const queued = liveTasks[0];
+    const queuedTaskIds = liveTasks.slice(1).map(task => task.taskId);
+    const recovered: StreamSnapshot = {
+      phase: 'queued',
+      taskId: queued.taskId,
+      sessionId: session.sessionId,
+      prompt: this.displayPromptForTask(queued),
+      queuePosition: Math.max(1, liveTasks.length),
+      updatedAt: now,
+      model: session.modelId ?? null,
+      effort: session.thinkingEffort ?? null,
+      queuedTaskIds: queuedTaskIds.length ? queuedTaskIds : undefined,
+    };
+    this.streamSnapshots.set(session.key, recovered);
+    return recovered;
   }
 
   private pruneDeadStreamSnapshot(sessionKey: string): StreamSnapshot | null {
@@ -549,12 +610,18 @@ export class Bot {
    */
   private enrichSnapshot(snap: StreamSnapshot): StreamSnapshot {
     let next = snap;
+    const activeTask = this.activeTasks.get(next.taskId);
+    if (activeTask) {
+      const activePrompt = this.displayPromptForTask(activeTask);
+      next = activePrompt ? { ...next, prompt: activePrompt } : { ...next, prompt: undefined };
+    }
     if (next.queuedTaskIds?.length) {
       const queuedTasks = next.queuedTaskIds.map(taskId => {
-        const raw = this.activeTasks.get(taskId)?.prompt || '';
+        const task = this.activeTasks.get(taskId);
+        const raw = task ? this.displayPromptForTask(task) : '';
         // Show `/skillname` instead of the long expansion we synthesized for the
         // agent — matches what the user actually typed in the queued row.
-        return { taskId, prompt: collapseSkillPrompt(raw) ?? raw };
+        return { taskId, prompt: raw };
       });
       next = { ...next, queuedTasks };
     }
@@ -567,6 +634,12 @@ export class Bot {
       next = { ...next, interactions: refreshed };
     }
     return next;
+  }
+
+  private displayPromptForTask(task: RunningTask): string {
+    if (task.displayPrompt === null) return '';
+    const raw = task.displayPrompt !== undefined ? task.displayPrompt : task.prompt;
+    return collapseSkillPrompt(raw) ?? raw;
   }
 
   private queuedTaskOrderForSnapshot(snap: StreamSnapshot | null | undefined): string[] {
@@ -716,6 +789,9 @@ export class Bot {
     const now = Date.now();
     switch (event.type) {
       case 'queued': {
+        if (event.position <= 0) {
+          break;
+        }
         const existing = this.streamSnapshots.get(sessionKey);
         if (existing && (existing.phase === 'streaming' || existing.phase === 'done')) {
           // Don't overwrite active stream — append to the queued list (deduped).
@@ -728,9 +804,19 @@ export class Bot {
           const list = existing.queuedTaskIds ? [...existing.queuedTaskIds] : [];
           if (existing.taskId !== event.taskId && !list.includes(event.taskId)) list.push(event.taskId);
           existing.queuedTaskIds = list.length ? list : undefined;
+          existing.queuePosition = Math.max(1, existing.queuePosition || event.position);
           existing.updatedAt = now;
         } else {
-          this.streamSnapshots.set(sessionKey, { phase: 'queued', taskId: event.taskId, updatedAt: now });
+          const ordered = this.liveQueuedTaskOrder(sessionKey);
+          const firstTaskId = ordered[0] || event.taskId;
+          const rest = ordered.filter(id => id !== firstTaskId);
+          this.streamSnapshots.set(sessionKey, {
+            phase: 'queued',
+            taskId: firstTaskId,
+            queuedTaskIds: rest.length ? rest : undefined,
+            queuePosition: event.position,
+            updatedAt: now,
+          });
         }
         break;
       }
@@ -2158,6 +2244,7 @@ export class Bot {
       agent: session.agent,
       sessionKey: session.key,
       prompt,
+      displayPrompt: opts.displayPrompt,
       attachments,
       startedAt: queuedAt,
       sourceMessageId,
@@ -2915,9 +3002,10 @@ export class Bot {
    * Safe to call at any time — only touches records whose owning process is
    * no longer alive (or that have gone stale past the age threshold).
    */
-  private reconcileStaleRunningSessions() {
+  private reconcileStaleRunningSessions(): ReconciledOrphanedRunningSession[] {
     const seen = new Set<string>();
     const candidates: string[] = [this.workdir];
+    const recovered: ReconciledOrphanedRunningSession[] = [];
     try {
       for (const ws of loadWorkspaces()) candidates.push(ws.path);
     } catch {}
@@ -2925,8 +3013,9 @@ export class Bot {
       const resolved = path.resolve(candidate);
       if (seen.has(resolved)) continue;
       seen.add(resolved);
-      try { reconcileOrphanedRunningSessions(resolved); } catch {}
+      try { recovered.push(...reconcileAndCollectOrphanedRunningSessions(resolved)); } catch {}
     }
+    return recovered;
   }
 
   private refreshManagedConfig(config: Record<string, any>, opts: { initial?: boolean } = {}) {

@@ -95,6 +95,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
   it('filters interrupted placeholder prompts out of session previews', () => {
     expect(sanitizeSessionUserPreviewText('[Request interrupted by user]')).toBe('');
     expect(sanitizeSessionUserPreviewText('[Request interrupted by user for tool use]')).toBe('');
+    expect(sanitizeSessionUserPreviewText('The previous run was interrupted because Pikiclaw restarted. Continue from the last saved state and finish the task.')).toBe('');
     expect(sanitizeSessionUserPreviewText('[Image: original 2316x1558, displayed at 2000x1338]')).toBe('');
     expect(sanitizeSessionUserPreviewText('[Attached file: /tmp/shot.png]')).toBe('');
     expect(sanitizeSessionUserPreviewText('[Image: original 2316x1558] 帮我看一下这里为什么有间距')).toBe('帮我看一下这里为什么有间距');

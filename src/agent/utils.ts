@@ -423,6 +423,9 @@ export function readTailLines(filePath: string, maxBytes = 256 * 1024): string[]
 }
 
 export function stripInjectedPrompts(text: string): string {
+  if (text.trim() === 'The previous run was interrupted because Pikiclaw restarted. Continue from the last saved state and finish the task.') {
+    return '';
+  }
   text = stripHandoverSeed(text);
   const markers = ['\n[Session Workspace]'];
   for (const m of markers) {

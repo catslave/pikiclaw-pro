@@ -10,6 +10,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import type { InteractionSnapshot, MessageBlock, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
+import { hasRenderableAssistant } from './AssistantContent';
 import { InputComposer, type PendingReviewComment } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
 import type { OpenFileLinkHandler } from './markdown';
@@ -20,13 +21,40 @@ import {
   type Turn,
   type TurnHistoryWindow,
 } from './utils';
+import {
+  assistantHasFinalOutput,
+  assistantHasProcessOnlyOutput,
+  isLiveStreamActive,
+  isStaleStreamingSnapshotAfterDone,
+  liveStreamAlreadyInHistory as computeLiveStreamAlreadyInHistory,
+  isStaleDoneSnapshotForPending,
+  resolveEffectiveLiveStream,
+  shouldSkipEmptyStreamingHandoff,
+  willQueueSendOnStart,
+} from './stream-ui';
 
 export type SessionPanelChange = { agent: string; sessionId: string; workdir: string; openInNewSlot?: boolean };
 
 const SESSION_PAGE_TURNS = 12;
 const TOP_LOAD_THRESHOLD_PX = 160;
 const BOTTOM_STICK_THRESHOLD_PX = 96;
+const STREAM_FOLLOW_THRESHOLD_PX = 24;
 const LOCAL_SEND_TASK_ASSIGNMENT_GRACE_MS = 30_000;
+const USER_SCROLL_AUTOSTICK_PAUSE_MS = 60 * 60 * 1000;
+const PROGRAMMATIC_SCROLL_IGNORE_MS = 160;
+const USER_SCROLL_UP_THRESHOLD_PX = 4;
+const STREAM_BOTTOM_SCROLL_THROTTLE_MS = 220;
+
+function scrollToMessageBottom(el: HTMLDivElement) {
+  const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  if (Math.abs(el.scrollTop - maxScrollTop) > 1) {
+    el.scrollTop = maxScrollTop;
+  }
+}
+
+function remainingToMessageBottom(el: HTMLDivElement) {
+  return Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
+}
 
 /* ── Stale-while-revalidate: persist last-known history across mount/unmount ── */
 const MAX_HISTORY_SNAPSHOTS = 20;
@@ -104,11 +132,12 @@ function bridgePendingImagesIntoHistory(history: TurnHistoryWindow, pendingPromp
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
+  readOnly?: boolean;
   onSessionChange?: (next: SessionPanelChange) => void;
   onMultiSessionChange?: (next: SessionPanelChange[], prompt: string) => void;
   onOpenFileLink?: OpenFileLinkHandler;
@@ -142,6 +171,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [pendingReviewComments, setPendingReviewComments] = useState<PendingReviewComment[]>([]);
   const [liveStream, setLiveStream] = useState<{
     taskId: string | null;
+    prompt?: string | null;
     phase: 'streaming' | 'done';
     text: string;
     thinking: string;
@@ -180,8 +210,12 @@ export const SessionPanel = memo(function SessionPanel({
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const [pendingStopped, setPendingStopped] = useState(false);
+  const pendingPromptRef = useRef<string | null>(null);
+  pendingPromptRef.current = pendingPrompt;
   const pendingTaskIdRef = useRef<string | null>(null);
   pendingTaskIdRef.current = pendingTaskId;
+  const pendingCreatedAtRef = useRef<string | null>(null);
+  pendingCreatedAtRef.current = pendingCreatedAt;
   const pendingStoppedRef = useRef(false);
   pendingStoppedRef.current = pendingStopped;
   // Optimistic state for queued sends — one entry per send made while another
@@ -218,6 +252,15 @@ export const SessionPanel = memo(function SessionPanel({
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const stickToBottomRef = useRef(true);
   const scrollToBottomRef = useRef(false);
+  const forceScrollToBottomRef = useRef(false);
+  const bottomScrollFrameRef = useRef<number | null>(null);
+  const bottomScrollForceRef = useRef(false);
+  const bottomScrollTimerRef = useRef<number | null>(null);
+  const lastBottomScrollAtRef = useRef(0);
+  const autoStickPausedUntilRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
+  const programmaticScrollUntilRef = useRef(0);
+  const lastStreamAutoScrollRef = useRef<{ taskId: string | null; textLength: number } | null>(null);
   // Re-entrancy guard for loadLatestTurns. Scoped to a specific session id so a
   // fetch for sessionA can't block a fetch for sessionB — important during the
   // pending→native promotion of a brand-new session: the in-flight `pending_xxx`
@@ -228,15 +271,111 @@ export const SessionPanel = memo(function SessionPanel({
   const loadingLatestRef = useRef<string | null>(null);
   const loadingOlderRef = useRef(false);
   const localStreamPendingRef = useRef(hasInitialPending);
-  const clearPendingOnLoadRef = useRef(false);
+  const clearPendingOnLoadRef = useRef<{ taskId: string | null; pendingCreatedAt: string | null } | true | false>(false);
   // When a task ends, we wait for loadLatestTurns to commit its final text to
   // history before clearing liveStream. We remember which task triggered the
   // clear so that if a new task has already started streaming into liveStream
   // by the time history arrives, we don't accidentally wipe the new task's
   // preview. `true` = no specific task (used for non-handoff shutdown paths).
   const clearLiveStreamOnLoadRef = useRef<{ taskId: string | null } | true | false>(false);
+  // The backend keeps a completed stream snapshot around briefly so reconnects
+  // can recover the terminal state. Treat each done task as a one-shot handoff:
+  // once we've kicked off the history refresh for it, repeated done snapshots
+  // must not resurrect the live Working card over the persisted "Worked for"
+  // history row.
+  const doneHandoffTaskIdRef = useRef<string | null>(null);
   const initialPendingConsumedRef = useRef(false);
   const promotingRef = useRef(false);
+
+  const canAutoStickToBottom = useCallback(() => {
+    if (!stickToBottomRef.current || Date.now() < autoStickPausedUntilRef.current) return false;
+    const el = scrollRef.current;
+    if (!el) return true;
+    if (remainingToMessageBottom(el) > BOTTOM_STICK_THRESHOLD_PX) {
+      stickToBottomRef.current = false;
+      scrollToBottomRef.current = false;
+      return false;
+    }
+    return true;
+  }, []);
+
+  const canFollowStreamToBottom = useCallback(() => {
+    if (!stickToBottomRef.current || Date.now() < autoStickPausedUntilRef.current) return false;
+    const el = scrollRef.current;
+    if (!el) return true;
+    if (remainingToMessageBottom(el) > STREAM_FOLLOW_THRESHOLD_PX) {
+      stickToBottomRef.current = false;
+      scrollToBottomRef.current = false;
+      return false;
+    }
+    return true;
+  }, []);
+
+  const canApplyRequestedBottomScroll = useCallback(() => (
+    stickToBottomRef.current && Date.now() >= autoStickPausedUntilRef.current
+  ), []);
+
+  const runBottomScroll = useCallback((force: boolean) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (!force && !canApplyRequestedBottomScroll()) return;
+    autoStickPausedUntilRef.current = 0;
+    stickToBottomRef.current = true;
+    programmaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+    scrollToMessageBottom(el);
+    lastBottomScrollAtRef.current = Date.now();
+    lastScrollTopRef.current = el.scrollTop;
+  }, [canApplyRequestedBottomScroll]);
+
+  const scheduleBottomScroll = useCallback((force: boolean) => {
+    bottomScrollForceRef.current = bottomScrollForceRef.current || force;
+    if (bottomScrollFrameRef.current != null) {
+      cancelAnimationFrame(bottomScrollFrameRef.current);
+      bottomScrollFrameRef.current = null;
+    }
+    const requestFrame = () => {
+      if (bottomScrollFrameRef.current != null) {
+        cancelAnimationFrame(bottomScrollFrameRef.current);
+        bottomScrollFrameRef.current = null;
+      }
+      bottomScrollFrameRef.current = requestAnimationFrame(() => {
+        const shouldForce = bottomScrollForceRef.current;
+        bottomScrollForceRef.current = false;
+        bottomScrollFrameRef.current = null;
+        runBottomScroll(shouldForce);
+      });
+    };
+    if (force) {
+      if (bottomScrollTimerRef.current != null) {
+        window.clearTimeout(bottomScrollTimerRef.current);
+        bottomScrollTimerRef.current = null;
+      }
+      requestFrame();
+      return;
+    }
+    const elapsed = Date.now() - lastBottomScrollAtRef.current;
+    if (elapsed >= STREAM_BOTTOM_SCROLL_THROTTLE_MS) {
+      requestFrame();
+      return;
+    }
+    if (bottomScrollTimerRef.current != null) return;
+    bottomScrollTimerRef.current = window.setTimeout(() => {
+      bottomScrollTimerRef.current = null;
+      requestFrame();
+    }, STREAM_BOTTOM_SCROLL_THROTTLE_MS - elapsed);
+  }, [runBottomScroll]);
+
+  useEffect(() => () => {
+    if (bottomScrollTimerRef.current != null) {
+      window.clearTimeout(bottomScrollTimerRef.current);
+      bottomScrollTimerRef.current = null;
+    }
+    if (bottomScrollFrameRef.current != null) {
+      cancelAnimationFrame(bottomScrollFrameRef.current);
+      bottomScrollFrameRef.current = null;
+    }
+    bottomScrollForceRef.current = false;
+  }, []);
 
   // Consume initialPendingPrompt/initialPendingImageUrls from new-session flow.
   // State (pendingPrompt, pendingImageUrls, loading, localStreamPendingRef) is already initialized
@@ -277,12 +416,13 @@ export const SessionPanel = memo(function SessionPanel({
   }, []);
 
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
-    const livePhase = liveStreamRef.current?.phase || null;
-    const willBeQueued = streamingRef.current
-      || livePhase === 'streaming'
-      || streamPhaseRef.current === 'streaming'
-      || streamPhaseRef.current === 'queued'
-      || queuedTaskIdsRef.current.length > 0;
+    const willBeQueued = willQueueSendOnStart({
+      streaming: streamingRef.current,
+      streamPhase: streamPhaseRef.current as 'queued' | 'streaming' | 'done' | null,
+      pendingPrompt: pendingPromptRef.current,
+      pendingTaskId: pendingTaskIdRef.current,
+      queuedTaskCount: queuedTaskIdsRef.current.length,
+    });
     const urls = imageUrls || [];
     const createdAt = new Date().toISOString();
     if (willBeQueued) {
@@ -296,8 +436,18 @@ export const SessionPanel = memo(function SessionPanel({
     }
     // No active stream — this send is the (about-to-be) running task. Replace
     // the running pending slot wholesale and revoke any stale image URLs.
+    autoStickPausedUntilRef.current = 0;
+    programmaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+    stickToBottomRef.current = true;
+    forceScrollToBottomRef.current = true;
+    scrollToBottomRef.current = true;
     for (const u of pendingImageUrlsRef.current) URL.revokeObjectURL(u);
     lastSendQueuedLocalIdRef.current = null;
+    localStreamPendingRef.current = true;
+    setLiveStream(null);
+    doneHandoffTaskIdRef.current = null;
+    clearLiveStreamOnLoadRef.current = false;
+    clearPendingOnLoadRef.current = false;
     setPendingPrompt(prompt || null);
     setPendingCreatedAt(createdAt);
     setPendingImageUrls(urls);
@@ -423,7 +573,7 @@ export const SessionPanel = memo(function SessionPanel({
       if (!fetched) return false;
       const { history: next, transferred: transferredPendingImages } = bridgePendingImagesIntoHistory(
         fetched,
-        pendingPrompt,
+        pendingPromptRef.current,
         pendingImageUrlsRef.current,
       );
       // Drop stale results: if the panel's session id has rotated since this
@@ -449,8 +599,14 @@ export const SessionPanel = memo(function SessionPanel({
       // Clear pending + liveStream in the same synchronous block as setHistory so
       // React batches all updates into a single render (avoids flash/scroll jump)
       if (clearPendingOnLoadRef.current) {
+        const pendingClear = clearPendingOnLoadRef.current;
         clearPendingOnLoadRef.current = false;
-        clearPending({ revokeImages: !transferredPendingImages });
+        const scopedTaskId = pendingClear !== true ? pendingClear.taskId : null;
+        const scopedPendingCreatedAt = pendingClear !== true ? pendingClear.pendingCreatedAt : null;
+        const ownsPending = pendingClear === true
+          || (!!scopedTaskId && pendingTaskIdRef.current === scopedTaskId)
+          || (!!scopedPendingCreatedAt && pendingCreatedAtRef.current === scopedPendingCreatedAt);
+        if (ownsPending) clearPending({ revokeImages: !transferredPendingImages });
       }
       if (clearLiveStreamOnLoadRef.current) {
         const pending = clearLiveStreamOnLoadRef.current;
@@ -472,7 +628,7 @@ export const SessionPanel = memo(function SessionPanel({
         loadingLatestRef.current = null;
       }
     }
-  }, [fetchTurnWindow, clearPending, pendingPrompt, session.sessionId]);
+  }, [fetchTurnWindow, clearPending, session.sessionId]);
 
   const loadOlderTurns = useCallback(async () => {
     if (!history?.hasOlder || loadingOlderRef.current) return;
@@ -512,7 +668,10 @@ export const SessionPanel = memo(function SessionPanel({
       setStreaming(false);
       if (prev === 'streaming') {
         // Delay liveStream clearing — same pattern as the 'done' handler
-        clearPendingOnLoadRef.current = true;
+        clearPendingOnLoadRef.current = {
+          taskId: liveStreamRef.current?.taskId ?? null,
+          pendingCreatedAt: pendingCreatedAtRef.current,
+        };
         clearLiveStreamOnLoadRef.current = true;
         void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: stickToBottomRef.current });
       } else {
@@ -534,29 +693,69 @@ export const SessionPanel = memo(function SessionPanel({
       setQueuedTaskIds([]);
       setQueuedTasks([]);
       setInteractions([]);
+      lastStreamAutoScrollRef.current = null;
       prevPhaseRef.current = null;
       return;
     }
+    const queuePosition = typeof state.queuePosition === 'number' ? state.queuePosition : 0;
+    const queuedBehind = Array.isArray(state.queuedTaskIds) ? state.queuedTaskIds : [];
+    const visibleQueuedTaskIds = state.phase === 'queued' && state.taskId && queuePosition > 0
+      ? [state.taskId, ...queuedBehind.filter((id: string) => id !== state.taskId)]
+      : queuedBehind;
+    const visibleQueuedTasks = (() => {
+      const tasks = Array.isArray(state.queuedTasks) ? state.queuedTasks : [];
+      if (state.phase !== 'queued' || !state.taskId || queuePosition <= 0) return tasks;
+      if (tasks.some((task: { taskId?: string }) => task.taskId === state.taskId)) return tasks;
+      return [{ taskId: state.taskId, prompt: typeof state.prompt === 'string' ? state.prompt : '' }, ...tasks];
+    })();
+
+    if (isStaleDoneSnapshotForPending({
+      phase: state.phase,
+      pendingPrompt: pendingPromptRef.current,
+      pendingTaskId: pendingTaskIdRef.current,
+      pendingCreatedAt: pendingCreatedAtRef.current,
+      snapshotTaskId: state.taskId || null,
+      snapshotPrompt: typeof state.prompt === 'string' ? state.prompt : null,
+      snapshotCompletedAt: state.completedAt ?? null,
+      snapshotUpdatedAt: state.updatedAt ?? null,
+    })) {
+      return;
+    }
+    if (isStaleStreamingSnapshotAfterDone({
+      phase: state.phase,
+      snapshotTaskId: state.taskId || null,
+      doneHandoffTaskId: doneHandoffTaskIdRef.current,
+    })) {
+      return;
+    }
+
     setStreamPhase(state.phase);
     setStreamTaskId(state.taskId || null);
-    setQueuedTaskIds(state.queuedTaskIds && state.queuedTaskIds.length ? state.queuedTaskIds : []);
-    setQueuedTasks(state.queuedTasks && state.queuedTasks.length ? state.queuedTasks : []);
+    setQueuedTaskIds(visibleQueuedTaskIds.length ? visibleQueuedTaskIds : []);
+    setQueuedTasks(visibleQueuedTasks.length ? visibleQueuedTasks : []);
     setInteractions(Array.isArray(state.interactions) && state.interactions.length ? state.interactions : []);
     if (state.phase === 'streaming') {
+      if (state.taskId && doneHandoffTaskIdRef.current === state.taskId) {
+        return;
+      }
       // Steer handoff: a previous task just ended ('done' triggered loadLatestTurns
       // and armed clearLiveStreamOnLoadRef). The new task's initial snapshot carries
       // an empty text — overwriting liveStream here would flash the previous task's
       // partial response away before loadLatestTurns has a chance to commit it to
       // history. Skip the empty overwrite; the new task's subsequent text events
       // (or the loadLatestTurns completion) will replace liveStream naturally.
-      const handingOffPrevTask = clearLiveStreamOnLoadRef.current
-        && !!liveStreamRef.current
-        && liveStreamRef.current.taskId !== null
-        && liveStreamRef.current.taskId !== (state.taskId || null)
-        && !(state.text || '').trim();
+      const handingOffPrevTask = shouldSkipEmptyStreamingHandoff({
+        clearLiveStreamOnLoad: !!clearLiveStreamOnLoadRef.current,
+        liveStreamTaskId: liveStreamRef.current?.taskId ?? null,
+        incomingTaskId: state.taskId || null,
+        incomingText: String(state.text || ''),
+        pendingPrompt: pendingPromptRef.current,
+        liveStreamPrompt: liveStreamRef.current?.prompt ?? null,
+      });
       if (!handingOffPrevTask) {
         setLiveStream({
           taskId: state.taskId || null,
+          prompt: typeof state.prompt === 'string' ? state.prompt : liveStreamRef.current?.prompt ?? null,
           phase: 'streaming',
           text: state.text || '',
           thinking: state.thinking || '',
@@ -593,42 +792,75 @@ export const SessionPanel = memo(function SessionPanel({
           pendingImageUrlsRef.current = promoted.imageUrls;
           setPendingTaskId(state.taskId);
           setPendingQueuedSends(prev => prev.filter((_, i) => i !== idx));
+        } else if (typeof state.prompt === 'string' && state.prompt.trim()) {
+          const serverPrompt = state.prompt.trim();
+          const optimisticPrompt = pendingPromptRef.current?.trim() || '';
+          if (!optimisticPrompt || optimisticPrompt === serverPrompt) {
+            for (const url of pendingImageUrlsRef.current) URL.revokeObjectURL(url);
+            setPendingPrompt(serverPrompt);
+            setPendingCreatedAt(state.startedAt ? new Date(state.startedAt).toISOString() : new Date().toISOString());
+            setPendingImageUrls([]);
+            pendingImageUrlsRef.current = [];
+          }
+          setPendingTaskId(state.taskId);
         }
       }
-      if (stickToBottomRef.current) scrollToBottomRef.current = true;
+      const nextTaskId = state.taskId || null;
+      const nextTextLength = String(state.text || '').length;
+      const previousAutoScroll = lastStreamAutoScrollRef.current;
+      const shouldFollowStream = !previousAutoScroll
+        || previousAutoScroll.taskId !== nextTaskId
+        || nextTextLength > previousAutoScroll.textLength;
+      lastStreamAutoScrollRef.current = { taskId: nextTaskId, textLength: nextTextLength };
+      if (shouldFollowStream && canFollowStreamToBottom()) {
+        scrollToBottomRef.current = true;
+      }
     } else if (state.phase === 'queued') {
-      setLiveStream(null);
+      const awaitingOwnTask = !!(pendingPromptRef.current && !pendingTaskIdRef.current);
+      if (!awaitingOwnTask) setLiveStream(null);
       setStreaming(false);
+      lastStreamAutoScrollRef.current = null;
     } else if (state.phase === 'done') {
       // Don't clear liveStream here — keep it visible so the scroll position stays
       // stable while loadLatestTurns fetches the full history.  The live preview is
       // cleared atomically with the history update inside loadLatestTurns to avoid
       // the intermediate "empty" render that causes a scroll jump.
       setStreaming(false);
+      const hasMoreQueued = !!state.queuedTaskIds?.length;
+      const stoppedOrIncomplete = !!state.incomplete || /stopped by user/i.test(String(state.error || ''));
+      const doneTaskId = state.taskId || null;
+      const firstDoneSnapshotForTask = !doneTaskId || doneHandoffTaskIdRef.current !== doneTaskId;
+      if (firstDoneSnapshotForTask && doneTaskId) doneHandoffTaskIdRef.current = doneTaskId;
       // Mark the live preview as finished and forward any error from the
       // snapshot so a content-less failure surfaces a reason instead of a phantom.
-      setLiveStream(prev => prev ? {
+      setLiveStream(prev => (prev && firstDoneSnapshotForTask) ? {
         ...prev,
+        prompt: typeof state.prompt === 'string' ? state.prompt : prev.prompt ?? null,
         phase: 'done',
         error: state.error ?? null,
         completedAt: state.completedAt ?? state.updatedAt ?? prev.completedAt ?? null,
         updatedAt: state.updatedAt ?? prev.updatedAt ?? null,
         previewMeta: state.previewMeta ?? prev.previewMeta ?? null,
       } : prev);
-      const hasMoreQueued = !!state.queuedTaskIds?.length;
-      const stoppedOrIncomplete = !!state.incomplete || /stopped by user/i.test(String(state.error || ''));
       if (stoppedOrIncomplete && (pendingPrompt || pendingImageUrlsRef.current.length > 0)) {
         setPendingStopped(true);
       }
-      if (prevPhaseRef.current !== 'done') {
-        if (!hasMoreQueued && !stoppedOrIncomplete) clearPendingOnLoadRef.current = true;
+      if (firstDoneSnapshotForTask) {
+        if (!hasMoreQueued && !stoppedOrIncomplete) {
+          clearPendingOnLoadRef.current = {
+            taskId: doneTaskId,
+            pendingCreatedAt: pendingCreatedAtRef.current,
+          };
+        }
         // Scope the pending clear to the finishing task so a steer handoff can
         // start a new task's stream without losing its preview when the history
         // fetch resolves.
-        clearLiveStreamOnLoadRef.current = { taskId: state.taskId || null };
+        clearLiveStreamOnLoadRef.current = { taskId: doneTaskId };
         void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: stickToBottomRef.current });
       }
-      if (!hasMoreQueued) localStreamPendingRef.current = false;
+      if (!hasMoreQueued && !pendingPromptRef.current && !pendingImageUrlsRef.current.length) {
+        localStreamPendingRef.current = false;
+      }
     }
     // Prune queued-send optimistic entries whose server-assigned taskId no
     // longer appears in the live snapshot — covers server-side cancel /
@@ -652,7 +884,7 @@ export const SessionPanel = memo(function SessionPanel({
       return changed ? next : prev;
     });
     prevPhaseRef.current = state.phase;
-  }, [clearPending, clearPendingQueuedSends, loadLatestTurns, pendingPrompt, session.sessionId, session.agent, onSessionChange, workdir]);
+  }, [canFollowStreamToBottom, clearPending, clearPendingQueuedSends, loadLatestTurns, pendingPrompt, session.sessionId, session.agent, onSessionChange, workdir]);
 
   const requestStreamPolling = useCallback(() => {
     localStreamPendingRef.current = true;
@@ -725,6 +957,7 @@ export const SessionPanel = memo(function SessionPanel({
   }, [session.agent, session.sessionId]);
 
   const handleResendText = useCallback((txt: string) => {
+    forceScrollToBottomRef.current = true;
     scrollToBottomRef.current = true;
     handleSendStart(txt);
     requestStreamPolling();
@@ -758,7 +991,7 @@ export const SessionPanel = memo(function SessionPanel({
       turnOffset: 0,
       turnLimit: SESSION_PAGE_TURNS,
     }, { allowStale: true });
-    const isNewSession = hasInitialPending && !initialPendingConsumedRef.current;
+    const isNewSession = hasInitialPending;
     // Stale-while-revalidate: API cache → history snapshot → loading spinner
     const initialHistory = cachedLatest?.ok
       ? normalizeTurnHistory(cachedLatest)
@@ -771,6 +1004,7 @@ export const SessionPanel = memo(function SessionPanel({
     setQueuedTaskIds([]);
     setQueuedTasks([]);
     setInteractions([]);
+    lastStreamAutoScrollRef.current = null;
     // Reset the previous session's optimistic state (pending bubble, queued
     // sends, deferred clear flags). Without this, navigating to another
     // session via onSessionChange — including the fork flow that swaps the
@@ -783,8 +1017,10 @@ export const SessionPanel = memo(function SessionPanel({
       localStreamPendingRef.current = false;
       clearPendingOnLoadRef.current = false;
       clearLiveStreamOnLoadRef.current = false;
+      doneHandoffTaskIdRef.current = null;
     }
     stickToBottomRef.current = true;
+    forceScrollToBottomRef.current = false;
     scrollToBottomRef.current = true;
     if (!isNewSession) {
       loadLatestTurns({ keepOlder: false, force: true }).finally(() => { if (!c) setLoading(false); });
@@ -853,7 +1089,12 @@ export const SessionPanel = memo(function SessionPanel({
     const pendingAssignmentGraceActive =
       (pendingAwaitingTask && pendingAgeMs < LOCAL_SEND_TASK_ASSIGNMENT_GRACE_MS)
       || queuedAssignmentGraceActive;
-    if (displayState !== 'running' && !streaming && !liveStream
+    const hasPendingContent = !!(pendingPrompt || pendingImageUrls.length);
+    const streamLocallyActive = !!(streaming || liveStream || streamPhase);
+    if (hasPendingContent && (streamLocallyActive || pendingTaskId || pendingAssignmentGraceActive || localStreamPendingRef.current)) {
+      return;
+    }
+    if (displayState !== 'running' && !streamLocallyActive
         && !streamPhase && queuedTaskIds.length === 0
         && !localStreamPendingRef.current
         && !pendingStopped
@@ -872,25 +1113,25 @@ export const SessionPanel = memo(function SessionPanel({
     el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
   }, [history?.turns.length]);
 
-  useLayoutEffect(() => {
+  const historyScrollKey = history ? `${history.startTurn}:${history.endTurn}:${history.turns.length}` : 'none';
+  const liveScrollKey = liveStream ? `${liveStream.taskId || ''}:${liveStream.phase}:${(liveStream.text || '').length}` : 'none';
+
+  useEffect(() => {
     if (!scrollToBottomRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
+    const force = forceScrollToBottomRef.current;
+    forceScrollToBottomRef.current = false;
     scrollToBottomRef.current = false;
-    el.scrollTop = el.scrollHeight;
-    // Catch any post-layout height shifts (CSS animations, LivePreview→TurnView swap)
-    requestAnimationFrame(() => {
-      if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-    });
-  }, [history, liveStream]);
+    scheduleBottomScroll(force);
+  }, [historyScrollKey, liveScrollKey, scheduleBottomScroll]);
 
   // Scroll to bottom when the running task's pending prompt appears.
   // Queued follow-ups stay in the task bar and should not move the transcript.
-  useLayoutEffect(() => {
-    if (!pendingPrompt) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [pendingPrompt]);
+  useEffect(() => {
+    if (!pendingPrompt && pendingImageUrls.length === 0) return;
+    const force = forceScrollToBottomRef.current;
+    forceScrollToBottomRef.current = false;
+    scheduleBottomScroll(force);
+  }, [pendingPrompt, pendingImageUrls.length, scheduleBottomScroll]);
 
   const hasActiveTurn = !!(liveStream || streaming || streamPhase || pendingPrompt);
 
@@ -906,10 +1147,69 @@ export const SessionPanel = memo(function SessionPanel({
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = remaining <= BOTTOM_STICK_THRESHOLD_PX;
+    const previousScrollTop = lastScrollTopRef.current;
+    const nextScrollTop = el.scrollTop;
+    lastScrollTopRef.current = nextScrollTop;
+    const userMovedUp = nextScrollTop < previousScrollTop - USER_SCROLL_UP_THRESHOLD_PX;
+    const remaining = remainingToMessageBottom(el);
+    const atBottom = remaining <= 2;
+    if (Date.now() < programmaticScrollUntilRef.current) {
+      // Programmatic bottom-follow can be active almost continuously while a
+      // task streams. If the user drags the scrollbar upward during that
+      // window, do not classify it as our own scroll; otherwise the next stream
+      // snapshot will pull the panel back to bottom and the scrollbar appears
+      // to jitter.
+      if (userMovedUp && remaining > 2) {
+        autoStickPausedUntilRef.current = Date.now() + USER_SCROLL_AUTOSTICK_PAUSE_MS;
+        stickToBottomRef.current = false;
+        scrollToBottomRef.current = false;
+        if (el.scrollTop <= TOP_LOAD_THRESHOLD_PX) void loadOlderTurns();
+        return;
+      }
+      if (remaining <= BOTTOM_STICK_THRESHOLD_PX && atBottom) {
+        stickToBottomRef.current = true;
+      }
+      return;
+    }
+    const autoStickPaused = Date.now() < autoStickPausedUntilRef.current;
+    if (userMovedUp) {
+      autoStickPausedUntilRef.current = Date.now() + USER_SCROLL_AUTOSTICK_PAUSE_MS;
+      stickToBottomRef.current = false;
+      scrollToBottomRef.current = false;
+      if (el.scrollTop <= TOP_LOAD_THRESHOLD_PX) void loadOlderTurns();
+      return;
+    }
+    if (remaining <= BOTTOM_STICK_THRESHOLD_PX) {
+      if (atBottom && !autoStickPaused) {
+        autoStickPausedUntilRef.current = 0;
+        stickToBottomRef.current = true;
+      } else {
+        stickToBottomRef.current = false;
+        scrollToBottomRef.current = false;
+      }
+    } else {
+      stickToBottomRef.current = false;
+      if (autoStickPaused) scrollToBottomRef.current = false;
+    }
     if (el.scrollTop <= TOP_LOAD_THRESHOLD_PX) void loadOlderTurns();
   }, [loadOlderTurns]);
+
+  const pauseAutoStickForUserScroll = useCallback((event?: { deltaY?: number }) => {
+    const deltaY = event?.deltaY ?? 0;
+    const el = scrollRef.current;
+    if (el) {
+      const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (deltaY > 0 && remaining <= 2) {
+        autoStickPausedUntilRef.current = 0;
+        stickToBottomRef.current = true;
+        return;
+      }
+    }
+    if (deltaY >= 0) return;
+    autoStickPausedUntilRef.current = Date.now() + USER_SCROLL_AUTOSTICK_PAUSE_MS;
+    stickToBottomRef.current = false;
+    scrollToBottomRef.current = false;
+  }, []);
 
   // Effective model + effort to display: live stream wins (it carries the truth
   // for the in-flight turn), then the session's persisted choice, then the
@@ -920,23 +1220,49 @@ export const SessionPanel = memo(function SessionPanel({
   const displayModelShort = displayModel ? shortenModel(displayModel) : null;
 
   const rawTurns = history?.turns || [];
-  // When a live stream is active, the last turn's assistant response may already be
-  // present in fetched history (partial or complete).  Suppress it to avoid rendering
-  // the same response twice (once in TurnView, once in LivePreview).
-  // BUT: when there's a pending follow-up prompt whose turn hasn't appeared in history
-  // yet, the liveStream is for the NEW turn — don't strip the previous turn's response.
+  const streamSnapshotActive = isLiveStreamActive({
+    streaming,
+    streamPhase: streamPhase as 'queued' | 'streaming' | 'done' | null,
+    liveStreamPhase: liveStream?.phase ?? null,
+    pendingPrompt,
+    pendingTaskId,
+    pendingImageCount: pendingImageUrls.length,
+  });
+  const effectiveLiveStream = useMemo(() => resolveEffectiveLiveStream({
+    liveStream,
+    pendingPrompt,
+    pendingTaskId,
+    streamSnapshotActive,
+    streamTaskId,
+    displayModel,
+    displayEffort,
+  }), [
+    liveStream,
+    streamSnapshotActive,
+    pendingPrompt,
+    pendingTaskId,
+    streamTaskId,
+    displayModel,
+    displayEffort,
+  ]);
+  const activeLivePrompt = (pendingPrompt || effectiveLiveStream?.prompt || '').trim();
+  // When a live stream is active, the stream prompt owns where the live assistant
+  // card attaches. Pending input can be a queued follow-up, so it must not steal
+  // ownership from the currently running turn.
   const pendingMatchesLastServerUser = useMemo(() => {
     if (!pendingPrompt || !rawTurns.length) return false;
     const last = rawTurns[rawTurns.length - 1];
     return (last.user?.text?.trim() || '') === pendingPrompt.trim();
   }, [rawTurns, pendingPrompt]);
-  // The optimistic user bubble is the stable source of truth for the just-sent
-  // message until the pending slot is cleared. Do not depend on stream flags
-  // here: after send, the server can echo the user turn before streamPhase /
-  // liveStream has reached this panel. If we hide pending in that window, the
-  // user message disappears while the Working card is already visible.
-  const pendingOwnsVisibleUser = !!(pendingPrompt || pendingImageUrls.length)
-    && pendingMatchesLastServerUser;
+  const liveCanAttachToLastServerTurn = useMemo(() => {
+    if (!effectiveLiveStream || !activeLivePrompt || !rawTurns.length) return false;
+    const last = rawTurns[rawTurns.length - 1];
+    if (!last.user || last.user.text?.trim() !== activeLivePrompt) return false;
+    // Do not attach a restored live stream to an older historical assistant just
+    // because the prompt text happens to match. The optimistic pending prompt is
+    // the signal that this browser instance owns the currently running turn.
+    return pendingMatchesLastServerUser || !last.assistant;
+  }, [effectiveLiveStream, activeLivePrompt, rawTurns, pendingMatchesLastServerUser]);
   // True when the server's matching user lacks the images we're holding.
   const optimisticBridgesImages = useMemo(() => {
     if (!pendingImageUrls.length || !pendingMatchesLastServerUser || !rawTurns.length) return false;
@@ -946,23 +1272,57 @@ export const SessionPanel = memo(function SessionPanel({
     return serverImages < pendingImageUrls.length;
   }, [rawTurns, pendingMatchesLastServerUser, pendingImageUrls.length]);
 
+  const liveStreamAlreadyInHistory = useMemo(() => {
+    if (!effectiveLiveStream || !rawTurns.length) return false;
+    const last = rawTurns[rawTurns.length - 1];
+    return computeLiveStreamAlreadyInHistory({
+      hasEffectiveLiveStream: true,
+      lastTurnUserText: last.user?.text,
+      lastAssistantHasFinalOutput: !!last.assistant && assistantHasFinalOutput(last.assistant),
+      activeLivePrompt: activeLivePrompt || '',
+      effectiveTaskId: effectiveLiveStream.taskId,
+      doneHandoffTaskId: doneHandoffTaskIdRef.current,
+    });
+  }, [effectiveLiveStream, rawTurns, activeLivePrompt]);
+  const liveStreamVisible = !!effectiveLiveStream
+    && !liveStreamAlreadyInHistory
+    && liveStreamShouldRender(effectiveLiveStream);
+  const streamIsActive = streamSnapshotActive;
+
   const turns = useMemo(() => {
     let result = rawTurns;
-    // Drop the duplicate user from history while the optimistic bubble owns the
-    // in-flight prompt. We keep the assistant so live/history output can continue
-    // rendering underneath the stable pending user bubble.
-    if (pendingOwnsVisibleUser || optimisticBridgesImages) {
-      const last = result[result.length - 1];
-      result = [...result.slice(0, -1), { ...last, user: null }];
+    // If the server echoed the matching user without the local image previews,
+    // keep the optimistic bubble as the visible source for that turn. Text-only
+    // sends should use the server user once it arrives, otherwise a later
+    // pending cleanup can leave only the Working card visible.
+    if (effectiveLiveStream && optimisticBridgesImages) {
+      result = result.slice(0, -1);
     }
-    if (!liveStream || !result.length) return result;
+    // While the just-sent user turn has not been echoed by history yet, keep
+    // history immutable. The live preview will render under the optimistic
+    // pending bubble below; stripping the last assistant here makes the previous
+    // completed turn disappear and visually attaches new work to the old user.
+    if (pendingPrompt && !pendingMatchesLastServerUser) return result;
+    if (effectiveLiveStream && result.length) {
+      const last = result[result.length - 1];
+      const activePromptMatches = !!activeLivePrompt && last.user?.text?.trim() === activeLivePrompt;
+      const canOwnPromptlessLatestTurn = !activeLivePrompt && streamIsActive;
+      if ((activePromptMatches || canOwnPromptlessLatestTurn)
+          && last.assistant
+          && assistantHasProcessOnlyOutput(last.assistant)) {
+        return [...result.slice(0, -1), { ...last, assistant: null }];
+      }
+    }
+    if (effectiveLiveStream && !activeLivePrompt) return result;
+    if (!effectiveLiveStream || !result.length) return result;
+    if (!liveCanAttachToLastServerTurn) return result;
     const last = result[result.length - 1];
     if (!last.assistant) return result;
     // If a pending prompt exists and doesn't match the last turn's user message,
     // the live stream is for a new follow-up turn, not the last one in history.
-    if (pendingPrompt && last.user?.text?.trim() !== pendingPrompt.trim()) return result;
+    if (activeLivePrompt && last.user?.text?.trim() !== activeLivePrompt) return result;
     return [...result.slice(0, -1), { ...last, assistant: null }];
-  }, [rawTurns, liveStream, pendingPrompt, pendingOwnsVisibleUser, optimisticBridgesImages]);
+  }, [rawTurns, effectiveLiveStream, activeLivePrompt, pendingPrompt, pendingMatchesLastServerUser, optimisticBridgesImages, liveCanAttachToLastServerTurn, streamIsActive]);
   const displayTurnItems = useMemo(() => {
     const normalizedReplacementPrompt = editReplacement?.prompt.trim();
     const replacementSourceIndex = editReplacement && normalizedReplacementPrompt
@@ -981,7 +1341,6 @@ export const SessionPanel = memo(function SessionPanel({
         return replacementSourceIndex >= 0 && sourceIndex >= replacementSourceIndex;
       });
   }, [editReplacement, history?.startTurn, turns]);
-  const liveStreamVisible = !!liveStream && liveStreamShouldRender(liveStream);
   const pendingBubble = (pendingPrompt || pendingImageUrls.length > 0)
     ? (
       <UserBubble
@@ -995,41 +1354,78 @@ export const SessionPanel = memo(function SessionPanel({
       />
     )
     : null;
+  const pendingVisibleInTurns = useMemo(() => {
+    const trimmed = pendingPrompt?.trim();
+    if (!trimmed || !turns.length) return false;
+    const last = turns[turns.length - 1];
+    return (last.user?.text?.trim() || '') === trimmed;
+  }, [turns, pendingPrompt]);
   const showStandalonePending = !!pendingBubble
-    && (!pendingMatchesLastServerUser || pendingOwnsVisibleUser || optimisticBridgesImages);
+    && (!pendingVisibleInTurns || optimisticBridgesImages);
   const liveStreamAttachIndex = useMemo(() => {
+    if (showStandalonePending) return -1;
     if (!liveStreamVisible || !turns.length) return -1;
     const index = turns.length - 1;
     const last = turns[index];
     if (!last.user) return -1;
-    if (pendingPrompt && last.user.text?.trim() !== pendingPrompt.trim()) return -1;
+    const activePromptMatches = !!activeLivePrompt && last.user.text?.trim() === activeLivePrompt;
+    const promptlessActiveTurn = !activeLivePrompt && streamIsActive;
+    if ((activePromptMatches || promptlessActiveTurn)
+        && last.assistant
+        && assistantHasProcessOnlyOutput(last.assistant)) {
+      return index;
+    }
+    if (!activeLivePrompt) return -1;
+    if (!liveCanAttachToLastServerTurn) return -1;
+    if (!activePromptMatches) return -1;
     return index;
-  }, [liveStreamVisible, pendingPrompt, turns]);
+  }, [showStandalonePending, liveStreamVisible, activeLivePrompt, streamIsActive, liveCanAttachToLastServerTurn, turns]);
   const latestContextMeta = useMemo(() => {
-    const liveMeta = liveStream?.previewMeta;
+    const liveMeta = effectiveLiveStream?.previewMeta;
     if (liveMeta?.contextPercent != null || liveMeta?.contextUsedTokens != null) return liveMeta;
     for (let i = rawTurns.length - 1; i >= 0; i -= 1) {
       const usage = rawTurns[i].assistant?.usage;
       if (usage?.contextPercent != null || usage?.contextUsedTokens != null) return usage;
     }
     return null;
-  }, [liveStream?.previewMeta, rawTurns]);
+  }, [effectiveLiveStream?.previewMeta, rawTurns]);
   useEffect(() => {
     if (latestContextMeta) setLastContextMeta(latestContextMeta);
   }, [latestContextMeta]);
   const composerContextMeta = latestContextMeta ?? lastContextMeta;
-  const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || liveStream);
+  const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || effectiveLiveStream);
+  const transcriptTailKey = [
+    showStandalonePending ? 1 : 0,
+    liveStreamVisible ? 1 : 0,
+    liveStreamAlreadyInHistory ? 1 : 0,
+    liveStreamAttachIndex,
+    turns.length,
+    pendingPrompt?.length || 0,
+    effectiveLiveStream?.text?.length || 0,
+    effectiveLiveStream?.activity?.length || 0,
+  ].join(':');
+  useLayoutEffect(() => {
+    if (!stickToBottomRef.current) return;
+    scheduleBottomScroll(scrollToBottomRef.current || forceScrollToBottomRef.current);
+    scrollToBottomRef.current = false;
+    forceScrollToBottomRef.current = false;
+  }, [transcriptTailKey, scheduleBottomScroll]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-[var(--th-session-bg)]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]">
       {/* ── Messages ── */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        onWheel={pauseAutoStickForUserScroll}
+        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain [overflow-anchor:none]"
+      >
         {loading && !hasImmediateMessageContent ? (
           <div className="flex items-center justify-center py-20"><Spinner className="h-5 w-5 text-fg-4" /></div>
-        ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !liveStream ? (
+        ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !effectiveLiveStream ? (
           <div className="py-20 text-center text-[13px] text-fg-5">{t('hub.noMessages')}</div>
         ) : (
-          <div className="max-w-[860px] mx-auto px-6 py-6 space-y-0">
+          <div className="max-w-[860px] mx-auto px-6 pt-6 pb-12 space-y-0">
             {(history?.hasOlder || loadingOlder) && !hasActiveTurn && (
               <div className="mb-4 flex items-center justify-center gap-2 text-[11px] text-fg-5">
                 {loadingOlder ? <Spinner className="h-3 w-3 text-fg-5" /> : <span className="h-1.5 w-1.5 rounded-full bg-fg-5/35" />}
@@ -1067,13 +1463,20 @@ export const SessionPanel = memo(function SessionPanel({
                 && !liveStream
                 && !streamPhase
                 && !!turn.user?.text;
+              const assistantRunError = isLatestVisibleTurn
+                && displayState === 'incomplete'
+                && !streaming
+                && !liveStream
+                && !streamPhase
+                ? (session.runDetail || t('dashboard.incompleteHint'))
+                : null;
               return (
                 <TurnView key={`${history?.startTurn || 0}:${sourceIndex}`}
                   turn={turn}
                   turnIndex={absoluteTurnIndex}
                   agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
-                  previewMeta={sourceIndex === liveStreamAttachIndex ? liveStream?.previewMeta ?? null : undefined}
-                  liveAssistant={sourceIndex === liveStreamAttachIndex && liveStream ? <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} /> : undefined}
+                  previewMeta={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? effectiveLiveStream.previewMeta ?? null : undefined}
+                  liveAssistant={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} /> : undefined}
                   onResend={handleResendText}
                   onEdit={(txt) => setEditRequest({ atTurn: absoluteTurnIndex, text: txt, draftPending: true })}
                   onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
@@ -1083,6 +1486,7 @@ export const SessionPanel = memo(function SessionPanel({
                   onCreateReviewCommentFromSelection={handleAppendReviewCommentFromSelection}
                   workdir={workdir}
                   retryProminent={retryProminent}
+                  assistantRunError={assistantRunError}
                 />
               );
             })}
@@ -1103,12 +1507,12 @@ export const SessionPanel = memo(function SessionPanel({
             {showStandalonePending && (
               <div className="session-turn">
                 {pendingBubble}
-                {liveStreamVisible && liveStreamAttachIndex < 0 && liveStream
+                {liveStreamVisible && liveStreamAttachIndex < 0 && effectiveLiveStream
                   ? (
                     <>
-                      <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta ?? null} />
+                      <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={effectiveLiveStream.previewMeta ?? null} />
                       <div className="mb-6">
-                        <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
+                        <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
                       </div>
                     </>
                   ) : !liveStream && !pendingStopped && (
@@ -1120,50 +1524,59 @@ export const SessionPanel = memo(function SessionPanel({
             )}
             {/* Live stream preview — skip entirely when the stream has nothing to show
                 (no body, no error). Prevents a phantom header above an empty body. */}
-            {liveStreamVisible && liveStreamAttachIndex < 0 && !showStandalonePending && liveStream && (
+            {liveStreamVisible && liveStreamAttachIndex < 0 && !showStandalonePending && effectiveLiveStream && (
               <div className="mb-6">
-                <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta} />
-                <LivePreview stream={liveStream} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
+                <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={effectiveLiveStream.previewMeta} />
+                <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
               </div>
             )}
-            <div className="h-4" />
           </div>
         )}
       </div>
 
       {/* ── Input ── */}
-      <InputComposer
-        session={session}
-        workdir={workdir}
-        onStreamQueued={requestStreamPolling}
-        onSendStart={handleSendStart}
-        onSendTaskAssigned={handleSendTaskAssigned}
-        onSendFailed={handleSendFailed}
-        onSessionChange={onSessionChange}
-        onMultiSessionChange={onMultiSessionChange}
-        t={t}
-        streamPhase={streamPhase}
-        streamTaskId={streamTaskId}
-        queuedTaskIds={queuedTaskIds}
-        queuedTasks={queuedTasks}
-        pendingQueuedSends={pendingQueuedSends}
-        pendingReviewComments={pendingReviewComments}
-        onRemovePendingReviewComment={(id) => setPendingReviewComments(prev => prev.filter(comment => comment.id !== id))}
-        onClearPendingReviewComments={() => setPendingReviewComments([])}
-        contextMeta={composerContextMeta}
-        onRecall={handleRecallTask}
-        onSteer={handleSteerTask}
-        onReorderQueued={handleReorderQueuedTasks}
-        editDraft={editRequest?.draftPending ? editRequest.text : null}
-        editAtTurn={editRequest?.atTurn ?? null}
-        onEditDraftConsumed={() => setEditRequest(current => current ? { ...current, draftPending: false } : current)}
-        onEditSendStart={(prompt, atTurn) => {
-          const replacement = { fromTurn: atTurn, prompt };
-          setEditReplacement(replacement);
-          writeEditReplacement(session.agent, session.sessionId, replacement);
-          setEditRequest(null);
-        }}
-      />
+      {readOnly ? (
+        <div className="shrink-0 border-t border-edge/40 bg-[var(--th-session-bg)] px-4 py-3 shadow-[0_-12px_28px_rgba(15,23,42,0.04)]">
+          <div className="mx-auto flex max-w-[860px] items-center justify-center rounded-md border border-edge bg-panel-alt px-3 py-2 text-[12px] text-fg-5">
+            Archived assistant history. This chat is read-only.
+          </div>
+        </div>
+      ) : (
+      <div className="shrink-0 border-t border-edge/30 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]">
+          <InputComposer
+            session={session}
+            workdir={workdir}
+            onStreamQueued={requestStreamPolling}
+            onSendStart={handleSendStart}
+            onSendTaskAssigned={handleSendTaskAssigned}
+            onSendFailed={handleSendFailed}
+            onSessionChange={onSessionChange}
+            onMultiSessionChange={onMultiSessionChange}
+            t={t}
+            streamPhase={streamPhase}
+            streamTaskId={streamTaskId}
+            queuedTaskIds={queuedTaskIds}
+            queuedTasks={queuedTasks}
+            pendingQueuedSends={pendingQueuedSends}
+            pendingReviewComments={pendingReviewComments}
+            onRemovePendingReviewComment={(id) => setPendingReviewComments(prev => prev.filter(comment => comment.id !== id))}
+            onClearPendingReviewComments={() => setPendingReviewComments([])}
+            contextMeta={composerContextMeta}
+            onRecall={handleRecallTask}
+            onSteer={handleSteerTask}
+            onReorderQueued={handleReorderQueuedTasks}
+            editDraft={editRequest?.draftPending ? editRequest.text : null}
+            editAtTurn={editRequest?.atTurn ?? null}
+            onEditDraftConsumed={() => setEditRequest(current => current ? { ...current, draftPending: false } : current)}
+            onEditSendStart={(prompt, atTurn) => {
+              const replacement = { fromTurn: atTurn, prompt };
+              setEditReplacement(replacement);
+              writeEditReplacement(session.agent, session.sessionId, replacement);
+              setEditRequest(null);
+            }}
+          />
+      </div>
+      )}
 
       {/* ── Fork composer modal ── */}
       {forkRequest && (
