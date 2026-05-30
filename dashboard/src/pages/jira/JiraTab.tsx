@@ -458,29 +458,38 @@ function TaskCard({
   task,
   selected,
   busyStage,
+  assistants,
   draggable,
   isDragging,
   onSelect,
+  onAssignAssistant,
   onDragStart,
   onDragEnd,
 }: {
   task: ProTask;
   selected: boolean;
   busyStage: ProTaskStage | null;
+  assistants: AgentAssistant[];
   draggable?: boolean;
   isDragging?: boolean;
   onSelect: (task: ProTask) => void;
+  onAssignAssistant: (task: ProTask, assistantId: string) => void;
   onDragStart?: (task: ProTask, event: ReactDragEvent<HTMLDivElement>) => void;
   onDragEnd?: () => void;
 }) {
   const latestRun = task.stageRuns[0];
   const progress = subtaskProgress(task);
   const cardDescription = cleanTaskDescription(task);
-  const remoteStatus = task.jiraFields?.status || jiraRemoteSyncField(task.description, 'Status');
-  const assignee = task.jiraFields?.assignee || jiraRemoteSyncField(task.description, 'Assignee') || task.defaultAgent || 'Unassigned';
-  const priority = task.jiraFields?.priority || jiraRemoteSyncField(task.description, 'Priority');
-  const outputCount = task.outputs?.length || 0;
-  const changedFileCount = taskChangedFiles(task).length;
+  const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
+  const assistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
+  const progressLabel = latestRun
+    ? `${STAGE_LABEL[latestRun.stage]} · ${latestRun.status}`
+    : progress.total > 0
+      ? `Subtasks · ${progress.done}/${progress.total}`
+      : STATUS_LABEL[displayTaskStatus(task.status)];
+  const progressDetail = latestRun?.session?.sessionId
+    ? `${latestRun.session.agent}:${latestRun.session.sessionId.slice(0, 8)}`
+    : null;
   return (
     <div
       role="button"
@@ -508,49 +517,34 @@ function TaskCard({
         selected ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]' : 'border-edge/70',
       )}
     >
-      <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-fg-5">
-          {task.jiraKey && (
-            <span className="inline-flex min-w-0 items-center gap-1.5">
-              <TicketTypeIcon task={task} />
-              <span className="font-mono text-fg-3">{task.jiraKey}</span>
-            </span>
-          )}
-          {priority && <span className="rounded border border-edge bg-panel-alt px-1.5 py-0.5">{priority}</span>}
-          {remoteStatus && <span className="max-w-[120px] truncate rounded border border-edge/70 bg-panel-alt/70 px-1.5 py-0.5">{remoteStatus}</span>}
-          {outputCount > 0 && <span className="rounded border border-primary/24 bg-primary/[0.08] px-1.5 py-0.5 text-primary">{outputCount} output</span>}
-          {changedFileCount > 0 && <span className="rounded border border-[color:var(--th-ok)]/25 bg-[color-mix(in_oklab,var(--th-ok)_9%,transparent)] px-1.5 py-0.5 text-[color:var(--th-ok)]">{changedFileCount} files</span>}
-        </div>
-        <Badge variant={taskStatusTone(task.status)} className="shrink-0">{STATUS_LABEL[task.status]}</Badge>
-      </div>
-
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+      <div className="flex min-w-0 items-start gap-2">
+        <TicketTypeIcon task={task} />
+        <div className="min-w-0 flex-1">
           <div className="line-clamp-2 text-[13px] font-semibold leading-snug text-fg">{task.title}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-5">
-            {task.sprint && <span>{task.sprint}</span>}
-            <span>{formatTime(task.updatedAt)}</span>
-          </div>
+          <div className="mt-1 text-[11px] text-fg-5">Created {formatTime(task.createdAt)}</div>
         </div>
       </div>
       {cardDescription && <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-fg-4">{cardDescription}</div>}
-      {progress.total > 0 && (
-        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-edge bg-panel-alt px-2 py-1.5 text-[11px] text-fg-4">
-          <span className="font-semibold text-fg-3">Subtasks</span>
-          <span className="font-mono text-fg-3">{progress.done}/{progress.total}</span>
-        </div>
-      )}
-      {latestRun && (
-        <div className="mt-2 flex items-center gap-1.5 rounded-md border border-edge/65 bg-panel-alt/62 px-2 py-1.5 text-[11px] text-fg-4">
-          {busyStage === latestRun.stage ? <Spinner className="h-3 w-3" /> : null}
-          <span className="shrink-0 font-medium text-fg-3">{STAGE_LABEL[latestRun.stage]}</span>
-          <span className="min-w-0 truncate">{latestRun.session.agent}:{latestRun.session.sessionId.slice(0, 8)}</span>
-        </div>
-      )}
-      <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[11px] text-fg-5">
-        <span className="min-w-0 truncate">Assignee: {assignee}</span>
-        {task.exclusiveMode && <Badge variant="warn">Exclusive</Badge>}
+      <div className="mt-2 flex min-w-0 items-center gap-1.5 rounded-md border border-edge/65 bg-panel-alt/62 px-2 py-1.5 text-[11px] text-fg-4">
+        {latestRun && busyStage === latestRun.stage ? <Spinner className="h-3 w-3" /> : <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fg-5/45" />}
+        <span className="shrink-0 font-medium text-fg-3">{progressLabel}</span>
+        {progressDetail && <span className="min-w-0 truncate">{progressDetail}</span>}
       </div>
+      <label
+        className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-fg-5"
+        onClick={event => event.stopPropagation()}
+        onPointerDown={event => event.stopPropagation()}
+      >
+        <span className="shrink-0">Assignee</span>
+        <select
+          value={assignedAssistantId}
+          onChange={event => onAssignAssistant(task, event.target.value)}
+          className="h-7 min-w-0 flex-1 rounded-md border border-edge bg-inset px-2 text-[11px] text-fg outline-none transition focus:border-primary/45"
+        >
+          <option value="">None</option>
+          {assistantOptions.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+        </select>
+      </label>
     </div>
   );
 }
@@ -4401,9 +4395,11 @@ export function TasksTab() {
                             task={task}
                             selected={selectedTask?.id === task.id}
                             busyStage={busy?.taskId === task.id ? busy.stage : null}
+                            assistants={assistants}
                             draggable
                             isDragging={draggingTaskId === task.id}
                             onSelect={openTaskDetail}
+                            onAssignAssistant={(nextTask, assistantId) => { void assignTaskAssistant(nextTask, assistantId); }}
                             onDragStart={(next) => setDraggingTaskId(next.id)}
                             onDragEnd={() => {
                               setDraggingTaskId(null);
