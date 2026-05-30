@@ -153,8 +153,25 @@ export function Sidebar({
           </nav>
           <div className="mt-3 h-px w-6 bg-edge/70" />
           <div className="mt-auto flex min-h-0 flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            <div id="global-inbox-host" className="flex shrink-0 flex-col items-center gap-1 empty:hidden" />
-            <div className="my-1 h-px w-6 bg-edge/70" />
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center" title={appStatus.badgeContent} aria-label={appStatus.badgeContent}>
+              <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
+            </div>
+            <Button
+              variant={confirming ? 'secondary' : 'ghost'}
+              size="icon"
+              onClick={onRestartClick}
+              disabled={busy}
+              title={busy ? t('modal.restarting') : confirming ? t('modal.confirmRestart') : t('sidebar.restart')}
+              className={cn(
+                '!h-8 !w-8',
+                busy ? 'pointer-events-none opacity-70' : '',
+                confirming ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : '',
+              )}
+            >
+              <span className={busy ? 'animate-spin' : ''} style={busy ? { animationDuration: '1s' } : undefined} aria-hidden="true">
+                {IconRestart}
+              </span>
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -175,26 +192,7 @@ export function Sidebar({
             >
               {locale === 'zh-CN' ? 'EN' : '\u4e2d'}
             </Button>
-            <Button
-              variant={confirming ? 'secondary' : 'ghost'}
-              size="icon"
-              onClick={onRestartClick}
-              disabled={busy}
-              title={busy ? t('modal.restarting') : confirming ? t('modal.confirmRestart') : t('sidebar.restart')}
-              className={cn(
-                '!h-8 !w-8',
-                busy ? 'pointer-events-none opacity-70' : '',
-                confirming ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : '',
-              )}
-            >
-              <span className={busy ? 'animate-spin' : ''} style={busy ? { animationDuration: '1s' } : undefined} aria-hidden="true">
-                {IconRestart}
-              </span>
-            </Button>
-            <div className="my-1 h-px w-6 bg-edge/70" />
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center" title={appStatus.badgeContent} aria-label={appStatus.badgeContent}>
-              <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
-            </div>
+            <div id="global-inbox-host" className="mt-1 flex shrink-0 flex-col items-center gap-1 empty:hidden" />
           </div>
         </div>
       </header>
