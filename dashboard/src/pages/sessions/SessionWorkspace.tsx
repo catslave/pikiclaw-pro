@@ -1485,6 +1485,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const liveSessionStatesRef = useRef(liveSessionStates);
   liveSessionStatesRef.current = liveSessionStates;
   const visibleWorkspaceRefreshRef = useRef<Record<string, number>>({});
+  const sessionGridScrollRef = useRef<HTMLDivElement | null>(null);
+  const pendingSessionGridScrollRef = useRef<{ gridTop: number | null; windowX: number; windowY: number } | null>(null);
+  const skipNextSlotAutoScrollRef = useRef(false);
+
+  const preserveSessionGridScroll = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    pendingSessionGridScrollRef.current = {
+      gridTop: sessionGridScrollRef.current?.scrollTop ?? null,
+      windowX: window.scrollX,
+      windowY: window.scrollY,
+    };
+    skipNextSlotAutoScrollRef.current = true;
+  }, []);
 
   // Persist wrappers — localStorage survives dashboard/app restarts; sessionStorage
   // mirrors it as a same-tab fallback and migrates old pre-localStorage state.
@@ -4234,6 +4247,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   /* ── Close a session slot ── */
   const handleCloseSlot = useCallback((index: number) => {
+    preserveSessionGridScroll();
     setFocusedSlotIndex(prev => {
       if (prev == null) return prev;
       if (prev === index) return null;
@@ -4257,7 +4271,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       }
       return next;
     });
-  }, [setActiveSlotIndex, setOpenSessions, setOpenSideChatsByParent]);
+  }, [preserveSessionGridScroll, setActiveSlotIndex, setOpenSessions, setOpenSideChatsByParent]);
 
   const moveSessionSlot = useCallback((from: number, index: number) => {
     setOpenSessions(prev => {
@@ -4501,6 +4515,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const hiddenFocusFloatingSessionCount = focusFloatingSessions.filter(item => item.hidden).length;
   useEffect(() => {
     if (focusedSlotIndex != null) return;
+    if (skipNextSlotAutoScrollRef.current) {
+      skipNextSlotAutoScrollRef.current = false;
+      return;
+    }
     if (isSessionComposerFocused()) return;
     const timer = window.setTimeout(() => {
       const el = document.querySelector(`[data-session-slot-index="${activeSlotIndex}"]`) as HTMLElement | null;
@@ -4508,6 +4526,21 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }, 50);
     return () => window.clearTimeout(timer);
   }, [activeSlotIndex, focusedSlotIndex, openSessions.length, showNewSession]);
+
+  useLayoutEffect(() => {
+    const snapshot = pendingSessionGridScrollRef.current;
+    if (!snapshot || typeof window === 'undefined') return;
+    pendingSessionGridScrollRef.current = null;
+    const restore = () => {
+      if (snapshot.gridTop != null && sessionGridScrollRef.current) {
+        sessionGridScrollRef.current.scrollTop = snapshot.gridTop;
+      }
+      window.scrollTo(snapshot.windowX, snapshot.windowY);
+    };
+    restore();
+    const frame = window.requestAnimationFrame(restore);
+    return () => window.cancelAnimationFrame(frame);
+  }, [openSessions.length, showNewSession]);
 
   useLayoutEffect(() => {
     const previousRects = slotFlipRectsRef.current;
@@ -4841,7 +4874,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             <div className={cn(
               'flex-1 min-h-0 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]',
               multiWidgetGrid ? 'pr-3 md:pr-4' : 'pr-1',
-            )}>
+            )} ref={sessionGridScrollRef}>
               <div
                 className={cn(
                   multiWidgetGrid ? 'flex flex-wrap' : 'grid',
