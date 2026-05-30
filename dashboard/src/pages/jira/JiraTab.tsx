@@ -4568,18 +4568,32 @@ export function TasksTab() {
                     ...
                   </Button>
                   {detailMenuOpen && selectedTask && (
-                    <div className="absolute right-0 top-7 z-20 w-36 rounded-md border border-edge bg-panel py-1 shadow-lg">
+                    <div
+                      className="absolute right-0 top-[calc(100%+8px)] z-40 w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
+                      role="menu"
+                    >
                       <button
                         type="button"
+                        role="menuitem"
                         disabled={deletingTaskId === selectedTask.id}
                         onClick={() => {
                           setDetailMenuOpen(false);
                           setTaskDeleteTarget(selectedTask);
                         }}
-                        className="flex h-8 w-full items-center gap-2 px-3 text-left text-[12px] font-medium text-err transition-colors hover:bg-panel-h disabled:pointer-events-none disabled:opacity-50"
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-err transition-colors hover:bg-err/[0.10] disabled:pointer-events-none disabled:opacity-50"
                       >
-                        {deletingTaskId === selectedTask.id ? <Spinner /> : null}
-                        Delete task
+                        {deletingTaskId === selectedTask.id ? (
+                          <Spinner />
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M3 6h18" />
+                            <path d="M8 6V4h8v2" />
+                            <path d="M19 6l-1 14H6L5 6" />
+                            <path d="M10 11v5" />
+                            <path d="M14 11v5" />
+                          </svg>
+                        )}
+                        <span>Delete task</span>
                       </button>
                     </div>
                   )}
