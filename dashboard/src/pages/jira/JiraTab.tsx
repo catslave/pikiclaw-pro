@@ -4500,23 +4500,6 @@ export function TasksTab() {
           </div>
         </div>
       </Modal>
-      <Modal open={!!taskDeleteTarget} onClose={() => setTaskDeleteTarget(null)}>
-        <ModalHeader title="Delete task" onClose={() => setTaskDeleteTarget(null)} />
-        <div className="space-y-4">
-          <div className="text-[13px] leading-relaxed text-fg-3">
-            Delete <span className="font-semibold text-fg">{taskDeleteTarget?.jiraKey || taskDeleteTarget?.title}</span> from Pikiclaw? External tickets are not deleted.
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" disabled={!!deletingTaskId} onClick={() => setTaskDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" size="sm" disabled={!!deletingTaskId} onClick={() => { void deleteTask(); }}>
-              {deletingTaskId ? <Spinner /> : null}
-              Delete
-            </Button>
-          </div>
-        </div>
-      </Modal>
       <JiraAssistantConfigModal
         open={settingsOpen}
         saving={savingConfig}
@@ -4615,6 +4598,23 @@ export function TasksTab() {
               </>
             ) : null}
           />
+        </div>
+      </Modal>
+      <Modal open={!!taskDeleteTarget} onClose={() => setTaskDeleteTarget(null)}>
+        <ModalHeader title="Delete task" onClose={() => setTaskDeleteTarget(null)} />
+        <div className="space-y-4">
+          <div className="text-[13px] leading-relaxed text-fg-3">
+            Delete <span className="font-semibold text-fg">{taskDeleteTarget?.jiraKey || taskDeleteTarget?.title}</span> from Pikiclaw? External tickets are not deleted.
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" disabled={!!deletingTaskId} onClick={() => setTaskDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="sm" disabled={!!deletingTaskId} onClick={() => { void deleteTask(); }}>
+              {deletingTaskId ? <Spinner /> : null}
+              Delete
+            </Button>
+          </div>
         </div>
       </Modal>
       <BrowserPanelModal
