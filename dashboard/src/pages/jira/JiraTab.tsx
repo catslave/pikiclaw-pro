@@ -1373,26 +1373,28 @@ function TaskFlowMap({ task, busyStage, compact = false }: { task: ProTask; busy
       <div className="flex w-full min-w-0 items-center justify-between gap-3 text-left">
         <div className="min-w-0">
           <div className="text-[12px] font-semibold text-primary">Task progress</div>
-          <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
-            <span className={cn(
-              'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
-              activeStep?.status === 'done' && 'border-ok bg-ok text-white',
-              activeStep?.status === 'active' && 'border-primary bg-primary text-primary-fg',
-              (!activeStep || activeStep.status === 'waiting') && 'border-edge bg-panel text-fg-5',
-            )}>
-              {activeStep?.status === 'done' ? (
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="m5 12 4 4L19 6" />
-                </svg>
-              ) : activeStep?.status === 'active' ? (
-                <span className="h-1.5 w-1.5 rounded-full bg-current" />
-              ) : null}
-            </span>
-            <span className="truncate">
-              <span className="font-semibold text-fg-3">{activeStep?.label || 'Current'}</span>
-              <span className="text-fg-5"> · {activeStatusText}</span>
-            </span>
-          </div>
+          {compact && (
+            <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
+              <span className={cn(
+                'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
+                activeStep?.status === 'done' && 'border-ok bg-ok text-white',
+                activeStep?.status === 'active' && 'border-primary bg-primary text-primary-fg',
+                (!activeStep || activeStep.status === 'waiting') && 'border-edge bg-panel text-fg-5',
+              )}>
+                {activeStep?.status === 'done' ? (
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="m5 12 4 4L19 6" />
+                  </svg>
+                ) : activeStep?.status === 'active' ? (
+                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                ) : null}
+              </span>
+              <span className="truncate">
+                <span className="font-semibold text-fg-3">{activeStep?.label || 'Current'}</span>
+                <span className="text-fg-5"> · {activeStatusText}</span>
+              </span>
+            </div>
+          )}
         </div>
         <span className="shrink-0 text-[10px] font-medium text-fg-5">{completed}/{steps.length} Complete</span>
       </div>
@@ -1889,8 +1891,11 @@ function TaskChatWindow({
     const isPendingSession = runSession.sessionId.startsWith('pending_');
     return (
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]">
-        <div className="shrink-0 px-5 pb-3 pt-3">
+        <div className="shrink-0 space-y-3 px-5 pb-3 pt-3">
           {taskHeader}
+          <div className="mx-auto max-w-[760px]">
+            <TaskFlowMap task={task} busyStage={busyStage} />
+          </div>
         </div>
         <div className="min-h-0 flex-1">
           <SessionPanel
@@ -1924,6 +1929,9 @@ function TaskChatWindow({
           <div className="sticky top-0 z-20 -mx-5 mb-5 px-5 pb-3 pt-3">
             <div className="absolute inset-x-0 top-0 h-[calc(100%+28px)] bg-gradient-to-b from-[var(--th-session-bg)] via-[var(--th-session-bg)]/92 to-transparent" />
             {taskHeader}
+          </div>
+          <div className="mb-5">
+            <TaskFlowMap task={task} busyStage={busyStage} />
           </div>
           {run && (
             <div className="mb-4 flex min-w-0 items-center justify-center gap-2 text-[11px] text-fg-5">
@@ -2486,7 +2494,6 @@ function TaskDetail({
   addWorkspace(task.workdir);
   addWorkspace(fallbackWorkdir, 'Current workspace');
   const currentWorkdir = inferredWorkdir;
-  const activeBusyStage = busy?.taskId === task.id ? busy.stage : null;
   const shelfTabs: Array<{ id: 'status' | 'outputs' | 'files' | 'browser' | 'ticket'; label: string; count?: number }> = [
     { id: 'status', label: 'Overview' },
     { id: 'outputs', label: 'Outputs', count: outputItems.length },
@@ -2563,9 +2570,6 @@ function TaskDetail({
                     </button>
                   );
                 })}
-              </div>
-              <div className="mb-4">
-                <TaskFlowMap task={task} busyStage={activeBusyStage} />
               </div>
               {shelfTab === 'status' && (
                 <div className="space-y-4">
