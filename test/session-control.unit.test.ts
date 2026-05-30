@@ -64,6 +64,7 @@ describe('session-control', () => {
     expect(call.prompt).toContain('<proposed_plan>');
     expect(call.prompt).toContain('add native goal UI');
     expect(call.prompt).not.toContain('Read the skill definition');
+    expect(call.displayPrompt).toBe('/plan add native goal UI');
     expect(result).toEqual({ ok: true, queued: true, taskId: 'task-plan', sessionKey: 'codex:pending_plan' });
   });
 

@@ -50,6 +50,7 @@ export function liveStreamShouldRender(stream: LiveStreamView): boolean {
 
 function cleanWorkingPreview(line: string): string {
   return formatActivityForDisplay(line)
+    .replace(/^Codex connection:\s*/i, '')
     .replace(/\s+/g, ' ')
     .replace(/\s+done$/i, '')
     .trim();
@@ -100,8 +101,10 @@ export function LivePreview({
     ? (stream.plan.steps.find(step => step.status === 'inProgress') || [...stream.plan.steps].reverse().find(step => step.status === 'completed') || stream.plan.steps[0])?.step
     : '';
   const thinkingPreview = stream.thinking ? lastNLines(stream.thinking, 1) : '';
+  const diagnosticLines = stream.previewMeta?.diagnostics?.map(line => cleanWorkingPreview(String(line || ''))).filter(Boolean) || [];
+  const diagnosticPreview = diagnosticLines[diagnosticLines.length - 1] || cleanWorkingPreview(stream.previewMeta?.lastEvent || '');
   const activitySummary = summarizeWorkingActivity(activityLines, t, stream.activitySummary ?? null);
-  const workingPreview = activitySummary[0] || currentPlanStep || thinkingPreview || cleanWorkingPreview(lastActivity) || '';
+  const workingPreview = activitySummary[0] || currentPlanStep || thinkingPreview || cleanWorkingPreview(lastActivity) || diagnosticPreview || '';
   const structuredStepCount = stream.activitySummary
     ? stream.activitySummary.files + stream.activitySummary.searches + stream.activitySummary.commands + stream.activitySummary.tools
     : 0;
@@ -111,6 +114,7 @@ export function LivePreview({
     || (subAgents?.length ?? 0)
     || (stream.thinking ? 1 : 0);
   const terminalError = !!String(stream.error || '').trim();
+  const hasDiagnostics = !!stream.previewMeta?.diagnostics?.some(line => String(line || '').trim());
   const showLiveWorking = streamActive || stream.phase === 'streaming';
   const showWorking = showLiveWorking
     || !!stream.thinking
@@ -158,7 +162,7 @@ export function LivePreview({
               <WorkingActivitySummary lines={activityLines} activitySummary={stream.activitySummary ?? null} activityEvents={stream.activityEvents ?? null} t={t} />
               <WorkingActivityDetails lines={activityLines} activityEvents={stream.activityEvents ?? null} t={t} />
               <WorkingDiagnostics diagnostics={stream.previewMeta?.diagnostics} t={t} />
-              {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && !visibleText && (
+              {!showPlan && !subAgents?.length && activityLines.length === 0 && !stream.thinking && !visibleText && !hasDiagnostics && (
                 <div className="text-[12px] text-fg-5">{t('hub.workingIdle')}</div>
               )}
             </div>

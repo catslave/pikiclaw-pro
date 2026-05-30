@@ -89,6 +89,11 @@ export function resolveEffectiveLiveStream<T extends EffectiveLiveStreamInput['l
   const liveMatchesTask = !input.pendingTaskId
     || !live?.taskId
     || live.taskId === input.pendingTaskId;
+  // The backend may expand slash commands such as `/plan clarify ...` into a
+  // longer internal prompt. When the task id matches, the live stream is still
+  // the authoritative process state; dropping it would replace real activity
+  // with an empty "waiting" shell.
+  if (live && input.pendingTaskId && live.taskId === input.pendingTaskId) return live as T;
   if (live && liveMatchesPending && liveMatchesTask) return live as T;
   if (!input.streamSnapshotActive) return null;
   return {

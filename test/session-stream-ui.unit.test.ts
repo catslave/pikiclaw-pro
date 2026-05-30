@@ -136,6 +136,25 @@ describe('session stream UI helpers', () => {
       });
     });
 
+    it('keeps live stream content when slash command display prompt differs but task matches', () => {
+      const live = {
+        taskId: 't-plan',
+        prompt: 'Continue planning mode for the current session. Do not implement yet.',
+        phase: 'streaming' as const,
+        text: '',
+        activity: 'Search: dashboard session stream',
+      };
+      expect(resolveEffectiveLiveStream({
+        liveStream: live,
+        pendingPrompt: '/plan clarify dashboard session stream',
+        pendingTaskId: 't-plan',
+        streamSnapshotActive: true,
+        streamTaskId: 't-plan',
+        displayModel: 'gpt',
+        displayEffort: 'medium',
+      })).toBe(live);
+    });
+
     it('returns null when snapshot is inactive and live stream mismatches', () => {
       expect(resolveEffectiveLiveStream({
         liveStream: { taskId: 't-old', prompt: 'old', text: 'stale' },

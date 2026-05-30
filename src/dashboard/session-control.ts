@@ -180,6 +180,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
   if (!request.workdir || (!request.prompt && !(request.attachments || []).length)) {
     return { ok: false as const, error: 'workdir and either prompt or attachments are required' };
   }
+  const userPrompt = request.prompt || '';
 
   const config = loadUserConfig();
   const resolvedAgent = typeof request.agent === 'string' && KNOWN_AGENTS.has(request.agent as Agent)
@@ -202,7 +203,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       workdir: request.workdir,
       agent: resolvedAgent,
       sessionId: sessionId || '',
-      title: request.prompt || 'Log trace',
+      title: userPrompt || 'Log trace',
       threadId: null,
       origin: { channel: 'dashboard', chatId: 'dashboard' },
       ...(modelId ? { model: modelId } : {}),
@@ -272,7 +273,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       workdir: request.workdir,
       files: attachments,
       sessionId: sessionId || null,
-      title: request.prompt || 'New session',
+      title: userPrompt || request.prompt || 'New session',
       threadId: null,
       handoverFrom,
     });
@@ -287,6 +288,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     agent: resolvedAgent,
     sessionId,
     prompt: prompt || 'Please inspect the attached file(s).',
+    ...((userPrompt && userPrompt !== prompt) ? { displayPrompt: userPrompt } : {}),
     attachments,
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
