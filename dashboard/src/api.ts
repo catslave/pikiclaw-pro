@@ -662,9 +662,9 @@ export const api = {
   // Pikiclaw Pro task workflow
   getTaskSpaces: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; spaces: TaskSpace[]; error?: string }>('/api/pro/task-spaces', opts),
-  createTaskSpace: (space: { name: string; defaultWorkdir?: string; defaultAgent?: string | null }, opts?: ApiRequestOptions) =>
+  createTaskSpace: (space: { name: string; defaultWorkdir?: string; defaultAgent?: string | null; defaultAssistantId?: string | null }, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; space?: TaskSpace; error?: string }>('/api/pro/task-spaces', space, opts),
-  updateTaskSpace: (spaceId: string, space: { name?: string; defaultWorkdir?: string | null; defaultAgent?: string | null; archived?: boolean }, opts?: ApiRequestOptions) =>
+  updateTaskSpace: (spaceId: string, space: { name?: string; defaultWorkdir?: string | null; defaultAgent?: string | null; defaultAssistantId?: string | null; archived?: boolean }, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; space?: TaskSpace; error?: string }>(
       `/api/pro/task-spaces/${encodeURIComponent(spaceId)}`,
       {
@@ -1068,6 +1068,7 @@ export const api = {
     stageRunId: string,
     patch: {
       status?: string;
+      session?: { workdir: string; agent: string; sessionId: string };
       summary?: string;
       estimate?: unknown;
       branch?: string;

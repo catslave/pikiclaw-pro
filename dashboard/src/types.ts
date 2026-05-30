@@ -968,6 +968,7 @@ export interface TaskSpace {
   kind: TaskSpaceKind;
   defaultWorkdir?: string;
   defaultAgent?: string;
+  defaultAssistantId?: string;
   archived?: boolean;
   createdAt: string;
   updatedAt: string;

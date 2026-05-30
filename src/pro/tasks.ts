@@ -26,6 +26,7 @@ export interface TaskSpace {
   kind: TaskSpaceKind;
   defaultWorkdir?: string;
   defaultAgent?: string;
+  defaultAssistantId?: string;
   archived?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -247,12 +248,14 @@ export interface CreateTaskSpaceInput {
   kind?: unknown;
   defaultWorkdir?: unknown;
   defaultAgent?: unknown;
+  defaultAssistantId?: unknown;
 }
 
 export interface UpdateTaskSpaceInput {
   name?: unknown;
   defaultWorkdir?: unknown;
   defaultAgent?: unknown;
+  defaultAssistantId?: unknown;
   archived?: unknown;
 }
 
@@ -331,6 +334,7 @@ export interface UpdateTaskMetaInput {
 
 export interface UpdateStageRunInput {
   status?: ProStageRunStatus;
+  session?: StageSessionRef;
   summary?: string;
   estimate?: TaskEstimate;
   branch?: string;
@@ -490,6 +494,7 @@ function normalizeTaskSpace(value: unknown): TaskSpace | null {
     kind,
     defaultWorkdir: normalizeText(raw.defaultWorkdir, 2048) || undefined,
     defaultAgent: normalizeText(raw.defaultAgent, 80) || undefined,
+    defaultAssistantId: normalizeText(raw.defaultAssistantId, 160) || undefined,
     archived: raw.archived === true,
     createdAt: normalizeText(raw.createdAt, 80) || new Date().toISOString(),
     updatedAt: normalizeText(raw.updatedAt, 80) || new Date().toISOString(),
@@ -806,6 +811,7 @@ export function createTaskSpace(input: CreateTaskSpaceInput): TaskSpace {
     kind,
     defaultWorkdir: normalizeText(input.defaultWorkdir, 2048) || undefined,
     defaultAgent: normalizeText(input.defaultAgent, 80) || undefined,
+    defaultAssistantId: normalizeText(input.defaultAssistantId, 160) || undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -833,6 +839,9 @@ export function updateTaskSpace(spaceId: string, input: UpdateTaskSpaceInput): T
   }
   if (Object.prototype.hasOwnProperty.call(input, 'defaultAgent')) {
     space.defaultAgent = normalizeText(input.defaultAgent, 80) || undefined;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, 'defaultAssistantId')) {
+    space.defaultAssistantId = normalizeText(input.defaultAssistantId, 160) || undefined;
   }
   if (Object.prototype.hasOwnProperty.call(input, 'archived')) space.archived = input.archived === true;
   space.updatedAt = new Date().toISOString();
@@ -1252,6 +1261,14 @@ export function updateStageRun(taskId: string, stageRunId: string, input: Update
   if (input.status) {
     run.status = input.status;
     if (input.status === 'completed' || input.status === 'failed' || input.status === 'cancelled') run.completedAt = now;
+  }
+  if (input.session?.workdir && input.session.agent && input.session.sessionId) {
+    run.session = {
+      workdir: normalizeText(input.session.workdir, 1000),
+      agent: normalizeText(input.session.agent, 80),
+      sessionId: normalizeText(input.session.sessionId, 240),
+    };
+    run.selectedAgent = run.session.agent;
   }
   if (input.focus) run.focus = input.focus;
   run.output = {

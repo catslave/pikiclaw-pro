@@ -2,33 +2,35 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as Re
 import ReactMarkdown from 'react-markdown';
 import { api } from '../../api';
 import { BrowserPanelModal } from '../../components/BrowserPanelModal';
+import { DirBrowser } from '../../components/DirBrowser';
 import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
-import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
+import { Badge, Button, ChevronIcon, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, JiraCycle, JiraSyncRun, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, StageRun, TaskSpace, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, JiraCycle, JiraSyncRun, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, SessionInfo, StageRun, StageSessionRef, TaskSpace, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
+import { SessionPanel, type SessionPanelChange } from '../sessions/SessionPanel';
 import { createMdComponents, mdPlugins } from '../sessions/markdown';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const VISIBLE_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'done'];
 const STAGES: ProTaskStage[] = ['focus', 'refinement', 'coding', 'verification', 'demo', 'bugfix'];
-type JiraColumnKey = 'backlog' | 'running' | 'working' | 'done';
+type JiraColumnKey = 'backlog' | 'refinement' | 'working' | 'done';
 
 const ALL_TASKS_SPACE_ID = 'all';
 const JIRA_TASK_SPACE_ID = 'jira';
 const PERSONAL_TASK_SPACE_ID = 'personal';
 
 const JIRA_COLUMNS: Array<{ key: JiraColumnKey; label: string; hint: string }> = [
-  { key: 'backlog', label: 'Inbox', hint: 'New or planned' },
-  { key: 'running', label: 'Clarify', hint: 'Clarify scope and plan' },
-  { key: 'working', label: 'Execute', hint: 'Implementation in progress' },
+  { key: 'backlog', label: 'Backlog', hint: 'New or planned' },
+  { key: 'refinement', label: 'Refinement', hint: 'Clarify scope and plan' },
+  { key: 'working', label: 'Working', hint: 'Implementation in progress' },
   { key: 'done', label: 'Done', hint: 'Local work completed' },
 ];
 
 const JIRA_COLUMN_BADGE: Record<JiraColumnKey, 'ok' | 'warn' | 'muted' | 'accent'> = {
   backlog: 'muted',
-  running: 'warn',
+  refinement: 'warn',
   working: 'accent',
   done: 'ok',
 };
@@ -44,15 +46,15 @@ const TASK_SPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:tasks:space-sidebar-c
 const TASK_DETAIL_LAYOUT_STORAGE_KEY = 'pikiclaw:tasks:detail-layout:v1';
 const DEFAULT_JIRA_COLUMN_SORT_MODES: JiraColumnSortModes = {
   backlog: 'desc',
-  running: 'desc',
+  refinement: 'desc',
   working: 'desc',
   done: 'desc',
 };
 
 const STATUS_LABEL: Record<ProTaskStatus, string> = {
-  backlog: 'Inbox',
-  refinement: 'Clarify',
-  coding: 'Execute',
+  backlog: 'Backlog',
+  refinement: 'Refinement',
+  coding: 'Working',
   resolved: 'Review',
   done: 'Done',
 };
@@ -403,6 +405,18 @@ function taskBriefSummary(task: ProTask): string {
   return text.length > 220 ? `${text.slice(0, 220).trim()}...` : text;
 }
 
+function taskExpandedSummary(task: ProTask): string {
+  return cleanTaskDescription(task)
+    .replace(/```([\s\S]*?)```/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[>#*_`]/g, '')
+    .split('\n')
+    .map(line => line.replace(/^\s*[-\u2022]\s*/, '').replace(/[ \t]+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
 function jiraRemoteSyncBlock(task: ProTask): string | null {
   const text = task.description?.trim() || '';
   const markerIndex = text.indexOf('[Jira remote sync]');
@@ -554,15 +568,25 @@ function jiraColumnForTask(task: ProTask): JiraColumnKey {
   const latest = task.stageRuns[0];
   if (latest?.status === 'failed' || latest?.status === 'cancelled') return 'working';
   if (task.status === 'coding') return 'working';
-  if (task.status === 'refinement') return 'running';
+  if (task.status === 'refinement') return 'refinement';
   return 'backlog';
 }
 
 function jiraStatusForColumn(column: JiraColumnKey): ProTaskStatus {
-  if (column === 'running') return 'refinement';
+  if (column === 'refinement') return 'refinement';
   if (column === 'working') return 'coding';
   if (column === 'done') return 'done';
   return 'backlog';
+}
+
+function taskRemoteStatus(task: ProTask): string | null {
+  return task.jiraFields?.status || jiraRemoteSyncField(task.description, 'Status') || null;
+}
+
+function isClosedRemoteTask(task: ProTask): boolean {
+  if (!task.kind.startsWith('jira')) return false;
+  const status = taskRemoteStatus(task)?.trim().toLowerCase();
+  return !!status && /^(closed|close|cancelled|canceled)$/.test(status);
 }
 
 function statusForChatStage(stage: ProTaskStage): ProTaskStatus | null {
@@ -648,6 +672,7 @@ function CreateJiraTaskModal({
   assistants,
   defaultWorkdir,
   defaultAgent,
+  defaultAssistantId,
   onClose,
   onCreate,
 }: {
@@ -658,6 +683,7 @@ function CreateJiraTaskModal({
   assistants: AgentAssistant[];
   defaultWorkdir: string;
   defaultAgent: string;
+  defaultAssistantId?: string;
   onClose: () => void;
   onCreate: (draft: { title: string; description: string; workdir: string; defaultAgent: string; defaultAssistantId: string }) => void;
 }) {
@@ -666,7 +692,7 @@ function CreateJiraTaskModal({
     description: '',
     workdir: defaultWorkdir,
     defaultAgent,
-    defaultAssistantId: assistants.find(item => item.id === 'assistant_refinement')?.id || '',
+    defaultAssistantId: defaultAssistantId || assistants.find(item => item.id === 'assistant_refinement')?.id || '',
   });
 
   useEffect(() => {
@@ -675,9 +701,9 @@ function CreateJiraTaskModal({
       ...prev,
       workdir: prev.workdir || defaultWorkdir,
       defaultAgent: prev.defaultAgent || defaultAgent,
-      defaultAssistantId: prev.defaultAssistantId || assistants.find(item => item.id === 'assistant_refinement')?.id || '',
+      defaultAssistantId: prev.defaultAssistantId || defaultAssistantId || assistants.find(item => item.id === 'assistant_refinement')?.id || '',
     }));
-  }, [assistants, defaultAgent, defaultWorkdir, open]);
+  }, [assistants, defaultAgent, defaultAssistantId, defaultWorkdir, open]);
 
   return (
     <Modal open={open} onClose={onClose}>
@@ -734,8 +760,6 @@ function TaskSpaceSidebar({
   detailLayout,
   onSelect,
   onCreateSpace,
-  onCreateTask,
-  onSearchRequest,
   onSearchChange,
   onDetailLayoutChange,
   onToggleCollapsed,
@@ -749,8 +773,6 @@ function TaskSpaceSidebar({
   detailLayout: TaskDetailLayout;
   onSelect: (spaceId: string) => void;
   onCreateSpace: () => void;
-  onCreateTask: () => void;
-  onSearchRequest: () => void;
   onSearchChange: (value: string) => void;
   onDetailLayoutChange: (layout: TaskDetailLayout) => void;
   onToggleCollapsed: () => void;
@@ -768,108 +790,17 @@ function TaskSpaceSidebar({
   }, [collapsed, searchFocusTick]);
 
   if (collapsed) {
-    return (
-      <aside className="hidden w-[52px] shrink-0 border-r border-edge/55 bg-panel/62 md:flex md:min-h-0 md:flex-col">
-        <div className="flex shrink-0 flex-col items-center gap-1 border-b border-edge/40 px-2 py-2.5">
-          <button
-            type="button"
-            onClick={onToggleCollapsed}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
-            title="Show task spaces"
-            aria-label="Show task spaces"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="m9 18 6-6-6-6" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={onSearchRequest}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
-            title="Search tasks"
-            aria-label="Search tasks"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={onCreateTask}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-fg shadow-sm transition hover:brightness-110"
-            title="Create task"
-            aria-label="Create task"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={onCreateSpace}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
-            title="Create task space"
-            aria-label="Create task space"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => onDetailLayoutChange(detailLayout === 'side' ? 'modal' : 'side')}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
-            title={detailLayout === 'side' ? 'Detail opens in side panel' : 'Detail opens in modal'}
-            aria-label="Toggle task detail layout"
-          >
-            {detailLayout === 'side' ? (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <rect x="3" y="5" width="18" height="14" rx="2" />
-                <path d="M14 5v14" />
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <rect x="5" y="5" width="14" height="14" rx="2" />
-                <path d="M8 9h8" />
-              </svg>
-            )}
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-          {items.map(space => {
-            const active = selectedId === space.id;
-            const count = counts[space.id] || 0;
-            return (
-              <button
-                key={space.id}
-                type="button"
-                onClick={() => onSelect(space.id)}
-                className={cn(
-                  'relative mb-1 inline-flex h-8 w-8 items-center justify-center rounded-md border text-[10px] font-bold transition last:mb-0',
-                  active
-                    ? 'border-primary/38 bg-primary text-white shadow-sm'
-                    : 'border-transparent bg-transparent text-fg-4 hover:border-edge/60 hover:bg-panel-h hover:text-fg-2',
-                )}
-                title={`${space.name} · ${count}`}
-                aria-label={`${space.name} task space`}
-              >
-                {taskSpaceIcon(space.id, space.kind)}
-                {count > 0 && (
-                  <span className="absolute -right-1 -top-1 min-w-[15px] rounded-full border border-panel bg-inset px-1 text-center font-mono text-[8px] leading-[13px] text-fg-4">
-                    {Math.min(count, 99)}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </aside>
-    );
+    return null;
   }
+  const nextDetailLayout: TaskDetailLayout = detailLayout === 'side' ? 'modal' : 'side';
+  const detailLayoutTitle = nextDetailLayout === 'side'
+    ? 'Open cards in the right panel'
+    : 'Open cards in a dialog';
+
   return (
-    <aside className="hidden w-[226px] shrink-0 border-r border-edge/55 bg-panel/62 md:flex md:min-h-0 md:flex-col">
+    <aside className="panel-isolated hidden h-full w-[300px] max-w-[calc(100vw-16px)] shrink-0 overflow-hidden rounded-xl border border-edge/70 bg-panel/96 shadow-[var(--th-card-shadow)] backdrop-blur-md md:flex md:min-h-0 md:flex-col">
       <div className="shrink-0 border-b border-edge/40 px-3 py-3">
-        <div className="flex items-center gap-1.5">
+        <div className="grid grid-cols-[32px_minmax(0,1fr)_32px_32px] items-center gap-1.5">
           <Button
             variant="ghost"
             size="icon"
@@ -882,7 +813,7 @@ function TaskSpaceSidebar({
               <path d="m15 18-6-6 6-6" />
             </svg>
           </Button>
-          <div className="relative group min-w-0 flex-1">
+          <div className="relative group min-w-0">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-5/40 transition-colors group-focus-within:text-fg-4" aria-hidden="true">
               <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
@@ -908,6 +839,29 @@ function TaskSpaceSidebar({
             )}
           </div>
           <Button
+            variant={detailLayout === 'modal' ? 'secondary' : 'ghost'}
+            size="icon"
+            onClick={() => onDetailLayoutChange(nextDetailLayout)}
+            title={detailLayoutTitle}
+            aria-label={detailLayoutTitle}
+            className={cn(
+              'h-8 w-8 shrink-0',
+              detailLayout === 'modal' && 'border-primary/35 text-primary',
+            )}
+          >
+            {nextDetailLayout === 'side' ? (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <path d="M14 5v14" />
+              </svg>
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="5" y="5" width="14" height="14" rx="2" />
+                <path d="M8 9h8" />
+              </svg>
+            )}
+          </Button>
+          <Button
             variant="ghost"
             size="icon"
             onClick={onCreateSpace}
@@ -919,50 +873,6 @@ function TaskSpaceSidebar({
               <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
             </svg>
           </Button>
-        </div>
-        <Button variant="primary" size="sm" className="mt-3 w-full justify-center" onClick={onCreateTask} title="Create task" aria-label="Create task">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          Create task
-        </Button>
-        <div className="mt-3 rounded-lg border border-edge/55 bg-panel-alt/52 p-1">
-          <div className="grid grid-cols-2 gap-1">
-            {([
-              { key: 'side' as const, label: 'Side', title: 'Open cards in the right panel' },
-              { key: 'modal' as const, label: 'Modal', title: 'Open cards in a dialog' },
-            ]).map(item => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => onDetailLayoutChange(item.key)}
-                title={item.title}
-                className={cn(
-                  'inline-flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-[11px] font-semibold transition',
-                  detailLayout === item.key
-                    ? 'bg-panel text-fg shadow-sm'
-                    : 'text-fg-5 hover:bg-panel-h hover:text-fg-3',
-                )}
-              >
-                {item.key === 'side' ? (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <rect x="3" y="5" width="18" height="14" rx="2" />
-                    <path d="M14 5v14" />
-                  </svg>
-                ) : (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <rect x="5" y="5" width="14" height="14" rx="2" />
-                    <path d="M8 9h8" />
-                  </svg>
-                )}
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="mt-2 px-1">
-          <div className="text-[12px] font-semibold text-fg-2">Task spaces</div>
-          <div className="mt-0.5 text-[10.5px] text-fg-5">任务空间</div>
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -1003,19 +913,23 @@ function TaskSpaceSidebar({
 function CreateTaskSpaceModal({
   open,
   busy,
+  assistants,
   defaultWorkdir,
   defaultAgent,
+  defaultAssistantId,
   onClose,
   onCreate,
 }: {
   open: boolean;
   busy: boolean;
+  assistants: AgentAssistant[];
   defaultWorkdir: string;
   defaultAgent: string;
+  defaultAssistantId?: string;
   onClose: () => void;
-  onCreate: (draft: { name: string; defaultWorkdir: string; defaultAgent: string }) => void;
+  onCreate: (draft: { name: string; defaultWorkdir: string; defaultAgent: string; defaultAssistantId: string }) => void;
 }) {
-  const [draft, setDraft] = useState({ name: '', defaultWorkdir, defaultAgent });
+  const [draft, setDraft] = useState({ name: '', defaultWorkdir, defaultAgent, defaultAssistantId: defaultAssistantId || '' });
 
   useEffect(() => {
     if (!open) return;
@@ -1023,15 +937,16 @@ function CreateTaskSpaceModal({
       name: prev.name,
       defaultWorkdir: prev.defaultWorkdir || defaultWorkdir,
       defaultAgent: prev.defaultAgent || defaultAgent,
+      defaultAssistantId: prev.defaultAssistantId || defaultAssistantId || '',
     }));
-  }, [defaultAgent, defaultWorkdir, open]);
+  }, [defaultAgent, defaultAssistantId, defaultWorkdir, open]);
 
   return (
     <Modal open={open} onClose={onClose}>
       <ModalHeader title="Create task space" description="Use a task space for your own task boards, project work, or writing queues." onClose={onClose} />
       <div className="space-y-3">
         <Input autoFocus value={draft.name} onChange={event => setDraft(prev => ({ ...prev, name: event.target.value }))} placeholder="Pikiclaw Roadmap" />
-        <div className="grid gap-2 md:grid-cols-2">
+        <div className="grid gap-2 md:grid-cols-3">
           <label className="space-y-1">
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Default workspace</div>
             <Input value={draft.defaultWorkdir} onChange={event => setDraft(prev => ({ ...prev, defaultWorkdir: event.target.value }))} placeholder="/path/to/workspace" />
@@ -1040,6 +955,13 @@ function CreateTaskSpaceModal({
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Default agent</div>
             <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
               {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Default assistant</div>
+            <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              <option value="">Runtime default</option>
+              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
             </select>
           </label>
         </div>
@@ -1418,41 +1340,154 @@ function taskFlowStatus(task: ProTask, step: (typeof TASK_FLOW_STEPS)[number], a
   return 'waiting';
 }
 
-function TaskFlowMap({ task, busyStage }: { task: ProTask; busyStage?: ProTaskStage | null }) {
+function TaskFlowMap({
+  task,
+  busyStage,
+  stickyTopClassName = 'top-3',
+}: {
+  task: ProTask;
+  busyStage?: ProTaskStage | null;
+  stickyTopClassName?: string;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
+  const [expanded, setExpanded] = useState(true);
+  const [atBottom, setAtBottom] = useState(true);
   const activeStage = currentFlowStage(task, busyStage);
   const latestRun = latestTaskStageRun(task);
   const steps = TASK_FLOW_STEPS.map(step => ({ ...step, status: taskFlowStatus(task, step, activeStage) }));
+  const completed = steps.filter(step => step.status === 'done').length;
+  const activeStep = steps.find(step => step.status === 'active') || [...steps].reverse().find(step => step.status === 'done') || steps[0];
+  const activeStatusText = latestRun
+    ? `${STAGE_LABEL[latestRun.stage]} is ${latestRun.status}`
+    : activeStep
+      ? `${activeStep.label} is current`
+      : 'The first agent message will shape this flow.';
+
+  useEffect(() => {
+    setExpanded(true);
+    setAtBottom(true);
+  }, [task.id]);
+
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!node) return undefined;
+    let parent = node.parentElement;
+    let scroller: HTMLElement | null = null;
+    while (parent) {
+      const style = window.getComputedStyle(parent);
+      if (/(auto|scroll|overlay)/.test(style.overflowY)) {
+        scroller = parent;
+        break;
+      }
+      parent = parent.parentElement;
+    }
+    if (!scroller) return undefined;
+    scrollerRef.current = scroller;
+    const updateFromScroll = () => {
+      const distanceToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      const nextAtBottom = distanceToBottom <= 28;
+      setAtBottom(nextAtBottom);
+      setExpanded(nextAtBottom);
+    };
+    const frame = window.requestAnimationFrame(updateFromScroll);
+    scroller.addEventListener('scroll', updateFromScroll, { passive: true });
+    window.addEventListener('resize', updateFromScroll);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scroller.removeEventListener('scroll', updateFromScroll);
+      window.removeEventListener('resize', updateFromScroll);
+      if (scrollerRef.current === scroller) scrollerRef.current = null;
+    };
+  }, [task.id]);
+
+  const revealFullProgress = () => {
+    if (atBottom) return;
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+  };
+
   return (
-    <div className="mb-4 rounded-xl border border-edge/65 bg-panel/72 px-3.5 py-3 shadow-sm">
-      <div className="mb-3 flex min-w-0 items-center justify-between gap-3">
+    <div
+      ref={rootRef}
+      className={cn(
+        'sticky z-10 mb-4 w-full max-w-[420px] rounded-xl border border-edge/65 bg-panel/90 px-3.5 shadow-[0_12px_32px_rgba(15,23,42,0.12)] backdrop-blur-md transition-[padding,box-shadow] duration-200',
+        stickyTopClassName,
+        expanded ? 'py-3' : 'py-2.5 shadow-[0_8px_22px_rgba(15,23,42,0.10)]',
+      )}
+    >
+      <button
+        type="button"
+        onClick={revealFullProgress}
+        aria-expanded={expanded}
+        className="flex w-full min-w-0 items-center justify-between gap-3 text-left"
+      >
         <div className="min-w-0">
-          <div className="text-[12px] font-semibold text-fg-2">Generated task map</div>
-          <div className="mt-0.5 truncate text-[11px] text-fg-5">
-            {latestRun ? `${STAGE_LABEL[latestRun.stage]} is ${latestRun.status}` : 'The first agent message will shape this flow.'}
+          <div className="text-[12px] font-semibold text-primary">Task progress</div>
+          <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
+            <span className={cn(
+              'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
+              activeStep?.status === 'done' && 'border-ok bg-ok text-white',
+              activeStep?.status === 'active' && 'border-primary bg-primary text-primary-fg',
+              (!activeStep || activeStep.status === 'waiting') && 'border-edge bg-panel text-fg-5',
+            )}>
+              {activeStep?.status === 'done' ? (
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="m5 12 4 4L19 6" />
+                </svg>
+              ) : activeStep?.status === 'active' ? (
+                <span className="h-1.5 w-1.5 rounded-full bg-current" />
+              ) : null}
+            </span>
+            <span className="truncate">
+              <span className="font-semibold text-fg-3">{activeStep?.label || 'Current'}</span>
+              <span className="text-fg-5"> · {activeStatusText}</span>
+            </span>
           </div>
         </div>
-        <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
+        <span className="shrink-0 text-[10px] font-medium text-fg-5">{completed}/{steps.length} Complete</span>
+      </button>
+      <div className={cn('h-1.5 overflow-hidden rounded-full bg-inset', expanded ? 'mb-3 mt-3' : 'mt-2')}>
+        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(8, (completed / steps.length) * 100)}%` }} />
       </div>
-      <div className="grid grid-cols-5 gap-1.5">
-        {steps.map((step, index) => (
-          <div key={step.key} className="min-w-0">
-            <div
-              className={cn(
-                'flex h-8 items-center justify-center rounded-lg border text-[11px] font-semibold transition-colors',
-                step.status === 'done' && 'border-ok/35 bg-ok/10 text-ok',
-                step.status === 'active' && 'border-primary/45 bg-primary/10 text-primary shadow-[0_0_0_3px_var(--th-glow-a)]',
-                step.status === 'waiting' && 'border-edge/60 bg-panel-alt/50 text-fg-5',
-              )}
-            >
-              <span className="truncate px-1">{step.label}</span>
-            </div>
-            {index < steps.length - 1 && (
-              <div className="mx-auto mt-1 h-0.5 w-[calc(100%-8px)] rounded-full bg-edge/70">
-                <div className={cn('h-full rounded-full transition-all', step.status === 'done' ? 'w-full bg-ok' : 'w-0 bg-primary')} />
+      <div className={cn(
+        'grid transition-[grid-template-rows,opacity] duration-200',
+        expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+      )}>
+        <div className="min-h-0 overflow-hidden">
+          <div className="space-y-1.5">
+            {steps.map(step => (
+              <div
+                key={step.key}
+                className={cn(
+                  'flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors',
+                  step.status === 'done' && 'border-ok/20 bg-ok/10 text-ok',
+                  step.status === 'active' && 'border-primary/35 bg-primary/10 text-primary',
+                  step.status === 'waiting' && 'border-edge/55 bg-panel-alt/48 text-fg-5',
+                )}
+              >
+                <span
+                  className={cn(
+                    'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
+                    step.status === 'done' && 'border-ok bg-ok text-white',
+                    step.status === 'active' && 'border-primary bg-primary text-primary-fg',
+                    step.status === 'waiting' && 'border-edge bg-panel text-fg-5',
+                  )}
+                >
+                  {step.status === 'done' ? (
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="m5 12 4 4L19 6" />
+                    </svg>
+                  ) : step.status === 'active' ? (
+                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                  ) : null}
+                </span>
+                <span className="min-w-0 truncate">{step.label}</span>
               </div>
-            )}
+            ))}
           </div>
-        ))}
+        </div>
       </div>
     </div>
   );
@@ -1727,6 +1762,8 @@ function TaskChatWindow({
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedAgent, setSelectedAgent] = useState(currentDefaultAgent);
   const [chatStatus, setChatStatus] = useState<ProTaskStatus>(displayTaskStatus(task.status));
+  const [ticketExpanded, setTicketExpanded] = useState(false);
+  const [sessionOverrides, setSessionOverrides] = useState<Record<string, StageSessionRef>>({});
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const agentOptions = useMemo(() => {
     const options = new Map<string, string>();
@@ -1743,6 +1780,10 @@ function TaskChatWindow({
   useEffect(() => {
     setChatStatus(displayTaskStatus(task.status));
   }, [task.id, task.status]);
+
+  useEffect(() => {
+    setSessionOverrides({});
+  }, [task.id]);
 
   const activeStatus = chatStatus;
   const runsByStatus = useMemo(() => {
@@ -1763,19 +1804,24 @@ function TaskChatWindow({
   }, [task.stageRuns]);
   const activeRuns = runsByStatus.get(activeStatus) || [];
   const run = activeRuns[0] || null;
+  const runSession = run ? sessionOverrides[run.id] || run.session : null;
   const activeStage = STATUS_CHAT_STAGE[activeStatus];
-  const agentDiffersFromRun = !!run && !!selectedAgent && run.session.agent !== selectedAgent;
+  const agentDiffersFromRun = !!runSession && !!selectedAgent && runSession.agent !== selectedAgent;
   const missingSessionHistory = !!run && !!error && /session history file not found/i.test(error);
   const canSendToRun = !!run && !agentDiffersFromRun && !missingSessionHistory;
   const fields = task.jiraFields || {};
   const priority = fields.priority || jiraRemoteSyncField(task.description, 'Priority');
   const brief = taskBriefSummary(task);
+  const expandedBrief = taskExpandedSummary(task);
+  const summaryFallback = 'No ticket description yet. Ask the agent to inspect the task and create a plan.';
+  const ticketSummary = ticketExpanded ? (expandedBrief || brief || summaryFallback) : (brief || summaryFallback);
+  const canExpandTicketSummary = task.title.length > 72 || expandedBrief.length > 220 || expandedBrief.includes('\n');
   const meaningfulMessages = messages.filter(message => !!compactMessageText(message));
   const lastMeaningfulMessage = meaningfulMessages[meaningfulMessages.length - 1] || null;
   const showOutputActions = !!lastMeaningfulMessage && lastMeaningfulMessage.role !== 'user';
   const mdComponents = useMemo(
-    () => createMdComponents({ workdir: run?.session.workdir || task.workdir }),
-    [run?.session.workdir, task.workdir],
+    () => createMdComponents({ workdir: runSession?.workdir || task.workdir }),
+    [runSession?.workdir, task.workdir],
   );
 
   useEffect(() => {
@@ -1785,6 +1831,7 @@ function TaskChatWindow({
     setReloadKey(0);
     setSelectedAgent(currentDefaultAgent);
     setChatStatus(displayTaskStatus(task.status));
+    setTicketExpanded(false);
   }, [currentDefaultAgent, task.id, task.status]);
 
   useEffect(() => {
@@ -1797,7 +1844,8 @@ function TaskChatWindow({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    api.getSessionMessages(run.session.workdir, run.session.agent, run.session.sessionId, { lastNTurns: 16, rich: true })
+    const session = runSession || run.session;
+    api.getSessionMessages(session.workdir, session.agent, session.sessionId, { lastNTurns: 16, rich: true })
       .then(result => {
         if (cancelled) return;
         if (!result.ok) {
@@ -1812,7 +1860,7 @@ function TaskChatWindow({
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [reloadKey, run?.id, run?.session.agent, run?.session.sessionId, run?.session.workdir]);
+  }, [reloadKey, run?.id, runSession?.agent, runSession?.sessionId, runSession?.workdir]);
 
   const focusComposer = (seed?: string) => {
     if (seed) setDraft(current => current || seed);
@@ -1843,7 +1891,8 @@ function TaskChatWindow({
     setError(null);
     setSending(true);
     try {
-      const result = await api.sendSessionMessage(run.session.workdir, run.session.agent, run.session.sessionId, prompt);
+      const session = runSession || run.session;
+      const result = await api.sendSessionMessage(session.workdir, session.agent, session.sessionId, prompt);
       if (!result.ok) throw new Error(result.error || 'Failed to send message');
       setDraft('');
       setReloadKey(value => value + 1);
@@ -1854,56 +1903,151 @@ function TaskChatWindow({
     }
   };
 
+  const handleRunSessionChange = useCallback((next: SessionPanelChange) => {
+    if (!run) return;
+    const nextSession: StageSessionRef = { workdir: next.workdir, agent: next.agent, sessionId: next.sessionId };
+    setSessionOverrides(current => ({ ...current, [run.id]: nextSession }));
+    if (
+      nextSession.workdir !== run.session.workdir
+      || nextSession.agent !== run.session.agent
+      || nextSession.sessionId !== run.session.sessionId
+    ) {
+      void api.updateProTaskStageRun(task.id, run.id, { session: nextSession }).catch(() => {});
+    }
+  }, [run, task.id]);
+
+  const taskHeader = (
+    <div className="relative mx-auto max-w-[760px] overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
+      <div className="relative px-3.5 py-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="mt-0.5 shrink-0"><TicketTypeIcon task={task} /></div>
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex flex-wrap items-center gap-1.5">
+              {task.jiraKey && <span className="font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
+              <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
+              <Badge variant={stageTone(activeStage)}>{STAGE_LABEL[activeStage]}</Badge>
+              {priority && <Badge variant="muted">{priority}</Badge>}
+            </div>
+            <div className="flex min-w-0 items-start gap-2">
+              <div
+                className={cn(
+                  'min-w-0 flex-1 text-[13px] font-semibold tracking-tight text-fg',
+                  ticketExpanded ? 'whitespace-normal break-words leading-snug' : 'truncate',
+                )}
+                title={task.title}
+              >
+                {task.title}
+              </div>
+              {canExpandTicketSummary && (
+                <button
+                  type="button"
+                  aria-expanded={ticketExpanded}
+                  onClick={() => setTicketExpanded(value => !value)}
+                  className="mt-[-1px] inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-edge/70 bg-panel/60 px-1.5 text-[11px] font-medium text-fg-4 transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                >
+                  {ticketExpanded ? 'Collapse' : 'Expand'}
+                  <ChevronIcon open={ticketExpanded} className="text-current" />
+                </button>
+              )}
+            </div>
+            <div
+              className={cn(
+                'mt-1 text-[12px] leading-relaxed text-fg-4',
+                ticketExpanded
+                  ? 'max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words pr-1 sm:max-h-[34vh]'
+                  : 'line-clamp-2',
+              )}
+            >
+              {ticketSummary}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="primary"
+              className="h-7 px-2.5"
+              disabled={sending || busyStage === STATUS_CHAT_STAGE.refinement}
+              onClick={() => { void startChat('refinement', ANALYZE_TICKET_PROMPT); }}
+            >
+              {sending || busyStage === STATUS_CHAT_STAGE.refinement ? <Spinner className="h-3 w-3" /> : null}
+              Start work
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 px-2.5" onClick={onOpenTicket}>Ticket</Button>
+            {actions}
+          </div>
+        </div>
+        <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
+          <button type="button" onClick={onOpenArtifacts} className="rounded-md px-1.5 py-1 transition hover:bg-panel-h hover:text-fg-3">
+            {artifactCount ? `${artifactCount} artifacts` : 'Artifacts will appear here'}
+          </button>
+          <span className="h-1 w-1 rounded-full bg-fg-6/50" />
+          <span className="truncate">Progress appears here after the task chat starts.</span>
+        </div>
+      </div>
+    </div>
+  );
+
+  const panelSession = run && runSession ? ({
+    sessionId: runSession.sessionId,
+    agent: runSession.agent,
+    workdir: runSession.workdir,
+    runState: run.status === 'failed' || run.status === 'cancelled'
+      ? 'incomplete'
+      : run.status === 'completed'
+        ? 'completed'
+        : 'running',
+    runStartedAt: run.startedAt,
+    runUpdatedAt: run.completedAt || run.startedAt,
+    title: task.title,
+    lastQuestion: run.prompt,
+  } satisfies SessionInfo) : null;
+
+  if (run && runSession && panelSession) {
+    const isPendingSession = runSession.sessionId.startsWith('pending_');
+    return (
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]">
+        <div className="shrink-0 px-5 pb-3 pt-3">
+          {taskHeader}
+        </div>
+        <div className="min-h-0 flex-1">
+          <SessionPanel
+            key={run.id}
+            session={panelSession}
+            workdir={runSession.workdir}
+            active
+            transcriptHeader={(
+              <>
+                <TaskFlowMap task={task} busyStage={busyStage} />
+                <div className="mb-4 flex min-w-0 items-center justify-center gap-2 text-[11px] text-fg-5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                  <span className="max-w-full truncate rounded-md border border-edge/65 bg-panel-alt/70 px-2 py-1 font-mono">
+                    {STAGE_LABEL[activeStage]} · {runSession.agent}:{runSession.sessionId}
+                  </span>
+                </div>
+              </>
+            )}
+            initialPendingPrompt={isPendingSession ? run.prompt : null}
+            initialPendingCreatedAt={isPendingSession ? run.startedAt || null : null}
+            onSessionChange={handleRunSessionChange}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="relative h-full min-h-0 overflow-hidden bg-[var(--th-session-bg)]">
       <div className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-[130px]">
         <div className="mx-auto max-w-[860px] px-5 pb-5">
           <div className="sticky top-0 z-20 -mx-5 mb-5 px-5 pb-3 pt-3">
             <div className="absolute inset-x-0 top-0 h-[calc(100%+28px)] bg-gradient-to-b from-[var(--th-session-bg)] via-[var(--th-session-bg)]/92 to-transparent" />
-            <div className="relative mx-auto max-w-[760px] overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
-              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
-              <div className="relative px-3.5 py-3">
-                <div className="flex min-w-0 items-start gap-3">
-                  <div className="mt-0.5 shrink-0"><TicketTypeIcon task={task} /></div>
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                      {task.jiraKey && <span className="font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
-                      <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
-                      <Badge variant={stageTone(activeStage)}>{STAGE_LABEL[activeStage]}</Badge>
-                      {priority && <Badge variant="muted">{priority}</Badge>}
-                    </div>
-                    <div className="truncate text-[13px] font-semibold tracking-tight text-fg" title={task.title}>{task.title}</div>
-                    <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-fg-4">
-                      {brief || 'No ticket description yet. Ask the agent to inspect the task and create a plan.'}
-                    </div>
-                  </div>
-	                  <div className="flex shrink-0 items-center gap-1.5">
-	                    <Button
-                      size="sm"
-                      variant="primary"
-                      className="h-7 px-2.5"
-                      disabled={sending || busyStage === STATUS_CHAT_STAGE.refinement}
-                      onClick={() => { void startChat('refinement', ANALYZE_TICKET_PROMPT); }}
-                    >
-                      {sending || busyStage === STATUS_CHAT_STAGE.refinement ? <Spinner className="h-3 w-3" /> : null}
-                      Analyze
-	                    </Button>
-	                    <Button size="sm" variant="outline" className="h-7 px-2.5" onClick={onOpenTicket}>Ticket</Button>
-	                    {actions}
-	                  </div>
-	                </div>
-	                <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
-	                  <button type="button" onClick={onOpenArtifacts} className="rounded-md px-1.5 py-1 transition hover:bg-panel-h hover:text-fg-3">
-	                    {artifactCount ? `${artifactCount} artifacts` : 'Artifacts will appear here'}
-	                  </button>
-	                  <span className="h-1 w-1 rounded-full bg-fg-6/50" />
-	                  <span className="truncate">Task progress updates here as generated UI.</span>
-	                </div>
-	              </div>
-	            </div>
-	          </div>
-	          <TaskFlowMap task={task} busyStage={busyStage} />
-	          {run && (
+            {taskHeader}
+          </div>
+          {(run || busyStage || (task.stageRuns || []).length > 0) && (
+            <TaskFlowMap task={task} busyStage={busyStage} stickyTopClassName="top-[124px]" />
+          )}
+          {run && (
             <div className="mb-4 flex min-w-0 items-center justify-center gap-2 text-[11px] text-fg-5">
               <span className="h-1.5 w-1.5 rounded-full bg-ok" />
               <span className="max-w-full truncate rounded-md border border-edge/65 bg-panel-alt/70 px-2 py-1 font-mono">
@@ -1927,7 +2071,7 @@ function TaskChatWindow({
           ) : messages.length === 0 ? (
             <div className="flex min-h-[260px] items-center justify-center px-4 text-center">
               <div className="max-w-[420px] text-[12px] leading-relaxed text-fg-5">
-                Start with <span className="font-medium text-fg-3">Analyze</span> on the task card, or ask the agent directly in the composer.
+                Start with <span className="font-medium text-fg-3">Start work</span> on the task card, or ask the agent directly in the composer.
               </div>
             </div>
           ) : (
@@ -2045,7 +2189,7 @@ function TaskChatWindow({
                 )}
               >
                 {sending ? <Spinner className="h-3.5 w-3.5" /> : null}
-                <span className="whitespace-nowrap">{draft.trim() ? 'Send' : canSendToRun ? 'Send' : 'Send message'}</span>
+                <span className="whitespace-nowrap">{draft.trim() ? 'Send' : canSendToRun ? 'Send' : 'Start work'}</span>
               </button>
             </div>
           </div>
@@ -2332,6 +2476,7 @@ function TaskDetail({
   defaultAgent,
   agents,
   busy,
+  reopening,
   cycles,
   workspaces,
   fallbackWorkdir,
@@ -2343,12 +2488,14 @@ function TaskDetail({
   onCreateSubtask,
   onUpdateSubtaskStatus,
   onStartSubtask,
+  onReopen,
 }: {
   task: ProTask | null;
   actions?: ReactNode;
   defaultAgent: string;
   agents: AgentRuntimeStatus[];
   busy?: { taskId: string; stage: ProTaskStage } | null;
+  reopening?: boolean;
   cycles: JiraCycle[];
   workspaces: WorkspaceEntry[];
   fallbackWorkdir?: string;
@@ -2360,8 +2507,13 @@ function TaskDetail({
   onCreateSubtask: (task: ProTask) => void;
   onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
+  onReopen?: (task: ProTask) => void;
 }) {
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [shelfTab, setShelfTab] = useState<'status' | 'files' | 'cards' | 'browser' | 'ticket'>('status');
+  const [contextOpen, setContextOpen] = useState(true);
+  const [fileBrowserPath, setFileBrowserPath] = useState('');
   const sortedRuns = useMemo(() => [...(task?.stageRuns || [])].sort((a, b) => {
     const bTime = Date.parse(b.startedAt || b.completedAt || '');
     const aTime = Date.parse(a.startedAt || a.completedAt || '');
@@ -2417,6 +2569,13 @@ function TaskDetail({
     }
     return items;
   }, [sortedRuns, task]);
+  const latestRunWorkdir = sortedRuns.find(run => run.session?.workdir)?.session.workdir || '';
+  const inferredWorkdir = latestRunWorkdir || task?.workdir || fallbackWorkdir || '';
+  useEffect(() => {
+    setContextOpen(true);
+    setShelfTab('status');
+    setFileBrowserPath(inferredWorkdir);
+  }, [inferredWorkdir, task?.id]);
   if (!task) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 bg-panel px-6 text-center">
@@ -2444,23 +2603,40 @@ function TaskDetail({
     workspaceOptions.set(cleanPath, label?.trim() || workspaceShortLabel(cleanPath));
   };
   for (const workspace of workspaces) addWorkspace(workspace.path, workspace.name);
+  addWorkspace(latestRunWorkdir, 'Latest task chat');
   addWorkspace(task.workdir);
   addWorkspace(fallbackWorkdir, 'Current workspace');
   const shelfTabs: Array<{ key: 'status' | 'files' | 'cards' | 'browser' | 'ticket'; label: string; count?: number }> = [
     { key: 'status', label: 'Status' },
-    { key: 'files', label: 'Files', count: fileItems.length },
-    { key: 'cards', label: 'Cards', count: outputItems.length },
+    { key: 'files', label: 'Files' },
+    { key: 'cards', label: 'Side card', count: outputItems.length },
     { key: 'browser', label: 'Browser' },
     { key: 'ticket', label: 'Ticket' },
   ];
+  const currentWorkdir = inferredWorkdir;
+  const chatActions = (
+    <>
+      {actions}
+      {!contextOpen && (
+        <Button variant="outline" size="sm" className="h-7 px-2.5" onClick={() => setContextOpen(true)}>
+          Context
+        </Button>
+      )}
+    </>
+  );
 
   return (
     <div className="h-full overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
-      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_minmax(260px,38%)] overflow-hidden min-[980px]:grid-cols-[minmax(0,1fr)_390px] min-[980px]:grid-rows-[minmax(0,1fr)]">
+      <div className={cn(
+        'grid h-full min-h-0 overflow-hidden',
+        contextOpen
+          ? 'grid-rows-[minmax(0,1fr)_minmax(260px,38%)] min-[980px]:grid-cols-[minmax(0,1fr)_390px] min-[980px]:grid-rows-[minmax(0,1fr)]'
+          : 'grid-cols-1',
+      )}>
         <main className="min-h-0 min-w-0 overflow-hidden">
           <TaskChatWindow
             task={task}
-            actions={actions}
+            actions={chatActions}
             agents={agents}
             defaultAgent={defaultAgent}
             busyStage={busy?.taskId === task.id ? busy.stage : null}
@@ -2471,15 +2647,20 @@ function TaskDetail({
           />
         </main>
 
-        <aside className="min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
+        {contextOpen && <aside className="min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
           <div className="flex h-full min-h-0 flex-col">
             <div className="shrink-0 border-b border-edge/55 px-3 py-3">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-[12px] font-semibold text-fg-2">Task context</div>
-                  <div className="mt-0.5 truncate text-[10.5px] text-fg-5">Status, files, cards, browser, and raw ticket</div>
+                  <div className="mt-0.5 truncate text-[10.5px] text-fg-5">Status, files, browser, and raw ticket</div>
                 </div>
-                <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
+                <Button variant="ghost" size="icon" className="h-7 w-7" title="Hide context" aria-label="Hide context" onClick={() => setContextOpen(false)}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="16" rx="2" />
+                    <path d="M15 4v16" />
+                  </svg>
+                </Button>
               </div>
               <div className="flex min-w-0 gap-1 rounded-md border border-edge/55 bg-panel-alt/60 p-0.5">
                 {shelfTabs.map(tab => (
@@ -2503,7 +2684,21 @@ function TaskDetail({
               {shelfTab === 'status' && (
                 <div className="space-y-4">
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
-                    <div className="mb-3"><TaskStatusDisplay status={task.status} /></div>
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <TaskStatusDisplay status={task.status} />
+                      {isClosedRemoteTask(task) && onReopen && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          className="h-7 shrink-0 px-2.5 text-[11px]"
+                          disabled={reopening}
+                          onClick={() => onReopen(task)}
+                        >
+                          {reopening ? <Spinner /> : null}
+                          Reopen
+                        </Button>
+                      )}
+                    </div>
                     <dl className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[12px]">
                       <dt className="text-fg-5">Assistant</dt>
                       <dd className="min-w-0 truncate text-fg-3">{taskAssignee(task, defaultAgent)}</dd>
@@ -2545,49 +2740,67 @@ function TaskDetail({
                       <dd className="min-w-0"><TaskPrField task={task} onMetaChange={onMetaChange} /></dd>
                     </dl>
                   </section>
-                  <TaskGeneratedBlocks
-                    task={task}
-                    busyStage={busy?.taskId === task.id ? busy.stage : null}
-                    compact
-                    subtaskDraft={subtaskDraft}
-                    onOpenTicket={() => setShelfTab('ticket')}
-                    onOpenArtifacts={() => setShelfTab('cards')}
-                    onSubtaskDraftChange={onSubtaskDraftChange}
-                    onCreateSubtask={onCreateSubtask}
-                    onUpdateSubtaskStatus={onUpdateSubtaskStatus}
-                    onStartSubtask={onStartSubtask}
-                  />
-                  {sortedRuns.length > 0 && (
-                    <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
-                      <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Stage runs</div>
-                      <div className="space-y-2">
-                        {sortedRuns.slice(0, 6).map(run => (
-                          <div key={run.id} className="rounded-lg border border-edge/65 bg-panel/55 px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              <Badge variant={stageTone(run.stage)}>{STAGE_LABEL[run.stage]}</Badge>
-                              <span className="min-w-0 flex-1 truncate text-[11px] text-fg-4">{run.status}</span>
-                            </div>
-                            <div className="mt-1 truncate font-mono text-[10px] text-fg-5">{run.session.agent}:{run.session.sessionId}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  )}
                 </div>
               )}
 
               {shelfTab === 'files' && (
-                <div className="space-y-2">
-                  {fileItems.length === 0 ? (
+                <div className="space-y-3">
+                  <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Workspace</div>
+                    <select
+                      value={task.workdir || ''}
+                      onChange={event => onMetaChange(task, { workdir: event.target.value || null })}
+                      className="h-8 w-full rounded-md border border-edge bg-panel px-2 text-[12px] text-fg-3 outline-none transition hover:border-edge-h focus:border-primary/40"
+                      title={currentWorkdir || 'No workspace'}
+                    >
+                      <option value="">Current workspace</option>
+                      {Array.from(workspaceOptions, ([path, label]) => (
+                        <option key={path} value={path}>{label}</option>
+                      ))}
+                    </select>
+                  </section>
+                  {currentWorkdir ? (
+                    <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
+                      <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                        <div className="min-w-0 truncate font-mono text-[10px] text-fg-5" title={fileBrowserPath || currentWorkdir}>
+                          {fileBrowserPath || currentWorkdir}
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0 px-2 text-[11px]"
+                          disabled={!fileBrowserPath || fileBrowserPath === task.workdir}
+                          onClick={() => onMetaChange(task, { workdir: fileBrowserPath || null })}
+                        >
+                          Use
+                        </Button>
+                      </div>
+                      <DirBrowser
+                        key={currentWorkdir}
+                        initialPath={currentWorkdir}
+                        compact
+                        minHeight={180}
+                        maxHeight={280}
+                        t={t}
+                        onSelect={(path) => setFileBrowserPath(path)}
+                      />
+                    </section>
+                  ) : (
                     <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center text-[12px] text-fg-5">
-                      Changed and referenced files will appear after agent output.
+                      Select a workspace to browse files.
                     </div>
-                  ) : fileItems.map(file => (
-                    <div key={file.path} className="rounded-lg border border-edge/65 bg-panel-alt/58 px-3 py-2">
-                      <div className="truncate font-mono text-[11px] text-fg-3" title={file.path}>{file.path}</div>
-                      <div className="mt-1 text-[10px] text-fg-5">{file.source}</div>
-                    </div>
-                  ))}
+                  )}
+                  {fileItems.length > 0 && (
+                    <section className="space-y-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Referenced</div>
+                      {fileItems.slice(0, 6).map(file => (
+                        <div key={file.path} className="rounded-lg border border-edge/65 bg-panel-alt/58 px-3 py-2">
+                          <div className="truncate font-mono text-[11px] text-fg-3" title={file.path}>{file.path}</div>
+                          <div className="mt-1 text-[10px] text-fg-5">{file.source}</div>
+                        </div>
+                      ))}
+                    </section>
+                  )}
                 </div>
               )}
 
@@ -2657,7 +2870,7 @@ function TaskDetail({
               )}
             </div>
           </div>
-        </aside>
+        </aside>}
       </div>
     </div>
   );
@@ -2668,6 +2881,7 @@ function TaskInlineWorkbench({
   defaultAgent,
   agents,
   busy,
+  reopening,
   cycles,
   workspaces,
   fallbackWorkdir,
@@ -2679,12 +2893,14 @@ function TaskInlineWorkbench({
   onCreateSubtask,
   onUpdateSubtaskStatus,
   onStartSubtask,
+  onReopen,
   onOpenFull,
 }: {
   task: ProTask | null;
   defaultAgent: string;
   agents: AgentRuntimeStatus[];
   busy?: { taskId: string; stage: ProTaskStage } | null;
+  reopening?: boolean;
   cycles: JiraCycle[];
   workspaces: WorkspaceEntry[];
   fallbackWorkdir?: string;
@@ -2696,6 +2912,7 @@ function TaskInlineWorkbench({
   onCreateSubtask: (task: ProTask) => void;
   onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
+  onReopen?: (task: ProTask) => void;
   onOpenFull: () => void;
 }) {
   if (!task) {
@@ -2719,6 +2936,7 @@ function TaskInlineWorkbench({
         defaultAgent={defaultAgent}
         agents={agents}
         busy={busy}
+        reopening={reopening}
         cycles={cycles}
         workspaces={workspaces}
         fallbackWorkdir={fallbackWorkdir}
@@ -2730,6 +2948,7 @@ function TaskInlineWorkbench({
         onCreateSubtask={onCreateSubtask}
         onUpdateSubtaskStatus={onUpdateSubtaskStatus}
         onStartSubtask={onStartSubtask}
+        onReopen={onReopen}
         actions={(
           <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={onOpenFull}>
             Open
@@ -2908,7 +3127,7 @@ function JiraSyncDetailsContent({ run }: { run: JiraSyncRun }) {
             {run.error && <div className="mt-3 text-[12px] text-err">{run.error}</div>}
           </div>
         </div>
-	  );
+  );
 }
 
 function JiraDashboardSettingsMenu({
@@ -3151,6 +3370,7 @@ export function TasksTab() {
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [taskDeleteTarget, setTaskDeleteTarget] = useState<ProTask | null>(null);
   const [savingJiraFieldsTaskId, setSavingJiraFieldsTaskId] = useState<string | null>(null);
+  const [reopeningTaskId, setReopeningTaskId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -3219,10 +3439,12 @@ export function TasksTab() {
       task.sprint,
     ].filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery));
   }, [activeSpaceIsJira, activeSpaceTasks, selectedSprint, ticketQuery]);
+  const boardTasks = useMemo(() => visibleTasks.filter(task => !isClosedRemoteTask(task)), [visibleTasks]);
+  const closedTasks = useMemo(() => visibleTasks.filter(isClosedRemoteTask), [visibleTasks]);
   const byStatus = useMemo(() => {
     const grouped = new Map<JiraColumnKey, ProTask[]>();
     for (const column of JIRA_COLUMNS) grouped.set(column.key, []);
-    for (const task of visibleTasks) grouped.get(jiraColumnForTask(task))?.push(task);
+    for (const task of boardTasks) grouped.get(jiraColumnForTask(task))?.push(task);
     for (const column of JIRA_COLUMNS) {
       const tasksInColumn = grouped.get(column.key) || [];
       const mode = columnSortModes[column.key] || 'desc';
@@ -3244,7 +3466,7 @@ export function TasksTab() {
       }
     }
     return grouped;
-  }, [columnManualOrder, columnSortModes, visibleTasks]);
+  }, [boardTasks, columnManualOrder, columnSortModes]);
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedId) || null, [selectedId, tasks]);
   const draggingTask = useMemo(() => tasks.find(task => task.id === draggingTaskId) || null, [draggingTaskId, tasks]);
   const activeCycle = useMemo(() => cycles.find(cycle => cycle.status === 'active') || null, [cycles]);
@@ -3550,7 +3772,7 @@ export function TasksTab() {
     }
   }, [activeSpaceIsJira, selectedSpaceId, selectedSprint, state?.runtimeWorkdir, toast, upsertTask]);
 
-  const createTaskSpace = useCallback(async (draft: { name: string; defaultWorkdir: string; defaultAgent: string }) => {
+  const createTaskSpace = useCallback(async (draft: { name: string; defaultWorkdir: string; defaultAgent: string; defaultAssistantId: string }) => {
     const name = draft.name.trim();
     if (!name) return;
     setSpaceCreateBusy(true);
@@ -3559,6 +3781,7 @@ export function TasksTab() {
         name,
         defaultWorkdir: draft.defaultWorkdir || state?.runtimeWorkdir,
         defaultAgent: draft.defaultAgent || state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex',
+        defaultAssistantId: draft.defaultAssistantId || undefined,
       });
       if (!result.ok || !result.space) throw new Error(result.error || 'Failed to create task space');
       setTaskSpaces(prev => [...prev.filter(space => space.id !== result.space!.id), result.space!]);
@@ -3683,6 +3906,31 @@ export function TasksTab() {
       setSavingJiraFieldsTaskId(null);
     }
   }, [toast, upsertTask]);
+
+  const reopenClosedTask = useCallback(async (task: ProTask) => {
+    if (reopeningTaskId) return;
+    setReopeningTaskId(task.id);
+    try {
+      const fieldsResult = await api.updateProTaskJiraFields(task.id, {
+        status: 'Reopened',
+        updatedAt: new Date().toISOString(),
+      });
+      if (!fieldsResult.ok || !fieldsResult.task) throw new Error(fieldsResult.error || 'Failed to reopen ticket');
+      let nextTask = fieldsResult.task;
+      if (nextTask.status !== 'backlog') {
+        const statusResult = await api.updateProTaskStatus(task.id, 'backlog');
+        if (!statusResult.ok || !statusResult.task) throw new Error(statusResult.error || 'Failed to update task status');
+        nextTask = statusResult.task;
+      }
+      upsertTask(nextTask);
+      void refreshCycles().catch(() => {});
+      toast('Ticket reopened locally');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to reopen ticket', false);
+    } finally {
+      setReopeningTaskId(null);
+    }
+  }, [refreshCycles, reopeningTaskId, toast, upsertTask]);
 
   const updateTaskCycle = useCallback(async (task: ProTask, cycleId: string | null) => {
     try {
@@ -3983,39 +4231,55 @@ export function TasksTab() {
 
   const activeSpaceName = selectedSpaceId === ALL_TASKS_SPACE_ID ? 'All Tasks' : activeTaskSpace?.name || 'Tasks';
   const taskSpaceSelectItems = [{ id: ALL_TASKS_SPACE_ID, name: 'All Tasks', kind: 'custom' as const }, ...taskSpaces];
-  const boardControlsVisible = activeSpaceIsJira || taskSpaceSelectItems.length > 0;
+  const activeSpaceCount = activeSpaceTasks.length;
+  const visibleSpaceCount = visibleTasks.length;
+  const activeSpaceSubtitle = selectedSpaceId === ALL_TASKS_SPACE_ID
+    ? 'Across task spaces'
+    : activeSpaceIsJira
+      ? 'Jira task space'
+      : activeTaskSpace?.kind === 'personal'
+        ? 'Personal task space'
+        : 'Custom task space';
 
   return (
-    <div className="flex h-full min-h-[640px] flex-col overflow-hidden rounded-[16px] border border-edge/65 bg-panel/70" style={{ boxShadow: 'var(--th-card-shadow)' }}>
+    <div className="h-full min-h-[640px] overflow-hidden">
       {loading ? (
-        <div className="flex h-48 items-center justify-center text-sm text-fg-4"><Spinner /> {t('sessions.loading')}</div>
+        <div className="flex h-full items-center justify-center rounded-xl border border-edge/70 bg-panel/78 text-sm text-fg-4 shadow-[var(--th-card-shadow)]">
+          <Spinner /> {t('sessions.loading')}
+        </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-hidden">
-          <div className="flex h-full min-h-0">
-            <TaskSpaceSidebar
-              spaces={taskSpaces}
-              selectedId={selectedSpaceId}
-              counts={taskSpaceCounts}
-              collapsed={spaceSidebarCollapsed}
-              search={ticketQuery}
-              searchFocusTick={spaceSearchFocusTick}
-              detailLayout={taskDetailLayout}
-              onSelect={setSelectedSpaceId}
-              onCreateSpace={() => setSpaceCreateOpen(true)}
-              onCreateTask={() => setAgentCreateOpen(true)}
-              onSearchRequest={revealTaskSpaceSearch}
-              onSearchChange={setTicketQuery}
-              onDetailLayoutChange={updateTaskDetailLayout}
-              onToggleCollapsed={toggleTaskSpaceSidebar}
-            />
-            <div className={cn(
-              'grid min-h-0 flex-1 grid-cols-1 overflow-hidden',
-              taskDetailLayout === 'side' && '2xl:grid-cols-[minmax(0,1fr)_minmax(560px,42vw)]',
-            )}>
-              <div className="min-h-0 overflow-y-auto p-3">
-          <div className="space-y-3">
-          {boardControlsVisible && (
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="flex h-full min-h-0 gap-3">
+          <TaskSpaceSidebar
+            spaces={taskSpaces}
+            selectedId={selectedSpaceId}
+            counts={taskSpaceCounts}
+            collapsed={spaceSidebarCollapsed}
+            search={ticketQuery}
+            searchFocusTick={spaceSearchFocusTick}
+            detailLayout={taskDetailLayout}
+            onSelect={setSelectedSpaceId}
+            onCreateSpace={() => setSpaceCreateOpen(true)}
+            onSearchChange={setTicketQuery}
+            onDetailLayoutChange={updateTaskDetailLayout}
+            onToggleCollapsed={toggleTaskSpaceSidebar}
+          />
+          <div className="panel-isolated flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[var(--th-card-shadow)] backdrop-blur-md">
+            <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-edge/45 bg-panel/45 px-3 py-2">
+              {spaceSidebarCollapsed && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={toggleTaskSpaceSidebar}
+                  title="Show task spaces"
+                  aria-label="Show task spaces"
+                  className="h-8 w-8 shrink-0"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="16" rx="2" />
+                    <path d="M9 4v16" />
+                  </svg>
+                </Button>
+              )}
               <select
                 value={selectedSpaceId}
                 onChange={event => setSelectedSpaceId(event.target.value || ALL_TASKS_SPACE_ID)}
@@ -4023,7 +4287,29 @@ export function TasksTab() {
               >
                 {taskSpaceSelectItems.map(space => <option key={space.id} value={space.id}>{space.name}</option>)}
               </select>
-              <Button variant="primary" size="sm" className="shrink-0 md:hidden" onClick={() => setAgentCreateOpen(true)}>
+              <div className="min-w-[150px] flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-[13px] font-semibold text-fg" title={activeSpaceName}>{activeSpaceName}</span>
+                  <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{visibleSpaceCount}</Badge>
+                  {closedTasks.length > 0 && <span className="hidden text-[10.5px] text-fg-5 sm:inline">{closedTasks.length} closed</span>}
+                </div>
+                <div className="truncate text-[10.5px] text-fg-5">
+                  {activeSpaceSubtitle}{activeSpaceCount !== visibleSpaceCount ? ` · ${activeSpaceCount} total` : ''}
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={revealTaskSpaceSearch}
+                title="Search tasks"
+                aria-label="Search tasks"
+                className={cn('h-8 w-8 shrink-0', !spaceSidebarCollapsed && 'md:hidden')}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+              </Button>
+              <Button variant="primary" size="sm" className="shrink-0" onClick={() => setAgentCreateOpen(true)}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
@@ -4031,6 +4317,7 @@ export function TasksTab() {
               </Button>
               {activeSpaceIsJira && (
                 <>
+                  <div className="hidden h-5 w-px bg-edge/60 lg:block" />
                   <JiraSyncMonitor
                     runs={syncRuns}
                     selectedRun={selectedSyncRun}
@@ -4040,7 +4327,6 @@ export function TasksTab() {
                     onSelectRun={setSelectedSyncRunId}
                     onCloseDetails={() => setSyncDetailsOpen(false)}
                   />
-                  <div className="min-w-0 flex-1" />
                   <Button variant="outline" size="sm" disabled={analyzeBusy || !(ticketQuery.trim() || selectedTask)} onClick={() => { void analyzeTicket(); }}>
                     {analyzeBusy ? <Spinner /> : null}
                     Analyze ticket
@@ -4090,7 +4376,12 @@ export function TasksTab() {
                 </>
               )}
             </div>
-          )}
+            <div className={cn(
+              'grid min-h-0 flex-1 grid-cols-1 overflow-hidden',
+              taskDetailLayout === 'side' && '2xl:grid-cols-[minmax(0,1fr)_minmax(560px,42vw)]',
+            )}>
+              <div className="min-h-0 overflow-y-auto p-3">
+                <div className="space-y-3">
           <div className="dashboard-board-grid grid min-h-[calc(100vh-220px)] gap-3">
             {JIRA_COLUMNS.map(column => (
               <section
@@ -4119,14 +4410,14 @@ export function TasksTab() {
                     title="Toggle time sort"
                   >
                     <Badge variant={JIRA_COLUMN_BADGE[column.key]} className="h-5 px-2 text-[10px] tabular-nums">{byStatus.get(column.key)?.length || 0}</Badge>
-	                    <div className="min-w-0 flex-1">
-	                      <div className="flex min-w-0 items-center gap-1.5">
-	                        <span className="truncate text-[12px] font-semibold text-fg-2">{column.label}</span>
-	                      </div>
-	                      <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
-	                    </div>
-	                    <JiraColumnSortIcon mode={columnSortModes[column.key] || 'desc'} />
-	                  </button>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-[12px] font-semibold text-fg-2">{column.label}</span>
+                      </div>
+                      <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
+                    </div>
+                    <JiraColumnSortIcon mode={columnSortModes[column.key] || 'desc'} />
+                  </button>
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
                   {dragOverColumn === column.key && draggingTask && jiraColumnForTask(draggingTask) !== column.key && (
@@ -4135,12 +4426,34 @@ export function TasksTab() {
                     </div>
                   )}
                   {(byStatus.get(column.key) || []).length === 0 ? (
-                    <div className={cn(
-                      'flex h-24 items-center justify-center rounded-lg border border-dashed bg-inset/30 text-[11px]',
-                      dragOverColumn === column.key
-                        ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
-                        : 'border-edge/40 text-fg-5/60',
-                    )}>No tasks</div>
+                    column.key === 'backlog' ? (
+                      <button
+                        type="button"
+                        onClick={() => setAgentCreateOpen(true)}
+                        className={cn(
+                          'flex h-24 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-inset/30 text-center transition hover:border-primary/45 hover:bg-primary/[0.04] hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/25',
+                          dragOverColumn === column.key
+                            ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
+                            : 'border-edge/40 text-fg-5/70',
+                        )}
+                        title="Create task"
+                        aria-label="Create task"
+                      >
+                        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-edge/55 bg-panel/80 text-fg-4 shadow-sm transition group-hover/column:border-primary/35 group-hover/column:text-primary">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+                            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                          </svg>
+                        </span>
+                        <span className="text-[12px] font-semibold text-fg-3">Create task</span>
+                      </button>
+                    ) : (
+                      <div className={cn(
+                        'flex h-24 items-center justify-center rounded-lg border border-dashed bg-inset/30 text-[11px]',
+                        dragOverColumn === column.key
+                          ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
+                          : 'border-edge/40 text-fg-5/60',
+                      )}>No tasks</div>
+                    )
                   ) : (
                     <div className="space-y-2">
                       {(byStatus.get(column.key) || []).map(task => (
@@ -4193,6 +4506,48 @@ export function TasksTab() {
               </section>
             ))}
           </div>
+          {closedTasks.length > 0 && (
+            <section className="rounded-xl border border-edge/50 bg-panel-alt/35 px-3 py-3">
+              <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-[12px] font-semibold text-fg-2">Closed</div>
+                  <div className="truncate text-[10px] text-fg-5">Remote status is closed</div>
+                </div>
+                <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{closedTasks.length}</Badge>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {closedTasks.slice(0, 12).map(task => (
+                  <div
+                    key={task.id}
+                    className={cn(
+                      'min-w-0 rounded-lg border border-edge/55 bg-panel/62 px-3 py-2 text-left transition hover:border-edge-h hover:bg-panel-h',
+                      selectedTask?.id === task.id && 'border-primary/35 bg-primary/[0.055]',
+                    )}
+                  >
+                    <button type="button" onClick={() => openTaskDetail(task)} className="block w-full min-w-0 text-left">
+                      <div className="mb-1 flex min-w-0 items-center gap-2">
+                        {task.jiraKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
+                        <Badge variant="muted">{taskRemoteStatus(task) || 'Closed'}</Badge>
+                      </div>
+                      <div className="truncate text-[12px] font-semibold text-fg-2">{task.title}</div>
+                    </button>
+                    <div className="mt-2 flex justify-end">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="h-6 px-2 text-[10.5px]"
+                        disabled={reopeningTaskId === task.id}
+                        onClick={() => { void reopenClosedTask(task); }}
+                      >
+                        {reopeningTaskId === task.id ? <Spinner /> : null}
+                        Reopen
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
           {activeSpaceIsJira && (
             <JiraCyclePanel
               cycles={cycles}
@@ -4211,6 +4566,7 @@ export function TasksTab() {
                   defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
                   agents={agentStatus?.agents || []}
                   busy={busy}
+                  reopening={selectedTask ? reopeningTaskId === selectedTask.id : false}
                   cycles={cycles}
                   workspaces={workspaces}
                   fallbackWorkdir={state?.runtimeWorkdir}
@@ -4222,6 +4578,7 @@ export function TasksTab() {
                   onCreateSubtask={(task) => { void createSubtask(task); }}
                   onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
                   onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
+                  onReopen={(task) => { void reopenClosedTask(task); }}
                   onOpenFull={() => setDetailOpen(true)}
                 />
               )}
@@ -4237,12 +4594,14 @@ export function TasksTab() {
         assistants={assistants}
         defaultWorkdir={activeTaskSpace?.defaultWorkdir || state?.runtimeWorkdir || workspaces[0]?.path || ''}
         defaultAgent={activeTaskSpace?.defaultAgent || state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
+        defaultAssistantId={activeTaskSpace?.defaultAssistantId}
         onClose={() => setCreateOpen(false)}
         onCreate={createTask}
       />
       <CreateTaskSpaceModal
         open={spaceCreateOpen}
         busy={spaceCreateBusy}
+        assistants={assistants}
         defaultWorkdir={state?.runtimeWorkdir || workspaces[0]?.path || ''}
         defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
         onClose={() => setSpaceCreateOpen(false)}
@@ -4328,6 +4687,7 @@ export function TasksTab() {
             defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
             agents={agentStatus?.agents || []}
             busy={busy}
+            reopening={selectedTask ? reopeningTaskId === selectedTask.id : false}
             cycles={cycles}
             workspaces={workspaces}
             fallbackWorkdir={state?.runtimeWorkdir}
@@ -4339,13 +4699,14 @@ export function TasksTab() {
             onCreateSubtask={(task) => { void createSubtask(task); }}
             onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
             onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
+            onReopen={(task) => { void reopenClosedTask(task); }}
             actions={selectedTask ? (
               <>
                 <div className="relative">
                   <Button
-	                    variant="ghost"
-	                    size="icon"
-	                    className="!h-7 !w-7 text-[12px]"
+                    variant="ghost"
+                    size="icon"
+                    className="!h-7 !w-7 text-[12px]"
                     aria-label="Task actions"
                     aria-expanded={detailMenuOpen}
                     onClick={() => setDetailMenuOpen(prev => !prev)}
@@ -4376,10 +4737,10 @@ export function TasksTab() {
                     setDetailMenuOpen(false);
                     setDetailOpen(false);
                   }}
-	                  className="!h-7 !w-7 text-[12px]"
-	                  aria-label="Close"
-	                >
-	                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  className="!h-7 !w-7 text-[12px]"
+                  aria-label="Close"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
                   </svg>

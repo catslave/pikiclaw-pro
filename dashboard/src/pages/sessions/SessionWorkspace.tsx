@@ -4457,13 +4457,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     ? `calc((100% - ${(multiGridColumnCount - 1) * multiItemGapPx}px) / ${multiGridColumnCount})`
     : undefined;
   const multiItemTall = multiWideWorkbench || (multiWidgetGrid && multiGridColumnCount <= 2 && gridRowCount <= 1);
-  const canResizeMultiRows = multiWidgetGrid && !multiItemTall && multiGridColumnCount >= 3;
+  const canResizeMultiRows = multiWidgetGrid && !multiSingleChatPresentation && layoutSlotCount > 1;
   const compactMultiItemHeight = multiRowHeightPx == null
     ? 'min(640px, calc(100dvh - 120px))'
     : `${clampMultiRowHeightForViewport(multiRowHeightPx)}px`;
-  const multiItemHeight = multiItemTall
-    ? 'calc(100dvh - 32px)'
-    : compactMultiItemHeight;
+  const multiItemHeight = multiRowHeightPx != null
+    ? compactMultiItemHeight
+    : (multiItemTall ? 'calc(100dvh - 32px)' : compactMultiItemHeight);
   const appRailVisible = mode === 'workspace' || mode === 'dashboard';
   const workspaceCenterClass = mode === 'workspace'
     ? workspaceSidebarVisible
@@ -5755,7 +5755,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       onMouseDown={e => e.stopPropagation()}
                       onClick={e => e.stopPropagation()}
                       className={cn(
-                        'absolute bottom-1 left-1/2 z-30 h-2.5 w-16 -translate-x-1/2 cursor-row-resize rounded-full border border-transparent bg-fg-5/10 opacity-0 transition-[opacity,background,border-color] hover:border-primary/20 hover:bg-primary/30 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover/session-slot:opacity-100',
+                        'absolute bottom-1 left-1/2 z-30 h-2.5 w-16 -translate-x-1/2 cursor-row-resize rounded-full border border-edge/35 bg-fg-5/16 opacity-55 transition-[opacity,background,border-color] hover:border-primary/30 hover:bg-primary/35 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover/session-slot:opacity-100',
                         multiRowHeightDrag && 'border-primary/20 bg-primary/30 opacity-100',
                       )}
                       title={t('hub.resizeWindowHeight')}

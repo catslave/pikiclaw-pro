@@ -1137,6 +1137,11 @@ app.patch('/api/pro/tasks/:taskId/stage-runs/:stageRunId', async (c) => {
     const status = readString(body?.status);
     const task = updateStageRun(c.req.param('taskId'), c.req.param('stageRunId'), {
       ...(status ? { status: status as any } : {}),
+      session: body?.session && typeof body.session === 'object' ? {
+        workdir: readString(body.session.workdir),
+        agent: readString(body.session.agent),
+        sessionId: readString(body.session.sessionId),
+      } : undefined,
       summary: body?.summary,
       estimate: body?.estimate,
       branch: body?.branch,
