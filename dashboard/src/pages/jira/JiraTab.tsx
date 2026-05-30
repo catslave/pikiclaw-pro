@@ -1683,6 +1683,7 @@ function TaskChatWindow({
   busyStage,
   agents,
   defaultAgent,
+  showProgress,
   onStartStatusChat,
   onOpenTicket,
   onOpenArtifacts,
@@ -1693,6 +1694,7 @@ function TaskChatWindow({
   busyStage?: ProTaskStage | null;
   agents: AgentRuntimeStatus[];
   defaultAgent: string;
+  showProgress?: boolean;
   onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
   onOpenTicket: () => void;
   onOpenArtifacts: () => void;
@@ -1872,11 +1874,14 @@ function TaskChatWindow({
     </div>
   );
   const taskTop = (
-    <div className="grid w-full items-start gap-5 min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
+    <div className={cn(
+      'grid w-full items-start gap-5',
+      showProgress && 'min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]',
+    )}>
       <div className="w-full min-w-0 min-[1180px]:max-w-[1120px] min-[1180px]:justify-self-end">{taskHeader}</div>
-      <div className="min-w-0 w-full max-w-[360px] min-[1180px]:justify-self-end">
+      {showProgress && <div className="min-w-0 w-full max-w-[360px] min-[1180px]:justify-self-end">
         <TaskFlowMap task={task} busyStage={busyStage} />
-      </div>
+      </div>}
     </div>
   );
 
@@ -2545,6 +2550,7 @@ function TaskDetail({
               agents={agents}
               defaultAgent={defaultAgent}
               busyStage={busy?.taskId === task.id ? busy.stage : null}
+              showProgress={!contextOpen}
               onStartStatusChat={onStartStatusChat}
               onOpenTicket={() => setShelfTab('ticket')}
               onOpenArtifacts={() => setShelfTab('outputs')}
