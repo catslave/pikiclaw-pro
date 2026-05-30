@@ -32,7 +32,7 @@ import {
   type SimpleCliParsedOutput,
 } from './simple-cli.js';
 
-const DEFAULT_OPENCLAW_AGENT = 'main';
+const DEFAULT_OPENCLAW_AGENT = 'codex';
 const OPENCLAW_NODE_MIN_VERSION = '22.19.0';
 
 const OPENCLAW_MODELS = [

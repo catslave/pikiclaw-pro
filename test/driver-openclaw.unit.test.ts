@@ -100,6 +100,24 @@ console.log(JSON.stringify({ message: { content: 'OpenClaw answer' }, model: 'op
     expect(messages.messages.map(message => message.text)).toContain('OpenClaw answer');
   });
 
+  it('defaults OpenClaw turns to the Codex ACP agent', async () => {
+    writeOpenClawScript(`
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(spawnLog)}, JSON.stringify(args));
+console.log(JSON.stringify({ message: 'Codex ACP answer' }));
+`);
+
+    const result = await doOpenClawStream(baseOpts());
+
+    expect(result.ok).toBe(true);
+    const args = JSON.parse(fs.readFileSync(spawnLog, 'utf8'));
+    expect(args).toEqual(expect.arrayContaining([
+      '--agent', 'codex',
+      '--session-key', `agent:codex:${result.sessionId}`,
+    ]));
+  });
+
   it('surfaces invalid OpenClaw JSON as a clear driver error', async () => {
     writeOpenClawScript(`
 process.stdout.write('not json');
@@ -134,12 +152,39 @@ process.exit(0);
   });
 
   it('starts the OpenClaw Gateway service from the agent card action', async () => {
+    const configPath = path.join(tmpDir, 'openclaw.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      agents: {
+        list: [{ id: 'main', workspace: path.join(tmpDir, 'openclaw-workspace') }],
+      },
+    }));
     writeOpenClawScript(`
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(spawnLog)}, JSON.stringify(args) + '\\n');
 if (args[0] === '--version') {
   console.log('openclaw 2026.5.1');
+  process.exit(0);
+}
+if (args[0] === 'setup') {
+  console.log('setup complete');
+  process.exit(0);
+}
+if (args[0] === 'config' && args[1] === 'file') {
+  console.log(${JSON.stringify(configPath)});
+  process.exit(0);
+}
+if (args[0] === 'config' && args[1] === 'patch') {
+  let stdin = '';
+  process.stdin.on('data', chunk => { stdin += String(chunk); });
+  process.stdin.on('end', () => {
+    fs.appendFileSync(${JSON.stringify(spawnLog)}, JSON.stringify({ patch: JSON.parse(stdin) }) + '\\n');
+    process.exit(0);
+  });
+  return;
+}
+if (args[0] === 'config' && args[1] === 'validate') {
+  console.log('valid');
   process.exit(0);
 }
 if (args[0] === 'gateway' && args[1] === 'start') {
@@ -153,12 +198,53 @@ if (args[0] === 'gateway' && args[1] === 'status') {
 process.exit(0);
 `);
 
-    const result = await startOpenClawGatewayService(tmpDir);
+    const result = await startOpenClawGatewayService(tmpDir, {
+      codexModel: 'gpt-5.5',
+      codexReasoningEffort: 'high',
+      cursorModel: 'cursor-auto',
+      cursorReasoningEffort: 'medium',
+    });
 
     expect(result.ok).toBe(true);
     expect(result.detail).toContain('started');
     const calls = fs.readFileSync(spawnLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(calls).toContainEqual(['setup']);
+    expect(calls).toContainEqual(['config', 'file']);
+    expect(calls).toContainEqual(['config', 'patch', '--stdin', '--replace-path', 'agents.list']);
+    expect(calls).toContainEqual(['config', 'validate']);
     expect(calls).toContainEqual(['gateway', 'start']);
     expect(calls).toContainEqual(['gateway', 'status']);
+    const patchCall = calls.find(call => !Array.isArray(call) && call.patch)?.patch;
+    expect(patchCall.acp.enabled).toBe(true);
+    expect(patchCall.acp.backend).toBe('acpx');
+    expect(patchCall.acp.allowedAgents).toEqual(expect.arrayContaining(['codex', 'cursor']));
+    expect(patchCall.plugins.entries.acpx.enabled).toBe(true);
+    expect(patchCall.plugins.entries.acpx.config.cwd).toBe(tmpDir);
+    expect(patchCall.plugins.entries.acpx.config.probeAgent).toBe('codex');
+    expect(patchCall.plugins.entries.acpx.config.agents.cursor).toEqual({
+      command: path.join(fakeBin, 'cursor-agent'),
+      args: ['acp'],
+    });
+    expect(patchCall.agents.list).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'main' }),
+      expect.objectContaining({
+        id: 'codex',
+        model: 'gpt-5.5',
+        thinkingDefault: 'high',
+        runtime: expect.objectContaining({
+          type: 'acp',
+          acp: expect.objectContaining({ agent: 'codex', backend: 'acpx', cwd: tmpDir }),
+        }),
+      }),
+      expect.objectContaining({
+        id: 'cursor',
+        model: 'cursor-auto',
+        thinkingDefault: 'medium',
+        runtime: expect.objectContaining({
+          type: 'acp',
+          acp: expect.objectContaining({ agent: 'cursor', backend: 'acpx', cwd: tmpDir }),
+        }),
+      }),
+    ]));
   });
 });

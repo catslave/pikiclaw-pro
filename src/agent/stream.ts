@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { restartManagedBrowser } from '../browser-supervisor.js';
 import { terminateProcessTree } from '../core/process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/constants.js';
-import { processEnvWithUserBins, resolveExecutablePath } from '../core/platform.js';
+import { processEnvWithNodeAtLeast, processEnvWithUserBins, resolveExecutablePath } from '../core/platform.js';
 import { getDriver, allDrivers, getAcceptedProviderKinds } from './driver.js';
 import {
   resolveAgentInjection, getActiveProfile, getProvider, updateProfile, listProfiles,
@@ -70,25 +70,35 @@ export function _detectBrowserMcpFailure(rawLine: string): string | null {
 const AGENT_DETECT_TTL_MS = AGENT_DETECT_TIMEOUTS.detectTtl;
 const AGENT_VERSION_TTL_MS = AGENT_DETECT_TIMEOUTS.versionTtl;
 const AGENT_VERSION_TIMEOUT_MS = AGENT_DETECT_TIMEOUTS.versionCommand;
+const AGENT_TRANSIENT_MISS_TTL_MS = 60_000;
+const OPENCLAW_NODE_MIN_VERSION = '22.19.0';
 
 interface AgentDetectCacheEntry {
   detectedAt: number;
   versionAt: number;
+  missingAt?: number;
   info: AgentInfo;
 }
 
 const agentDetectCache = new Map<string, AgentDetectCacheEntry>();
 
-function resolveAgentBinPath(cmd: string): string | null {
-  return resolveExecutablePath(cmd);
+function agentDetectionEnv(agent: string): NodeJS.ProcessEnv {
+  return agent === 'openclaw'
+    ? processEnvWithNodeAtLeast(OPENCLAW_NODE_MIN_VERSION)
+    : processEnvWithUserBins();
 }
 
-function readAgentVersion(binPath: string, timeoutMs: number): string | null {
+function resolveAgentBinPath(cmd: string, agent: string): string | null {
+  return resolveExecutablePath(cmd, agentDetectionEnv(agent));
+}
+
+function readAgentVersion(binPath: string, timeoutMs: number, agent: string): string | null {
   try {
     const devnull = process.platform === 'win32' ? '2>nul' : '2>/dev/null';
     return execSync(`${Q(binPath)} --version ${devnull}`, {
       encoding: 'utf-8',
       timeout: Math.max(250, timeoutMs),
+      env: agentDetectionEnv(agent),
     }).trim().split('\n')[0] || null;
   } catch {
     return null;
@@ -106,20 +116,36 @@ export function detectAgentBin(cmd: string, agent: string, options: AgentDetectO
 
   const shouldRefreshBase = refresh || !entry || now - entry.detectedAt > AGENT_DETECT_TTL_MS;
   if (shouldRefreshBase) {
-    const binPath = resolveAgentBinPath(cmd);
-    const previousVersion = entry?.info.path === binPath ? entry.info.version ?? null : null;
-    const previousVersionAt = entry?.info.path === binPath ? entry.versionAt : 0;
-    entry = {
-      detectedAt: now,
-      versionAt: previousVersionAt,
-      info: {
-        agent,
-        installed: !!binPath,
-        path: binPath,
-        version: previousVersion,
-      },
-    };
-    agentDetectCache.set(cacheKey, entry);
+    const binPath = resolveAgentBinPath(cmd, agent);
+    if (!binPath && entry?.info.installed && entry.info.path) {
+      const missingAt = entry.missingAt || now;
+      if (now - missingAt <= AGENT_TRANSIENT_MISS_TTL_MS) {
+        entry = { ...entry, detectedAt: now, missingAt, info: { ...entry.info } };
+        agentDetectCache.set(cacheKey, entry);
+      } else {
+        entry = {
+          detectedAt: now,
+          versionAt: 0,
+          info: { agent, installed: false, path: null, version: null },
+        };
+        agentDetectCache.set(cacheKey, entry);
+      }
+    } else {
+      const previousVersion = entry?.info.path === binPath ? entry.info.version ?? null : null;
+      const previousVersionAt = entry?.info.path === binPath ? entry.versionAt : 0;
+      entry = {
+        detectedAt: now,
+        versionAt: previousVersionAt,
+        missingAt: undefined,
+        info: {
+          agent,
+          installed: !!binPath,
+          path: binPath,
+          version: previousVersion,
+        },
+      };
+      agentDetectCache.set(cacheKey, entry);
+    }
   }
 
   if (!entry) {
@@ -132,7 +158,7 @@ export function detectAgentBin(cmd: string, agent: string, options: AgentDetectO
     && entry.info.path
     && (refresh || !entry.versionAt || now - entry.versionAt > AGENT_VERSION_TTL_MS)
   ) {
-    entry.info.version = readAgentVersion(entry.info.path, versionTimeoutMs);
+    entry.info.version = readAgentVersion(entry.info.path, versionTimeoutMs, agent);
     entry.versionAt = now;
     agentDetectCache.set(cacheKey, entry);
   }

@@ -10,13 +10,17 @@ import type { AgentInfo } from './index.js';
 import { getAgentLabel, getAgentPackage, getAgentBrewCask } from './npm.js';
 import type { UserConfig } from '../core/config/user-config.js';
 import { AGENT_UPDATE_TIMEOUTS } from '../core/constants.js';
+import { processEnvWithNodeAtLeast, processEnvWithUserBins, resolveExecutablePath } from '../core/platform.js';
 
 const AGENT_UPDATE_LOCK_STALE_MS = AGENT_UPDATE_TIMEOUTS.lockStale;
 const AGENT_UPDATE_COMMAND_TIMEOUT_MS = AGENT_UPDATE_TIMEOUTS.commandTimeout;
+const AGENT_SELF_UPDATE_TIMEOUT_MS = 90_000;
+const OPENCLAW_NODE_MIN_VERSION = '22.19.0';
 
 type AgentUpdateStrategy =
   | { kind: 'npm'; pkg: string }
   | { kind: 'brew'; cask: string }
+  | { kind: 'self'; cmd: string; args: string[] }
   | { kind: 'skip'; reason: string };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +105,21 @@ function packageDirFromNpmRoot(npmRoot: string, pkg: string): string {
   return path.join(path.resolve(npmRoot), ...pkg.split('/'));
 }
 
+function npmRootCandidatesFromPrefix(prefix: string | null): string[] {
+  if (!prefix) return [];
+  const resolved = path.resolve(prefix);
+  return [
+    path.join(resolved, 'lib', 'node_modules'),
+    path.join(resolved, 'node_modules'),
+  ];
+}
+
+function inferredNpmPrefixFromBinPath(binPath: string): string | null {
+  const binDir = path.dirname(path.resolve(binPath));
+  if (path.basename(binDir) !== 'bin') return null;
+  return path.dirname(binDir);
+}
+
 function isNpmPackageOwnedBinary(binPath: string, pkg: string, npmRoot: string | null): boolean {
   if (!npmRoot) return false;
   const packageDir = packageDirFromNpmRoot(npmRoot, pkg);
@@ -142,13 +161,34 @@ export function resolveAgentUpdateStrategy(
   }
 
   // Check for npm global install.
-  const npmBinDir = npmPrefix ? path.join(path.resolve(npmPrefix), 'bin') : null;
-  const npmManaged = !!(npmBinDir && isPathInside(npmBinDir, binPath));
-  if (!npmManaged) return { kind: 'skip', reason: 'non-npm install path' };
-  if (!isNpmPackageOwnedBinary(binPath, pkg, npmRoot)) {
-    return { kind: 'skip', reason: 'binary is not owned by the npm package' };
+  const candidatePrefixes = [
+    npmPrefix ? path.resolve(npmPrefix) : null,
+    inferredNpmPrefixFromBinPath(binPath),
+  ].filter((value): value is string => !!value);
+  const seenPrefixes = new Set<string>();
+  for (const prefix of candidatePrefixes) {
+    const resolvedPrefix = path.resolve(prefix);
+    if (seenPrefixes.has(resolvedPrefix)) continue;
+    seenPrefixes.add(resolvedPrefix);
+    const npmBinDir = path.join(resolvedPrefix, 'bin');
+    if (!isPathInside(npmBinDir, binPath)) continue;
+    const roots = [
+      ...(npmRoot ? [npmRoot] : []),
+      ...npmRootCandidatesFromPrefix(resolvedPrefix),
+    ];
+    if (roots.some(root => isNpmPackageOwnedBinary(binPath, pkg, root))) {
+      return { kind: 'npm', pkg };
+    }
   }
-  return { kind: 'npm', pkg };
+
+  if (id === 'copilot') {
+    // The GitHub Copilot CLI can be installed as a self-updating binary (for
+    // example via GitHub CLI), where the npm package is only metadata. Running
+    // `npm install -g @github/copilot` in that state leaves the real binary
+    // untouched and can make the dashboard flip-flop between update/install.
+    return { kind: 'self', cmd: binPath, args: ['update'] };
+  }
+  return { kind: 'skip', reason: 'binary is not owned by the npm package' };
 }
 
 function labelForAgent(agent: string): string {
@@ -158,13 +198,23 @@ function labelForAgent(agent: string): string {
 async function runCommand(
   cmd: string,
   args: string[],
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ ok: boolean; code: number | null; stdout: string; stderr: string; error: string | null }> {
   return new Promise(resolve => {
     let stdout = '';
     let stderr = '';
     let finished = false;
-    const child = spawn(cmd, args, {
+    const spawnEnv = processEnvWithUserBins({
+      ...(opts.env || process.env),
+      npm_config_yes: 'true',
+      npm_config_fetch_retries: '1',
+      npm_config_fetch_timeout: '30000',
+      npm_config_fetch_retry_mintimeout: '1000',
+      npm_config_fetch_retry_maxtimeout: '5000',
+      HOMEBREW_NO_AUTO_UPDATE: '1',
+    });
+    const resolvedCmd = resolveExecutablePath(cmd, spawnEnv) || cmd;
+    const child = spawn(resolvedCmd, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       // HOMEBREW_NO_AUTO_UPDATE=1 skips brew's implicit `brew update` before
       // each command — we already resolve the latest version via the
@@ -174,7 +224,7 @@ async function runCommand(
       // on the `vendor-install-ruby` lockf and surfaces as "Failed to upgrade
       // Homebrew Portable Ruby". Those transient collisions are handled by
       // `isBrewBusyError` below, which downgrades the failure to a soft skip.
-      env: { ...process.env, npm_config_yes: 'true', HOMEBREW_NO_AUTO_UPDATE: '1' },
+      env: spawnEnv,
     });
     const timeoutMs = Math.max(500, opts.timeoutMs ?? AGENT_UPDATE_COMMAND_TIMEOUT_MS);
     const timer = setTimeout(() => {
@@ -207,24 +257,36 @@ async function runCommand(
   });
 }
 
-async function getNpmGlobalPrefix(): Promise<string | null> {
-  const result = await runCommand('npm', ['prefix', '-g'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix });
+function agentUpdateEnv(agent: string): NodeJS.ProcessEnv {
+  return agent === 'openclaw'
+    ? processEnvWithNodeAtLeast(OPENCLAW_NODE_MIN_VERSION)
+    : processEnvWithUserBins();
+}
+
+async function getNpmGlobalPrefix(agent: string): Promise<string | null> {
+  const result = await runCommand('npm', ['prefix', '-g'], {
+    timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix,
+    env: agentUpdateEnv(agent),
+  });
   return result.ok ? result.stdout.trim().split('\n')[0] || null : null;
 }
 
-async function getNpmGlobalRoot(): Promise<string | null> {
-  const result = await runCommand('npm', ['root', '-g'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix });
+async function getNpmGlobalRoot(agent: string): Promise<string | null> {
+  const result = await runCommand('npm', ['root', '-g'], {
+    timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix,
+    env: agentUpdateEnv(agent),
+  });
   return result.ok ? result.stdout.trim().split('\n')[0] || null : null;
 }
 
-async function getLatestPackageVersion(pkg: string): Promise<string | null> {
+async function getLatestPackageVersion(pkg: string, agent: string): Promise<string | null> {
   // `--prefer-online` bypasses the local npm metadata cache so we always see
   // the registry's current `latest` tag. Without it, `npm view` can serve a
   // stale version for several minutes after a release.
   const result = await runCommand(
     'npm',
     ['view', pkg, 'version', '--json', '--prefer-online'],
-    { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmView },
+    { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmView, env: agentUpdateEnv(agent) },
   );
   if (!result.ok) return null;
   const raw = result.stdout.trim();
@@ -261,8 +323,18 @@ function acquireUpdateLock(log: (message: string) => void): (() => void) | null 
 
 type UpdateResult = { ok: boolean; detail: string | null; busy?: boolean };
 
-async function updateViaNpm(pkg: string): Promise<UpdateResult> {
-  const result = await runCommand('npm', ['install', '-g', `${pkg}@latest`]);
+async function updateViaNpm(pkg: string, agent: string): Promise<UpdateResult> {
+  const result = await runCommand('npm', ['install', '-g', `${pkg}@latest`], {
+    env: agentUpdateEnv(agent),
+  });
+  return { ok: result.ok, detail: result.ok ? result.stdout.trim() || null : result.error };
+}
+
+async function updateViaSelf(cmd: string, args: string[], agent: string): Promise<UpdateResult> {
+  const result = await runCommand(cmd, args, {
+    timeoutMs: AGENT_SELF_UPDATE_TIMEOUT_MS,
+    env: agentUpdateEnv(agent),
+  });
   return { ok: result.ok, detail: result.ok ? result.stdout.trim() || null : result.error };
 }
 
@@ -276,6 +348,11 @@ async function updateViaNpm(pkg: string): Promise<UpdateResult> {
 function isBrewBusyError(text: string | null | undefined): boolean {
   if (!text) return false;
   return /vendor-install ruby|already locked|Failed to upgrade Homebrew Portable Ruby|is already running/i.test(text);
+}
+
+function isSoftAutoUpdateError(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /rate limit exceeded|timed out after|network timeout|ECONNRESET|ENOTFOUND|ETIMEDOUT/i.test(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -342,9 +419,6 @@ export function startAgentAutoUpdate(opts: {
   void (async () => {
     try {
       opts.log(`agent auto-update: checking ${installedAgents.length} installed agent${installedAgents.length === 1 ? '' : 's'} in background`);
-      const npmPrefix = await getNpmGlobalPrefix();
-      const npmRoot = await getNpmGlobalRoot();
-
       for (const agent of installedAgents) {
         const id = String(agent.agent || '').trim();
         const pkg = getAgentPackage(id);
@@ -354,7 +428,7 @@ export function startAgentAutoUpdate(opts: {
         const currentVersion = extractAgentSemver(agent.version);
         setUpdateState(id, { currentVersion, status: 'checking' });
 
-        const strategy = resolveAgentUpdateStrategy(agent, npmPrefix, npmRoot);
+        const strategy = resolveAgentUpdateStrategy(agent, null, null);
         if (strategy.kind === 'skip') {
           opts.log(`agent auto-update: ${label} skipped (${strategy.reason})`);
           setUpdateState(id, { status: 'skipped', detail: strategy.reason, checkedAt: Date.now() });
@@ -364,10 +438,10 @@ export function startAgentAutoUpdate(opts: {
         // Use brew version check for brew installs, npm for npm installs.
         const latestVersion = strategy.kind === 'brew'
           ? await getLatestBrewCaskVersion(strategy.cask)
-          : await getLatestPackageVersion(pkg);
+          : await getLatestPackageVersion(pkg, id);
         if (!latestVersion) {
           opts.log(`agent auto-update: ${label} latest version lookup failed`);
-          setUpdateState(id, { status: 'failed', detail: 'latest version lookup failed', checkedAt: Date.now() });
+          setUpdateState(id, { status: 'skipped', detail: 'latest version lookup failed', updateAvailable: false, checkedAt: Date.now() });
           continue;
         }
         if (currentVersion === latestVersion) {
@@ -381,7 +455,9 @@ export function startAgentAutoUpdate(opts: {
 
         const result = strategy.kind === 'brew'
           ? await updateViaBrew(strategy.cask)
-          : await updateViaNpm(strategy.pkg);
+          : strategy.kind === 'self'
+            ? await updateViaSelf(strategy.cmd, strategy.args, id)
+            : await updateViaNpm(strategy.pkg, id);
         if (result.ok) {
           opts.log(`agent auto-update: ${label} update completed`);
           setUpdateState(id, { updateAvailable: false, status: 'updated', detail: null, checkedAt: Date.now() });
@@ -390,6 +466,13 @@ export function startAgentAutoUpdate(opts: {
           setUpdateState(id, {
             status: 'skipped',
             detail: 'another brew process is busy upgrading Homebrew — will retry on next startup',
+            checkedAt: Date.now(),
+          });
+        } else if (isSoftAutoUpdateError(result.detail)) {
+          opts.log(`agent auto-update: ${label} deferred — ${result.detail || 'transient update error'}`);
+          setUpdateState(id, {
+            status: 'skipped',
+            detail: result.detail || 'transient update error — will retry on next startup',
             checkedAt: Date.now(),
           });
         } else {
@@ -420,12 +503,28 @@ export async function checkAgentLatestVersion(
   const currentVersion = extractAgentSemver(agent.version);
   setUpdateState(id, { currentVersion, status: 'checking' });
 
-  // Detect brew install and use brew version check.
-  const binPath = String(agent.path || '').trim();
-  const brewCask = binPath && isBrewInstalledBinary(binPath) ? getAgentBrewCask(id) : null;
-  const latestVersion = brewCask
-    ? await getLatestBrewCaskVersion(brewCask)
-    : await getLatestPackageVersion(pkg);
+  let strategy = resolveAgentUpdateStrategy(agent, null, null);
+  if (strategy.kind === 'skip') {
+    const npmPrefix = await getNpmGlobalPrefix(id);
+    const npmRoot = await getNpmGlobalRoot(id);
+    strategy = resolveAgentUpdateStrategy(agent, npmPrefix, npmRoot);
+  }
+  if (strategy.kind === 'skip') {
+    const state: AgentUpdateState = {
+      currentVersion,
+      latestVersion: null,
+      updateAvailable: false,
+      status: 'skipped',
+      detail: strategy.reason,
+      checkedAt: Date.now(),
+    };
+    setUpdateState(id, state);
+    return state;
+  }
+
+  const latestVersion = strategy.kind === 'brew'
+    ? await getLatestBrewCaskVersion(strategy.cask)
+    : await getLatestPackageVersion(pkg, id);
 
   if (!latestVersion) {
     const state: AgentUpdateState = { currentVersion, latestVersion: null, updateAvailable: false, status: 'failed', detail: 'latest version lookup failed', checkedAt: Date.now() };
@@ -456,18 +555,31 @@ export async function manualAgentUpdate(
   if (!pkg) return { ok: false, error: 'Unsupported agent' };
 
   const label = labelForAgent(id);
-  const binPath = String(agent.path || '').trim();
-  const brewCask = binPath && isBrewInstalledBinary(binPath) ? getAgentBrewCask(id) : null;
+  let strategy = resolveAgentUpdateStrategy(agent, null, null);
+  if (strategy.kind === 'skip') {
+    const npmPrefix = await getNpmGlobalPrefix(id);
+    const npmRoot = await getNpmGlobalRoot(id);
+    strategy = resolveAgentUpdateStrategy(agent, npmPrefix, npmRoot);
+  }
+  if (strategy.kind === 'skip') {
+    const detail = strategy.reason;
+    log(`manual update: ${label} skipped — ${detail}`);
+    setUpdateState(id, { status: 'skipped', detail, checkedAt: Date.now() });
+    return { ok: false, error: detail };
+  }
 
   setUpdateState(id, { status: 'updating' });
 
   let result: UpdateResult;
-  if (brewCask) {
-    log(`manual update: updating ${label} via brew upgrade --cask ${brewCask}`);
-    result = await updateViaBrew(brewCask);
+  if (strategy.kind === 'brew') {
+    log(`manual update: updating ${label} via brew upgrade --cask ${strategy.cask}`);
+    result = await updateViaBrew(strategy.cask);
+  } else if (strategy.kind === 'self') {
+    log(`manual update: updating ${label} via ${[strategy.cmd, ...strategy.args].join(' ')}`);
+    result = await updateViaSelf(strategy.cmd, strategy.args, id);
   } else {
     log(`manual update: updating ${label} via npm install -g ${pkg}@latest`);
-    result = await updateViaNpm(pkg);
+    result = await updateViaNpm(pkg, id);
   }
 
   if (result.ok) {

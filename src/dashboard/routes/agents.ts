@@ -3,14 +3,15 @@
  */
 
 import { Hono } from 'hono';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from '../../agent/npm.js';
 import { copilotAuthEnv } from '../../agent/copilot-auth.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, type UserConfig } from '../../core/config/user-config.js';
-import { setAgentBoundModelId, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
-import { getAgentUpdateState, checkAgentLatestVersion, manualAgentUpdate } from '../../agent/auto-update.js';
+import { detectAgentBin, setAgentBoundModelId, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
+import { getAgentUpdateState, getAllAgentUpdateStates, checkAgentLatestVersion, manualAgentUpdate } from '../../agent/auto-update.js';
 import type { Agent } from '../../agent/index.js';
 import { getDriver, getDriverCapabilities } from '../../agent/driver.js';
 import {
@@ -33,6 +34,10 @@ const AGENT_INSTALL_TIMEOUT_MS = DASHBOARD_TIMEOUTS.agentInstall;
 const AGENT_HEALTH_TIMEOUT_MS = DASHBOARD_TIMEOUTS.agentHealth;
 const OPENCLAW_GATEWAY_GUIDANCE = 'OpenClaw CLI is installed, but its Gateway is not running or not reachable. Click Start on the OpenClaw card, or run `openclaw gateway start` if you are outside pikiclaw.';
 const OPENCLAW_NODE_MIN_VERSION = '22.19.0';
+const OPENCLAW_ACP_BACKEND = 'acpx';
+const OPENCLAW_ACP_AGENT_IDS = ['codex', 'cursor'] as const;
+const OPENCLAW_ACP_INSTALL_COMMAND = 'Install Codex CLI and Cursor Agent from the pikiclaw Agents page, then start OpenClaw again.';
+type OpenClawAcpAgentId = (typeof OPENCLAW_ACP_AGENT_IDS)[number];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,19 +58,29 @@ function dedupeModels(models: { id: string; alias: string | null }[]): { id: str
 function runCommand(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
+  opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; stdin?: string } = {},
 ): Promise<{ ok: boolean; stdout: string; stderr: string; error: string | null }> {
   return new Promise(resolve => {
     let stdout = '';
     let stderr = '';
     let finished = false;
-    const spawnEnv = processEnvWithUserBins({ ...process.env, ...(opts.env || {}), npm_config_yes: 'true' });
+    const spawnEnv = processEnvWithUserBins({
+      ...process.env,
+      ...(opts.env || {}),
+      npm_config_yes: 'true',
+      npm_config_fetch_retries: '1',
+      npm_config_fetch_timeout: '30000',
+      npm_config_fetch_retry_mintimeout: '1000',
+      npm_config_fetch_retry_maxtimeout: '5000',
+    });
     const resolvedCmd = resolveExecutablePath(cmd, spawnEnv) || cmd;
     const child = spawn(resolvedCmd, args, {
       cwd: opts.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: spawnEnv,
     });
+    if (opts.stdin !== undefined) child.stdin?.end(opts.stdin);
+    else child.stdin?.end();
     const timeoutMs = Math.max(500, opts.timeoutMs ?? DASHBOARD_TIMEOUTS.runCommand);
     const timer = setTimeout(() => {
       if (finished) return;
@@ -132,7 +147,12 @@ function cleanupNpmStagingFromError(stderr: string): string[] {
   return removed;
 }
 
-async function installAgentViaNpm(agent: Agent, log: (msg: string) => void): Promise<void> {
+async function installAgentViaNpm(
+  agent: Agent,
+  log: (msg: string) => void,
+  workdir?: string,
+  config: Partial<UserConfig> = loadUserConfig(),
+): Promise<void> {
   const pkg = getAgentPackage(agent);
   if (!pkg) throw new Error(`Unsupported agent: ${agent}`);
   log(`Installing ${getAgentLabel(agent)} via npm...`);
@@ -152,7 +172,7 @@ async function installAgentViaNpm(agent: Agent, log: (msg: string) => void): Pro
   }
   if (!result.ok) throw new Error(result.error || `Failed to install ${pkg}`);
   if (agent === 'openclaw') {
-    await completeOpenClawGatewayInstall(log);
+    await completeOpenClawGatewayInstall(log, workdir, config);
   }
   log(`${getAgentLabel(agent)} installation complete.`);
 }
@@ -175,12 +195,13 @@ function isOpenClawGatewayReady(output: string): boolean {
 
 async function runOpenClawCommand(
   args: string[],
-  opts: { cwd?: string; timeoutMs?: number } = {},
+  opts: { cwd?: string; timeoutMs?: number; stdin?: string } = {},
 ): Promise<{ ok: boolean; stdout: string; stderr: string; error: string | null }> {
   return runCommand('openclaw', args, {
     cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? AGENT_HEALTH_TIMEOUT_MS,
     env: openClawCommandEnv(),
+    stdin: opts.stdin,
   });
 }
 
@@ -188,7 +209,7 @@ async function requireOpenClawCommand(
   label: string,
   args: string[],
   log: (msg: string) => void,
-  opts: { cwd?: string; timeoutMs?: number } = {},
+  opts: { cwd?: string; timeoutMs?: number; stdin?: string } = {},
 ): Promise<void> {
   log(`${label}: openclaw ${args.join(' ')}`);
   const result = await runOpenClawCommand(args, opts);
@@ -197,13 +218,307 @@ async function requireOpenClawCommand(
   }
 }
 
-async function completeOpenClawGatewayInstall(log: (msg: string) => void): Promise<void> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mergeUniqueStrings(values: unknown, additions: readonly string[]): string[] {
+  const merged = new Set<string>();
+  if (Array.isArray(values)) {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) merged.add(value.trim());
+    }
+  }
+  for (const value of additions) merged.add(value);
+  return [...merged];
+}
+
+function nonEmptyString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function setStringDefault(target: Record<string, unknown>, key: string, value: string | null | undefined): void {
+  if (nonEmptyString(target[key])) return;
+  const next = nonEmptyString(value);
+  if (next) target[key] = next;
+}
+
+function cursorAcpCommand(): Record<string, unknown> {
+  return {
+    command: resolveExecutablePath('cursor-agent', openClawCommandEnv()) || 'cursor-agent',
+    args: ['acp'],
+  };
+}
+
+function openClawCodexAcpPlatformPackage(): string | null {
+  const platform = process.platform;
+  const arch = process.arch;
+  if (platform === 'darwin' && arch === 'arm64') return 'codex-acp-darwin-arm64';
+  if (platform === 'darwin' && arch === 'x64') return 'codex-acp-darwin-x64';
+  if (platform === 'linux' && arch === 'arm64') return 'codex-acp-linux-arm64';
+  if (platform === 'linux' && arch === 'x64') return 'codex-acp-linux-x64';
+  if (platform === 'win32' && arch === 'arm64') return 'codex-acp-win32-arm64';
+  if (platform === 'win32' && arch === 'x64') return 'codex-acp-win32-x64';
+  return null;
+}
+
+function codexAcpBinaryIsRunnable(binPath: string): boolean {
+  try {
+    const result = spawnSync(binPath, ['--help'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return !result.error && result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function restoreCodexAcpBinaryFromOfflineCache(binPath: string, packageName: string, log: (msg: string) => void): boolean {
+  const packageSpec = `@zed-industries/${packageName}@0.13.0`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-codex-acp-'));
+  try {
+    const pack = spawnSync('npm', ['pack', '--offline', packageSpec], {
+      cwd: tempDir,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: processEnvWithUserBins(process.env),
+    });
+    if (pack.status !== 0) return false;
+    const tarball = pack.stdout.trim().split(/\r?\n/).filter(Boolean).pop();
+    if (!tarball) return false;
+    const unpack = spawnSync('tar', ['-xzf', tarball, '-C', tempDir], {
+      cwd: tempDir,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    if (unpack.status !== 0) return false;
+    const fallbackBin = path.join(tempDir, 'package', 'bin', process.platform === 'win32' ? 'codex-acp.exe' : 'codex-acp');
+    const stat = fs.statSync(fallbackBin);
+    if (!stat.isFile()) return false;
+    fs.copyFileSync(fallbackBin, binPath);
+    if (process.platform !== 'win32') fs.chmodSync(binPath, 0o755);
+    log(`Restored OpenClaw Codex ACP binary from offline npm cache (${packageSpec}).`);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+function repairOpenClawAcpxBinaryPermissions(log: (msg: string) => void, configFile: string | null): void {
+  const home = process.env.HOME || '';
+  if (!home) return;
+  const openClawHome = path.join(home, '.openclaw');
+  const resolvedConfigFile = configFile ? path.resolve(configFile) : '';
+  if (!resolvedConfigFile.startsWith(`${path.resolve(openClawHome)}${path.sep}`)) return;
+  const zedScopeDir = path.join(
+    openClawHome,
+    'npm',
+    'node_modules',
+    '@openclaw',
+    'acpx',
+    'node_modules',
+    '@zed-industries',
+  );
+  let repaired = 0;
+  try {
+    for (const packageName of fs.readdirSync(zedScopeDir)) {
+      if (!packageName.startsWith('codex-acp-')) continue;
+      const binPath = path.join(zedScopeDir, packageName, 'bin', 'codex-acp');
+      let stat: fs.Stats;
+      try { stat = fs.statSync(binPath); } catch { continue; }
+      if (!stat.isFile()) continue;
+      if ((stat.mode & 0o111) !== 0) continue;
+      fs.chmodSync(binPath, stat.mode | 0o755);
+      repaired++;
+    }
+  } catch {
+    return;
+  }
+  if (repaired > 0) log(`Repaired OpenClaw Codex ACP executable permissions (${repaired} file${repaired === 1 ? '' : 's'}).`);
+
+  const platformPackage = openClawCodexAcpPlatformPackage();
+  if (!platformPackage) return;
+  const binName = process.platform === 'win32' ? 'codex-acp.exe' : 'codex-acp';
+  const binPath = path.join(zedScopeDir, platformPackage, 'bin', binName);
+  try {
+    if (process.platform !== 'win32') {
+      const stat = fs.statSync(binPath);
+      if (stat.isFile() && (stat.mode & 0o111) === 0) fs.chmodSync(binPath, stat.mode | 0o755);
+    }
+  } catch {
+    return;
+  }
+  if (codexAcpBinaryIsRunnable(binPath)) return;
+  if (restoreCodexAcpBinaryFromOfflineCache(binPath, platformPackage, log) && codexAcpBinaryIsRunnable(binPath)) return;
+  log('OpenClaw Codex ACP binary is present but not runnable; Codex ACP may need OpenClaw/acpx reinstall.');
+}
+
+function openClawAcpAgentPatch(
+  existingConfig: unknown,
+  workdir: string,
+  config: Partial<UserConfig> = loadUserConfig(),
+): Record<string, unknown> {
+  const existing = isPlainObject(existingConfig) ? existingConfig : {};
+  const existingAcp = isPlainObject(existing.acp) ? existing.acp : {};
+  const existingDispatch = isPlainObject(existingAcp.dispatch) ? existingAcp.dispatch : {};
+  const existingRuntime = isPlainObject(existingAcp.runtime) ? existingAcp.runtime : {};
+  const existingAgents = isPlainObject(existing.agents) ? existing.agents : {};
+  const existingPlugins = isPlainObject(existing.plugins) ? existing.plugins : {};
+  const existingPluginEntries = isPlainObject(existingPlugins.entries) ? existingPlugins.entries : {};
+  const existingAcpxEntry = isPlainObject(existingPluginEntries.acpx) ? existingPluginEntries.acpx : {};
+  const existingAcpxConfig = isPlainObject(existingAcpxEntry.config) ? existingAcpxEntry.config : {};
+  const existingAcpxAgents = isPlainObject(existingAcpxConfig.agents) ? existingAcpxConfig.agents : {};
+  const existingList = Array.isArray(existingAgents.list) ? existingAgents.list : [];
+  const nextList = existingList
+    .filter(item => isPlainObject(item) && typeof item.id === 'string' && item.id.trim())
+    .map(item => ({ ...item }));
+
+  const upsertAcpAgent = (id: OpenClawAcpAgentId, name: string) => {
+    const index = nextList.findIndex(item => item.id === id);
+    const current = index >= 0 ? nextList[index] : { id };
+    const currentRuntime = isPlainObject(current.runtime) ? current.runtime : {};
+    const currentRuntimeAcp = isPlainObject(currentRuntime.acp) ? currentRuntime.acp : {};
+    const currentWorkspace = typeof current.workspace === 'string' && current.workspace.trim()
+      ? current.workspace.trim()
+      : workdir;
+    const next = {
+      ...current,
+      id,
+      name: typeof current.name === 'string' && current.name.trim() ? current.name : name,
+      description: typeof current.description === 'string' && current.description.trim()
+        ? current.description
+        : `${name} exposed to OpenClaw through pikiclaw ACP integration.`,
+      workspace: currentWorkspace,
+      runtime: {
+        ...currentRuntime,
+        type: 'acp',
+        acp: {
+          ...currentRuntimeAcp,
+          agent: id,
+          backend: typeof currentRuntimeAcp.backend === 'string' && currentRuntimeAcp.backend.trim()
+            ? currentRuntimeAcp.backend
+            : OPENCLAW_ACP_BACKEND,
+          mode: typeof currentRuntimeAcp.mode === 'string' && currentRuntimeAcp.mode.trim()
+            ? currentRuntimeAcp.mode
+            : 'persistent',
+          cwd: typeof currentRuntimeAcp.cwd === 'string' && currentRuntimeAcp.cwd.trim()
+            ? currentRuntimeAcp.cwd
+            : currentWorkspace,
+        },
+      },
+    };
+    setStringDefault(next, 'model', runtime.getRuntimeModel(id, config));
+    setStringDefault(next, 'thinkingDefault', runtime.getRuntimeEffort(id, config));
+    if (index >= 0) nextList[index] = next;
+    else nextList.push(next);
+  };
+
+  upsertAcpAgent('codex', 'Codex');
+  upsertAcpAgent('cursor', 'Cursor');
+
+  const nextAcpxAgents: Record<string, unknown> = { ...existingAcpxAgents };
+  if (!isPlainObject(nextAcpxAgents.cursor)) nextAcpxAgents.cursor = cursorAcpCommand();
+
+  return {
+    acp: {
+      ...existingAcp,
+      enabled: true,
+      backend: typeof existingAcp.backend === 'string' && existingAcp.backend.trim()
+        ? existingAcp.backend
+        : OPENCLAW_ACP_BACKEND,
+      defaultAgent: typeof existingAcp.defaultAgent === 'string' && existingAcp.defaultAgent.trim()
+        ? existingAcp.defaultAgent
+        : 'codex',
+      allowedAgents: mergeUniqueStrings(existingAcp.allowedAgents, OPENCLAW_ACP_AGENT_IDS),
+      dispatch: {
+        ...existingDispatch,
+        enabled: true,
+      },
+      runtime: {
+        ...existingRuntime,
+        installCommand: typeof existingRuntime.installCommand === 'string' && existingRuntime.installCommand.trim()
+          ? existingRuntime.installCommand
+        : OPENCLAW_ACP_INSTALL_COMMAND,
+      },
+    },
+    plugins: {
+      ...existingPlugins,
+      entries: {
+        ...existingPluginEntries,
+        acpx: {
+          ...existingAcpxEntry,
+          enabled: true,
+          config: {
+            ...existingAcpxConfig,
+            cwd: nonEmptyString(existingAcpxConfig.cwd) || workdir,
+            probeAgent: nonEmptyString(existingAcpxConfig.probeAgent) || 'codex',
+            agents: nextAcpxAgents,
+          },
+        },
+      },
+    },
+    agents: {
+      list: nextList,
+    },
+  };
+}
+
+async function readOpenClawConfig(workdir?: string): Promise<{ config: unknown; file: string | null }> {
+  const fileResult = await runOpenClawCommand(['config', 'file'], {
+    cwd: workdir,
+    timeoutMs: AGENT_HEALTH_TIMEOUT_MS,
+  });
+  if (!fileResult.ok) return { config: {}, file: null };
+  const file = fileResult.stdout.trim().split(/\r?\n/).pop()?.trim();
+  if (!file) return { config: {}, file: null };
+  try {
+    return { config: JSON.parse(fs.readFileSync(file, 'utf8')), file };
+  } catch {
+    return { config: {}, file };
+  }
+}
+
+async function ensureOpenClawAcpAgents(
+  log: (msg: string) => void,
+  workdir: string,
+  config: Partial<UserConfig> = loadUserConfig(),
+): Promise<void> {
+  const { config: existingConfig, file: configFile } = await readOpenClawConfig(workdir);
+  const patch = openClawAcpAgentPatch(existingConfig, workdir, config);
+  await requireOpenClawCommand(
+    'Configuring OpenClaw ACP agents for Codex and Cursor',
+    ['config', 'patch', '--stdin', '--replace-path', 'agents.list'],
+    log,
+    {
+      cwd: workdir,
+      timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
+      stdin: JSON.stringify(patch),
+    },
+  );
+  await requireOpenClawCommand('Validating OpenClaw ACP config', ['config', 'validate'], log, {
+    cwd: workdir,
+    timeoutMs: AGENT_HEALTH_TIMEOUT_MS,
+  });
+  repairOpenClawAcpxBinaryPermissions(log, configFile);
+}
+
+async function completeOpenClawGatewayInstall(
+  log: (msg: string) => void,
+  workdir?: string,
+  config: Partial<UserConfig> = loadUserConfig(),
+): Promise<void> {
   // OpenClaw's Gateway is a managed service. A dashboard "Install" should leave
   // the card ready to use instead of requiring the user to discover daemon setup
   // in a terminal.
   await requireOpenClawCommand('Initializing OpenClaw baseline config', ['setup'], log, {
     timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
   });
+  await ensureOpenClawAcpAgents(log, workdir || process.cwd(), config);
   await requireOpenClawCommand('Installing OpenClaw Gateway service', ['gateway', 'install', '--force'], log, {
     timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
   });
@@ -238,12 +553,6 @@ export async function runAgentHealthCheck(agent: Agent, workdir: string): Promis
   output: string | null;
 }> {
   const checkedAt = new Date().toISOString();
-  const setupState = runtime.getSetupState(loadUserConfig(), { includeVersion: true, refresh: true });
-  const agentState = setupState.agents.find(item => item.agent === agent);
-  if (!agentState?.installed) {
-    return { ok: false, agent, checkedAt, detail: `${getAgentLabel(agent)} CLI is not installed or not on PATH.`, output: null };
-  }
-
   let command: { cmd: string; args: string[]; timeoutMs?: number };
   switch (agent) {
     case 'claude':
@@ -265,11 +574,16 @@ export async function runAgentHealthCheck(agent: Agent, workdir: string): Promis
       command = { cmd: 'hermes', args: ['auth', 'list'], timeoutMs: 8_000 };
       break;
     case 'openclaw':
-      command = { cmd: 'openclaw', args: ['gateway', 'status'], timeoutMs: 8_000 };
+      command = { cmd: 'openclaw', args: ['gateway', 'status'], timeoutMs: 20_000 };
       break;
     default:
       command = { cmd: agent, args: ['--version'] };
       break;
+  }
+
+  const agentState = detectAgentBin(command.cmd, agent, { refresh: true });
+  if (!agentState.installed) {
+    return { ok: false, agent, checkedAt, detail: `${getAgentLabel(agent)} CLI is not installed or not on PATH.`, output: null };
   }
 
   const result = await runCommand(command.cmd, command.args, {
@@ -343,7 +657,10 @@ export async function runAgentHealthCheck(agent: Agent, workdir: string): Promis
   };
 }
 
-export async function startOpenClawGatewayService(workdir: string): Promise<{
+export async function startOpenClawGatewayService(
+  workdir: string,
+  config: Partial<UserConfig> = loadUserConfig(),
+): Promise<{
   ok: boolean;
   agent: Agent;
   checkedAt: string;
@@ -351,15 +668,7 @@ export async function startOpenClawGatewayService(workdir: string): Promise<{
   output: string | null;
 }> {
   const checkedAt = new Date().toISOString();
-  const startResult = await runOpenClawCommand(['gateway', 'start'], { cwd: workdir });
-  const statusAfterStart = await runAgentHealthCheck('openclaw', workdir);
-  if (statusAfterStart.ok) {
-    return {
-      ...statusAfterStart,
-      detail: startResult.ok ? 'OpenClaw Gateway started.' : 'OpenClaw Gateway is already running.',
-    };
-  }
-
+  const log = (msg: string) => runtime.log(`[agents] ${msg}`);
   const setupResult = await runOpenClawCommand(['setup'], {
     cwd: workdir,
     timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
@@ -369,8 +678,30 @@ export async function startOpenClawGatewayService(workdir: string): Promise<{
       ok: false,
       agent: 'openclaw',
       checkedAt,
-      detail: 'OpenClaw Gateway start failed, and setup also failed.',
-      output: commandOutput({ ...setupResult, error: setupResult.error || startResult.error }),
+      detail: 'OpenClaw Gateway start failed because setup failed.',
+      output: commandOutput(setupResult),
+    };
+  }
+  try {
+    await ensureOpenClawAcpAgents(log, workdir, config);
+  } catch (err) {
+    return {
+      ok: false,
+      agent: 'openclaw',
+      checkedAt,
+      detail: 'OpenClaw Gateway start failed because Codex/Cursor ACP config failed.',
+      output: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const startResult = await runOpenClawCommand(['gateway', 'start'], { cwd: workdir });
+  const statusAfterStart = await runAgentHealthCheck('openclaw', workdir);
+  if (statusAfterStart.ok) {
+    return {
+      ...statusAfterStart,
+      detail: startResult.ok
+        ? 'OpenClaw Gateway started with Codex/Cursor ACP agents configured.'
+        : 'OpenClaw Gateway is already running with Codex/Cursor ACP agents configured.',
     };
   }
 
@@ -400,7 +731,7 @@ export async function startOpenClawGatewayService(workdir: string): Promise<{
   }
 
   const health = await runAgentHealthCheck('openclaw', workdir);
-  if (health.ok) return { ...health, detail: 'OpenClaw Gateway started.' };
+  if (health.ok) return { ...health, detail: 'OpenClaw Gateway started with Codex/Cursor ACP agents configured.' };
   return health;
 }
 
@@ -548,22 +879,42 @@ type AgentStatusData = Awaited<ReturnType<typeof buildAgentStatusResponse>>;
 
 const statusCache: {
   data: AgentStatusData | null;
+  createdAt: number;
   expiresAt: number;
   pending: Promise<AgentStatusData> | null;
-} = { data: null, expiresAt: 0, pending: null };
+} = { data: null, createdAt: 0, expiresAt: 0, pending: null };
 
 function refreshStatusCache(config?: Partial<UserConfig>, opts?: AgentDetectOptions) {
   if (!statusCache.pending) {
     statusCache.pending = buildAgentStatusResponse(config, opts)
-      .then(result => { statusCache.data = result; statusCache.expiresAt = Date.now() + AGENT_STATUS_CACHE_TTL_MS; return result; })
+      .then(result => {
+        statusCache.data = result;
+        statusCache.createdAt = Date.now();
+        statusCache.expiresAt = Date.now() + AGENT_STATUS_CACHE_TTL_MS;
+        return result;
+      })
       .finally(() => { statusCache.pending = null; });
   }
   return statusCache.pending;
 }
 
+function isLiveUpdateStatus(status: unknown): boolean {
+  return status === 'checking' || status === 'updating';
+}
+
+function hasLiveUpdateStateInMemory(): boolean {
+  return Object.values(getAllAgentUpdateStates()).some(state => isLiveUpdateStatus(state.status));
+}
+
+function hasLiveUpdateStateInSnapshot(data: AgentStatusData | null): boolean {
+  return !!data?.agents?.some(agent => isLiveUpdateStatus((agent as { updateStatus?: unknown }).updateStatus));
+}
+
 function getCachedAgentStatus() {
   if (statusCache.data) {
-    if (Date.now() >= statusCache.expiresAt) void refreshStatusCache();
+    const ageMs = Date.now() - statusCache.createdAt;
+    const updateStateIsMoving = hasLiveUpdateStateInMemory() || hasLiveUpdateStateInSnapshot(statusCache.data);
+    if (Date.now() >= statusCache.expiresAt || (updateStateIsMoving && ageMs > 1_000)) return refreshStatusCache();
     return Promise.resolve(statusCache.data);
   }
   return refreshStatusCache();
@@ -592,7 +943,9 @@ app.post('/api/agent-install', async (c) => {
   if (!runtime.isAgent(agent)) return c.json({ ok: false, error: 'Invalid agent' }, 400);
   runtime.log(`[agents] install requested agent=${agent} command="${getAgentInstallCommand(agent) || '(unknown)'}"`);
   try {
-    await installAgentViaNpm(agent, msg => runtime.log(`[agents] ${msg}`));
+    const config = loadUserConfig();
+    const workdir = runtime.getRuntimeWorkdir(config);
+    await installAgentViaNpm(agent, msg => runtime.log(`[agents] ${msg}`), workdir, config);
     return c.json({ ok: true, ...(await invalidateAgentStatus(loadUserConfig(), { refresh: true })) });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -678,8 +1031,9 @@ app.post('/api/agent-service', async (c) => {
   }
   runtime.log(`[agents] service action requested agent=${agent} action=${action}`);
   try {
-    const workdir = runtime.getRuntimeWorkdir(loadUserConfig());
-    const result = await startOpenClawGatewayService(workdir);
+    const config = loadUserConfig();
+    const workdir = runtime.getRuntimeWorkdir(config);
+    const result = await startOpenClawGatewayService(workdir, config);
     runtime.log(`[agents] service action result agent=${agent} action=${action} ok=${result.ok} detail=${result.detail}`);
     return c.json(result);
   } catch (err) {
