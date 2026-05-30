@@ -1872,9 +1872,9 @@ function TaskChatWindow({
     </div>
   );
   const taskTop = (
-    <div className="mx-auto grid w-full max-w-[1320px] items-start gap-5 min-[1180px]:grid-cols-[minmax(0,760px)_minmax(300px,360px)]">
+    <div className="grid w-full items-start gap-5 min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
       <div className="min-w-0 min-[1180px]:justify-self-center">{taskHeader}</div>
-      <div className="min-w-0 max-w-[360px] min-[1180px]:justify-self-end">
+      <div className="min-w-0 w-full max-w-[360px] min-[1180px]:justify-self-end">
         <TaskFlowMap task={task} busyStage={busyStage} />
       </div>
     </div>
