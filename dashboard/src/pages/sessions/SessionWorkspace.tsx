@@ -937,8 +937,8 @@ function SessionAttentionDot({
         aria-hidden="true"
         className={cn('relative inline-grid shrink-0 place-items-center rounded-full', compact ? 'h-2 w-2' : 'h-2.5 w-2.5', className)}
       >
-        <span className="absolute inset-0 rounded-full bg-primary/25 animate-ping" />
-        <span className={cn('relative rounded-full bg-primary shadow-[0_0_8px_var(--th-selection-ring)]', compact ? 'h-1.5 w-1.5' : 'h-2 w-2')} />
+        <span className="absolute inset-0 rounded-full bg-[color-mix(in_oklab,var(--th-warn)_26%,transparent)] animate-ping" />
+        <span className={cn('relative rounded-full bg-[var(--th-warn)] shadow-[0_0_8px_var(--th-warn-glow)]', compact ? 'h-1.5 w-1.5' : 'h-2 w-2')} />
       </span>
     );
   }
@@ -950,7 +950,7 @@ function SessionAttentionDot({
         'inline-block shrink-0 rounded-full',
         compact ? 'h-1.5 w-1.5' : 'h-2 w-2',
         kind === 'warn'
-          ? 'bg-warn shadow-[0_0_8px_var(--th-warn-glow)]'
+          ? 'bg-err shadow-[0_0_8px_var(--th-err-glow)]'
           : 'bg-ok shadow-[0_0_8px_var(--th-ok-glow)]',
         className,
       )}
@@ -1156,7 +1156,7 @@ function WorkspaceStatusStrip({
   const statusTone = !state
     ? 'idle'
     : hasRunning
-      ? 'ok'
+      ? 'warn'
       : hasAttention
         ? 'warn'
         : 'idle';
@@ -1187,7 +1187,7 @@ function WorkspaceStatusStrip({
           </Badge>
         </div>
         <StatusMetric label={isZh ? '任务' : 'Tasks'} value={summary.activeTasks} variant={summary.activeTasks > 0 ? 'ok' : 'muted'} />
-        <StatusMetric label={isZh ? '运行中' : 'Running'} value={summary.runningSessions} variant={summary.runningSessions > 0 ? 'ok' : 'muted'} />
+        <StatusMetric label={isZh ? '运行中' : 'Running'} value={summary.runningSessions} variant={summary.runningSessions > 0 ? 'warn' : 'muted'} />
         <StatusMetric label={isZh ? '待查看' : 'To review'} value={summary.pendingReviewSessions} variant={summary.pendingReviewSessions > 0 ? 'warn' : 'muted'} />
         <StatusMetric label={isZh ? '需处理' : 'Incomplete'} value={summary.incompleteSessions} variant={summary.incompleteSessions > 0 ? 'warn' : 'muted'} />
         <StatusMetric label={isZh ? '近24h完成' : 'Done 24h'} value={summary.completedSessions} variant={summary.completedSessions > 0 ? 'accent' : 'muted'} />
@@ -4825,7 +4825,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   <span className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
                     <BrandIcon brand={slotPointerDrag.agent || ''} size={16} />
                     {slotPointerDrag.state === 'running' && (
-                      <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-panel bg-ok" />
+                      <SessionAttentionDot kind="running" compact className="absolute -right-0.5 -top-0.5 border-2 border-panel" />
                     )}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg">{slotPointerDrag.title}</span>
@@ -7018,7 +7018,7 @@ function InboxDrawer({
         >
           <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge/45 bg-panel/82 px-3 backdrop-blur-md">
             <Dot
-              variant={focusedDisplayState === 'running' ? 'active' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
+              variant={focusedDisplayState === 'running' ? 'running' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
               pulse={focusedDisplayState === 'running'}
             />
             {focusedMeta && (
@@ -7159,7 +7159,7 @@ function DashboardTaskCard({
           <span className="ml-auto shrink-0 tabular-nums">{time}</span>
         </div>
 	        <div className="mt-1.5 flex items-start gap-2">
-          {!selected && <Dot variant={displayState === 'running' ? 'active' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
+          {!selected && <Dot variant={displayState === 'running' ? 'running' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
 	          <div className="min-w-0 flex-1">
 	            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
 	            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
@@ -7555,9 +7555,9 @@ const SessionCard = memo(function SessionCard({
     : isOpen
       ? 'bg-primary/[0.045] text-fg-2 ring-1 ring-inset ring-primary/8 hover:bg-primary/[0.065]'
       : displayState === 'running'
-        ? 'bg-transparent text-fg-3 hover:bg-primary/[0.035]'
+        ? 'bg-transparent text-fg-3 hover:bg-warn/[0.035]'
         : displayState === 'incomplete'
-          ? 'bg-transparent text-fg-3 hover:bg-warn/[0.035]'
+          ? 'bg-transparent text-fg-3 hover:bg-err/[0.035]'
           : 'bg-transparent text-fg-3 hover:bg-panel-h/52';
 
   const kebabRef = useRef<HTMLButtonElement | null>(null);
@@ -7571,9 +7571,9 @@ const SessionCard = memo(function SessionCard({
         isSelected || isOpen
           ? 'bg-primary'
           : displayState === 'running'
-            ? 'bg-primary'
-	            : displayState === 'incomplete'
-	              ? 'bg-warn'
+            ? 'bg-warn'
+          : displayState === 'incomplete'
+            ? 'bg-err'
 	              : 'bg-primary',
 	        (isSelected || isOpen) && 'opacity-100',
 	        !isSelected && !isOpen && 'group-hover/session:opacity-60',
