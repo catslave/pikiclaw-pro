@@ -1857,7 +1857,7 @@ function TaskChatWindow({
   }, [run, task.id]);
 
   const taskHeader = (
-    <div className="relative w-full max-w-[760px] overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+    <div className="relative w-full overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
       <div className="relative px-3.5 py-3">
         <div className="line-clamp-2 text-[12px] leading-relaxed text-fg-4">
@@ -1873,7 +1873,7 @@ function TaskChatWindow({
   );
   const taskTop = (
     <div className="grid w-full items-start gap-5 min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
-      <div className="min-w-0 min-[1180px]:justify-self-center">{taskHeader}</div>
+      <div className="w-full min-w-0">{taskHeader}</div>
       <div className="min-w-0 w-full max-w-[360px] min-[1180px]:justify-self-end">
         <TaskFlowMap task={task} busyStage={busyStage} />
       </div>
