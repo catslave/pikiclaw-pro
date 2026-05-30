@@ -572,8 +572,13 @@ export function saveSessionRecord(workdir: string, record: ManagedSessionRecord)
   ensureDir(record.workspacePath);
   const index = loadSessionIndex(workdir);
   record.threadId = normalizeThreadId(record.threadId) || legacyThreadId(record.agent, record.sessionId);
-  record.updatedAt = new Date().toISOString();
   const pos = index.sessions.findIndex(entry => entry.agent === record.agent && entry.sessionId === record.sessionId);
+  const existing = pos >= 0 ? index.sessions[pos] : null;
+  if (existing?.titleSource === 'user' && (record.titleSource !== 'user' || record.title !== existing.title)) {
+    record.title = existing.title;
+    record.titleSource = 'user';
+  }
+  record.updatedAt = new Date().toISOString();
   if (pos >= 0) index.sessions[pos] = record;
   else index.sessions.unshift(record);
   const parentRef = record.sideChatOf;

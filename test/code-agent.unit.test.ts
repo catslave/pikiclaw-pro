@@ -33,6 +33,7 @@ import {
   type StreamOpts,
 } from '../src/agent/index.ts';
 import { querySessions } from '../src/bot/session-hub.ts';
+import { saveSessionRecord } from '../src/agent/session.ts';
 import { makeTmpDir, withTempHome } from './support/env.ts';
 
 const tmpDir = path.join(os.tmpdir(), 'pikiclaw-test-' + process.pid);
@@ -644,6 +645,25 @@ describe('stageSessionFiles', () => {
     expect(adoptAgentSessionTitle(workdir, 'codex', staged.sessionId, 'Ignored Native Rename')).toBe(false);
     record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
     expect(record?.title).toBe('Manual Chat Name');
+    expect(record?.titleSource).toBe('user');
+  });
+
+  it('keeps a user rename when a stale running record is saved later', () => {
+    const workdir = makeTmpDir('pikiclaw-user-rename-');
+    const staged = stageSessionFiles({
+      agent: 'codex',
+      workdir,
+      files: [],
+      title: 'original prompt title',
+    });
+    const staleRecord = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
+    expect(staleRecord).toBeTruthy();
+
+    expect(updateSessionMeta(workdir, 'codex', staged.sessionId, { title: 'Renamed chat window' })).toBe(true);
+    saveSessionRecord(workdir, { ...staleRecord! });
+
+    const record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.title).toBe('Renamed chat window');
     expect(record?.titleSource).toBe('user');
   });
 
