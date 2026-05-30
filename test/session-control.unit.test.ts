@@ -46,6 +46,45 @@ describe('session-control', () => {
     expect(result).toEqual({ ok: true, queued: true, taskId: 'task-1', sessionKey: 'codex:sess-1' });
   });
 
+  it('routes /plan through the capability-aware controller before skill resolution', async () => {
+    const submitSessionTask = vi.fn(() => ({ ok: true, queued: true, taskId: 'task-plan', sessionKey: 'codex:pending_plan' }));
+    getBotRefMock.mockReturnValue({ submitSessionTask });
+
+    const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
+    const result = await queueDashboardSessionTask({
+      workdir: '/tmp/pikiclaw',
+      agent: 'codex',
+      sessionId: 'pending_plan',
+      prompt: '/plan add native goal UI',
+      attachments: [],
+    });
+
+    expect(submitSessionTask).toHaveBeenCalledTimes(1);
+    const call = submitSessionTask.mock.calls[0][0];
+    expect(call.prompt).toContain('<proposed_plan>');
+    expect(call.prompt).toContain('add native goal UI');
+    expect(call.prompt).not.toContain('Read the skill definition');
+    expect(result).toEqual({ ok: true, queued: true, taskId: 'task-plan', sessionKey: 'codex:pending_plan' });
+  });
+
+  it('does not pretend unsupported native plan support exists', async () => {
+    const submitSessionTask = vi.fn();
+    getBotRefMock.mockReturnValue({ submitSessionTask });
+
+    const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
+    const result = await queueDashboardSessionTask({
+      workdir: '/tmp/pikiclaw',
+      agent: 'hermes',
+      sessionId: 'sess-1',
+      prompt: '/plan inspect',
+      attachments: [],
+    });
+
+    expect(submitSessionTask).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect((result as any).error).toContain('does not advertise /plan support');
+  });
+
   it('surfaces stream state, cancel, and steer through public bot methods', async () => {
     const cancelTask = vi.fn(() => ({ cancelled: true, interrupted: false, task: {} }));
     const steerTask = vi.fn(async () => ({ steered: true, interrupted: true, task: {} }));

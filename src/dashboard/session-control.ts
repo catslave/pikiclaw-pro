@@ -3,7 +3,25 @@
  */
 
 import path from 'node:path';
-import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, findPikiclawSessionInfo, getDriverCapabilities, isPendingSessionId, recordFork, recordSideChat, type Agent, type HandoverRef } from '../agent/index.js';
+import {
+  getProjectSkillPaths,
+  listSkills,
+  stageSessionFiles,
+  ensureManagedSession,
+  findPikiclawSession,
+  findPikiclawSessionInfo,
+  getDriverCapabilities,
+  isPendingSessionId,
+  recordFork,
+  recordSideChat,
+  createSessionPlanView,
+  writeSessionPlan,
+  readSessionPlan,
+  clearSessionPlan,
+  type Agent,
+  type AgentCapabilityDescriptor,
+  type HandoverRef,
+} from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { isLogTraceSlash, runLogTraceSkill } from '../platform/logtrace.js';
 import { runtime } from './runtime.js';
@@ -32,6 +50,64 @@ function parseGoalSlash(prompt: string): { action: 'set' | 'clear' | 'pause' | '
   if (lower === 'pause') return { action: 'pause', objective: '' };
   if (lower === 'resume') return { action: 'resume', objective: '' };
   return { action: 'set', objective: args };
+}
+
+type PlanSlashAction = 'start' | 'clarify' | 'approve' | 'cancel' | 'implement' | 'status';
+
+function parsePlanSlash(prompt: string): { action: PlanSlashAction; input: string } | null {
+  const trimmed = prompt.trim();
+  const m = trimmed.match(/^\/plan(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  const args = (m[1] || '').trim();
+  if (!args) return { action: 'start', input: '' };
+  const first = args.match(/^([a-zA-Z_-]+)(?:\s+([\s\S]*))?$/);
+  const verb = (first?.[1] || '').toLowerCase();
+  const rest = (first?.[2] || '').trim();
+  if (verb === 'clarify') return { action: 'clarify', input: rest };
+  if (verb === 'approve') return { action: 'approve', input: rest };
+  if (verb === 'cancel' || verb === 'clear') return { action: 'cancel', input: rest };
+  if (verb === 'implement' || verb === 'apply') return { action: 'implement', input: rest };
+  if (verb === 'status') return { action: 'status', input: rest };
+  return { action: 'start', input: args };
+}
+
+function buildPlanStartPrompt(input: string, capability: AgentCapabilityDescriptor): string {
+  const modeLabel = capability.mode === 'native'
+    ? 'Use your native planning lifecycle when available.'
+    : 'Use pikiclaw portable planning format; do not claim this is native agent state.';
+  const task = input.trim() || 'Clarify the user goal and produce an implementation plan for this session.';
+  return [
+    'Enter planning mode for this task. Do not modify files, run destructive actions, or implement yet.',
+    modeLabel,
+    '',
+    'If critical requirements are ambiguous, ask concise clarification questions using your available human-input path. Otherwise produce the plan directly.',
+    'Render the final proposed plan inside exactly one <proposed_plan>...</proposed_plan> block.',
+    'Inside that block include: Summary, Key Changes, Implementation Order, Test Plan, and Assumptions.',
+    'After the block, ask whether to implement, continue clarifying, or cancel.',
+    '',
+    `Task:\n${task}`,
+  ].join('\n');
+}
+
+function buildPlanClarifyPrompt(input: string): string {
+  return [
+    'Continue planning mode for the current session. Do not implement yet.',
+    'Use this clarification or open question to revise the plan.',
+    '',
+    input.trim() || 'Ask the next clarification question needed to make the plan actionable.',
+    '',
+    'When ready, render the revised proposed plan inside <proposed_plan>...</proposed_plan>.',
+  ].join('\n');
+}
+
+function buildPlanImplementPrompt(input: string): string {
+  const extra = input.trim();
+  return [
+    'Implement the latest proposed plan for this session.',
+    'If no proposed plan is available in context, first summarize the inferred plan briefly, then implement with minimal, scoped changes.',
+    'Keep the user updated and verify the result.',
+    extra ? `\nAdditional instruction:\n${extra}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 /**
@@ -161,6 +237,16 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     return runDashboardGoalSlash(bot, resolvedAgent, request, goalCmd, modelId, thinkingEffort);
   }
 
+  // /plan — route through the capability-aware planning controller before
+  // skill resolution. Some workspaces may define a `plan` skill; the slash
+  // command here is a first-class agent capability entry point.
+  const planCmd = parsePlanSlash(request.prompt || '');
+  if (planCmd) {
+    const planHandled = runDashboardPlanSlash(resolvedAgent, request, planCmd);
+    if (planHandled.kind === 'response') return planHandled.response;
+    request.prompt = planHandled.prompt;
+  }
+
   // Resolve /skill-name prompts into full skill execution prompts
   let prompt = request.prompt;
   const skillResult = prompt ? resolveSkillFromPrompt(request.workdir, prompt) : null;
@@ -206,6 +292,63 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     ...(thinkingEffort ? { thinkingEffort } : {}),
     ...(handoverFrom ? { handoverFrom } : {}),
   });
+}
+
+function runDashboardPlanSlash(
+  agent: Agent,
+  request: QueueSessionTaskRequest,
+  cmd: { action: PlanSlashAction; input: string },
+): { kind: 'response'; response: any } | { kind: 'prompt'; prompt: string } {
+  const capability = getDriverCapabilities(agent).plan;
+  const mode = capability?.mode || 'unsupported';
+  const sessionKey = `${agent}:${request.sessionId || ''}`;
+  const taskId = `plan-${cmd.action}-${Date.now().toString(36)}`;
+
+  if (mode === 'unsupported') {
+    return {
+      kind: 'response',
+      response: {
+        ok: false as const,
+        error: `${agent} does not advertise /plan support.`,
+        capability,
+      },
+    };
+  }
+
+  const existingSessionId = request.sessionId && !isPendingSessionId(request.sessionId) ? request.sessionId : '';
+  if (cmd.action === 'status') {
+    const plan = existingSessionId ? readSessionPlan(request.workdir, agent, existingSessionId) : null;
+    return { kind: 'response', response: { ok: true as const, taskId, sessionKey, queued: false, plan, capability } };
+  }
+  if (cmd.action === 'cancel') {
+    if (existingSessionId) clearSessionPlan(request.workdir, agent, existingSessionId);
+    return { kind: 'response', response: { ok: true as const, taskId, sessionKey, queued: false, cancelled: true, capability } };
+  }
+
+  if (existingSessionId && (cmd.action === 'start' || cmd.action === 'clarify' || cmd.action === 'approve')) {
+    const current = readSessionPlan(request.workdir, agent, existingSessionId);
+    const status = cmd.action === 'clarify' ? 'needs_clarification' : 'draft';
+    writeSessionPlan(request.workdir, agent, existingSessionId, current
+      ? { ...current, mode, source: capability?.source || current.source, status }
+      : createSessionPlanView({
+        agent,
+        mode,
+        source: capability?.source || 'pikiclaw plan controller',
+        status,
+      }));
+  }
+  if (existingSessionId && (cmd.action === 'implement' || cmd.action === 'approve')) {
+    const current = readSessionPlan(request.workdir, agent, existingSessionId);
+    if (current) writeSessionPlan(request.workdir, agent, existingSessionId, { ...current, status: 'implementing' });
+  }
+
+  if (cmd.action === 'implement' || cmd.action === 'approve') {
+    return { kind: 'prompt', prompt: buildPlanImplementPrompt(cmd.input) };
+  }
+  if (cmd.action === 'clarify') {
+    return { kind: 'prompt', prompt: buildPlanClarifyPrompt(cmd.input) };
+  }
+  return { kind: 'prompt', prompt: buildPlanStartPrompt(cmd.input, capability!) };
 }
 
 async function runDashboardGoalSlash(

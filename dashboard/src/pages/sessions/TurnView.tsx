@@ -583,24 +583,24 @@ export function TurnDivider({ agent, meta, model, effort, providerName: provider
   // the session-level prop for saved turns whose `usage` lacks the field.
   const providerName = previewMeta?.providerName ?? providerNameProp ?? null;
   return (
-    <div className="flex items-center gap-1.5 mt-1 mb-3">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 mt-1 mb-3">
       <BrandIcon brand={agent} size={13} />
-      <span className="text-[12px] font-semibold text-fg-2">{meta.label}</span>
+      <span className="shrink-0 text-[12px] font-semibold text-fg-2">{meta.label}</span>
       {(model || effort) && (
-        <span className="text-[10px] font-mono text-fg-4">
+        <span className="min-w-0 truncate text-[10px] font-mono text-fg-4">
           {model || ''}{model && effort ? ' · ' : ''}{effort || ''}
         </span>
       )}
       {providerName && (
         <span
-          className="text-[10px] font-mono text-fg-4 px-1.5 py-px rounded bg-fg-5/8"
+          className="shrink-0 text-[10px] font-mono text-fg-4 px-1.5 py-px rounded bg-fg-5/8"
           title={`This turn is routed through ${providerName} (BYOK), not the agent CLI's native auth.`}
         >
           via {providerName}
         </span>
       )}
       {showCtx && (
-        <span className="ml-auto inline-flex min-w-[92px] justify-end items-center gap-1 text-[10px] font-mono tabular-nums text-fg-5/55" title={formatContextTitle(previewMeta)}>
+        <span className="ml-auto inline-flex min-w-0 shrink-0 justify-end items-center gap-1 text-[10px] font-mono tabular-nums text-fg-5/55" title={formatContextTitle(previewMeta)}>
           {ctxPct != null && <ContextDot pct={ctxPct} />}
           <span>{ctxPct != null ? `${ctxPct.toFixed(1)}%` : ''}</span>
           {ctxTokens > 0 && <span className="text-fg-5/40">· {formatTokens(ctxTokens)}</span>}

@@ -10,6 +10,7 @@ import { loadUserConfig } from '../../core/config/user-config.js';
 import {
   listAgents, listSkills,
   decodeAttachmentPathParam, resolveAllowedAttachmentPath, rewriteImageBlocksForTransport,
+  readSessionPlan,
   type Agent, type SessionInfo, type SessionMessagesResult, type RichMessage,
 } from '../../agent/index.js';
 import { getSessionStatusForBot } from '../../bot/session-status.js';
@@ -1001,6 +1002,21 @@ app.post('/api/session-hub/session/goal/clear', async (c) => {
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }
+});
+
+// ==========================================================================
+// Session plan view.
+// ==========================================================================
+
+app.get('/api/session-hub/session/plan', (c) => {
+  const workdir = c.req.query('workdir') || '';
+  const agent = c.req.query('agent') || '';
+  const sessionId = c.req.query('sessionId') || '';
+  if (!workdir || !agent || !sessionId) {
+    return c.json({ ok: false, error: 'workdir, agent, and sessionId query params required' }, 400);
+  }
+  const plan = readSessionPlan(workdir, agent as Agent, sessionId);
+  return c.json({ ok: true, plan });
 });
 
 // ==========================================================================

@@ -16,6 +16,8 @@ import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
 import {
   getProjectSkillPaths, normalizeClaudeModelId, sessionListDisplayTitle,
   listAllMcpExtensions, listSkills as listAllSkills,
+  getDriverCapabilities, readSessionPlan, writeSessionPlan, clearSessionPlan,
+  createSessionPlanView,
 } from '../agent/index.js';
 import { getDriver } from '../agent/driver.js';
 import { getActiveProfile, getProvider } from '../model/index.js';
@@ -101,6 +103,95 @@ export function getWorkspacesData(bot: Bot, chatId: ChatId): WorkspacesData {
       };
     });
   return { currentWorkdir, workspaces };
+}
+
+// ---------------------------------------------------------------------------
+// Plan — channel-agnostic /plan command dispatch
+// ---------------------------------------------------------------------------
+
+export async function handlePlanCommand(bot: Bot, chatId: ChatId, rawArgs: string): Promise<string | null> {
+  const session = bot.selectedSession(chatId);
+  if (!session || !session.sessionId) return null;
+  const workdir = session.workdir;
+  const agent = session.agent;
+  const sessionId = session.sessionId;
+  const capability = getDriverCapabilities(agent).plan;
+  if (!capability || capability.mode === 'unsupported') {
+    return `${agent} does not advertise /plan support.`;
+  }
+
+  const args = rawArgs.trim();
+  const lower = args.toLowerCase();
+  if (!args || lower === 'status') {
+    const plan = readSessionPlan(workdir, agent, sessionId);
+    if (!plan) return `No plan recorded yet. Use /plan <task> to draft one.`;
+    return [
+      `Plan: ${plan.status}`,
+      `Source: ${plan.mode}${plan.source ? ` (${plan.source})` : ''}`,
+      plan.content ? truncate(plan.content, 500) : 'Plan content will appear in the next assistant message.',
+    ].join('\n');
+  }
+  if (lower === 'cancel' || lower === 'clear') {
+    clearSessionPlan(workdir, agent, sessionId);
+    return 'Cancelled plan.';
+  }
+
+  const [verb, ...restParts] = args.split(/\s+/);
+  const verbLower = verb.toLowerCase();
+  const rest = restParts.join(' ').trim();
+  const isImplement = verbLower === 'implement' || verbLower === 'approve' || verbLower === 'apply';
+  const isClarify = verbLower === 'clarify';
+  const prompt = isImplement
+    ? buildPlanImplementPrompt(rest)
+    : isClarify
+      ? buildPlanClarifyPrompt(rest)
+      : buildPlanStartPrompt(args, capability.mode);
+
+  const current = readSessionPlan(workdir, agent, sessionId);
+  const nextStatus = isImplement ? 'implementing' : isClarify ? 'needs_clarification' : 'draft';
+  writeSessionPlan(workdir, agent, sessionId, current
+    ? { ...current, mode: capability.mode, source: capability.source || current.source, status: nextStatus }
+    : createSessionPlanView({
+      agent,
+      mode: capability.mode,
+      source: capability.source || 'pikiclaw plan controller',
+      status: nextStatus,
+    }));
+  bot.submitSessionTask({ agent, sessionId, workdir, prompt, chatId });
+  return capability.mode === 'native'
+    ? 'Planning started through the native agent path.'
+    : 'Planning started using pikiclaw portable plan mode.';
+}
+
+function buildPlanStartPrompt(task: string, mode: 'native' | 'portable' | 'unsupported'): string {
+  const modeLine = mode === 'native'
+    ? 'Use your native planning lifecycle when available.'
+    : 'Use pikiclaw portable planning format; do not claim this is native agent state.';
+  return [
+    'Enter planning mode for this task. Do not modify files, run destructive actions, or implement yet.',
+    modeLine,
+    'If critical requirements are ambiguous, ask concise clarification questions using your available human-input path.',
+    'Render the final proposed plan inside exactly one <proposed_plan>...</proposed_plan> block.',
+    'Inside that block include: Summary, Key Changes, Implementation Order, Test Plan, and Assumptions.',
+    '',
+    `Task:\n${task || 'Clarify the user goal and produce an implementation plan for this session.'}`,
+  ].join('\n');
+}
+
+function buildPlanClarifyPrompt(input: string): string {
+  return [
+    'Continue planning mode for the current session. Do not implement yet.',
+    input || 'Ask the next clarification question needed to make the plan actionable.',
+    'When ready, render the revised proposed plan inside <proposed_plan>...</proposed_plan>.',
+  ].join('\n\n');
+}
+
+function buildPlanImplementPrompt(input: string): string {
+  return [
+    'Implement the latest proposed plan for this session.',
+    'If no proposed plan is available in context, first summarize the inferred plan briefly, then implement with minimal, scoped changes.',
+    input ? `Additional instruction:\n${input}` : '',
+  ].filter(Boolean).join('\n\n');
 }
 
 // ---------------------------------------------------------------------------

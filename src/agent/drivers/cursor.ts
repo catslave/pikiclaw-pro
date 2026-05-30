@@ -91,6 +91,60 @@ class CursorDriver implements AgentDriver {
   readonly id = 'cursor';
   readonly cmd = 'cursor-agent';
   readonly thinkLabel = 'Thinking';
+  readonly capabilities = {
+    fork: false,
+    modelSwitch: true,
+    plan: {
+      mode: 'portable',
+      source: 'pikiclaw plan prompt',
+      commands: ['/plan'],
+      actions: ['start', 'clarify', 'approve', 'cancel', 'implement'],
+      note: 'No verified Cursor native plan protocol yet.',
+    },
+    goal: {
+      mode: 'portable',
+      source: 'pikiclaw goal.json',
+      statusSource: 'pikiclaw session metadata',
+      commands: ['/goal'],
+      actions: ['set', 'pause', 'resume', 'clear', 'status'],
+    },
+    humanInput: {
+      mode: 'unsupported',
+      note: 'No verified Cursor ask-user event in --print mode.',
+    },
+    approval: {
+      mode: 'unsupported',
+      note: 'Cursor is currently launched in trusted/force mode.',
+    },
+    artifacts: {
+      mode: 'portable',
+      source: 'pikiclaw transcript rendering',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'portable',
+      source: 'pikiclaw transcript replay',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'unsupported',
+      note: 'No verified Cursor native fork protocol.',
+    },
+    steer: {
+      mode: 'unsupported',
+      note: 'No verified Cursor in-place steering channel.',
+    },
+    mcp: {
+      mode: 'portable',
+      source: 'pikiclaw MCP bridge',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'portable',
+      source: 'MCP/tools',
+      actions: ['generate', 'render'],
+    },
+  } satisfies import('../types.js').AgentDriverCapabilities;
   readonly acceptedProviderKinds = [] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doCursorStream(opts); }

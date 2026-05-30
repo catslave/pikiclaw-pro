@@ -14,6 +14,7 @@ import {
   getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
   readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
+  extractProposedPlan, readSessionPlan, writeSessionPlan, createSessionPlanView, getDriverCapabilities,
   setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
   getClaudeNativeGoal, buildClaudeSetGoalPrompt, buildClaudeClearGoalPrompt,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type StreamActivityEvents, type StreamActivityKind, type StreamActivitySummary, type SessionInfo, type UsageResult,
@@ -2302,6 +2303,7 @@ export class Bot {
           incomplete: !!result.incomplete,
           ...(result.ok ? {} : { error: result.error || result.message }),
         });
+        this.recordPlanViewFromResult(session, result);
         if (presenter) {
           try { await presenter.onSuccess(result); }
           catch (e: any) { this.warn(`[submitSessionTask] presenter onSuccess failed task=${taskId}: ${e?.message || e}`); }
@@ -2343,6 +2345,40 @@ export class Bot {
    */
   protected async createImTaskPresenter(_opts: ImTaskPresenterOpts): Promise<ImTaskPresenter | null> {
     return null;
+  }
+
+  private recordPlanViewFromResult(session: SessionRuntime, result: StreamResult): void {
+    const sessionId = (result.sessionId || session.sessionId || '').trim();
+    if (!sessionId || isPendingSessionId(sessionId)) return;
+    const proposed = extractProposedPlan(result.message || '');
+    const steps = result.plan?.steps || [];
+    if (!proposed && !steps.length) return;
+    try {
+      const capability = getDriverCapabilities(session.agent).plan;
+      const mode = capability?.mode || 'portable';
+      const source = capability?.source || 'agent stream';
+      const current = readSessionPlan(session.workdir, session.agent, sessionId);
+      const next = current
+        ? {
+          ...current,
+          source,
+          mode,
+          status: proposed ? 'draft' as const : current.status,
+          content: proposed || current.content,
+          steps: steps.length ? steps : current.steps,
+        }
+        : createSessionPlanView({
+          agent: session.agent,
+          source,
+          mode,
+          status: 'draft',
+          content: proposed || '',
+          steps,
+        });
+      writeSessionPlan(session.workdir, session.agent, sessionId, next);
+    } catch (err: any) {
+      this.debug(`[plan] failed to record plan view: ${err?.message || err}`);
+    }
   }
 
   /**

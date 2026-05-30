@@ -25,7 +25,8 @@ import './drivers/openclaw.js';
 // ── Re-export: types ────────────────────────────────────────────────────────
 export type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
-  AgentDriverCapabilities, SessionLineageRef, HandoverRef,
+  AgentDriverCapabilities, AgentCapabilityDescriptor, AgentCapabilityMode, AgentCapabilityAction,
+  SessionLineageRef, HandoverRef,
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
@@ -127,6 +128,13 @@ export {
   sessionGoalPath, DEFAULT_MAX_CONTINUATIONS,
   type ThreadGoal, type GoalStatus, type TurnUsage, type ContinuationDecision,
 } from './goal.js';
+
+// ── Re-export: plan (driver-native/portable planning view) ──────────────────
+export {
+  readSessionPlan, writeSessionPlan, clearSessionPlan, createSessionPlanView,
+  extractProposedPlan, sessionPlanPath,
+  type SessionPlanView, type SessionPlanStatus,
+} from './plan.js';
 
 // ── Re-export: native codex goal bridge ──────────────────────────────────────
 export {

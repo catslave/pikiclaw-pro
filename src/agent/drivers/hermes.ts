@@ -345,10 +345,13 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
     }
 
     const messageText = state.text.trim();
+    const emptyReplyError = messageText
+      ? null
+      : `Hermes finished without a textual response. Check the selected Hermes model/provider in ~/.hermes/config.yaml or bind a working pikiclaw Profile.`;
     const isRefusalOnly = !!messageText && messageText.length < 120 && REFUSAL_REGEX.test(messageText);
     return makeStreamResult(start, {
-      ok: !isRefusalOnly,
-      message: messageText || '(no textual response)',
+      ok: !isRefusalOnly && !emptyReplyError,
+      message: messageText,
       thinking: state.thinking.trim() || null,
       sessionId,
       model: opts.model,
@@ -359,13 +362,13 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
       contextWindow: state.contextWindow,
       contextUsedTokens: state.contextUsedTokens,
       stopReason,
-      incomplete: stopReason !== 'end_turn',
+      incomplete: stopReason !== 'end_turn' || !!emptyReplyError,
       activity: null,
       // When the model itself refuses, mark as incomplete and add a hint so
       // the user can tell it's the model's choice (not a pikiclaw error).
-      error: isRefusalOnly
+      error: emptyReplyError || (isRefusalOnly
         ? `Model returned a safety refusal. Try a different model on the agent card (e.g. claude-haiku-4.5 via OpenRouter), or check ~/.hermes/config.yaml.`
-        : null,
+        : null),
       elapsedS: (Date.now() - start) / 1000,
     });
   } catch (e: any) {
@@ -673,7 +676,18 @@ function getHermesSessionMessagesFromRecord(opts: SessionMessagesOpts): SessionM
 
 async function getHermesSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult> {
   const fromJson = getHermesSessionMessagesFromJson(opts);
-  if (fromJson && fromJson.totalTurns > 0) return fromJson;
+  if (fromJson && fromJson.totalTurns > 0) {
+    const hasAssistant = (fromJson.richMessages || []).some(message =>
+      message.role === 'assistant' && (
+        String(message.text || '').trim()
+        || message.blocks?.some(block => String(block.content || '').trim())
+      ),
+    );
+    if (hasAssistant) return fromJson;
+    const fromRecord = getHermesSessionMessagesFromRecord(opts);
+    if ((fromRecord.richMessages || []).some(message => message.role === 'assistant')) return fromRecord;
+    return fromJson;
+  }
   return getHermesSessionMessagesFromRecord(opts);
 }
 
@@ -839,7 +853,59 @@ const HermesDriver: AgentDriver = {
   // Hermes locks the model at profile-binding time. The ACP `session/set_model`
   // hook exists but is unreliable across providers in current Hermes builds, so
   // pikiclaw treats the model as fixed for the session and hides the picker.
-  capabilities: { fork: false, modelSwitch: false },
+  capabilities: {
+    fork: false,
+    modelSwitch: false,
+    plan: {
+      mode: 'unsupported',
+      note: 'Enable only after ACP reports an explicit plan lifecycle capability.',
+    },
+    goal: {
+      mode: 'portable',
+      source: 'pikiclaw goal.json',
+      statusSource: 'pikiclaw session metadata',
+      commands: ['/goal'],
+      actions: ['set', 'pause', 'resume', 'clear', 'status'],
+    },
+    humanInput: {
+      mode: 'portable',
+      source: 'im_ask_user MCP bridge',
+      actions: ['ask'],
+    },
+    approval: {
+      mode: 'portable',
+      source: 'pikiclaw interaction UI',
+      actions: ['approveTool'],
+    },
+    artifacts: {
+      mode: 'portable',
+      source: 'pikiclaw transcript rendering',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'native',
+      source: 'ACP session id',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'unsupported',
+      note: 'No verified Hermes/ACP fork capability.',
+    },
+    steer: {
+      mode: 'unsupported',
+      note: 'No verified Hermes/ACP in-place steering channel.',
+    },
+    mcp: {
+      mode: 'native',
+      source: 'ACP mcpServers',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'portable',
+      source: 'MCP/tools',
+      actions: ['generate', 'render'],
+    },
+  },
   // Hermes is BYOK-only — every Profile kind is fair game.
   acceptedProviderKinds: ['anthropic', 'openai', 'openai-compatible', 'google'],
   doStream: doHermesStream,

@@ -2118,7 +2118,64 @@ class ClaudeDriver implements AgentDriver {
   readonly id = 'claude';
   readonly cmd = 'claude';
   readonly thinkLabel = 'Thinking';
-  readonly capabilities = { fork: true, modelSwitch: true };
+  readonly capabilities = {
+    fork: true,
+    modelSwitch: true,
+    plan: {
+      mode: 'native',
+      source: 'TodoWrite/TaskCreate/TaskUpdate',
+      statusSource: 'transcript',
+      commands: ['/plan'],
+      actions: ['start', 'clarify', 'approve', 'cancel', 'implement'],
+    },
+    goal: {
+      mode: 'native',
+      source: '/goal',
+      statusSource: 'goal_status transcript attachment',
+      commands: ['/goal'],
+      actions: ['set', 'clear', 'status'],
+      note: 'Claude native goal does not expose pause/resume.',
+    },
+    humanInput: {
+      mode: 'portable',
+      source: 'im_ask_user MCP bridge',
+      actions: ['ask'],
+    },
+    approval: {
+      mode: 'native',
+      source: 'Claude permission mode',
+      actions: ['approveTool'],
+    },
+    artifacts: {
+      mode: 'native',
+      source: 'tool and transcript events',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'native',
+      source: 'Claude transcript resume',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'native',
+      source: 'Claude fork session',
+      actions: ['fork'],
+    },
+    steer: {
+      mode: 'unsupported',
+      note: 'No verified in-place steering channel for Claude CLI.',
+    },
+    mcp: {
+      mode: 'native',
+      source: 'Claude MCP config',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'portable',
+      source: 'MCP/tools',
+      actions: ['generate', 'render'],
+    },
+  } satisfies import('../types.js').AgentDriverCapabilities;
   // Claude Code BYOK routes through ANTHROPIC_BASE_URL — accepts both
   // first-party Anthropic and any openai-compatible provider that exposes an
   // Anthropic-protocol-shaped endpoint (OpenRouter `/api/v1`, DeepSeek

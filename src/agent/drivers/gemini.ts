@@ -1034,6 +1034,62 @@ class GeminiDriver implements AgentDriver {
   readonly id = 'gemini';
   readonly cmd = 'gemini';
   readonly thinkLabel = 'Thinking';
+  readonly capabilities = {
+    fork: false,
+    modelSwitch: true,
+    plan: {
+      mode: 'native',
+      source: 'enter_plan_mode/exit_plan_mode/write_todos',
+      statusSource: 'Gemini stream events',
+      commands: ['/plan'],
+      actions: ['start', 'clarify', 'approve', 'cancel', 'implement'],
+    },
+    goal: {
+      mode: 'portable',
+      source: 'pikiclaw goal.json',
+      statusSource: 'pikiclaw session metadata',
+      commands: ['/goal'],
+      actions: ['set', 'pause', 'resume', 'clear', 'status'],
+    },
+    humanInput: {
+      mode: 'native',
+      source: 'ask_user tool event',
+      actions: ['ask'],
+    },
+    approval: {
+      mode: 'native',
+      source: 'Gemini approval mode',
+      actions: ['approveTool'],
+    },
+    artifacts: {
+      mode: 'portable',
+      source: 'pikiclaw transcript rendering',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'native',
+      source: 'Gemini session files',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'unsupported',
+      note: 'No verified Gemini native fork protocol.',
+    },
+    steer: {
+      mode: 'unsupported',
+      note: 'No verified Gemini in-place steering channel.',
+    },
+    mcp: {
+      mode: 'native',
+      source: 'Gemini CLI MCP integration',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'portable',
+      source: 'MCP/tools',
+      actions: ['generate', 'render'],
+    },
+  } satisfies import('../types.js').AgentDriverCapabilities;
   readonly acceptedProviderKinds = ['google'] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doGeminiStream(opts); }

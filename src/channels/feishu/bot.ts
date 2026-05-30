@@ -43,6 +43,7 @@ import {
   getWorkspacesData,
   resolveSkillPrompt,
   handleGoalCommand,
+  handlePlanCommand,
 } from '../../bot/commands.js';
 import {
   buildAgentsCommandView,
@@ -553,6 +554,15 @@ export class FeishuBot extends Bot {
 
   private async cmdGoal(ctx: FeishuContext, args: string) {
     const reply = await handleGoalCommand(this, ctx.chatId, args);
+    if (reply == null) {
+      await ctx.reply('No session selected. Use /sessions to pick one first.');
+      return;
+    }
+    await ctx.reply(reply);
+  }
+
+  private async cmdPlan(ctx: FeishuContext, args: string) {
+    const reply = await handlePlanCommand(this, ctx.chatId, args);
     if (reply == null) {
       await ctx.reply('No session selected. Use /sessions to pick one first.');
       return;
@@ -1146,6 +1156,7 @@ export class FeishuBot extends Bot {
         case 'models':   await this.cmdModels(ctx, args); return;
         case 'mode':     await this.cmdMode(ctx); return;
         case 'skills':   await this.cmdSkills(ctx); return;
+        case 'plan':     await this.cmdPlan(ctx, args); return;
         case 'goal':     await this.cmdGoal(ctx, args); return;
         case 'stop':     await this.cmdStop(ctx); return;
         case 'status':   await this.cmdStatus(ctx); return;

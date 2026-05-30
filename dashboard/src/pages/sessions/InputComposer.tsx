@@ -24,6 +24,8 @@ type BuiltinComposerCommand = {
   insert: string;
   labelKey: string;
   descriptionKey: string;
+  capability?: 'plan' | 'goal' | 'fork' | 'resume';
+  capabilityAction?: string;
   aliases?: string[];
 };
 
@@ -46,6 +48,8 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     insert: '/goal ',
     labelKey: 'hub.commandGoal',
     descriptionKey: 'hub.commandGoalDesc',
+    capability: 'goal',
+    capabilityAction: 'set',
     aliases: ['objective', 'persistent goal', '目标'],
   },
   {
@@ -53,6 +57,8 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     insert: '/goal pause',
     labelKey: 'hub.commandGoalPause',
     descriptionKey: 'hub.commandGoalPauseDesc',
+    capability: 'goal',
+    capabilityAction: 'pause',
     aliases: ['pause goal', '暂停'],
   },
   {
@@ -60,6 +66,8 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     insert: '/goal resume',
     labelKey: 'hub.commandGoalResume',
     descriptionKey: 'hub.commandGoalResumeDesc',
+    capability: 'goal',
+    capabilityAction: 'resume',
     aliases: ['resume goal', '恢复'],
   },
   {
@@ -67,6 +75,8 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     insert: '/goal clear',
     labelKey: 'hub.commandGoalClear',
     descriptionKey: 'hub.commandGoalClearDesc',
+    capability: 'goal',
+    capabilityAction: 'clear',
     aliases: ['clear goal', 'cancel goal', '清除'],
   },
   {
@@ -74,6 +84,8 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
     insert: '/plan ',
     labelKey: 'hub.commandPlan',
     descriptionKey: 'hub.commandPlanDesc',
+    capability: 'plan',
+    capabilityAction: 'start',
     aliases: ['planning', 'todo', '计划'],
   },
   {
@@ -498,6 +510,22 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     }
   }, [editDraft, onEditDraftConsumed, persistDraft]);
 
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: string }>).detail;
+      const text = typeof detail?.text === 'string' ? detail.text : '';
+      if (!text) return;
+      setInput(text);
+      persistDraft(text);
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    };
+    window.addEventListener('pikiclaw:composer-insert', handler);
+    return () => window.removeEventListener('pikiclaw:composer-insert', handler);
+  }, [persistDraft]);
+
   // Fetch available skills when workdir changes
   useEffect(() => {
     if (!workdir) return;
@@ -514,6 +542,22 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     const match = input.match(/^\/([^\n]*)$/);
     return match ? match[1].trimStart().toLowerCase() : null;
   })() : null;
+  const activeCommandAgent = selectedAgent
+    || session.agent
+    || agents.find(a => a.isDefault)?.agent
+    || agents.find(a => a.installed)?.agent
+    || '';
+  const activeCommandCapabilities = agents.find(a => a.agent === activeCommandAgent)?.capabilities || null;
+  const capabilityModeForCommand = useCallback((cmd: BuiltinComposerCommand): 'native' | 'portable' | 'unsupported' | null => {
+    if (!cmd.capability) return null;
+    if (!activeCommandCapabilities) return null;
+    if (cmd.capability === 'fork') return activeCommandCapabilities.forkCapability?.mode || (activeCommandCapabilities.fork ? 'native' : 'unsupported');
+    const descriptor = activeCommandCapabilities[cmd.capability];
+    if (cmd.capabilityAction && descriptor?.actions?.length && !descriptor.actions.includes(cmd.capabilityAction)) {
+      return 'unsupported';
+    }
+    return descriptor?.mode || 'unsupported';
+  }, [activeCommandCapabilities]);
   const commandOptions = useMemo<ComposerCommandOption[]>(() => {
     if (commandQuery === null) return [];
     const matches = (values: Array<string | null | undefined>) => {
@@ -521,13 +565,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       return values.filter(Boolean).join(' ').toLowerCase().includes(commandQuery);
     };
     const builtins: ComposerCommandOption[] = BUILTIN_COMPOSER_COMMANDS
+      .filter(cmd => capabilityModeForCommand(cmd) !== 'unsupported')
       .filter(cmd => matches([cmd.command, cmd.insert, ...(cmd.aliases || [])]))
       .map(cmd => ({ kind: 'builtin', ...cmd }));
     const skillOptions: ComposerCommandOption[] = skills
       .filter(skill => matches([skill.name, skill.label, skill.description]))
       .map(skill => ({ kind: 'skill', command: skill.name, skill }));
     return [...builtins, ...skillOptions].slice(0, 12);
-  }, [commandQuery, skills]);
+  }, [capabilityModeForCommand, commandQuery, skills]);
 
   // Reset selected index when filtered list changes
   useEffect(() => { setSkillMenuIndex(0); }, [skillMenuOpen, input]);
@@ -1512,6 +1557,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
               <div className="space-y-0.5">
                 {commandOptions.map((option, idx) => {
                   const isBuiltin = option.kind === 'builtin';
+                  const capabilityMode = isBuiltin ? capabilityModeForCommand(option) : null;
                   const title = isBuiltin
                     ? t(option.labelKey)
                     : (option.skill.label || option.skill.name);
@@ -1535,7 +1581,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                     >
                       <span className="min-w-0 truncate font-mono text-[12px] font-semibold">/{option.command}</span>
                       <span className="rounded border border-edge/25 bg-control px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-fg-5">
-                        {isBuiltin ? t('hub.commandBuiltIn') : t('hub.commandSkill')}
+                        {capabilityMode === 'native'
+                          ? 'Native'
+                          : capabilityMode === 'portable'
+                            ? 'Portable'
+                            : isBuiltin ? t('hub.commandBuiltIn') : t('hub.commandSkill')}
                       </span>
                       <span className="min-w-0">
                         {title && <span className="block truncate text-[11.5px] font-medium text-fg-3">{title}</span>}

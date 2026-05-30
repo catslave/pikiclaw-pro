@@ -286,6 +286,38 @@ export interface StreamOpts {
   };
 }
 
+export type AgentCapabilityMode = 'native' | 'portable' | 'unsupported';
+
+export type AgentCapabilityAction =
+  | 'start'
+  | 'clarify'
+  | 'approve'
+  | 'cancel'
+  | 'implement'
+  | 'set'
+  | 'pause'
+  | 'resume'
+  | 'clear'
+  | 'status'
+  | 'ask'
+  | 'approveTool'
+  | 'render'
+  | 'recover'
+  | 'fork'
+  | 'steer'
+  | 'useMcp'
+  | 'generate';
+
+export interface AgentCapabilityDescriptor {
+  mode: AgentCapabilityMode;
+  label?: string;
+  source?: string;
+  statusSource?: string;
+  commands?: string[];
+  actions?: AgentCapabilityAction[];
+  note?: string;
+}
+
 /** Static capability flags advertised by an AgentDriver. */
 export interface AgentDriverCapabilities {
   /** Driver supports forking a session into a new branch. */
@@ -297,6 +329,26 @@ export interface AgentDriverCapabilities {
    * profile-binding time and is not switchable per-session via ACP today).
    */
   modelSwitch: boolean;
+  /** Agent-native or pikiclaw-portable plan lifecycle support. */
+  plan?: AgentCapabilityDescriptor;
+  /** Persistent objective support. Native means the agent owns the goal state. */
+  goal?: AgentCapabilityDescriptor;
+  /** Agent can request structured human input during a run. */
+  humanInput?: AgentCapabilityDescriptor;
+  /** Tool/action approval support. */
+  approval?: AgentCapabilityDescriptor;
+  /** Structured artifacts surfaced back into the current chat. */
+  artifacts?: AgentCapabilityDescriptor;
+  /** Resume/recover an existing session. */
+  resume?: AgentCapabilityDescriptor;
+  /** Fork/branch an existing session. Mirrors `fork` for newer clients. */
+  forkCapability?: AgentCapabilityDescriptor;
+  /** Steer an active turn in-place. */
+  steer?: AgentCapabilityDescriptor;
+  /** MCP/tool bridge support. */
+  mcp?: AgentCapabilityDescriptor;
+  /** Native image generation event support. */
+  imageGeneration?: AgentCapabilityDescriptor;
 }
 
 /** Result returned by a completed agent stream. */

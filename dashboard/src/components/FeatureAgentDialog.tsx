@@ -25,7 +25,7 @@ function parseSessionKeyValue(value: string | null | undefined): { agent: string
 }
 
 export interface FeatureAgentDialogConfig {
-  kind: 'mcp' | 'skill' | 'jira-task';
+  kind: 'mcp' | 'skill' | 'jira-task' | 'agent';
   title: string;
   description: string;
   assistantName: string;
@@ -63,12 +63,20 @@ export function FeatureAgentDialog({
   const [toolWindowOpen, setToolWindowOpen] = useState(false);
 
   const assistantMeta = useMemo<AgentAssistant>(() => {
-    const surfaceId = config.kind === 'mcp' ? 'mcp' : config.kind === 'skill' ? 'skills' : 'dashboard';
+    const surfaceId = config.kind === 'mcp'
+      ? 'mcp'
+      : config.kind === 'skill'
+        ? 'skills'
+        : config.kind === 'agent'
+          ? 'agents'
+          : 'dashboard';
     const objectTypes = config.kind === 'mcp'
       ? ['mcp-server', 'mcp-auth']
       : config.kind === 'skill'
         ? ['skill', 'skill-prompt']
-        : ['task', 'jira-task'];
+        : config.kind === 'agent'
+          ? ['agent', 'assistant', 'model', 'profile']
+          : ['task', 'jira-task'];
     return {
       id: `feature-${config.kind}-creator`,
       name: config.assistantName,
@@ -83,7 +91,9 @@ export function FeatureAgentDialog({
         ? ['chat', 'create-mcp', 'configure-auth', 'test-tools']
         : config.kind === 'skill'
           ? ['chat', 'create-skill', 'edit-skill', 'test-skill']
-          : ['chat', 'create-task'],
+          : config.kind === 'agent'
+            ? ['chat', 'create-agent', 'create-assistant', 'configure-model', 'test-agent']
+            : ['chat', 'create-task'],
       builtIn: true,
       enabled: true,
       createdAt: new Date(0).toISOString(),
@@ -108,12 +118,22 @@ export function FeatureAgentDialog({
       ? 'Target surface: Extensions > MCP. You can create or update MCP configuration, validate required URL/token/command/env fields, and tell the user exactly when a Pikiclaw restart is required.'
       : config.kind === 'skill'
         ? 'Target surface: Extensions > Skills. You can create or update a Codex/Pikiclaw skill with a clear SKILL.md, trigger rules, workflow, scripts or templates when needed, and validation steps.'
-        : 'Target surface: Jira dashboard task creation. Guide the user from rough intent to a clear task with goal, boundary, acceptance points, workspace, owner mode, and execution mode.';
+        : config.kind === 'agent'
+          ? 'Target surface: Agents. You can help create or configure an agent/assistant entry, choose runtime driver boundaries, define model/profile binding, test steps, prompt scope, and whether the result belongs in Available Agents or Agent Assistants.'
+          : 'Target surface: Jira dashboard task creation. Guide the user from rough intent to a clear task with goal, boundary, acceptance points, workspace, owner mode, and execution mode.';
+    const creationMode = config.kind === 'agent'
+      ? [
+          'Work as a confirmation-first agent creation assistant.',
+          'Do not execute install commands, shell scripts, package managers, network installers, or file/config edits until the user explicitly confirms a proposed plan.',
+          'If the user provides an install URL or command, summarize what it would do, identify the target driver/config files, list the validation/test path, and ask for confirmation before running anything.',
+          'Only output a generated UI payload after the agent/assistant/config was actually created or after the user explicitly asks for a draft card.',
+        ].join(' ')
+      : 'Work as an assisted-creation agent. Start by asking concise clarifying questions only when required. Once enough information is available, perform the creation/configuration work directly when tools and files are available. If the result needs a restart, validation, or user-provided secret, say that explicitly.';
     return [
       `You are ${config.assistantName}.`,
       `Responsibility: ${config.assistantResponsibility}`,
       scopeHint,
-      'Work as an assisted-creation agent. Start by asking concise clarifying questions only when required. Once enough information is available, perform the creation/configuration work directly when tools and files are available. If the result needs a restart, validation, or user-provided secret, say that explicitly.',
+      creationMode,
       generatedObjectInstruction(assistantMeta),
       `Workspace: ${runtimeWorkdir || 'unknown'}`,
       `User request:\n${draft.trim()}`,
@@ -199,7 +219,7 @@ export function FeatureAgentDialog({
     }
   }, [activeSession, assistantMeta.objectTypes, generated.object?.type, locale, runtimeWorkdir, sendingGeneratedAction, toast]);
 
-  const transcriptFooter = sessionForPanel ? (
+  const transcriptFooter = sessionForPanel && generated.object ? (
     <GeneratedObjectBlock
       locale={locale}
       assistant={assistantMeta}

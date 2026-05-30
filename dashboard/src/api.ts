@@ -46,6 +46,8 @@ import type {
   SkillCatalogItem,
   RemoteSkillInfo,
   SessionHubResult,
+  SessionGoalView,
+  SessionPlanView,
   SessionMessagesResult,
   SkillInfo,
   StreamActivityEvents,
@@ -156,7 +158,9 @@ export const api = {
   updateAgent: (agent: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/agent-update', { agent }, { timeoutMs: 600_000, ...opts }),
   checkAgentHealth: (agent: string, opts?: ApiRequestOptions) =>
-    post<AgentHealthResult>('/api/agent-health', { agent }, { timeoutMs: 60_000, ...opts }),
+    post<AgentHealthResult>('/api/agent-health', { agent }, { timeoutMs: 12_000, ...opts }),
+  startAgentService: (agent: string, opts?: ApiRequestOptions) =>
+    post<AgentHealthResult>('/api/agent-service', { agent, action: 'start' }, { timeoutMs: 120_000, ...opts }),
   saveConfig: (patch: Record<string, unknown>) => post<{ ok: boolean; configPath?: string }>('/api/config', patch),
   validateTelegramConfig: (token: string, allowedChatIds = '', opts?: ApiRequestOptions) =>
     post<{ ok: boolean; error?: string | null; bot?: { username: string; displayName?: string }; normalizedAllowedChatIds?: string }>(
@@ -577,6 +581,34 @@ export const api = {
       { method: 'POST', body, timeoutMs: 30_000, ...opts },
     );
   },
+  getSessionGoal: (workdir: string, agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; goal?: SessionGoalView | null; error?: string }>(
+      `/api/session-hub/session/goal?workdir=${encodeURIComponent(workdir)}&agent=${encodeURIComponent(agent)}&sessionId=${encodeURIComponent(sessionId)}`,
+      opts,
+    ),
+  getSessionPlan: (workdir: string, agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; plan?: SessionPlanView | null; error?: string }>(
+      `/api/session-hub/session/plan?workdir=${encodeURIComponent(workdir)}&agent=${encodeURIComponent(agent)}&sessionId=${encodeURIComponent(sessionId)}`,
+      opts,
+    ),
+  pauseSessionGoal: (workdir: string, agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; goal?: SessionGoalView | null; error?: string }>(
+      '/api/session-hub/session/goal/pause',
+      { workdir, agent, sessionId },
+      opts,
+    ),
+  resumeSessionGoal: (workdir: string, agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; goal?: SessionGoalView | null; error?: string }>(
+      '/api/session-hub/session/goal/resume',
+      { workdir, agent, sessionId },
+      opts,
+    ),
+  clearSessionGoal: (workdir: string, agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string }>(
+      '/api/session-hub/session/goal/clear',
+      { workdir, agent, sessionId },
+      opts,
+    ),
   /**
    * Fork a session at `atTurn` and queue a new prompt against the freshly
    * created child. Returns the queued task plus the child's pending sessionKey

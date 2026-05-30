@@ -43,6 +43,11 @@ describe('Pro workflow store', () => {
     expect(ownerSurfaceIds).toEqual(['agents', 'dashboard', 'extensions', 'mcp', 'skills']);
     expect(ownerSurfaceIds).not.toContain('usage');
     expect(ownerSurfaceIds).not.toContain('system');
+    expect(assistants).toContainEqual(expect.objectContaining({
+      id: 'assistant_hermes_acp',
+      name: 'Hermes ACP Assistant',
+      preferredAgents: ['hermes'],
+    }));
 
     const promptInfo = getAssistantPrompt('assistant_dashboard_owner');
     expect(promptInfo.prompt).toContain('backlog -> refinement -> working -> done');

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import { useStore } from '../../store';
-import type { AgentAssistant, AgentRuntimeStatus, AssistantHistoryItem, SessionInfo } from '../../types';
+import type { AgentAssistant, AgentHealthResult, AgentRuntimeStatus, AssistantHistoryItem, SessionInfo } from '../../types';
 import { cn } from '../../utils';
 import { BrandIcon } from '../BrandIcon';
 import { Badge, Button, CountBadge, Modal, ModalHeader, Spinner } from '../ui';
@@ -21,6 +21,16 @@ const OPEN_SESSIONS_STORAGE_KEY = 'pikiclaw:session-workspace:open-sessions:v1';
 const ACTIVE_SLOT_STORAGE_KEY = 'pikiclaw:session-workspace:active-slot:v1';
 
 type AssistantRunMode = 'chat' | 'create' | 'test' | 'prompt';
+type AssistantTestStatus = 'idle' | 'running' | 'ok' | 'failed';
+
+interface AssistantTestState {
+  healthStatus: AssistantTestStatus;
+  chatStatus: 'pending' | 'running' | 'ok' | 'failed';
+  healthResult?: AgentHealthResult | null;
+  chatSession?: { agent: string; sessionId: string } | null;
+  chatSessionKey?: string | null;
+  error?: string | null;
+}
 
 function L(locale: string, zh: string, en: string): string {
   return locale === 'zh-CN' ? zh : en;
@@ -64,7 +74,7 @@ function actionPromptForMode(mode: AssistantRunMode, assistant: AgentAssistant, 
   const base = initialPrompt?.trim();
   if (base) return base;
   if (mode === 'create') return 'Help me create the right object for this page. Start by asking what I want to create and what constraints matter.';
-  if (mode === 'test') return 'Test this assistant with a realistic short conversation. Identify whether the prompt, scope, and allowed actions are working.';
+  if (mode === 'test') return 'Fast local test: validate assistant wiring and the selected runtime agent. Do not start a model conversation.';
   if (mode === 'prompt') return 'Review your current prompt with me. When we agree on the change, output the complete replacement prompt as a prompt patch.';
   return `Help me work on the ${assistant.surfaceId || 'current'} page.`;
 }
@@ -230,6 +240,7 @@ export function AssistantRunDialog({
   const [toolWindowOpen, setToolWindowOpen] = useState(false);
   const [applyingPrompt, setApplyingPrompt] = useState(false);
   const [sendingGeneratedAction, setSendingGeneratedAction] = useState(false);
+  const [assistantTest, setAssistantTest] = useState<AssistantTestState>({ healthStatus: 'idle', chatStatus: 'pending' });
 
   useEffect(() => {
     if (!open || !assistant) return;
@@ -243,7 +254,56 @@ export function AssistantRunDialog({
     setToolWindowOpen(false);
     setApplyingPrompt(false);
     setSendingGeneratedAction(false);
+    setAssistantTest({ healthStatus: 'idle', chatStatus: 'pending' });
   }, [assistant, defaultAgent, floating, initialPrompt, mode, open]);
+
+  const runAssistantTest = useCallback(async (targetAgent = agent) => {
+    if (!assistant || !targetAgent || busy) return;
+    setAgent(targetAgent);
+    setBusy(true);
+    setAssistantTest({ healthStatus: 'running', chatStatus: 'pending', healthResult: null, chatSession: null, chatSessionKey: null, error: null });
+    try {
+      const result = await api.checkAgentHealth(targetAgent, { timeoutMs: 12_000 });
+      setAssistantTest(current => ({
+        ...current,
+        healthStatus: result.ok ? 'ok' : 'failed',
+        chatStatus: result.ok ? 'running' : 'pending',
+        healthResult: result,
+        error: result.ok ? null : result.detail,
+      }));
+      if (!result.ok) return;
+      const chat = await api.sendSessionMessage(
+        runtimeWorkdir,
+        targetAgent,
+        '',
+        'Reply with exactly OK. Do not use tools.',
+        { timeoutMs: 45_000 },
+      );
+      if (!chat.ok) throw new Error(chat.error || 'Chat check failed');
+      const session = parseSessionKeyValue(chat.sessionKey);
+      setAssistantTest(current => ({
+        ...current,
+        chatStatus: session ? 'running' : 'failed',
+        chatSession: session,
+        chatSessionKey: chat.sessionKey || null,
+        error: session ? current.error : 'Chat check did not return a session.',
+      }));
+    } catch (error) {
+      setAssistantTest(current => ({
+        ...current,
+        healthStatus: current.healthStatus === 'running' ? 'failed' : current.healthStatus,
+        chatStatus: current.healthStatus === 'ok' ? 'failed' : current.chatStatus,
+        error: error instanceof Error ? error.message : 'Assistant test failed',
+      }));
+    } finally {
+      setBusy(false);
+    }
+  }, [agent, assistant, busy, runtimeWorkdir]);
+
+  useEffect(() => {
+    if (!open || !assistant || mode !== 'test' || assistantTest.healthStatus !== 'idle') return;
+    void runAssistantTest(defaultAgent);
+  }, [assistant, assistantTest.healthStatus, defaultAgent, mode, open, runAssistantTest]);
 
   const fullPrompt = useMemo(() => {
     if (!assistant) return '';
@@ -357,17 +417,14 @@ export function AssistantRunDialog({
 
   const transcriptFooter = sessionForPanel && assistant ? (
     <div className="space-y-3">
-      {(mode === 'create' || generated.object) && (
+      {generated.object && (
         <GeneratedObjectBlock
           locale={locale}
           assistant={assistant}
           object={generated.object}
           loading={generated.loading || sendingGeneratedAction}
           error={generated.error}
-          onOpenFocus={() => {
-            if (generated.object) setToolWindowOpen(true);
-            else setLocalFloating(true);
-          }}
+          onOpenFocus={() => setToolWindowOpen(true)}
           onRunAction={sendGeneratedAction}
           onOpenPrompt={onOpenPrompt ? () => onOpenPrompt(assistant) : undefined}
         />
@@ -387,9 +444,19 @@ export function AssistantRunDialog({
   ) : null;
 
   const panelStyle = {
-    maxWidth: sessionForPanel ? 'min(1040px, calc(100vw - 32px))' : 'min(700px, calc(100vw - 32px))',
+    maxWidth: sessionForPanel ? 'min(1040px, calc(100vw - 32px))' : mode === 'test' ? 'min(560px, calc(100vw - 32px))' : 'min(700px, calc(100vw - 32px))',
     maxHeight: 'min(92vh, 860px)',
   } satisfies CSSProperties;
+
+  const testStatusText = assistantTest.chatStatus === 'running'
+    ? L(locale, 'Chat check 中', 'Chat check running')
+    : assistantTest.healthStatus === 'running'
+    ? L(locale, '检测中', 'Checking')
+    : assistantTest.healthStatus === 'ok'
+      ? L(locale, '可用', 'Available')
+      : assistantTest.healthStatus === 'failed' || assistantTest.chatStatus === 'failed'
+        ? L(locale, '不可用', 'Unavailable')
+        : L(locale, '待检测', 'Ready');
 
   const content = assistant ? (
     <div className="space-y-4">
@@ -403,7 +470,83 @@ export function AssistantRunDialog({
         <div className="mt-2 text-[12px] leading-relaxed text-fg-4">{assistant.responsibility}</div>
       </div>
 
-      {!sessionForPanel && (
+      {mode === 'test' && !sessionForPanel ? (
+        <div className="rounded-lg border border-edge bg-panel shadow-sm">
+          <div className="flex min-w-0 items-center justify-between gap-3 border-b border-edge px-3 py-2.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <BrandIcon brand={agent as any} size={16} />
+              <div className="min-w-0">
+                <div className="truncate text-[13px] font-semibold text-fg-2">{testStatusText}</div>
+                <div className="truncate text-[11px] text-fg-5">
+                  {L(locale, '先 health check，再发送真实模型消息', 'Health check first, then a real model message')}
+                </div>
+              </div>
+            </div>
+            {(assistantTest.healthStatus === 'running' || assistantTest.chatStatus === 'running') && <Spinner className="h-4 w-4" />}
+          </div>
+          <div className="space-y-2.5 px-3 py-3">
+            {[
+              {
+                label: L(locale, 'Assistant 配置', 'Assistant config'),
+                detail: `${assistant.kind || 'assistant'} · ${(assistant.allowedActions || []).join(', ') || 'chat'}`,
+                state: 'ok',
+              },
+              {
+                label: L(locale, '选择运行时', 'Runtime selected'),
+                detail: `${agent}${assistant.preferredAgents?.length ? ` · preferred: ${assistant.preferredAgents.join(', ')}` : ''}`,
+                state: 'ok',
+              },
+              {
+                label: L(locale, 'CLI / 认证检测', 'CLI / auth check'),
+                detail: assistantTest.healthStatus === 'running'
+                  ? L(locale, '正在检查本地安装、认证和基础配置', 'Checking local install, auth, and basic config')
+                  : assistantTest.healthResult?.detail || assistantTest.error || L(locale, '尚未运行', 'Not run yet'),
+                state: assistantTest.healthStatus,
+              },
+              {
+                label: L(locale, '真实 Chat 检测', 'Real chat check'),
+                detail: assistantTest.chatStatus === 'pending'
+                  ? L(locale, '等待 health check 通过后发送真实消息。', 'Waiting for health check before sending a real message.')
+                  : assistantTest.chatStatus === 'running'
+                    ? L(locale, '已发送：Reply with exactly OK。下方显示真实会话和过程。', 'Sent: Reply with exactly OK. The live session is shown below.')
+                    : assistantTest.error || '',
+                state: assistantTest.chatStatus,
+              },
+            ].map(step => (
+              <div key={step.label} className="flex min-w-0 items-start gap-2 rounded-md border border-edge/65 bg-panel-alt px-2.5 py-2">
+                <span className={cn(
+                  'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
+                  step.state === 'running' ? 'animate-pulse bg-emerald-400/70' : step.state === 'failed' ? 'bg-rose-400/80' : 'bg-emerald-400/80',
+                )} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[12px] font-semibold text-fg-2">{step.label}</div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">{step.detail}</div>
+                </div>
+              </div>
+            ))}
+            {assistantTest.healthResult?.output && (
+              <pre className="max-h-44 overflow-auto rounded-md border border-edge/70 bg-inset px-2.5 py-2 text-[11px] leading-relaxed text-fg-4">
+                {assistantTest.healthResult.output}
+              </pre>
+            )}
+            {assistantTest.chatSession && (
+              <div className="h-[min(42vh,430px)] min-h-[300px] overflow-hidden rounded-lg border border-edge bg-[var(--th-session-bg)]">
+                <SessionPanel
+                  session={{
+                    agent: assistantTest.chatSession.agent,
+                    sessionId: assistantTest.chatSession.sessionId,
+                    workdir: runtimeWorkdir,
+                    workspacePath: runtimeWorkdir,
+                    runState: 'running',
+                  } as SessionInfo}
+                  workdir={runtimeWorkdir}
+                  active
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      ) : !sessionForPanel && (
         <>
           <label className="block space-y-1.5">
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agent</div>
@@ -462,8 +605,13 @@ export function AssistantRunDialog({
               {L(locale, 'Focus mode', 'Focus mode')}
             </Button>
           )}
-          <Button variant="ghost" onClick={onClose} disabled={busy}>{L(locale, '关闭', 'Close')}</Button>
-          {!sessionForPanel && (
+          <Button variant="ghost" onClick={onClose} disabled={busy && mode !== 'test'}>{L(locale, '关闭', 'Close')}</Button>
+          {!sessionForPanel && mode === 'test' ? (
+            <Button variant="primary" onClick={() => void runAssistantTest()} disabled={busy}>
+              {busy ? <Spinner /> : null}
+              {assistantTest.healthStatus === 'idle' ? L(locale, '检测', 'Check') : L(locale, '重新检测', 'Retry')}
+            </Button>
+          ) : !sessionForPanel && (
             <Button variant="primary" onClick={start} disabled={!draft.trim() || !runtimeWorkdir || busy}>
               {busy ? <Spinner /> : null}
               {L(locale, '启动', 'Start')}

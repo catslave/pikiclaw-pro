@@ -1806,7 +1806,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (!workdir) return;
     handledAgentTestChatRef.current = key;
     setNewSessionTemplateAgent(agent);
-    setNewSessionInitialDraftPrompt(String(navState?.newSessionPrompt || 'Say OK only.').trim() || 'Say OK only.');
+    setNewSessionInitialDraftPrompt(String(navState?.newSessionPrompt || 'Reply with exactly OK. Do not use tools.').trim() || 'Reply with exactly OK. Do not use tools.');
     setNewSessionInitialAutoSend(navState?.newSessionAutoSend === true);
     setShowNewSession(workdir);
     setActiveSlotIndex(openSessionsRef.current.length);
@@ -2571,6 +2571,55 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setDeletingSession(false);
     }
   }, [deletingSession, setOpenSideChatsByParent, t, toastSession]);
+
+  const renderDeleteSessionMenuItem = useCallback((target: SessionActionTarget) => {
+    const deleteKey = sessionSlotStorageKey(target);
+    const deleteArmed = deleteConfirmKey === deleteKey;
+    return (
+      <div
+        className="relative mx-1 h-8 w-[calc(100%-0.5rem)] overflow-hidden rounded"
+        onMouseLeave={() => {
+          if (deleteArmed && !deletingSession) setDeleteConfirmKey(null);
+        }}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          disabled={deletingSession && deleteArmed}
+          onClick={() => {
+            if (!deleteArmed) setDeleteConfirmKey(deleteKey);
+          }}
+          className={cn(
+            'flex h-8 w-full items-center gap-2 rounded px-2 text-left text-[12px] font-medium text-fg-3 transition-[background,color] duration-150 focus-visible:outline-none',
+            'hover:bg-red-500/[0.10] hover:text-red-500 focus-visible:bg-red-500/[0.12] focus-visible:text-red-500',
+            deletingSession && deleteArmed && 'cursor-wait opacity-80',
+          )}
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
+          </svg>
+          <span className="min-w-0 truncate">{t('session.delete')}</span>
+        </button>
+        <button
+          type="button"
+          disabled={!deleteArmed || deletingSession}
+          onClick={event => {
+            event.stopPropagation();
+            if (!deleteArmed) return;
+            void executeDeleteSession(target);
+          }}
+          className={cn(
+            'absolute inset-0 inline-flex items-center justify-center rounded bg-red-500 px-2 text-[12px] font-semibold text-white shadow-sm transition-[transform,opacity] duration-200 ease-out hover:bg-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/35',
+            deleteArmed ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-full opacity-0',
+            deletingSession && deleteArmed && 'cursor-wait opacity-80',
+          )}
+          aria-label={t('session.confirmDelete')}
+        >
+          {deletingSession && deleteArmed ? t('session.deleting') : t('session.confirmDelete')}
+        </button>
+      </div>
+    );
+  }, [deleteConfirmKey, deletingSession, executeDeleteSession, t]);
 
   /* ── New session — transition after InputComposer creates it ── */
   const [newSessionPendingPrompt, setNewSessionPendingPrompt] = useState<string | null>(null);
@@ -6061,8 +6110,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         const left = Math.max(8, Math.min(sessionMenu.anchor.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
         const top = Math.min(sessionMenu.anchor.bottom + 4, window.innerHeight - 60);
         const canResetMultiRowHeight = isMultiChatLayout(effectiveChatLayout) && !taskFocusId && multiRowHeightPx != null;
-        const deleteKey = sessionSlotStorageKey(sessionMenu.target);
-        const deleteArmed = deleteConfirmKey === deleteKey;
         return (
           <div
             className="fixed z-[60] min-w-[176px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
@@ -6143,28 +6190,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {sessionMenu.target.archived ? t('session.restore') : t('session.archive')}
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              disabled={deletingSession && deleteArmed}
-              onClick={() => {
-                if (!deleteArmed) {
-                  setDeleteConfirmKey(deleteKey);
-                  return;
-                }
-                void executeDeleteSession(sessionMenu.target);
-              }}
-              className={cn(
-                menuItemClass('danger'),
-                deleteArmed && 'bg-red-500 text-white hover:bg-red-500 hover:text-white focus-visible:bg-red-500 focus-visible:text-white',
-                deletingSession && deleteArmed && 'cursor-wait opacity-80',
-              )}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
-              </svg>
-              {deleteArmed ? (deletingSession ? t('session.deleting') : t('session.confirmDelete')) : t('session.delete')}
-            </button>
+            {renderDeleteSessionMenuItem(sessionMenu.target)}
           </div>
         );
       })()}
@@ -6182,8 +6208,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         const menuInfo = menuSlot ? resolveSlotInfo(menuSlot) : null;
         const isMultiSlotMenu = isMultiChatLayout(effectiveChatLayout) && !taskFocusId && !multiSingleChatPresentation;
         const hideDuplicateSlotMenuActions = !isMultiSlotMenu && (effectiveChatLayout === 'single' || multiSingleChatPresentation);
-        const deleteKey = sessionSlotStorageKey(slotMenu.target);
-        const deleteArmed = deleteConfirmKey === deleteKey;
         return (
           <div
             className="fixed z-[60] min-w-[176px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
@@ -6263,28 +6287,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {slotMenu.target.archived ? t('session.restore') : t('session.archive')}
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              disabled={deletingSession && deleteArmed}
-              onClick={() => {
-                if (!deleteArmed) {
-                  setDeleteConfirmKey(deleteKey);
-                  return;
-                }
-                void executeDeleteSession(slotMenu.target);
-              }}
-              className={cn(
-                menuItemClass('danger'),
-                deleteArmed && 'bg-red-500 text-white hover:bg-red-500 hover:text-white focus-visible:bg-red-500 focus-visible:text-white',
-                deletingSession && deleteArmed && 'cursor-wait opacity-80',
-              )}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
-              </svg>
-              {deleteArmed ? (deletingSession ? t('session.deleting') : t('session.confirmDelete')) : t('session.delete')}
-            </button>
+            {renderDeleteSessionMenuItem(slotMenu.target)}
           </div>
         );
       })()}

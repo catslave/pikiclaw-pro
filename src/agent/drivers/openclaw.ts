@@ -7,6 +7,7 @@
  */
 
 import { registerDriver, type AgentDriver } from '../driver.js';
+import { processEnvWithNodeAtLeast } from '../../core/platform.js';
 import type {
   ModelListOpts,
   ModelListResult,
@@ -32,6 +33,7 @@ import {
 } from './simple-cli.js';
 
 const DEFAULT_OPENCLAW_AGENT = 'main';
+const OPENCLAW_NODE_MIN_VERSION = '22.19.0';
 
 const OPENCLAW_MODELS = [
   { id: 'openai/gpt-5.4', alias: 'OpenAI GPT-5.4' },
@@ -41,6 +43,15 @@ const OPENCLAW_MODELS = [
 
 function openclawModel(opts: StreamOpts): string | null {
   return (opts.openclawModel || opts.model || '').trim() || null;
+}
+
+function openclawEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  const env = processEnvWithNodeAtLeast(OPENCLAW_NODE_MIN_VERSION);
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string') out[key] = value;
+  }
+  return out;
 }
 
 function flagValue(args: string[], name: string): string | null {
@@ -162,6 +173,7 @@ export async function doOpenClawStream(opts: StreamOpts): Promise<StreamResult> 
       args: openclawArgs(runOpts, prompt, sessionId),
       model: openclawModel(runOpts),
       prompt,
+      env: openclawEnv(),
     }),
   });
 }
@@ -170,6 +182,60 @@ class OpenClawDriver implements AgentDriver {
   readonly id = 'openclaw';
   readonly cmd = 'openclaw';
   readonly thinkLabel = 'Thinking';
+  readonly capabilities = {
+    fork: false,
+    modelSwitch: true,
+    plan: {
+      mode: 'portable',
+      source: 'pikiclaw plan prompt',
+      commands: ['/plan'],
+      actions: ['start', 'clarify', 'approve', 'cancel', 'implement'],
+      note: 'OpenClaw capability probing is pending; not marked native.',
+    },
+    goal: {
+      mode: 'portable',
+      source: 'pikiclaw goal.json',
+      statusSource: 'pikiclaw session metadata',
+      commands: ['/goal'],
+      actions: ['set', 'pause', 'resume', 'clear', 'status'],
+    },
+    humanInput: {
+      mode: 'unsupported',
+      note: 'No verified OpenClaw ask-user event in the gateway JSON turn.',
+    },
+    approval: {
+      mode: 'unsupported',
+      note: 'No verified OpenClaw approval event in the gateway JSON turn.',
+    },
+    artifacts: {
+      mode: 'portable',
+      source: 'pikiclaw transcript rendering',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'portable',
+      source: 'OpenClaw session-key + pikiclaw transcript',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'unsupported',
+      note: 'No verified OpenClaw native fork protocol.',
+    },
+    steer: {
+      mode: 'unsupported',
+      note: 'No verified OpenClaw in-place steering channel.',
+    },
+    mcp: {
+      mode: 'portable',
+      source: 'pikiclaw MCP bridge',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'portable',
+      source: 'MCP/tools',
+      actions: ['generate', 'render'],
+    },
+  } satisfies import('../types.js').AgentDriverCapabilities;
   readonly acceptedProviderKinds = [] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doOpenClawStream(opts); }

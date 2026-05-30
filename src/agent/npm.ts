@@ -41,6 +41,9 @@ export function getAgentLabel(agent: string): string {
 }
 
 export function getAgentInstallCommand(agent: string): string | null {
+  if (agent === 'openclaw') {
+    return 'npm install -g openclaw@latest && openclaw setup && openclaw gateway install --force && openclaw gateway start';
+  }
   const pkg = getAgentPackage(agent);
   return pkg ? `npm install -g ${pkg}` : null;
 }

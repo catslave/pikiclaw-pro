@@ -2920,6 +2920,63 @@ class CodexDriver implements AgentDriver {
   readonly id = 'codex';
   readonly cmd = 'codex';
   readonly thinkLabel = 'Reasoning';
+  readonly capabilities = {
+    fork: false,
+    modelSwitch: true,
+    plan: {
+      mode: 'native',
+      source: 'turn/plan/updated + proposed_plan',
+      statusSource: 'codex app-server stream',
+      commands: ['/plan'],
+      actions: ['start', 'clarify', 'approve', 'cancel', 'implement'],
+    },
+    goal: {
+      mode: 'native',
+      source: 'thread/goal/* RPC',
+      statusSource: 'codex goals sqlite/app-server',
+      commands: ['/goal'],
+      actions: ['set', 'pause', 'resume', 'clear', 'status'],
+    },
+    humanInput: {
+      mode: 'native',
+      source: 'item/tool/requestUserInput',
+      actions: ['ask'],
+    },
+    approval: {
+      mode: 'native',
+      source: 'Codex app-server approval events',
+      actions: ['approveTool'],
+    },
+    artifacts: {
+      mode: 'native',
+      source: 'Codex stream items',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'native',
+      source: 'Codex rollout/thread id',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'unsupported',
+      note: 'Codex fork is not exposed through the current app-server contract.',
+    },
+    steer: {
+      mode: 'native',
+      source: 'Codex turn control',
+      actions: ['steer'],
+    },
+    mcp: {
+      mode: 'native',
+      source: 'session-scoped MCP bridge',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'native',
+      source: 'imageGenerationCall/image_generation_call',
+      actions: ['generate', 'render'],
+    },
+  } satisfies import('../types.js').AgentDriverCapabilities;
   readonly acceptedProviderKinds = ['openai', 'openai-compatible'] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doCodexStream(opts); }

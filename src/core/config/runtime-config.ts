@@ -12,7 +12,7 @@ export const DEFAULT_AGENT_MODELS: Record<Agent, string> = {
   copilot: 'gpt-5.3-codex',
   cursor: 'auto',
   gemini: 'gemini-3.1-pro-preview',
-  hermes: 'anthropic/claude-sonnet-4',
+  hermes: '',
   openclaw: '',
 };
 

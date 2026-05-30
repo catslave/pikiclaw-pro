@@ -3,8 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import { api } from '../../api';
 import { BrowserPanelModal } from '../../components/BrowserPanelModal';
 import { DirBrowser } from '../../components/DirBrowser';
-import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
-import { Badge, Button, ChevronIcon, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
+import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
 import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, JiraCycle, JiraSyncRun, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, SessionInfo, StageRun, StageSessionRef, TaskSpace, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
@@ -405,16 +404,14 @@ function taskBriefSummary(task: ProTask): string {
   return text.length > 220 ? `${text.slice(0, 220).trim()}...` : text;
 }
 
-function taskExpandedSummary(task: ProTask): string {
-  return cleanTaskDescription(task)
+function inferTaskTitle(description: string): string {
+  const firstLine = description
     .replace(/```([\s\S]*?)```/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/[>#*_`]/g, '')
     .split('\n')
-    .map(line => line.replace(/^\s*[-\u2022]\s*/, '').replace(/[ \t]+/g, ' ').trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+    .map(line => line.replace(/[>#*_`]/g, '').replace(/^\s*[-\u2022]\s*/, '').replace(/[ \t]+/g, ' ').trim())
+    .find(Boolean) || 'Untitled task';
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77).trim()}...` : firstLine;
 }
 
 function jiraRemoteSyncBlock(task: ProTask): string | null {
@@ -705,43 +702,64 @@ function CreateJiraTaskModal({
     }));
   }, [assistants, defaultAgent, defaultAssistantId, defaultWorkdir, open]);
 
+  const assistantLabel = assistants.find(assistant => assistant.id === draft.defaultAssistantId)?.name || 'Runtime default';
+  const workspaceLabel = workspaces.find(workspace => workspace.path === draft.workdir)?.name || workspaceShortLabel(draft.workdir) || 'Workspace';
+  const canCreate = !!(draft.title.trim() || draft.description.trim()) && !creating;
+
   return (
     <Modal open={open} onClose={onClose}>
-      <ModalHeader title={title} onClose={onClose} />
+      <ModalHeader
+        title={title}
+        description="Describe the task. Title is optional; Pikiclaw can create one from the description."
+        onClose={onClose}
+      />
       <div className="space-y-3">
-        <Input value={draft.title} onChange={event => setDraft(prev => ({ ...prev, title: event.target.value }))} placeholder="Title" />
         <textarea
           autoFocus
           value={draft.description}
           onChange={event => setDraft(prev => ({ ...prev, description: event.target.value }))}
-          placeholder="Description"
-          className="min-h-28 w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          placeholder="Describe what you want done, what success looks like, and any constraints..."
+          className="min-h-40 w-full resize-y rounded-lg border border-control-border bg-control px-3.5 py-3 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/65 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
         />
-        <div className="grid gap-2 md:grid-cols-3">
+        <Input
+          value={draft.title}
+          onChange={event => setDraft(prev => ({ ...prev, title: event.target.value }))}
+          placeholder="Title optional"
+        />
+        <div className="rounded-lg border border-edge/60 bg-panel-alt/45 px-3 py-2">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-fg-5">
+            <span className="font-medium text-fg-3">{assistantLabel}</span>
+            <span>·</span>
+            <span>{draft.defaultAgent}</span>
+            <span>·</span>
+            <span className="truncate">{workspaceLabel}</span>
+          </div>
+          <div className="grid gap-2 md:grid-cols-3">
+            <label className="space-y-1">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</div>
+              <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+                <option value="">Runtime default</option>
+                {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agent</div>
+              <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+                {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
+              </select>
+            </label>
           <label className="space-y-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Workspace</div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Workspace</div>
             <select value={draft.workdir} onChange={event => setDraft(prev => ({ ...prev, workdir: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
               {workspaces.map(ws => <option key={ws.path} value={ws.path}>{ws.name || ws.path.split('/').pop() || ws.path}</option>)}
             </select>
           </label>
-          <label className="space-y-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agent</div>
-            <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
-            </select>
-          </label>
-          <label className="space-y-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</div>
-            <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              <option value="">Runtime default</option>
-              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
-            </select>
-          </label>
+          </div>
         </div>
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose} disabled={creating}>Cancel</Button>
-        <Button variant="primary" disabled={!draft.title.trim() || creating} onClick={() => onCreate(draft)}>
+        <Button variant="primary" disabled={!canCreate} onClick={() => onCreate(draft)}>
           {creating ? <Spinner /> : null}
           Create
         </Button>
@@ -1340,19 +1358,7 @@ function taskFlowStatus(task: ProTask, step: (typeof TASK_FLOW_STEPS)[number], a
   return 'waiting';
 }
 
-function TaskFlowMap({
-  task,
-  busyStage,
-  stickyTopClassName = 'top-3',
-}: {
-  task: ProTask;
-  busyStage?: ProTaskStage | null;
-  stickyTopClassName?: string;
-}) {
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const scrollerRef = useRef<HTMLElement | null>(null);
-  const [expanded, setExpanded] = useState(true);
-  const [atBottom, setAtBottom] = useState(true);
+function TaskFlowMap({ task, busyStage, compact = false }: { task: ProTask; busyStage?: ProTaskStage | null; compact?: boolean }) {
   const activeStage = currentFlowStage(task, busyStage);
   const latestRun = latestTaskStageRun(task);
   const steps = TASK_FLOW_STEPS.map(step => ({ ...step, status: taskFlowStatus(task, step, activeStage) }));
@@ -1364,65 +1370,14 @@ function TaskFlowMap({
       ? `${activeStep.label} is current`
       : 'The first agent message will shape this flow.';
 
-  useEffect(() => {
-    setExpanded(true);
-    setAtBottom(true);
-  }, [task.id]);
-
-  useEffect(() => {
-    const node = rootRef.current;
-    if (!node) return undefined;
-    let parent = node.parentElement;
-    let scroller: HTMLElement | null = null;
-    while (parent) {
-      const style = window.getComputedStyle(parent);
-      if (/(auto|scroll|overlay)/.test(style.overflowY)) {
-        scroller = parent;
-        break;
-      }
-      parent = parent.parentElement;
-    }
-    if (!scroller) return undefined;
-    scrollerRef.current = scroller;
-    const updateFromScroll = () => {
-      const distanceToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-      const nextAtBottom = distanceToBottom <= 28;
-      setAtBottom(nextAtBottom);
-      setExpanded(nextAtBottom);
-    };
-    const frame = window.requestAnimationFrame(updateFromScroll);
-    scroller.addEventListener('scroll', updateFromScroll, { passive: true });
-    window.addEventListener('resize', updateFromScroll);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      scroller.removeEventListener('scroll', updateFromScroll);
-      window.removeEventListener('resize', updateFromScroll);
-      if (scrollerRef.current === scroller) scrollerRef.current = null;
-    };
-  }, [task.id]);
-
-  const revealFullProgress = () => {
-    if (atBottom) return;
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
-  };
-
   return (
     <div
-      ref={rootRef}
       className={cn(
-        'sticky z-10 mb-4 w-full max-w-[420px] rounded-xl border border-edge/65 bg-panel/90 px-3.5 shadow-[0_12px_32px_rgba(15,23,42,0.12)] backdrop-blur-md transition-[padding,box-shadow] duration-200',
-        stickyTopClassName,
-        expanded ? 'py-3' : 'py-2.5 shadow-[0_8px_22px_rgba(15,23,42,0.10)]',
+        'w-full rounded-lg border border-edge/65 bg-panel/82 px-3.5 shadow-sm',
+        compact ? 'py-2.5' : 'py-3',
       )}
     >
-      <button
-        type="button"
-        onClick={revealFullProgress}
-        aria-expanded={expanded}
-        className="flex w-full min-w-0 items-center justify-between gap-3 text-left"
-      >
+      <div className="flex w-full min-w-0 items-center justify-between gap-3 text-left">
         <div className="min-w-0">
           <div className="text-[12px] font-semibold text-primary">Task progress</div>
           <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
@@ -1447,48 +1402,43 @@ function TaskFlowMap({
           </div>
         </div>
         <span className="shrink-0 text-[10px] font-medium text-fg-5">{completed}/{steps.length} Complete</span>
-      </button>
-      <div className={cn('h-1.5 overflow-hidden rounded-full bg-inset', expanded ? 'mb-3 mt-3' : 'mt-2')}>
+      </div>
+      <div className={cn('h-1.5 overflow-hidden rounded-full bg-inset', compact ? 'mt-2' : 'mb-3 mt-3')}>
         <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(8, (completed / steps.length) * 100)}%` }} />
       </div>
-      <div className={cn(
-        'grid transition-[grid-template-rows,opacity] duration-200',
-        expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-      )}>
-        <div className="min-h-0 overflow-hidden">
-          <div className="space-y-1.5">
-            {steps.map(step => (
-              <div
-                key={step.key}
+      {!compact && (
+        <div className="space-y-1.5">
+          {steps.map(step => (
+            <div
+              key={step.key}
+              className={cn(
+                'flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors',
+                step.status === 'done' && 'border-ok/20 bg-ok/10 text-ok',
+                step.status === 'active' && 'border-primary/35 bg-primary/10 text-primary',
+                step.status === 'waiting' && 'border-edge/55 bg-panel-alt/48 text-fg-5',
+              )}
+            >
+              <span
                 className={cn(
-                  'flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors',
-                  step.status === 'done' && 'border-ok/20 bg-ok/10 text-ok',
-                  step.status === 'active' && 'border-primary/35 bg-primary/10 text-primary',
-                  step.status === 'waiting' && 'border-edge/55 bg-panel-alt/48 text-fg-5',
+                  'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
+                  step.status === 'done' && 'border-ok bg-ok text-white',
+                  step.status === 'active' && 'border-primary bg-primary text-primary-fg',
+                  step.status === 'waiting' && 'border-edge bg-panel text-fg-5',
                 )}
               >
-                <span
-                  className={cn(
-                    'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
-                    step.status === 'done' && 'border-ok bg-ok text-white',
-                    step.status === 'active' && 'border-primary bg-primary text-primary-fg',
-                    step.status === 'waiting' && 'border-edge bg-panel text-fg-5',
-                  )}
-                >
-                  {step.status === 'done' ? (
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="m5 12 4 4L19 6" />
-                    </svg>
-                  ) : step.status === 'active' ? (
-                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                  ) : null}
-                </span>
-                <span className="min-w-0 truncate">{step.label}</span>
-              </div>
-            ))}
-          </div>
+                {step.status === 'done' ? (
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="m5 12 4 4L19 6" />
+                  </svg>
+                ) : step.status === 'active' ? (
+                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                ) : null}
+              </span>
+              <span className="min-w-0 truncate">{step.label}</span>
+            </div>
+          ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -1762,7 +1712,6 @@ function TaskChatWindow({
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedAgent, setSelectedAgent] = useState(currentDefaultAgent);
   const [chatStatus, setChatStatus] = useState<ProTaskStatus>(displayTaskStatus(task.status));
-  const [ticketExpanded, setTicketExpanded] = useState(false);
   const [sessionOverrides, setSessionOverrides] = useState<Record<string, StageSessionRef>>({});
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const agentOptions = useMemo(() => {
@@ -1812,10 +1761,8 @@ function TaskChatWindow({
   const fields = task.jiraFields || {};
   const priority = fields.priority || jiraRemoteSyncField(task.description, 'Priority');
   const brief = taskBriefSummary(task);
-  const expandedBrief = taskExpandedSummary(task);
   const summaryFallback = 'No ticket description yet. Ask the agent to inspect the task and create a plan.';
-  const ticketSummary = ticketExpanded ? (expandedBrief || brief || summaryFallback) : (brief || summaryFallback);
-  const canExpandTicketSummary = task.title.length > 72 || expandedBrief.length > 220 || expandedBrief.includes('\n');
+  const ticketSummary = brief || summaryFallback;
   const meaningfulMessages = messages.filter(message => !!compactMessageText(message));
   const lastMeaningfulMessage = meaningfulMessages[meaningfulMessages.length - 1] || null;
   const showOutputActions = !!lastMeaningfulMessage && lastMeaningfulMessage.role !== 'user';
@@ -1831,7 +1778,6 @@ function TaskChatWindow({
     setReloadKey(0);
     setSelectedAgent(currentDefaultAgent);
     setChatStatus(displayTaskStatus(task.status));
-    setTicketExpanded(false);
   }, [currentDefaultAgent, task.id, task.status]);
 
   useEffect(() => {
@@ -1931,58 +1877,23 @@ function TaskChatWindow({
             </div>
             <div className="flex min-w-0 items-start gap-2">
               <div
-                className={cn(
-                  'min-w-0 flex-1 text-[13px] font-semibold tracking-tight text-fg',
-                  ticketExpanded ? 'whitespace-normal break-words leading-snug' : 'truncate',
-                )}
+                className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-fg"
                 title={task.title}
               >
                 {task.title}
               </div>
-              {canExpandTicketSummary && (
-                <button
-                  type="button"
-                  aria-expanded={ticketExpanded}
-                  onClick={() => setTicketExpanded(value => !value)}
-                  className="mt-[-1px] inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-edge/70 bg-panel/60 px-1.5 text-[11px] font-medium text-fg-4 transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
-                >
-                  {ticketExpanded ? 'Collapse' : 'Expand'}
-                  <ChevronIcon open={ticketExpanded} className="text-current" />
-                </button>
-              )}
             </div>
             <div
-              className={cn(
-                'mt-1 text-[12px] leading-relaxed text-fg-4',
-                ticketExpanded
-                  ? 'max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words pr-1 sm:max-h-[34vh]'
-                  : 'line-clamp-2',
-              )}
+              className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-fg-4"
             >
               {ticketSummary}
             </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Button
-              size="sm"
-              variant="primary"
-              className="h-7 px-2.5"
-              disabled={sending || busyStage === STATUS_CHAT_STAGE.refinement}
-              onClick={() => { void startChat('refinement', ANALYZE_TICKET_PROMPT); }}
-            >
-              {sending || busyStage === STATUS_CHAT_STAGE.refinement ? <Spinner className="h-3 w-3" /> : null}
-              Start work
-            </Button>
-            <Button size="sm" variant="outline" className="h-7 px-2.5" onClick={onOpenTicket}>Ticket</Button>
-            {actions}
           </div>
         </div>
         <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
           <button type="button" onClick={onOpenArtifacts} className="rounded-md px-1.5 py-1 transition hover:bg-panel-h hover:text-fg-3">
             {artifactCount ? `${artifactCount} artifacts` : 'Artifacts will appear here'}
           </button>
-          <span className="h-1 w-1 rounded-full bg-fg-6/50" />
-          <span className="truncate">Progress appears here after the task chat starts.</span>
         </div>
       </div>
     </div>
@@ -2018,7 +1929,6 @@ function TaskChatWindow({
             active
             transcriptHeader={(
               <>
-                <TaskFlowMap task={task} busyStage={busyStage} />
                 <div className="mb-4 flex min-w-0 items-center justify-center gap-2 text-[11px] text-fg-5">
                   <span className="h-1.5 w-1.5 rounded-full bg-ok" />
                   <span className="max-w-full truncate rounded-md border border-edge/65 bg-panel-alt/70 px-2 py-1 font-mono">
@@ -2044,9 +1954,6 @@ function TaskChatWindow({
             <div className="absolute inset-x-0 top-0 h-[calc(100%+28px)] bg-gradient-to-b from-[var(--th-session-bg)] via-[var(--th-session-bg)]/92 to-transparent" />
             {taskHeader}
           </div>
-          {(run || busyStage || (task.stageRuns || []).length > 0) && (
-            <TaskFlowMap task={task} busyStage={busyStage} stickyTopClassName="top-[124px]" />
-          )}
           {run && (
             <div className="mb-4 flex min-w-0 items-center justify-center gap-2 text-[11px] text-fg-5">
               <span className="h-1.5 w-1.5 rounded-full bg-ok" />
@@ -2071,7 +1978,7 @@ function TaskChatWindow({
           ) : messages.length === 0 ? (
             <div className="flex min-h-[260px] items-center justify-center px-4 text-center">
               <div className="max-w-[420px] text-[12px] leading-relaxed text-fg-5">
-                Start with <span className="font-medium text-fg-3">Start work</span> on the task card, or ask the agent directly in the composer.
+                Send a message in the composer to start or continue this task.
               </div>
             </div>
           ) : (
@@ -2606,81 +2513,67 @@ function TaskDetail({
   addWorkspace(latestRunWorkdir, 'Latest task chat');
   addWorkspace(task.workdir);
   addWorkspace(fallbackWorkdir, 'Current workspace');
-  const shelfTabs: Array<{ key: 'status' | 'files' | 'cards' | 'browser' | 'ticket'; label: string; count?: number }> = [
-    { key: 'status', label: 'Status' },
-    { key: 'files', label: 'Files' },
-    { key: 'cards', label: 'Side card', count: outputItems.length },
-    { key: 'browser', label: 'Browser' },
-    { key: 'ticket', label: 'Ticket' },
-  ];
   const currentWorkdir = inferredWorkdir;
-  const chatActions = (
-    <>
-      {actions}
-      {!contextOpen && (
-        <Button variant="outline" size="sm" className="h-7 px-2.5" onClick={() => setContextOpen(true)}>
-          Context
-        </Button>
-      )}
-    </>
-  );
+  const activeBusyStage = busy?.taskId === task.id ? busy.stage : null;
 
   return (
-    <div className="h-full overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
+    <div className="relative h-full overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
+      {!contextOpen && (
+        <Button
+          variant="outline"
+          size="icon"
+          className="absolute right-3 top-3 z-30 h-8 w-8 shadow-sm"
+          title="Show context"
+          aria-label="Show context"
+          onClick={() => setContextOpen(true)}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M15 4v16" />
+          </svg>
+        </Button>
+      )}
       <div className={cn(
         'grid h-full min-h-0 overflow-hidden',
         contextOpen
           ? 'grid-rows-[minmax(0,1fr)_minmax(260px,38%)] min-[980px]:grid-cols-[minmax(0,1fr)_390px] min-[980px]:grid-rows-[minmax(0,1fr)]'
           : 'grid-cols-1',
       )}>
-        <main className="min-h-0 min-w-0 overflow-hidden">
-          <TaskChatWindow
-            task={task}
-            actions={chatActions}
-            agents={agents}
-            defaultAgent={defaultAgent}
-            busyStage={busy?.taskId === task.id ? busy.stage : null}
-            onStartStatusChat={onStartStatusChat}
-            onOpenTicket={() => setShelfTab('ticket')}
-            onOpenArtifacts={() => setShelfTab('cards')}
-            artifactCount={outputItems.length}
-          />
+        <main className={cn('min-h-0 min-w-0 overflow-hidden', !contextOpen && 'flex justify-center')}>
+          <div className={cn('h-full min-h-0 w-full', !contextOpen && 'max-w-[980px]')}>
+            <TaskChatWindow
+              task={task}
+              actions={actions}
+              agents={agents}
+              defaultAgent={defaultAgent}
+              busyStage={busy?.taskId === task.id ? busy.stage : null}
+              onStartStatusChat={onStartStatusChat}
+              onOpenTicket={() => setShelfTab('ticket')}
+              onOpenArtifacts={() => setShelfTab('cards')}
+              artifactCount={outputItems.length}
+            />
+          </div>
         </main>
 
-        {contextOpen && <aside className="min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
+        {contextOpen && <aside className="relative min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="absolute right-3 top-3 z-10 h-7 w-7"
+            title="Hide context"
+            aria-label="Hide context"
+            onClick={() => setContextOpen(false)}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M15 4v16" />
+            </svg>
+          </Button>
           <div className="flex h-full min-h-0 flex-col">
-            <div className="shrink-0 border-b border-edge/55 px-3 py-3">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-[12px] font-semibold text-fg-2">Task context</div>
-                  <div className="mt-0.5 truncate text-[10.5px] text-fg-5">Status, files, browser, and raw ticket</div>
-                </div>
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Hide context" aria-label="Hide context" onClick={() => setContextOpen(false)}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <rect x="3" y="4" width="18" height="16" rx="2" />
-                    <path d="M15 4v16" />
-                  </svg>
-                </Button>
-              </div>
-              <div className="flex min-w-0 gap-1 rounded-md border border-edge/55 bg-panel-alt/60 p-0.5">
-                {shelfTabs.map(tab => (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    onClick={() => setShelfTab(tab.key)}
-                    className={cn(
-                      'inline-flex h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded px-1.5 text-[11px] font-semibold transition',
-                      shelfTab === tab.key ? 'bg-panel text-fg shadow-sm' : 'text-fg-5 hover:bg-panel-h hover:text-fg-3',
-                    )}
-                  >
-                    <span className="truncate">{tab.label}</span>
-                    {!!tab.count && <span className="rounded bg-inset px-1 font-mono text-[9px] text-fg-4">{Math.min(tab.count, 99)}</span>}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+              <div className="mb-4 pr-8">
+                <TaskFlowMap task={task} busyStage={activeBusyStage} />
+              </div>
               {shelfTab === 'status' && (
                 <div className="space-y-4">
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">

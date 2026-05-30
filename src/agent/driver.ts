@@ -11,7 +11,7 @@ import type {
   SessionMessagesOpts, SessionMessagesResult,
   ModelListOpts, ModelListResult,
   UsageOpts, UsageResult,
-  AgentDriverCapabilities,
+  AgentCapabilityDescriptor, AgentDriverCapabilities,
 } from './index.js';
 
 /**
@@ -96,12 +96,52 @@ export function shutdownAllDrivers() {
   for (const d of drivers.values()) d.shutdown();
 }
 
-const DEFAULT_CAPABILITIES: AgentDriverCapabilities = { fork: false, modelSwitch: true };
+function unsupportedCapability(label: string): AgentCapabilityDescriptor {
+  return { mode: 'unsupported', label };
+}
+
+const DEFAULT_CAPABILITIES: AgentDriverCapabilities = {
+  fork: false,
+  modelSwitch: true,
+  plan: unsupportedCapability('Plan'),
+  goal: unsupportedCapability('Goal'),
+  humanInput: unsupportedCapability('Ask User'),
+  approval: unsupportedCapability('Approval'),
+  artifacts: unsupportedCapability('Artifacts'),
+  resume: unsupportedCapability('Resume'),
+  forkCapability: unsupportedCapability('Fork'),
+  steer: unsupportedCapability('Steer'),
+  mcp: unsupportedCapability('MCP'),
+  imageGeneration: unsupportedCapability('Image generation'),
+};
+
+function mergeCapabilityDescriptor(
+  base: AgentCapabilityDescriptor | undefined,
+  override: AgentCapabilityDescriptor | undefined,
+): AgentCapabilityDescriptor | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return { ...base, ...override };
+}
 
 export function getDriverCapabilities(id: string): AgentDriverCapabilities {
   const d = drivers.get(id);
-  if (!d?.capabilities) return DEFAULT_CAPABILITIES;
-  return { ...DEFAULT_CAPABILITIES, ...d.capabilities };
+  const override = d?.capabilities;
+  if (!override) return { ...DEFAULT_CAPABILITIES };
+  return {
+    ...DEFAULT_CAPABILITIES,
+    ...override,
+    plan: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.plan, override.plan),
+    goal: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.goal, override.goal),
+    humanInput: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.humanInput, override.humanInput),
+    approval: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.approval, override.approval),
+    artifacts: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.artifacts, override.artifacts),
+    resume: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.resume, override.resume),
+    forkCapability: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.forkCapability, override.forkCapability),
+    steer: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.steer, override.steer),
+    mcp: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.mcp, override.mcp),
+    imageGeneration: mergeCapabilityDescriptor(DEFAULT_CAPABILITIES.imageGeneration, override.imageGeneration),
+  };
 }
 
 /**

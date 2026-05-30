@@ -4,12 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { doOpenClawStream, getSessionMessages, listAgents, type StreamOpts } from '../src/agent/index.ts';
 import { getRecommendedClis } from '../src/agent/cli/index.ts';
-import { runAgentHealthCheck } from '../src/dashboard/routes/agents.ts';
+import { runAgentHealthCheck, startOpenClawGatewayService } from '../src/dashboard/routes/agents.ts';
 
 const tmpDir = path.join(os.tmpdir(), `pikiclaw-openclaw-test-${process.pid}`);
 const fakeBin = path.join(tmpDir, 'bin');
 const spawnLog = path.join(tmpDir, 'openclaw-args.json');
 const originalPath = process.env.PATH;
+const originalNvmDir = process.env.NVM_DIR;
 
 function baseOpts(extra: Partial<StreamOpts> = {}): StreamOpts {
   return {
@@ -41,10 +42,13 @@ beforeEach(() => {
   fs.mkdirSync(fakeBin, { recursive: true });
   writeFastAgentStubs();
   process.env.PATH = `${fakeBin}:${originalPath || ''}`;
+  process.env.NVM_DIR = path.join(tmpDir, '.nvm');
 });
 
 afterEach(() => {
   process.env.PATH = originalPath;
+  if (originalNvmDir === undefined) delete process.env.NVM_DIR;
+  else process.env.NVM_DIR = originalNvmDir;
   delete process.env.OPENCLAW_AGENT_ID;
 });
 
@@ -127,5 +131,34 @@ process.exit(0);
     expect(result.ok).toBe(false);
     expect(result.detail).toContain('Gateway is not running');
     expect(result.output).toContain('Gateway is not running');
+  });
+
+  it('starts the OpenClaw Gateway service from the agent card action', async () => {
+    writeOpenClawScript(`
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(spawnLog)}, JSON.stringify(args) + '\\n');
+if (args[0] === '--version') {
+  console.log('openclaw 2026.5.1');
+  process.exit(0);
+}
+if (args[0] === 'gateway' && args[1] === 'start') {
+  console.log('started');
+  process.exit(0);
+}
+if (args[0] === 'gateway' && args[1] === 'status') {
+  console.log('Gateway running');
+  process.exit(0);
+}
+process.exit(0);
+`);
+
+    const result = await startOpenClawGatewayService(tmpDir);
+
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain('started');
+    const calls = fs.readFileSync(spawnLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(calls).toContainEqual(['gateway', 'start']);
+    expect(calls).toContainEqual(['gateway', 'status']);
   });
 });

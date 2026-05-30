@@ -7,7 +7,7 @@ import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '.
 import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
 import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { InteractionSnapshot, MessageBlock, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
+import type { AgentCapabilityDescriptor, InteractionSnapshot, MessageBlock, SessionGoalView, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
 import { hasRenderableAssistant } from './AssistantContent';
@@ -128,6 +128,49 @@ function bridgePendingImagesIntoHistory(history: TurnHistoryWindow, pendingPromp
   return { history: { ...history, turns: nextTurns }, transferred: true };
 }
 
+function GoalStatusBar({
+  goal,
+  capability,
+  busy,
+  compact,
+  onPause,
+  onResume,
+  onClear,
+}: {
+  goal: SessionGoalView | null;
+  capability?: AgentCapabilityDescriptor | null;
+  busy: boolean;
+  compact: boolean;
+  onPause: () => void;
+  onResume: () => void;
+  onClear: () => void;
+}) {
+  if (!goal) return null;
+  const active = goal.status === 'active';
+  const paused = goal.status === 'paused';
+  const actions = new Set(capability?.actions || []);
+  const canPause = actions.has('pause');
+  const canResume = actions.has('resume');
+  const canClear = actions.has('clear');
+  return (
+    <div className={cn('mx-auto flex items-center gap-2 px-3 py-1.5', compact ? 'max-w-[520px]' : 'max-w-[860px]')}>
+      <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-edge/45 bg-panel-alt/70 px-2.5 py-1.5 text-[11px] text-fg-4">
+        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-emerald-400/80' : 'bg-fg-5/50')} />
+        <span className="shrink-0 font-semibold uppercase tracking-wider text-fg-5">Goal</span>
+        <span className="min-w-0 truncate text-fg-2">{goal.objective}</span>
+        <span className="shrink-0 rounded border border-edge/35 bg-control px-1.5 py-[1px] font-mono text-[10px] text-fg-5">
+          {goal.source}:{goal.status}
+        </span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {active && canPause && <Button variant="ghost" size="sm" disabled={busy} onClick={onPause}>Pause</Button>}
+        {paused && canResume && <Button variant="ghost" size="sm" disabled={busy} onClick={onResume}>Resume</Button>}
+        {canClear && <Button variant="ghost" size="sm" disabled={busy} onClick={onClear}>Clear</Button>}
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
@@ -203,6 +246,8 @@ export const SessionPanel = memo(function SessionPanel({
   // `interactions` field of the stream snapshot. The latest entry is rendered
   // as a modal popup; the server clears entries as users answer them.
   const [interactions, setInteractions] = useState<InteractionSnapshot[]>([]);
+  const [goalView, setGoalView] = useState<SessionGoalView | null>(null);
+  const [goalBusy, setGoalBusy] = useState(false);
   // Optimistic state for the RUNNING task only — the user message bubble that
   // backs the in-flight turn until rawTurns picks it up. Earlier this slot
   // doubled as the optimistic source for queued sends, which meant sending a
@@ -1395,6 +1440,43 @@ export const SessionPanel = memo(function SessionPanel({
   useEffect(() => {
     if (latestContextMeta) setLastContextMeta(latestContextMeta);
   }, [latestContextMeta]);
+  const refreshGoalView = useCallback(async () => {
+    const agent = session.agent || '';
+    const sessionId = session.sessionId || '';
+    if (!agent || !sessionId || sessionId.startsWith('pending_')) {
+      setGoalView(null);
+      return;
+    }
+    try {
+      const res = await api.getSessionGoal(workdir, agent, sessionId);
+      if (res.ok) setGoalView(res.goal || null);
+    } catch {
+      setGoalView(null);
+    }
+  }, [session.agent, session.sessionId, workdir]);
+  useEffect(() => {
+    void refreshGoalView();
+  }, [refreshGoalView, streamPhase]);
+  const runGoalAction = useCallback(async (action: 'pause' | 'resume' | 'clear') => {
+    const agent = session.agent || '';
+    const sessionId = session.sessionId || '';
+    if (!agent || !sessionId || sessionId.startsWith('pending_')) return;
+    setGoalBusy(true);
+    try {
+      if (action === 'pause') {
+        const res = await api.pauseSessionGoal(workdir, agent, sessionId);
+        if (res.ok) setGoalView(res.goal || null);
+      } else if (action === 'resume') {
+        const res = await api.resumeSessionGoal(workdir, agent, sessionId);
+        if (res.ok) setGoalView(res.goal || null);
+      } else {
+        const res = await api.clearSessionGoal(workdir, agent, sessionId);
+        if (res.ok) setGoalView(null);
+      }
+    } finally {
+      setGoalBusy(false);
+    }
+  }, [session.agent, session.sessionId, workdir]);
   const composerContextMeta = latestContextMeta ?? lastContextMeta;
   const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || effectiveLiveStream);
   const transcriptTailKey = [
@@ -1569,6 +1651,15 @@ export const SessionPanel = memo(function SessionPanel({
         'shrink-0 border-t border-edge/30 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]',
         compact && 'border-edge/45 bg-panel/85',
       )}>
+          <GoalStatusBar
+            goal={goalView}
+            capability={agentRuntime?.capabilities?.goal || null}
+            busy={goalBusy}
+            compact={compact}
+            onPause={() => void runGoalAction('pause')}
+            onResume={() => void runGoalAction('resume')}
+            onClear={() => void runGoalAction('clear')}
+          />
           <InputComposer
             session={session}
             workdir={workdir}

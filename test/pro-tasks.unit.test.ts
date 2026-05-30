@@ -15,6 +15,8 @@ import {
   setExclusiveMode,
   startVerificationRun,
   syncJiraTask,
+  updateJiraFields,
+  updateProTaskStatus,
   updateStageRun,
   updateSubtask,
 } from '../src/pro/tasks.ts';
@@ -36,10 +38,20 @@ afterEach(() => {
 
 describe('Pro task spaces', () => {
   it('creates custom task spaces and archives them without removing built-ins', () => {
-    const space = createTaskSpace({ name: 'Pikiclaw Roadmap', defaultWorkdir: '/repo/pikiclaw', defaultAgent: 'codex' });
+    const space = createTaskSpace({
+      name: 'Pikiclaw Roadmap',
+      defaultWorkdir: '/repo/pikiclaw',
+      defaultAgent: 'codex',
+      defaultAssistantId: 'assistant_hermes_acp',
+    });
 
     expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal', space.id]);
-    expect(listTaskSpaces()[2]).toMatchObject({ name: 'Pikiclaw Roadmap', kind: 'custom', defaultAgent: 'codex' });
+    expect(listTaskSpaces()[2]).toMatchObject({
+      name: 'Pikiclaw Roadmap',
+      kind: 'custom',
+      defaultAgent: 'codex',
+      defaultAssistantId: 'assistant_hermes_acp',
+    });
 
     archiveTaskSpace(space.id);
     expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal']);
@@ -196,5 +208,26 @@ describe('Pro task store', () => {
     const finished = finishVerificationRun(synced.id, verification.id, 'passed', 'Smoke passed.');
     expect(finished.verificationRuns[0].result).toBe('passed');
     expect(finished.verificationRuns[0].notes).toBe('Smoke passed.');
+  });
+
+  it('can reopen a locally closed Jira task without a remote transition', () => {
+    const closed = syncJiraTask({
+      title: 'Closed production bug',
+      issueType: 'Bug',
+      jiraKey: 'PRO-456',
+      ticketStatus: 'Closed',
+      workdir: '/repo/app',
+    });
+
+    const done = updateProTaskStatus(closed.id, 'done');
+    expect(done.status).toBe('done');
+    expect(done.jiraFields?.status).toBe('Closed');
+
+    const reopenedFields = updateJiraFields(done.id, { status: 'Reopened' });
+    const reopened = updateProTaskStatus(reopenedFields.id, 'backlog');
+
+    expect(reopened.status).toBe('backlog');
+    expect(reopened.jiraFields?.status).toBe('Reopened');
+    expect(reopened.events.some(event => event.summary.includes('Status changed from done to backlog'))).toBe(true);
   });
 });

@@ -72,6 +72,60 @@ class CopilotDriver implements AgentDriver {
   readonly id = 'copilot';
   readonly cmd = 'copilot';
   readonly thinkLabel = 'Thinking';
+  readonly capabilities = {
+    fork: false,
+    modelSwitch: true,
+    plan: {
+      mode: 'portable',
+      source: 'pikiclaw plan prompt',
+      commands: ['/plan'],
+      actions: ['start', 'clarify', 'approve', 'cancel', 'implement'],
+      note: 'No verified Copilot native plan protocol yet.',
+    },
+    goal: {
+      mode: 'portable',
+      source: 'pikiclaw goal.json',
+      statusSource: 'pikiclaw session metadata',
+      commands: ['/goal'],
+      actions: ['set', 'pause', 'resume', 'clear', 'status'],
+    },
+    humanInput: {
+      mode: 'unsupported',
+      note: 'Copilot is currently launched with --no-ask-user.',
+    },
+    approval: {
+      mode: 'unsupported',
+      note: 'Copilot is currently launched with --allow-all.',
+    },
+    artifacts: {
+      mode: 'portable',
+      source: 'pikiclaw transcript rendering',
+      actions: ['render', 'recover'],
+    },
+    resume: {
+      mode: 'portable',
+      source: 'pikiclaw transcript replay',
+      actions: ['resume', 'recover'],
+    },
+    forkCapability: {
+      mode: 'unsupported',
+      note: 'No verified Copilot native fork protocol.',
+    },
+    steer: {
+      mode: 'unsupported',
+      note: 'No verified Copilot in-place steering channel.',
+    },
+    mcp: {
+      mode: 'portable',
+      source: 'pikiclaw MCP bridge',
+      actions: ['useMcp'],
+    },
+    imageGeneration: {
+      mode: 'portable',
+      source: 'MCP/tools',
+      actions: ['generate', 'render'],
+    },
+  } satisfies import('../types.js').AgentDriverCapabilities;
   readonly acceptedProviderKinds = [] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doCopilotStream(opts); }

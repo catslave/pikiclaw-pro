@@ -299,16 +299,36 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
   const textBlocks = blocks.filter(b => b.type === 'text');
   const imageBlocks = blocks.filter(b => b.type === 'image');
   const text = textBlocks.map(b => b.content).filter(Boolean).join('\n\n');
+  const proposedPlan = splitProposedPlan(text);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
   if (!text.trim() && imageBlocks.length === 0) return null;
   return (
     <>
-      {text.trim() && (
+      {text.trim() && !proposedPlan && (
         <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
           <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
             {text}
           </ReactMarkdown>
+        </div>
+      )}
+      {proposedPlan && (
+        <div className="space-y-3">
+          {proposedPlan.before.trim() && (
+            <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
+              <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
+                {proposedPlan.before}
+              </ReactMarkdown>
+            </div>
+          )}
+          <ProposedPlanCard plan={proposedPlan.plan} mdComponents={mdComponents} />
+          {proposedPlan.after.trim() && (
+            <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
+              <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
+                {proposedPlan.after}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
       )}
       {imageBlocks.length > 0 && (
@@ -320,5 +340,66 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
       )}
       {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </>
+  );
+}
+
+function splitProposedPlan(text: string): { before: string; plan: string; after: string } | null {
+  const match = text.match(/<proposed_plan>([\s\S]*?)<\/proposed_plan>/i);
+  if (!match || match.index == null) return null;
+  const before = text.slice(0, match.index).trim();
+  const plan = match[1].trim();
+  const after = text.slice(match.index + match[0].length).trim();
+  if (!plan) return null;
+  return { before, plan, after };
+}
+
+function insertComposerCommand(text: string) {
+  window.dispatchEvent(new CustomEvent('pikiclaw:composer-insert', { detail: { text } }));
+}
+
+function ProposedPlanCard({
+  plan,
+  mdComponents,
+}: {
+  plan: string;
+  mdComponents: ReturnType<typeof createMdComponents>;
+}) {
+  return (
+    <div className="rounded-md border border-sky-500/25 bg-sky-500/[0.055]">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-500/15 px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-300">Proposed plan</div>
+          <div className="mt-0.5 text-[11px] text-fg-5">Rendered from agent planning output</div>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => insertComposerCommand('/plan implement')}
+            className="rounded-md border border-sky-400/30 bg-sky-400/[0.12] px-2 py-1 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-400/[0.18]"
+          >
+            Implement
+          </button>
+          <button
+            type="button"
+            onClick={() => insertComposerCommand('/plan clarify ')}
+            className="rounded-md border border-edge/40 bg-control px-2 py-1 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
+          >
+            Continue Clarifying
+          </button>
+          <button
+            type="button"
+            onClick={() => insertComposerCommand('/plan cancel')}
+            className="rounded-md border border-edge/40 bg-transparent px-2 py-1 text-[11px] font-semibold text-fg-5 transition hover:border-edge-h hover:text-fg-3"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+      <div className="session-md px-3 py-3 text-[13px] leading-[1.7] text-fg-2">
+        <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
+          {plan}
+        </ReactMarkdown>
+      </div>
+    </div>
   );
 }

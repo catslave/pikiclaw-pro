@@ -128,6 +128,33 @@ export interface AgentNativeConfig {
   source: string;
 }
 
+export type AgentCapabilityMode = 'native' | 'portable' | 'unsupported';
+
+export interface AgentCapabilityDescriptor {
+  mode: AgentCapabilityMode;
+  label?: string;
+  source?: string;
+  statusSource?: string;
+  commands?: string[];
+  actions?: string[];
+  note?: string;
+}
+
+export interface AgentCapabilityMatrix {
+  fork?: boolean;
+  modelSwitch?: boolean;
+  plan?: AgentCapabilityDescriptor;
+  goal?: AgentCapabilityDescriptor;
+  humanInput?: AgentCapabilityDescriptor;
+  approval?: AgentCapabilityDescriptor;
+  artifacts?: AgentCapabilityDescriptor;
+  resume?: AgentCapabilityDescriptor;
+  forkCapability?: AgentCapabilityDescriptor;
+  steer?: AgentCapabilityDescriptor;
+  mcp?: AgentCapabilityDescriptor;
+  imageGeneration?: AgentCapabilityDescriptor;
+}
+
 export interface AgentRuntimeStatus extends AgentInfo {
   selectedModel: string | null;
   selectedEffort: string | null;
@@ -142,8 +169,8 @@ export interface AgentRuntimeStatus extends AgentInfo {
   usage: UsageResult | null;
   /** Driver-supplied snapshot of the agent's external config, when applicable. */
   nativeConfig?: AgentNativeConfig | null;
-  /** Static driver capability flags, e.g. fork support. */
-  capabilities?: { fork?: boolean; modelSwitch?: boolean };
+  /** Static driver capability matrix. */
+  capabilities?: AgentCapabilityMatrix;
   /** BYOK provider name (e.g. "OpenRouter") when this agent has a Profile
    *  bound; null otherwise. Drives the dashboard "via <provider>" tag on
    *  turns where the bound model id matches the saved turn's model. */
@@ -514,6 +541,31 @@ export interface SessionHubResult {
   statusCounts: Record<string, number>;
   total: number;
   errors: string[];
+}
+
+export interface SessionGoalView {
+  goalId?: string;
+  objective: string;
+  status: string;
+  source: 'codex' | 'claude' | 'pikiclaw' | string;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  continuationCount: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface SessionPlanView {
+  planId: string;
+  agent: string;
+  source: string;
+  mode: AgentCapabilityMode;
+  status: string;
+  content: string;
+  steps: StreamPlan['steps'];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SessionsPageResult {
