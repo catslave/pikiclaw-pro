@@ -10,7 +10,7 @@ type ContextShelfFile = ProTaskWorkbench['files'][number];
 
 const TAB_LABEL: Record<ContextShelfTab, string> = {
   outputs: 'Outputs',
-  'side-chats': 'Side Chats',
+  'side-chats': 'Side Cards',
   files: 'Files',
   browser: 'Browser',
   status: 'Status',
@@ -64,11 +64,15 @@ function OutputPreview({
     return outputs.find(output => output.id === selectedId) || outputs[0];
   }, [outputs, selectedId]);
   if (!outputs.length) {
-    return <EmptyShelfState title="No outputs yet" hint="Final answers, docs, diffs, estimates, and stage summaries will appear here." />;
+    return <EmptyShelfState title="No outputs yet" hint="Task results, documents, diffs, links, and review-ready deliverables will appear here." />;
   }
   return (
     <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto]">
       <div className="min-h-0 overflow-y-auto px-3 py-3">
+        <div className="mb-3 rounded-lg border border-edge/45 bg-panel/45 px-3 py-2">
+          <div className="text-[12px] font-semibold text-fg-2">Task result center</div>
+          <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">Review generated documents, diffs, links, and final answers here.</div>
+        </div>
         <div className="space-y-2">
           {outputs.map(output => {
             const active = selected?.id === output.id;
@@ -136,10 +140,14 @@ function FilesTab({
   onOpenPath?: (path: string, workdir?: string) => void;
 }) {
   if (!files.length) {
-    return <EmptyShelfState title="No files yet" hint="Changed files and generated artifacts from this chat or task will be indexed here." />;
+    return <EmptyShelfState title="No files yet" hint="Workspace paths, referenced files, and task context will appear here." />;
   }
   return (
     <div className="h-full overflow-y-auto px-3 py-3">
+      <div className="mb-3 rounded-lg border border-edge/45 bg-panel/45 px-3 py-2">
+        <div className="text-[12px] font-semibold text-fg-2">Task context center</div>
+        <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">Browse workspace files, referenced paths, and source context for this task.</div>
+      </div>
       <div className="space-y-2">
         {files.map((file, index) => (
           <div key={`${file.workdir || ''}:${file.path}:${index}`} className="rounded-lg border border-edge/55 bg-panel/50 px-3 py-2">
@@ -540,6 +548,7 @@ export function ContextShelf({
                 >
                   {label}
                   {tab === 'outputs' && outputs.length > 0 && <span className="ml-1 text-[10px] text-primary">{outputs.length}</span>}
+                  {tab === 'files' && files.length > 0 && <span className="ml-1 text-[10px] text-primary">{files.length}</span>}
                 </button>
               );
             })}

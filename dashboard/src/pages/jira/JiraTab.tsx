@@ -1499,7 +1499,7 @@ function TaskGeneratedBlocks({
         <div className={cn('grid gap-2', !compact && 'md:grid-cols-3')}>
           <TaskMetaItem label="Goal" value={task.title} />
           <TaskMetaItem label="Next" value={nextStep} />
-          <TaskMetaItem label="Outputs" value={`${outputs.length} artifact${outputs.length === 1 ? '' : 's'}`} />
+          <TaskMetaItem label="Outputs" value={`${outputs.length} output${outputs.length === 1 ? '' : 's'}`} />
         </div>
       </section>
 
@@ -1632,11 +1632,11 @@ function TaskGeneratedBlocks({
 
         <section className="rounded-xl border border-edge/65 bg-panel/66 px-4 py-3">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <div className="text-[13px] font-semibold text-fg-2">Outputs & review</div>
+            <div className="text-[13px] font-semibold text-fg-2">Outputs</div>
             <button type="button" onClick={onOpenArtifacts} className="text-[11px] font-medium text-primary hover:underline">Open</button>
           </div>
           {outputs.length === 0 && reviewItems.length === 0 ? (
-            <div className="text-[12px] text-fg-5">Generated documents, diffs, and review items will appear here.</div>
+            <div className="text-[12px] text-fg-5">Generated events appear in chat. Documents, diffs, links, and review items live in the right sidebar.</div>
           ) : (
             <div className="space-y-2">
               {outputs.slice(0, 3).map(output => (
@@ -1847,7 +1847,7 @@ function TaskChatWindow({
         </div>
         <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
           <button type="button" onClick={onOpenArtifacts} className="rounded-md px-1.5 py-1 transition hover:bg-panel-h hover:text-fg-3">
-            {artifactCount ? `${artifactCount} artifacts` : 'Artifacts will appear here'}
+            {artifactCount ? `${artifactCount} output${artifactCount === 1 ? '' : 's'}` : 'Outputs open in the sidebar'}
           </button>
         </div>
       </div>
@@ -1994,7 +1994,7 @@ function TaskChatWindow({
                         onClick={onOpenArtifacts}
                         className="inline-flex h-7 items-center rounded-md border border-edge/70 bg-panel px-2.5 text-[11px] font-medium text-fg-3 transition hover:border-edge-h hover:bg-panel-h hover:text-fg"
                       >
-                        Artifacts
+                        Open outputs
                       </button>
                     </div>
                   </div>
@@ -2377,7 +2377,7 @@ function TaskDetail({
 }) {
   const locale = useStore(s => s.locale);
   const t = useMemo(() => createT(locale), [locale]);
-  const [shelfTab, setShelfTab] = useState<'status' | 'files' | 'cards' | 'browser' | 'ticket'>('status');
+  const [shelfTab, setShelfTab] = useState<'status' | 'outputs' | 'files' | 'browser' | 'ticket'>('status');
   const [contextOpen, setContextOpen] = useState(true);
   const [fileBrowserPath, setFileBrowserPath] = useState('');
   const sortedRuns = useMemo(() => [...(task?.stageRuns || [])].sort((a, b) => {
@@ -2474,6 +2474,13 @@ function TaskDetail({
   addWorkspace(fallbackWorkdir, 'Current workspace');
   const currentWorkdir = inferredWorkdir;
   const activeBusyStage = busy?.taskId === task.id ? busy.stage : null;
+  const shelfTabs: Array<{ id: 'status' | 'outputs' | 'files' | 'browser' | 'ticket'; label: string; count?: number }> = [
+    { id: 'status', label: 'Overview' },
+    { id: 'outputs', label: 'Outputs', count: outputItems.length },
+    { id: 'files', label: 'Files', count: fileItems.length },
+    { id: 'browser', label: 'Browser' },
+    { id: 'ticket', label: 'Ticket' },
+  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
@@ -2516,7 +2523,7 @@ function TaskDetail({
               busyStage={busy?.taskId === task.id ? busy.stage : null}
               onStartStatusChat={onStartStatusChat}
               onOpenTicket={() => setShelfTab('ticket')}
-              onOpenArtifacts={() => setShelfTab('cards')}
+              onOpenArtifacts={() => setShelfTab('outputs')}
               artifactCount={outputItems.length}
             />
           </div>
@@ -2525,6 +2532,25 @@ function TaskDetail({
         {contextOpen && <aside className="relative min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
           <div className="flex h-full min-h-0 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+              <div className="mb-3 flex min-w-0 gap-1 overflow-x-auto rounded-lg border border-edge/55 bg-inset/35 p-1">
+                {shelfTabs.map(tab => {
+                  const active = shelfTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setShelfTab(tab.id)}
+                      className={cn(
+                        'inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-semibold transition-colors',
+                        active ? 'bg-panel text-fg shadow-sm' : 'text-fg-5 hover:bg-panel-h/70 hover:text-fg-3',
+                      )}
+                    >
+                      <span>{tab.label}</span>
+                      {!!tab.count && <span className="font-mono text-[10px] text-primary">{Math.min(tab.count, 99)}</span>}
+                    </button>
+                  );
+                })}
+              </div>
               <div className="mb-4">
                 <TaskFlowMap task={task} busyStage={activeBusyStage} />
               </div>
@@ -2579,6 +2605,12 @@ function TaskDetail({
 
               {shelfTab === 'files' && (
                 <div className="space-y-3">
+                  <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
+                    <div className="text-[12px] font-semibold text-fg-2">Task context center</div>
+                    <div className="mt-1 text-[11.5px] leading-relaxed text-fg-5">
+                      Use Files to inspect the workspace, referenced paths, and source context for this task.
+                    </div>
+                  </section>
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Workspace</div>
                     <select
@@ -2638,11 +2670,17 @@ function TaskDetail({
                 </div>
               )}
 
-              {shelfTab === 'cards' && (
+              {shelfTab === 'outputs' && (
                 <div className="space-y-2">
+                  <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
+                    <div className="text-[12px] font-semibold text-fg-2">Task result center</div>
+                    <div className="mt-1 text-[11.5px] leading-relaxed text-fg-5">
+                      Outputs collects plans, documents, diffs, links, final answers, and review-ready results.
+                    </div>
+                  </section>
                   {outputItems.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center text-[12px] text-fg-5">
-                      Goal & Plan, implementation notes, diffs, and verification results will appear here.
+                      Goal & Plan, implementation notes, diffs, links, and verification results will appear here.
                     </div>
                   ) : outputItems.map(output => (
                     <div key={output.id} className="rounded-lg border border-edge/65 bg-panel-alt/58 px-3 py-2.5">

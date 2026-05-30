@@ -1218,10 +1218,11 @@ const CONTEXT_QUICK_LABEL: Record<ContextShelfTab, string> = {
   status: 'State',
   ticket: 'Ticket',
 };
-const FOCUS_CONTEXT_SHELF_TABS = new Set<ContextShelfTab>(['side-chats', 'files', 'browser']);
-const FOCUS_CONTEXT_SHELF_TAB_ORDER: ContextShelfTab[] = ['files', 'browser', 'side-chats'];
+const FOCUS_CONTEXT_SHELF_TABS = new Set<ContextShelfTab>(['outputs', 'side-chats', 'files', 'browser']);
+const FOCUS_CONTEXT_SHELF_TAB_ORDER: ContextShelfTab[] = ['outputs', 'files', 'browser', 'side-chats'];
 const FOCUS_CONTEXT_TAB_LABELS: Partial<Record<ContextShelfTab, string>> = {
-  'side-chats': 'Side Card',
+  outputs: 'Outputs',
+  'side-chats': 'Side',
 };
 
 function stageRunTime(run: StageRun): number {
@@ -5006,7 +5007,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	              const sideChatPanelOpen = sideChatPanelOpenByParent[parentSlotKey] === true;
 	              const contextSurfaceOpen = sideChatPanelOpen && (isFocused || shouldInlineSideChat);
 		              const contextShelfTabs: ContextShelfTab[] = taskWorkbenchForSlot
-		                ? ['outputs', 'side-chats', 'files', 'browser', 'status', 'ticket']
+		                ? ['outputs', 'files', 'side-chats', 'browser', 'status', 'ticket']
 		                : ['outputs', 'side-chats', 'files', 'browser', 'status'];
 		              const activeContextShelfTab = contextShelfTabByParent[parentSlotKey] || (taskWorkbenchForSlot ? 'outputs' : 'side-chats');
 		              const visibleContextShelfTabs = isFocused
@@ -5048,7 +5049,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const sideChatWidth = sideChatWidthsByParent[parentSlotKey] || SIDE_CHAT_DEFAULT_WIDTH;
               const contextFileCount = taskWorkbenchForSlot?.files.length || 0;
               const quickContextTabs: ContextShelfTab[] = taskWorkbenchForSlot
-                ? ['outputs', 'side-chats', 'files', 'browser', 'ticket']
+                ? ['outputs', 'files', 'side-chats', 'browser', 'ticket']
                 : ['side-chats', 'files', 'browser', 'status'];
 	              const contextCountForTab = (tab: ContextShelfTab) => {
 	                if (tab === 'outputs') return taskOutputCount;
@@ -5452,13 +5453,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                               setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: false }));
                               return;
                             }
-	                            const nextTab = isFocused
+	                            const preferredTaskContextTab: ContextShelfTab = taskOutputCount > 0
+	                              ? 'outputs'
+	                              : contextFileCount > 0
+	                                ? 'files'
+	                                : 'outputs';
+	                            const nextTab = taskWorkbenchForSlot
+	                              ? preferredTaskContextTab
+	                              : isFocused
 	                              ? FOCUS_CONTEXT_SHELF_TABS.has(activeContextShelfTab)
 	                                ? activeContextShelfTab
-	                                : 'side-chats'
-	                              : taskWorkbenchForSlot && taskOutputCount > 0
-	                                ? 'outputs'
-	                                : activeContextShelfTab;
+	                                : (taskOutputCount > 0 ? 'outputs' : 'side-chats')
+	                              : activeContextShelfTab;
 	                            openContextShelf(nextTab);
 	                          }}
 		                          className={cn(
