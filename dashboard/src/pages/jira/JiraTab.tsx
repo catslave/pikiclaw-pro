@@ -748,12 +748,12 @@ function CreateJiraTaskModal({
                 {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
               </select>
             </label>
-          <label className="space-y-1">
+            <label className="space-y-1">
               <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Workspace</div>
-            <select value={draft.workdir} onChange={event => setDraft(prev => ({ ...prev, workdir: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              {workspaces.map(ws => <option key={ws.path} value={ws.path}>{ws.name || ws.path.split('/').pop() || ws.path}</option>)}
-            </select>
-          </label>
+              <select value={draft.workdir} onChange={event => setDraft(prev => ({ ...prev, workdir: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+                {workspaces.map(ws => <option key={ws.path} value={ws.path}>{ws.name || ws.path.split('/').pop() || ws.path}</option>)}
+              </select>
+            </label>
           </div>
         </div>
       </div>
@@ -3256,7 +3256,6 @@ export function TasksTab() {
   const [createOpen, setCreateOpen] = useState(false);
   const [spaceCreateOpen, setSpaceCreateOpen] = useState(false);
   const [spaceCreateBusy, setSpaceCreateBusy] = useState(false);
-  const [agentCreateOpen, setAgentCreateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailMenuOpen, setDetailMenuOpen] = useState(false);
@@ -3640,14 +3639,15 @@ export function TasksTab() {
   }, [detailOpen, selectedId, upsertTask]);
 
   const createTask = useCallback(async (taskDraft: { title: string; description: string; workdir: string; defaultAgent: string; defaultAssistantId: string }) => {
-    const title = taskDraft.title.trim();
-    if (!title) return;
+    const description = taskDraft.description.trim();
+    const title = taskDraft.title.trim() || inferTaskTitle(description);
+    if (!title && !description) return;
     setCreating(true);
     try {
       const spaceId = defaultSpaceForCreate(selectedSpaceId);
       const result = await api.createProTask({
         title,
-        description: taskDraft.description,
+        description,
         sprint: activeSpaceIsJira && selectedSprint !== 'all' ? selectedSprint : undefined,
         spaceId,
         kind: defaultKindForSpace(spaceId),
@@ -4202,7 +4202,7 @@ export function TasksTab() {
                   <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
                 </svg>
               </Button>
-              <Button variant="primary" size="sm" className="shrink-0" onClick={() => setAgentCreateOpen(true)}>
+              <Button variant="primary" size="sm" className="shrink-0" onClick={() => setCreateOpen(true)}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                   <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
@@ -4322,7 +4322,7 @@ export function TasksTab() {
                     column.key === 'backlog' ? (
                       <button
                         type="button"
-                        onClick={() => setAgentCreateOpen(true)}
+                        onClick={() => setCreateOpen(true)}
                         className={cn(
                           'flex h-24 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-inset/30 text-center transition hover:border-primary/45 hover:bg-primary/[0.04] hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/25',
                           dragOverColumn === column.key
@@ -4482,7 +4482,7 @@ export function TasksTab() {
       <CreateJiraTaskModal
         open={createOpen}
         creating={creating}
-        title={`Create task in ${activeSpaceName}`}
+        title="Create task"
         workspaces={workspaces.length ? workspaces : [{ path: state?.runtimeWorkdir || '', name: state?.runtimeWorkdir || 'Workspace' }]}
         assistants={assistants}
         defaultWorkdir={activeTaskSpace?.defaultWorkdir || state?.runtimeWorkdir || workspaces[0]?.path || ''}
@@ -4542,20 +4542,6 @@ export function TasksTab() {
           </div>
         </div>
       </Modal>
-      <FeatureAgentDialog
-        open={agentCreateOpen}
-        onClose={() => setAgentCreateOpen(false)}
-        workdir={state?.runtimeWorkdir || workspaces[0]?.path || ''}
-        config={{
-          kind: 'jira-task',
-          title: 'Create task with Agent',
-          description: 'Use a task-creation assistant to clarify goal, boundary, acceptance points, workspace, owner mode, and execution mode before the task is created.',
-          assistantName: 'Task Creator Assistant',
-          assistantResponsibility: 'Guide rough intent into a clear Jira/Pikiclaw task by asking for missing goal, boundary, assumptions, acceptance points, workspace, lifecycle owner, and direct or interactive execution preference.',
-          placeholder: 'Describe what you want to do. Example: help me create a task for verifying cnlab03 login after the new deployment.',
-          submitLabel: 'Start task assistant',
-        }}
-      />
       <JiraAssistantConfigModal
         open={settingsOpen}
         saving={savingConfig}
