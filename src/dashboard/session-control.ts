@@ -21,6 +21,7 @@ import {
   type Agent,
   type AgentCapabilityDescriptor,
   type HandoverRef,
+  type SessionOrigin,
 } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { isLogTraceSlash, runLogTraceSkill } from '../platform/logtrace.js';
@@ -154,6 +155,7 @@ export interface QueueSessionTaskRequest {
    */
   previousAgent?: Agent | string | null;
   previousSessionId?: string | null;
+  origin?: Partial<SessionOrigin> | null;
 }
 
 /**
@@ -276,6 +278,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       title: userPrompt || request.prompt || 'New session',
       threadId: null,
       handoverFrom,
+      origin: request.origin,
     });
     if (!sessionId) sessionId = staged.sessionId;
     if (staged.importedFiles.length) {

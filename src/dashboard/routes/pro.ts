@@ -1107,6 +1107,12 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
       model: readString(body?.model) || null,
       effort: readString(body?.effort) || null,
       attachments: [],
+      origin: {
+        channel: 'task',
+        chatId: taskId,
+        chatType: stage,
+        sourceMessageId: typeof body?.subtaskId === 'string' ? body.subtaskId : null,
+      },
     });
     if (!queued.ok) {
       const statusCode = queued.error === 'Bot is not running' ? 503 : 400;

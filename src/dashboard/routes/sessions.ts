@@ -44,6 +44,7 @@ import {
 import { DASHBOARD_PAGINATION } from '../../core/constants.js';
 import { runtime } from '../runtime.js';
 import type { Bot } from '../../bot/bot.js';
+import { listProTasks } from '../../pro/tasks.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,6 +66,37 @@ function parsePageSize(value: string | null | undefined, fallback = DEFAULT_SESS
 }
 
 type DashboardSessionInfo = SessionInfo & { isCurrent?: boolean; workspaceName?: string };
+
+function readBooleanQuery(value: string | null | undefined): boolean {
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+function taskSessionKey(workdir: string | null | undefined, agent: string | null | undefined, sessionId: string | null | undefined): string | null {
+  if (!workdir || !agent || !sessionId) return null;
+  return `${path.resolve(workdir)}\0${agent}\0${sessionId}`;
+}
+
+function buildTaskSessionKeySet(): Set<string> {
+  const keys = new Set<string>();
+  for (const task of listProTasks()) {
+    for (const run of task.stageRuns || []) {
+      const key = taskSessionKey(run.session?.workdir, run.session?.agent, run.session?.sessionId);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+function isTaskSession(session: SessionInfo, taskSessionKeys: Set<string>): boolean {
+  if (session.origin?.channel === 'task') return true;
+  const key = taskSessionKey(session.workdir, session.agent, session.sessionId);
+  return !!key && taskSessionKeys.has(key);
+}
+
+function filterTaskSessions<T extends SessionInfo>(sessions: T[], includeTaskSessions: boolean, taskSessionKeys = buildTaskSessionKeySet()): T[] {
+  if (includeTaskSessions) return sessions;
+  return sessions.filter(session => !isTaskSession(session, taskSessionKeys));
+}
 
 function paginateSessionResult<T>(items: T[], page: number, limit: number) {
   const total = items.length;
@@ -219,6 +251,7 @@ app.get('/api/sessions/:agent', async (c) => {
   const workdir = runtime.getRequestWorkdir(config);
   const page = parsePageNumber(c.req.query('page'));
   const limit = parsePageSize(c.req.query('limit'));
+  const includeTaskSessions = readBooleanQuery(c.req.query('includeTaskSessions'));
   const botRef = runtime.getBotRef();
 
   runtime.debug(
@@ -227,7 +260,7 @@ app.get('/api/sessions/:agent', async (c) => {
   );
 
   const result = await querySessions({ workdir, agent });
-  const enriched = enrichWithRuntimeStatus(result.sessions, botRef);
+  const enriched = filterTaskSessions(enrichWithRuntimeStatus(result.sessions, botRef), includeTaskSessions);
   const paged = paginateSessionResult(enriched, page, limit);
 
   runtime.debug(
@@ -248,6 +281,7 @@ app.get('/api/sessions', async (c) => {
   const workdir = runtime.getRequestWorkdir(config);
   const page = parsePageNumber(c.req.query('page'));
   const limit = parsePageSize(c.req.query('limit'));
+  const includeTaskSessions = readBooleanQuery(c.req.query('includeTaskSessions'));
   const botRef = runtime.getBotRef();
 
   runtime.debug(
@@ -257,10 +291,11 @@ app.get('/api/sessions', async (c) => {
 
   const agents = listAgents().agents.filter(a => a.installed);
   const swimLane: Record<string, any> = {};
+  const taskSessionKeys = buildTaskSessionKeySet();
 
   await Promise.all(agents.map(async a => {
     const result = await querySessions({ workdir, agent: a.agent });
-    const enriched = enrichWithRuntimeStatus(result.sessions, botRef);
+    const enriched = filterTaskSessions(enrichWithRuntimeStatus(result.sessions, botRef), includeTaskSessions, taskSessionKeys);
     const paged = paginateSessionResult(enriched, page, limit);
 
     swimLane[a.agent] = {
@@ -413,9 +448,10 @@ app.post('/api/session-hub/sessions', async (c) => {
       limit: body?.limit,
       archiveMode: body?.archiveMode === 'archived' || body?.archiveMode === 'all' ? body.archiveMode : 'active',
     });
+    const includeTaskSessions = body?.includeTaskSessions === true;
     return c.json({
       ...result,
-      sessions: enrichWithRuntimeStatus(result.sessions, botRef),
+      sessions: filterTaskSessions(enrichWithRuntimeStatus(result.sessions, botRef), includeTaskSessions),
     });
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
