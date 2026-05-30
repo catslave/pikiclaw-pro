@@ -14,6 +14,58 @@ import type { Turn } from './utils';
 export type SelectionActionRequest = { quote: string; note: string; turnIndex?: number };
 export type SelectionSideChatRequest = SelectionActionRequest & { question: string };
 
+type ReviewCommentCardItem = { index: number; note: string; turn?: string; quote: string };
+type ReviewCommentCardData = { comments: ReviewCommentCardItem[]; trailingText: string };
+
+function parseReviewCommentCard(text: string): ReviewCommentCardData | null {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized.startsWith('Review comments to address:')) return null;
+  const [commentSection, ...tail] = normalized.split(/\n{2,}/);
+  const lines = commentSection.split('\n');
+  const comments: ReviewCommentCardItem[] = [];
+  let current: ReviewCommentCardItem | null = null;
+  let readingQuote = false;
+
+  const pushCurrent = () => {
+    if (current && (current.note.trim() || current.quote.trim())) {
+      comments.push({
+        ...current,
+        note: current.note.trim(),
+        quote: current.quote.trim(),
+      });
+    }
+  };
+
+  for (const rawLine of lines.slice(1)) {
+    const line = rawLine.trimEnd();
+    const nextComment = line.match(/^\s*(\d+)\.\s+(.*)$/);
+    if (nextComment) {
+      pushCurrent();
+      current = { index: Number(nextComment[1]), note: nextComment[2] || '', quote: '' };
+      readingQuote = false;
+      continue;
+    }
+    if (!current) continue;
+    const turn = line.match(/^\s*Turn:\s*(.+)$/);
+    if (turn) {
+      current.turn = turn[1].trim();
+      readingQuote = false;
+      continue;
+    }
+    if (/^\s*Quote:\s*$/.test(line)) {
+      readingQuote = true;
+      continue;
+    }
+    if (readingQuote) {
+      current.quote += `${current.quote ? '\n' : ''}${line.replace(/^\s*>\s?/, '')}`;
+    } else if (line.trim()) {
+      current.note += `${current.note ? '\n' : ''}${line.trim()}`;
+    }
+  }
+  pushCurrent();
+  if (!comments.length) return null;
+  return { comments, trailingText: tail.join('\n\n').trim() };
+}
 export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent, assistantRunError }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
@@ -121,6 +173,7 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const reviewCommentCard = parseReviewCommentCard(text);
   const totalLines = text ? text.split('\n').length : 0;
   const isLong = !!text && (text.length > LONG_USER_TEXT_CHAR_THRESHOLD || totalLines > LONG_USER_TEXT_LINE_THRESHOLD);
   const [expanded, setExpanded] = useState(false);
@@ -143,14 +196,19 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
     >
-      <div className="min-w-0 max-w-[72%] rounded-md border border-fg-6 bg-panel px-4 py-3 text-[13.5px] leading-[1.72] text-fg shadow-sm">
-        {text && (
+      <div className={cn(
+        'min-w-0 rounded-md border border-fg-6 bg-panel text-fg shadow-sm',
+        reviewCommentCard ? 'w-full max-w-[760px] px-0 py-0' : 'max-w-[72%] px-4 py-3 text-[13.5px] leading-[1.72]',
+      )}>
+        {reviewCommentCard ? (
+          <ReviewCommentsUserCard data={reviewCommentCard} />
+        ) : text ? (
           <div className="whitespace-pre-wrap break-words">
             {displayText}
             {isLong && !expanded && <span className="text-fg-5/60">…</span>}
           </div>
-        )}
-        {isLong && (
+        ) : null}
+        {!reviewCommentCard && isLong && (
           <button
             type="button"
             onClick={() => setExpanded(v => !v)}
@@ -160,7 +218,7 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
           </button>
         )}
         {imageBlocks.length > 0 && (
-          <div className={cn('flex min-w-0 max-w-full flex-wrap gap-2', text && 'mt-2')}>
+          <div className={cn('flex min-w-0 max-w-full flex-wrap gap-2', text && !reviewCommentCard && 'mt-2', reviewCommentCard && 'px-4 pb-4')}>
             {imageBlocks.map((img, i) => (
               <img
                 key={i}
@@ -189,6 +247,53 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
           onEdit={onEdit ? () => onEdit(text) : undefined}
           onFork={onFork}
         />
+      )}
+    </div>
+  );
+}
+
+function ReviewCommentsUserCard({ data }: { data: ReviewCommentCardData }) {
+  return (
+    <div className="overflow-hidden rounded-md">
+      <div className="flex items-center justify-between gap-3 border-b border-edge/50 bg-panel-alt/45 px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-[12.5px] font-semibold text-fg">Review comments</div>
+          <div className="mt-0.5 text-[11px] text-fg-5">Comments queued for the next agent turn</div>
+        </div>
+        <div className="shrink-0 rounded-full border border-primary/20 bg-primary/[0.08] px-2.5 py-1 text-[11px] font-semibold text-primary">
+          {data.comments.length} item{data.comments.length === 1 ? '' : 's'}
+        </div>
+      </div>
+      <div className="divide-y divide-edge/45">
+        {data.comments.map(comment => (
+          <div key={`${comment.index}-${comment.note}`} className="px-4 py-3">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border border-edge/65 bg-inset text-[11px] font-semibold text-fg-4">
+                {comment.index}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="whitespace-pre-wrap break-words text-[13px] font-medium leading-relaxed text-fg">
+                  {comment.note}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[10.5px] font-medium text-fg-5">
+                  {comment.turn && <span className="rounded border border-edge/55 bg-control/70 px-1.5 py-0.5">Turn {comment.turn}</span>}
+                  <span className="rounded border border-edge/55 bg-control/70 px-1.5 py-0.5">Quote</span>
+                </div>
+                {comment.quote && (
+                  <blockquote className="mt-2 border-l-2 border-primary/30 bg-inset/65 px-3 py-2 text-[12px] leading-relaxed text-fg-4">
+                    <div className="line-clamp-4 whitespace-pre-wrap break-words">{comment.quote}</div>
+                  </blockquote>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {data.trailingText && (
+        <div className="border-t border-edge/50 bg-panel/70 px-4 py-3">
+          <div className="mb-1 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-fg-5">Message</div>
+          <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-fg-3">{data.trailingText}</div>
+        </div>
       )}
     </div>
   );
