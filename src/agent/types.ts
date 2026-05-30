@@ -226,6 +226,7 @@ export interface StreamOpts {
   // openclaw
   openclawModel?: string;
   openclawExtraArgs?: string[];
+  openclawAgent?: 'codex' | 'cursor' | string;
   /** Override stdin payload (used for stream-json multimodal input) */
   _stdinOverride?: string;
   /** MCP bridge: callback when agent requests file send via MCP tool. Enables MCP bridge when provided. */
@@ -476,11 +477,13 @@ export interface ManagedSessionRecord {
   lastMessageText: string | null;
   lastThinking: string | null;
   lastPlan: StreamPreviewPlan | null;
+  outputs?: SessionOutput[];
   migratedFrom: SessionLineageRef | null;
   migratedTo: SessionLineageRef | null;
   linkedSessions: SessionLineageRef[];
   sideChatOf: SessionSideChatParentRef | null;
   sideChats: SessionSideChatRef[];
+  contextSources?: SessionContextSource[];
   numTurns?: number | null;
   /**
    * Set when this session was created by switching agent away from a prior session.
@@ -533,6 +536,35 @@ export interface SessionSideChatRef {
   hidden?: boolean;
 }
 
+export type SessionContextSourceMode = 'compact' | 'last_n_turns' | 'selected_turns' | 'full';
+
+export interface SessionContextSessionSource {
+  kind: 'session';
+  workdir: string;
+  agent: Agent;
+  sessionId: string;
+  title?: string | null;
+  mode?: SessionContextSourceMode;
+  lastNTurns?: number | null;
+  turnStart?: number | null;
+  turnEnd?: number | null;
+}
+
+export interface SessionContextOutputSource {
+  kind: 'output';
+  workdir: string;
+  agent: Agent;
+  sessionId: string;
+  outputId: string;
+  title: string;
+  summary?: string | null;
+  path?: string | null;
+  url?: string | null;
+  turnIndex?: number | null;
+}
+
+export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource;
+
 /** The run-state of a session: running, completed, or incomplete. */
 export type SessionRunState = 'running' | 'completed' | 'incomplete';
 
@@ -578,13 +610,38 @@ export interface SessionInfo {
   lastQuestion: string | null;
   lastAnswer: string | null;
   lastMessageText: string | null;
+  outputs?: SessionOutput[];
   migratedFrom: SessionLineageRef | null;
   migratedTo: SessionLineageRef | null;
   linkedSessions: SessionLineageRef[];
   sideChatOf?: SessionSideChatParentRef | null;
   sideChats?: SessionSideChatRef[];
+  contextSources?: SessionContextSource[];
   numTurns: number | null;
   handoverFrom?: HandoverRef | null;
+}
+
+export type SessionOutputKind = 'final' | 'document' | 'image' | 'file' | 'diff' | 'estimate' | 'stage-summary' | 'link';
+
+export interface SessionOutputRef {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+}
+
+export interface SessionOutput {
+  id: string;
+  kind: SessionOutputKind;
+  title: string;
+  summary?: string;
+  taskId?: string;
+  stageRunId?: string;
+  session?: SessionOutputRef;
+  turnIndex?: number;
+  path?: string;
+  url?: string;
+  createdAt: string;
+  pinned?: boolean;
 }
 
 /** Result of a session list request. */
@@ -721,6 +778,7 @@ export interface StageSessionFilesOpts {
   handoverFrom?: HandoverRef | null;
   /** Terminal/channel that first created or adopted this managed session. */
   origin?: Partial<SessionOrigin> | null;
+  contextSources?: SessionContextSource[];
 }
 
 /** Result of staging files into a session workspace. */
@@ -730,6 +788,7 @@ export interface StageSessionFilesResult {
   threadId: string | null;
   importedFiles: string[];
   handoverFrom: HandoverRef | null;
+  contextSources: SessionContextSource[];
 }
 
 /** Options for ensuring a managed session exists. */
@@ -741,6 +800,7 @@ export interface EnsureManagedSessionOpts {
   model?: string | null;
   threadId?: string | null;
   origin?: Partial<SessionOrigin> | null;
+  contextSources?: SessionContextSource[];
 }
 
 // ---------------------------------------------------------------------------

@@ -41,8 +41,8 @@ function setBuiltinEnabled(catalogId: string, enabled: boolean): boolean {
     saveUserConfig({ ...loadUserConfig(), browserEnabled: enabled });
     return true;
   }
-  if (catalogId === 'peekaboo') {
-    saveUserConfig({ ...loadUserConfig(), peekabooEnabled: enabled });
+  if (catalogId === 'computer-use' || catalogId === 'peekaboo') {
+    saveUserConfig({ ...loadUserConfig(), computerUseEnabled: enabled, peekabooEnabled: enabled });
     return true;
   }
   return false;

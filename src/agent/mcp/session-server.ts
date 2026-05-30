@@ -23,6 +23,7 @@ import { workspaceTools } from './tools/workspace.js';
 import { goalTools } from './tools/goal.js';
 import { askUserTools } from './tools/ask-user.js';
 import { proTools } from './tools/pro.js';
+import { outputTools } from './tools/outputs.js';
 
 // ---------------------------------------------------------------------------
 // Logging — writes to stderr + file so it doesn't interfere with stdio MCP transport
@@ -60,6 +61,8 @@ function summarizeArgs(args: unknown, max = 200): string {
 const ctx: ToolContext = {
   workspace: process.env.MCP_WORKSPACE_PATH || '',
   workdir: process.env.MCP_WORKDIR || undefined,
+  agent: process.env.MCP_AGENT || undefined,
+  sessionId: process.env.MCP_SESSION_ID || undefined,
   stagedFiles: (() => {
     try { return JSON.parse(process.env.MCP_STAGED_FILES || '[]'); } catch { return []; }
   })(),
@@ -83,6 +86,7 @@ const IS_CODEX = process.env.MCP_AGENT === 'codex';
 const TOOL_MODULES: McpToolModule[] = [
   ...(AVAILABLE.has('workspace') ? [workspaceTools] : []),
   ...(AVAILABLE.has('pro') ? [proTools] : []),
+  ...(AVAILABLE.has('outputs') ? [outputTools] : []),
   ...(IS_CODEX ? [] : [goalTools]),
   ...(AVAILABLE.has('ask-user') ? [askUserTools] : []),
 ];

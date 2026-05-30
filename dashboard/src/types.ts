@@ -282,6 +282,8 @@ export interface UserConfig {
   channels?: string[];
   browserEnabled?: boolean;
   browserHeadless?: boolean;
+  computerUseEnabled?: boolean;
+  peekabooEnabled?: boolean;
 }
 
 export interface WeixinValidationResult {
@@ -412,6 +414,17 @@ export interface LocalModelsProbeResponse {
   error?: string;
 }
 
+export interface LocalModelActionResponse extends LocalModelsProbeResponse {
+  backend?: LocalBackendStatus | null;
+  model?: string;
+  output?: string;
+  message?: string;
+  installedNow?: boolean;
+  serviceStarted?: boolean;
+  serviceReady?: boolean;
+  ready?: boolean;
+}
+
 /**
  * Single selectable option in a human-in-the-loop interaction question.
  * Mirrors AgentInteractionOption from the server.
@@ -472,6 +485,7 @@ export interface SessionInfo {
   lastQuestion?: string | null;
   lastAnswer?: string | null;
   lastMessageText?: string | null;
+  outputs?: ProOutput[];
   classification?: {
     outcome: 'answer' | 'proposal' | 'implementation' | 'partial' | 'blocked' | 'conversation';
     summary: string;
@@ -489,6 +503,7 @@ export interface SessionInfo {
   linkedSessions?: SessionLineageRef[];
   sideChatOf?: SessionSideChatParentRef | null;
   sideChats?: SessionSideChatRef[];
+  contextSources?: SessionContextSource[];
   numTurns?: number | null;
 }
 
@@ -512,6 +527,35 @@ export interface SessionLineageRef {
   /** 0-based turn index where the fork occurred (set on `migratedFrom` only). */
   forkedAtTurn?: number;
 }
+
+export type SessionContextSourceMode = 'compact' | 'last_n_turns' | 'selected_turns' | 'full';
+
+export interface SessionContextSessionSource {
+  kind: 'session';
+  workdir: string;
+  agent: Agent | string;
+  sessionId: string;
+  title?: string | null;
+  mode?: SessionContextSourceMode;
+  lastNTurns?: number | null;
+  turnStart?: number | null;
+  turnEnd?: number | null;
+}
+
+export interface SessionContextOutputSource {
+  kind: 'output';
+  workdir: string;
+  agent: Agent | string;
+  sessionId: string;
+  outputId: string;
+  title: string;
+  summary?: string | null;
+  path?: string | null;
+  url?: string | null;
+  turnIndex?: number | null;
+}
+
+export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource;
 
 export interface SessionSideChatParentRef {
   agent: Agent | string;
@@ -1275,6 +1319,15 @@ export interface TodoItemSource {
   quote?: string;
 }
 
+export interface TodoImageAttachment {
+  id: string;
+  kind: 'image';
+  name: string;
+  mimeType: string;
+  size?: number;
+  dataUrl: string;
+}
+
 export interface TodoItem {
   id: string;
   kind: TodoItemKind;
@@ -1283,6 +1336,7 @@ export interface TodoItem {
   status: TodoItemStatus;
   createdAt: string;
   updatedAt: string;
+  images?: TodoImageAttachment[];
   source?: TodoItemSource;
   linkedChat?: {
     workdir: string;

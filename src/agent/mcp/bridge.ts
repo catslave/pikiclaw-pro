@@ -188,8 +188,8 @@ export function resolveGuiIntegrationConfig(
     false,
   );
   const peekabooEnabled = boolFromConfigEnv(
-    config.peekabooEnabled,
-    env.PIKICLAW_PEEKABOO_ENABLED,
+    (config as Record<string, unknown>).computerUseEnabled ?? config.peekabooEnabled,
+    env.PIKICLAW_COMPUTER_USE_ENABLED ?? env.PIKICLAW_PEEKABOO_ENABLED,
     false,
   );
   return {
@@ -230,10 +230,10 @@ export function buildSupplementalMcpServers(
     });
   }
   if (gui.peekabooEnabled && process.platform === 'darwin') {
-    // Peekaboo — native macOS GUI automation via Accessibility + ScreenCaptureKit.
+    // Computer Use via Peekaboo — native macOS GUI automation via Accessibility + ScreenCaptureKit.
     // Run the dedicated MCP bin from the multi-bin @steipete/peekaboo package.
     servers.push({
-      name: 'peekaboo',
+      name: 'computer-use',
       command: 'npx',
       args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
     });
@@ -250,7 +250,7 @@ export function buildGuiSetupHints(gui: GuiIntegrationConfig = resolveGuiIntegra
   }
   if (gui.peekabooEnabled && process.platform === 'darwin') {
     hints.push(
-      'Peekaboo enabled — native macOS GUI tools (see / click / type / scroll / window / menu / app / dock) via Accessibility + ScreenCaptureKit. Prefer element-ID interactions (call `see` first) over raw coordinates.',
+      'Computer Use enabled — native macOS GUI tools (see / click / type / scroll / window / menu / app / dock) via Accessibility + ScreenCaptureKit. Use it for the user\'s current desktop apps and signed-in Chrome windows. Use managed Browser Automation instead for test/verify flows, localhost checks, screenshots, and repeatable isolated web validation unless the user explicitly asks for current Chrome. For URL navigation in current Chrome, open a new tab or focus the address bar before typing; never type URLs into page content.',
     );
   }
   return hints;
@@ -740,7 +740,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   // so agents can persist pulled Jira issues as Pikiclaw tasks.
   {
     const { command, args } = resolveMcpServerCommand();
-    const enabledTools: string[] = ['pro'];
+    const enabledTools: string[] = ['pro', 'outputs'];
     if (sendFile) enabledTools.push('workspace');
     // Codex has native user-input via JSON-RPC; don't expose `im_ask_user`.
     if (onInteraction && opts.agent !== 'codex') enabledTools.push('ask-user');
@@ -753,6 +753,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
         MCP_WORKSPACE_PATH: workspacePath,
         MCP_WORKDIR: opts.workdir || '',
         MCP_AGENT: opts.agent || '',
+        MCP_SESSION_ID: path.basename(sessionDir),
         MCP_STAGED_FILES: JSON.stringify(stagedFiles),
         MCP_CALLBACK_URL: port ? `http://127.0.0.1:${port}` : '',
         MCP_LOG_URL: port ? `http://127.0.0.1:${port}/log` : '',

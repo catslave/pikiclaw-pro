@@ -366,7 +366,9 @@ export function getCatalogItems(opts: {
   const userConfig = loadUserConfig();
   const builtinInstalled = (catalogId: string): boolean => {
     if (catalogId === 'pikiclaw-browser') return userConfig.browserEnabled === true;
-    if (catalogId === 'peekaboo') return userConfig.peekabooEnabled === true;
+    if (catalogId === 'computer-use' || catalogId === 'peekaboo') {
+      return userConfig.computerUseEnabled === true || userConfig.peekabooEnabled === true;
+    }
     return false;
   };
 

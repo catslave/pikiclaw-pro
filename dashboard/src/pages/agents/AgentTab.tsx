@@ -34,7 +34,7 @@ import { SessionPanel } from '../sessions/SessionPanel';
 import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
-const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'openclaw'];
+const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'gemini'];
 // Mirrors the backend type in src/model/validation.ts. Pricing fields are USD
 // per 1M tokens; `created` is unix epoch (seconds).
 interface ProviderModelInfo {

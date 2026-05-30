@@ -99,18 +99,26 @@ describe('resolveGuiIntegrationConfig', () => {
   it('prefers env overrides over user config defaults', () => {
     const config = {
       browserEnabled: false,
+      computerUseEnabled: false,
     };
     const gui = resolveGuiIntegrationConfig(config as any, {
       PIKICLAW_BROWSER_ENABLED: 'true',
       PIKICLAW_BROWSER_HEADLESS: 'true',
+      PIKICLAW_COMPUTER_USE_ENABLED: 'true',
     });
 
     expect(gui).toEqual({
       browserEnabled: true,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: true,
-      peekabooEnabled: false,
+      peekabooEnabled: true,
     });
+  });
+
+  it('keeps the legacy peekaboo config key as a Computer Use compatibility alias', () => {
+    const gui = resolveGuiIntegrationConfig({ peekabooEnabled: true } as any, {});
+
+    expect(gui.peekabooEnabled).toBe(true);
   });
 
   it('keeps the legacy browser-use-profile env var as a compatibility alias', () => {
@@ -173,6 +181,27 @@ describe('buildSupplementalMcpServers', () => {
     expect(expected.args).toContain('--cdp-endpoint');
     expect(expected.args).toContain(cdpEndpoint);
   });
+
+  it('adds the Computer Use MCP server when native desktop control is enabled on macOS', () => {
+    const servers = buildSupplementalMcpServers({
+      browserEnabled: false,
+      browserProfileDir: getManagedBrowserProfileDir(),
+      browserHeadless: false,
+      peekabooEnabled: true,
+    });
+
+    if (process.platform === 'darwin') {
+      expect(servers).toEqual([
+        {
+          name: 'computer-use',
+          command: 'npx',
+          args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
+        },
+      ]);
+    } else {
+      expect(servers).toEqual([]);
+    }
+  });
 });
 
 describe('buildGuiSetupHints', () => {
@@ -197,6 +226,23 @@ describe('buildGuiSetupHints', () => {
     expect(hints).toEqual([
       `managed browser profile mode enabled; runtime sessions reuse ${profileDir}; configured MCP browser mode=headless. This mode keeps automation isolated from your everyday browser. If the managed browser is already open, pikiclaw will try to attach to it first. When using browser_tabs, use action="new" to open a tab, not "create".`,
     ]);
+  });
+
+  it('explains Computer Use when native desktop control is enabled on macOS', () => {
+    const hints = buildGuiSetupHints({
+      browserEnabled: false,
+      browserProfileDir: getManagedBrowserProfileDir(),
+      browserHeadless: false,
+      peekabooEnabled: true,
+    });
+
+    if (process.platform === 'darwin') {
+      expect(hints).toEqual([
+        'Computer Use enabled — native macOS GUI tools (see / click / type / scroll / window / menu / app / dock) via Accessibility + ScreenCaptureKit. Use it for the user\'s current desktop apps and signed-in Chrome windows. Use managed Browser Automation instead for test/verify flows, localhost checks, screenshots, and repeatable isolated web validation unless the user explicitly asks for current Chrome. For URL navigation in current Chrome, open a new tab or focus the address bar before typing; never type URLs into page content.',
+      ]);
+    } else {
+      expect(hints).toEqual([]);
+    }
   });
 });
 

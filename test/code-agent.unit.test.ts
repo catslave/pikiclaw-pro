@@ -636,6 +636,41 @@ describe('stageSessionFiles', () => {
     });
   });
 
+  it('persists context sources on newly staged sessions', async () => {
+    const workdir = makeTmpDir('pikiclaw-context-source-');
+    const sourceWorkdir = makeTmpDir('pikiclaw-context-origin-');
+    const contextSources = [{
+      kind: 'session' as const,
+      workdir: sourceWorkdir,
+      agent: 'codex' as const,
+      sessionId: 'source-thread',
+      title: 'Source Thread',
+      mode: 'compact' as const,
+    }];
+    const normalizedSources = [{
+      ...contextSources[0],
+      lastNTurns: null,
+      turnStart: null,
+      turnEnd: null,
+    }];
+
+    const staged = stageSessionFiles({
+      agent: 'codex',
+      workdir,
+      files: [],
+      sessionId: 'target-thread',
+      title: 'new chat from source',
+      contextSources,
+    });
+
+    expect(staged.contextSources).toEqual(normalizedSources);
+    const record = listPikiclawSessions(workdir, 'codex').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.contextSources).toEqual(normalizedSources);
+
+    const info = ensureManagedSession({ agent: 'codex', workdir, sessionId: 'target-thread' });
+    expect(info.contextSources).toEqual(normalizedSources);
+  });
+
   it('adopts an agent-generated title once, then leaves later naming to the user', () => {
     const workdir = makeTmpDir('pikiclaw-agent-title-');
     const staged = stageSessionFiles({

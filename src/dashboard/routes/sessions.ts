@@ -11,8 +11,9 @@ import {
   listAgents, listSkills,
   decodeAttachmentPathParam, resolveAllowedAttachmentPath, rewriteImageBlocksForTransport,
   readSessionPlan,
-  type Agent, type SessionInfo, type SessionMessagesResult, type RichMessage,
+  type Agent, type SessionInfo, type SessionMessagesResult, type RichMessage, type SessionContextSource,
 } from '../../agent/index.js';
+import { normalizeSessionContextSources } from '../../agent/context-sources.js';
 import { getSessionStatusForBot } from '../../bot/session-status.js';
 import { findPikiclawSession } from '../../agent/session.js';
 import {
@@ -130,6 +131,12 @@ function readStringField(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function parseJsonField(value: unknown): unknown {
+  const text = readStringField(value);
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
 function isUploadFile(value: unknown): value is {
   name?: string;
   type?: string;
@@ -199,6 +206,7 @@ async function parseSessionSendRequest(c: any): Promise<{
   attachments: string[];
   previousAgent: string;
   previousSessionId: string;
+  contextSources: SessionContextSource[];
   cleanup: () => Promise<void>;
 }> {
   const contentType = String(c.req.header('content-type') || '').toLowerCase();
@@ -215,6 +223,7 @@ async function parseSessionSendRequest(c: any): Promise<{
       attachments: uploads.attachments,
       previousAgent: readStringField(form.get('previousAgent')),
       previousSessionId: readStringField(form.get('previousSessionId')),
+      contextSources: normalizeSessionContextSources(parseJsonField(form.get('contextSources'))),
       cleanup: uploads.cleanup,
     };
   }
@@ -230,6 +239,7 @@ async function parseSessionSendRequest(c: any): Promise<{
     attachments: [],
     previousAgent: readStringField(body?.previousAgent),
     previousSessionId: readStringField(body?.previousSessionId),
+    contextSources: normalizeSessionContextSources(body?.contextSources),
     cleanup: async () => {},
   };
 }
@@ -537,7 +547,10 @@ app.post('/api/session-hub/session/delete', async (c) => {
     const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
     const agent = typeof body?.agent === 'string' ? body.agent.trim() : '';
     const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
-    const purgeNative = false;
+    // Dashboard "Delete session" is a destructive delete. If we only remove
+    // Pikiclaw's overlay record, native agent sessions are merged back on the
+    // next refresh and the deleted row reappears.
+    const purgeNative = true;
     if (!workdir || !agent || !sessionId) {
       return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
     }
@@ -570,7 +583,9 @@ app.post('/api/session-hub/session/side-chat/delete', async (c) => {
     const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
     const parentAgent = typeof body?.parentAgent === 'string' ? body.parentAgent.trim() : '';
     const parentSessionId = typeof body?.parentSessionId === 'string' ? body.parentSessionId.trim() : '';
-    const purgeNative = false;
+    // Keep side-chat delete semantics aligned with regular Dashboard delete:
+    // remove the native transcript too, otherwise refresh can rediscover it.
+    const purgeNative = true;
     if (!workdir || !agent || !sessionId || !parentAgent || !parentSessionId) {
       return c.json({ ok: false, error: 'workdir, agent, sessionId, parentAgent, and parentSessionId are required' }, 400);
     }
@@ -797,7 +812,7 @@ app.get('/api/session-hub/skills', (c) => {
 
 app.post('/api/session-hub/session/send', async (c) => {
   try {
-    const { workdir, agent, sessionId, prompt, model, effort, attachments, previousAgent, previousSessionId, cleanup } = await parseSessionSendRequest(c);
+    const { workdir, agent, sessionId, prompt, model, effort, attachments, previousAgent, previousSessionId, contextSources, cleanup } = await parseSessionSendRequest(c);
     const queued = await queueDashboardSessionTask({
       workdir,
       agent,
@@ -808,6 +823,7 @@ app.post('/api/session-hub/session/send', async (c) => {
       attachments,
       previousAgent: previousAgent || null,
       previousSessionId: previousSessionId || null,
+      contextSources,
     });
     await cleanup();
     if (!queued.ok) {

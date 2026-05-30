@@ -9,11 +9,11 @@ export type ContextShelfTab = 'outputs' | 'side-chats' | 'files' | 'browser' | '
 type ContextShelfFile = ProTaskWorkbench['files'][number];
 
 const TAB_LABEL: Record<ContextShelfTab, string> = {
-  outputs: 'Outputs',
+  outputs: 'Output',
   'side-chats': 'Side Cards',
-  files: 'Files',
+  files: 'File',
   browser: 'Browser',
-  status: 'Status',
+  status: 'Overview',
   ticket: 'Ticket',
 };
 
@@ -54,9 +54,11 @@ function EmptyShelfState({ title, hint }: { title: string; hint: string }) {
 function OutputPreview({
   outputs,
   onOpenPath,
+  onCreateSessionFromOutput,
 }: {
   outputs: ProOutput[];
   onOpenPath?: (path: string, workdir?: string) => void;
+  onCreateSessionFromOutput?: (output: ProOutput) => void;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = useMemo(() => {
@@ -107,6 +109,11 @@ function OutputPreview({
         <div className="min-h-[190px] border-t border-edge/55 bg-inset/20 px-3 py-3">
           <div className="mb-2 flex min-w-0 items-center gap-2">
             <div className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg">{selected.title}</div>
+            {onCreateSessionFromOutput && (
+              <Button size="sm" variant="outline" onClick={() => onCreateSessionFromOutput(selected)}>
+                Open in chat
+              </Button>
+            )}
             {selected.path && onOpenPath && (
               <Button size="sm" variant="outline" onClick={() => onOpenPath(selected.path!, selected.session?.workdir)}>
                 Open
@@ -345,6 +352,7 @@ export function ContextShelf({
   ticket,
   statusContent,
   onOpenPath,
+  onCreateSessionFromOutput,
   width,
   surface = 'inline',
   cardTitle,
@@ -373,6 +381,7 @@ export function ContextShelf({
   ticket?: ProTaskWorkbench['ticketSnapshot'] | null;
   statusContent?: ReactNode;
   onOpenPath?: (path: string, workdir?: string) => void;
+  onCreateSessionFromOutput?: (output: ProOutput) => void;
   width?: number;
   surface?: 'inline' | 'card';
   cardTitle?: string;
@@ -573,7 +582,13 @@ export function ContextShelf({
       </div>}
       <div className="min-h-0 flex-1 bg-[var(--th-session-bg)]">
         {sideCardSurface ? (sideCardContent || sideChatContent) : null}
-        {!sideCardSurface && visibleTab === 'outputs' && <OutputPreview outputs={outputs} onOpenPath={onOpenPath} />}
+        {!sideCardSurface && visibleTab === 'outputs' && (
+          <OutputPreview
+            outputs={outputs}
+            onOpenPath={onOpenPath}
+            onCreateSessionFromOutput={onCreateSessionFromOutput}
+          />
+        )}
         {!sideCardSurface && visibleTab === 'side-chats' && sideChatContent}
         {!sideCardSurface && visibleTab === 'browser' && <BrowserTab />}
         {visibleTab === 'files' && (filesContent || <FilesTab files={files} onOpenPath={onOpenPath} />)}

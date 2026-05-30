@@ -121,7 +121,9 @@ export interface UserConfig {
   wecomEndpoint?: string;
   browserEnabled?: boolean;
   browserHeadless?: boolean;
-  /** Peekaboo MCP for native macOS GUI control — toggled from the Extensions tab. */
+  /** Computer Use MCP for native macOS GUI control — toggled from the Extensions tab. */
+  computerUseEnabled?: boolean;
+  /** Legacy config key for the Peekaboo-backed Computer Use MCP. */
   peekabooEnabled?: boolean;
   /** Extension configuration — global MCP servers, OAuth tokens, and skills. */
   extensions?: {
@@ -309,6 +311,9 @@ function normalizeUserConfig(config: Partial<UserConfig>): Partial<UserConfig> {
   }
   if (typeof next.browserHeadless !== 'boolean' && typeof next.browserGuiHeadless === 'boolean') {
     next.browserHeadless = next.browserGuiHeadless;
+  }
+  if (typeof next.computerUseEnabled !== 'boolean' && typeof next.peekabooEnabled === 'boolean') {
+    next.computerUseEnabled = next.peekabooEnabled;
   }
   delete next.browserUseProfile;
   delete next.browserCdpEndpoint;

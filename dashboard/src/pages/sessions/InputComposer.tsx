@@ -15,7 +15,7 @@ import {
   parseSessionKey,
   type ComposerAttachment,
 } from './utils';
-import type { SessionInfo, AgentRuntimeStatus, SkillInfo, StreamPreviewMeta } from '../../types';
+import type { SessionInfo, AgentRuntimeStatus, SkillInfo, StreamPreviewMeta, SessionContextSource } from '../../types';
 
 type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 
@@ -40,7 +40,9 @@ export type PendingReviewComment = {
   turnIndex?: number;
 };
 
-type ComposerMode = 'single' | 'multi';
+type ComposerMode = 'quick' | 'safe' | 'deep' | 'multi';
+
+const COMPOSER_MODES: ComposerMode[] = ['quick', 'safe', 'deep'];
 
 const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
   {
@@ -288,11 +290,96 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, initialDraftPrompt = null, onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
+function buildReferenceContextEnvelope(context: string): string {
+  const trimmed = context.trim();
+  if (!trimmed) return '';
+  const safe = trimmed.replace(/<\/pikiclaw_context>/gi, '</pikiclaw-context>');
+  return [
+    '<pikiclaw_context type="reference">',
+    safe,
+    '</pikiclaw_context>',
+    '[Reference context above was attached by Pikiclaw. Use it as background for the user message below; do not repeat it unless useful.]',
+  ].join('\n');
+}
+
+function wantsAutoCrossCheck(prompt: string): boolean {
+  const text = prompt.toLowerCase();
+  return [
+    '交叉检查',
+    '交叉验证',
+    '多个 agent',
+    '多 agent',
+    'multi agent',
+    'multi-agent',
+    'cross check',
+    'cross-check',
+    'second opinion',
+    '再确认一下',
+  ].some(pattern => text.includes(pattern));
+}
+
+function isAssuranceMode(mode: ComposerMode): boolean {
+  return mode === 'safe' || mode === 'deep';
+}
+
+function composerModeLabelKey(mode: ComposerMode): string {
+  if (mode === 'quick') return 'hub.modeQuick';
+  if (mode === 'safe') return 'hub.modeSafe';
+  if (mode === 'deep') return 'hub.modeDeep';
+  return 'hub.modeMulti';
+}
+
+async function waitForCrossCheckResults(
+  sessions: Array<{ agent: string; sessionId: string; workdir: string; label: 'Codex' | 'Cursor' }>,
+  timeoutMs = 10 * 60 * 1000,
+): Promise<Array<{ label: 'Codex' | 'Cursor'; agent: string; sessionId: string; text: string; error?: string }>> {
+  const startedAt = Date.now();
+  const remaining = new Map(sessions.map(session => [`${session.agent}:${session.sessionId}`, session]));
+  const results: Array<{ label: 'Codex' | 'Cursor'; agent: string; sessionId: string; text: string; error?: string }> = [];
+
+  while (remaining.size && Date.now() - startedAt < timeoutMs) {
+    await Promise.all(Array.from(remaining.entries()).map(async ([key, session]) => {
+      try {
+        const state = await api.getSessionStreamState(session.agent, session.sessionId, { timeoutMs: 8_000 });
+        const snapshot = state.state;
+        if (!snapshot || snapshot.phase !== 'done') return;
+        remaining.delete(key);
+        results.push({
+          label: session.label,
+          agent: session.agent,
+          sessionId: snapshot.sessionId || session.sessionId,
+          text: (snapshot.text || '').trim(),
+          ...(snapshot.error ? { error: snapshot.error } : {}),
+        });
+      } catch {
+        // A transient polling miss should not abort the whole synthesis.
+      }
+    }));
+    if (remaining.size) await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+
+  for (const session of remaining.values()) {
+    results.push({
+      label: session.label,
+      agent: session.agent,
+      sessionId: session.sessionId,
+      text: '',
+      error: 'Timed out waiting for this lane to finish.',
+    });
+  }
+  return results.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   compact?: boolean;
+  autoFocus?: boolean;
   initialDraftPrompt?: string | null;
+  referenceContextPrompt?: string | null;
+  referenceContextLabel?: string | null;
+  onReferenceContextClear?: () => void;
+  contextSources?: SessionContextSource[];
   onStreamQueued: () => void;
   onSendStart: (prompt: string, imageUrls?: string[]) => void;
   onSendTaskAssigned?: (taskId: string) => void;
@@ -346,7 +433,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   const [selectedAgent, setSelectedAgent] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState('');
-  const [composerMode, setComposerMode] = useState<ComposerMode>('single');
+  const [composerMode, setComposerMode] = useState<ComposerMode>('quick');
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [modeMenuPos, setModeMenuPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
   const [multiAgentIds, setMultiAgentIds] = useState<string[]>([]);
@@ -412,16 +499,17 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   }, []);
 
   useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
+  const selectableAgents = useMemo(() => agents.filter(agent => agent.agent !== 'openclaw'), [agents]);
   useEffect(() => {
-    if (!agents.length) return;
-    const installed = agents.filter(a => a.installed).map(a => a.agent);
+    if (!selectableAgents.length) return;
+    const installed = selectableAgents.filter(a => a.installed).map(a => a.agent);
     setMultiAgentIds(prev => {
       const filtered = prev.filter(agent => installed.includes(agent));
       if (filtered.length) return filtered;
-      const fallback = selectedAgent || session.agent || agents.find(a => a.isDefault)?.agent || installed[0] || '';
+      const fallback = selectedAgent || (session.agent !== 'openclaw' ? session.agent : '') || selectableAgents.find(a => a.isDefault)?.agent || installed[0] || '';
       return fallback ? [fallback] : [];
     });
-  }, [agents, selectedAgent, session.agent]);
+  }, [selectableAgents, selectedAgent, session.agent]);
   useEffect(() => { attachmentsRef.current = composerAttachments; }, [composerAttachments]);
 
   // Restore draft on mount, save on unmount
@@ -497,6 +585,17 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     });
   }, [dk, initialDraftPrompt, persistDraft]);
 
+  useEffect(() => {
+    if (!autoFocus) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [autoFocus, dk]);
+
   // Consume editDraft — populate the input when user clicks "Edit" on a message
   useEffect(() => {
     if (editDraft != null) {
@@ -543,9 +642,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     return match ? match[1].trimStart().toLowerCase() : null;
   })() : null;
   const activeCommandAgent = selectedAgent
-    || session.agent
-    || agents.find(a => a.isDefault)?.agent
-    || agents.find(a => a.installed)?.agent
+    || (session.agent !== 'openclaw' ? session.agent : '')
+    || selectableAgents.find(a => a.isDefault)?.agent
+    || selectableAgents.find(a => a.installed)?.agent
     || '';
   const activeCommandCapabilities = agents.find(a => a.agent === activeCommandAgent)?.capabilities || null;
   const capabilityModeForCommand = useCallback((cmd: BuiltinComposerCommand): 'native' | 'portable' | 'unsupported' | null => {
@@ -797,19 +896,62 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     ].join('\n');
   }, []);
 
+  const buildAutoCrossCheckPrompt = useCallback((prompt: string, lane: 'Codex' | 'Cursor', runId: string, mode: ComposerMode) => {
+    return [
+      `[Pikiclaw Auto Cross-check: ${lane}]`,
+      `Run: ${runId}`,
+      `Review depth: ${mode === 'deep' ? 'deep' : 'safe'}`,
+      lane === 'Codex'
+        ? 'Work as the code-analysis lane. Inspect independently and focus on correctness, risks, missing tests, and concrete next steps.'
+        : 'Work as the Cursor/IDE-perspective lane. Inspect independently and focus on what editor/context-aware review can add: navigation, changed-file context, likely implementation gaps, and ergonomic issues.',
+      mode === 'deep'
+        ? 'Be more exhaustive than usual: inspect edge cases, design tradeoffs, test gaps, operational risks, and whether the proposed behavior actually matches the product goal.'
+        : 'Keep the review concise and practical; prioritize issues that could change the answer or implementation decision.',
+      'Make the output easy to synthesize later: include assumptions, key findings, risks, and recommended next steps.',
+      '',
+      prompt,
+    ].join('\n');
+  }, []);
+
+  const buildAutoSynthesisPrompt = useCallback((
+    originalPrompt: string,
+    runId: string,
+    mode: ComposerMode,
+    results: Array<{ label: 'Codex' | 'Cursor'; agent: string; sessionId: string; text: string; error?: string }>,
+  ) => {
+    return [
+      '[Pikiclaw Auto Synthesis]',
+      `Run: ${runId}`,
+      `Mode: ${mode === 'deep' ? 'deep' : 'safe'}`,
+      'Combine the completed cross-check lanes into one final answer for the user.',
+      'Lead with the conclusion. Then list confirmed issues, disagreements between lanes, residual risks, and recommended next steps.',
+      'Do not mention OpenClaw/Gateway/ACP implementation details unless they are directly relevant to the user request.',
+      '',
+      `Original request:\n${originalPrompt}`,
+      '',
+      ...results.map(result => [
+        `## ${result.label} lane (${result.agent}:${result.sessionId})`,
+        result.error ? `Lane error: ${result.error}` : '',
+        result.text || '(No visible answer captured.)',
+      ].filter(Boolean).join('\n')),
+    ].join('\n\n');
+  }, []);
+
   const handleSend = useCallback(() => {
     const body = input.trim();
     const commentBlock = formatPendingReviewComments(pendingReviewComments);
-    const prompt = [commentBlock, body].filter(Boolean).join('\n\n');
+    const visiblePrompt = [commentBlock, body].filter(Boolean).join('\n\n');
+    const referenceContext = buildReferenceContextEnvelope(String(referenceContextPrompt || ''));
+    const prompt = [referenceContext, visiblePrompt].filter(Boolean).join('\n\n');
     if (composerAttachments.some(item => item.status !== 'ready')) return;
     const attachments = composerAttachments.map(item => item.file);
-    if ((!prompt && attachments.length === 0) || sending) return;
+    if ((!visiblePrompt && attachments.length === 0) || sending) return;
     const targetAgent = selectedAgent
-      || session.agent
-      || agents.find(a => a.isDefault)?.agent
+      || (session.agent !== 'openclaw' ? session.agent : '')
+      || selectableAgents.find(a => a.isDefault)?.agent
       || '';
     if (!targetAgent) return;
-    const installedAgentIds = agents.filter(a => a.installed).map(a => a.agent);
+    const installedAgentIds = selectableAgents.filter(a => a.installed).map(a => a.agent);
     const targetMultiAgents = Array.from(new Set(
       multiAgentIds.filter(agent => installedAgentIds.includes(agent)),
     ));
@@ -821,9 +963,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     const targetEffort = targetAgent === 'gemini'
       ? null
       : ((selectedEffort || targetStatus?.selectedEffort || '').trim() || null);
-    if (composerMode === 'multi') {
+    const autoCrossCheck = composerMode !== 'multi' && (isAssuranceMode(composerMode) || wantsAutoCrossCheck(visiblePrompt));
+    if (composerMode === 'multi' || autoCrossCheck) {
       setSending(true);
-      lastSentRef.current = { prompt, files: attachments };
+      lastSentRef.current = { prompt: visiblePrompt, files: attachments };
       inputValueRef.current = '';
       setInput('');
       onClearPendingReviewComments?.();
@@ -835,26 +978,66 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       const previousAgent = session.agent || null;
       const previousSessionId = session.sessionId || null;
       const startedSessions: Array<{ agent: string; sessionId: string; workdir: string }> = [];
-      const runId = `multi-${Date.now().toString(36)}`;
-      Promise.allSettled(targetMultiAgents.map(async agent => {
+      const runId = `${autoCrossCheck ? 'cross' : 'multi'}-${Date.now().toString(36)}`;
+      const codexLane = selectableAgents.some(agent => agent.agent === 'codex' && agent.installed) ? 'codex' : targetAgent;
+      const cursorLane = selectableAgents.some(agent => agent.agent === 'cursor' && agent.installed) ? 'cursor' : codexLane;
+      const runs: Array<{ agent: string; prompt: string; label?: 'Codex' | 'Cursor' }> = autoCrossCheck
+        ? [
+          {
+            agent: codexLane,
+            prompt: buildAutoCrossCheckPrompt(prompt || 'Please inspect the attached file(s).', 'Codex', runId, composerMode),
+            label: 'Codex',
+          },
+          {
+            agent: cursorLane,
+            prompt: buildMultiAgentPrompt(prompt || 'Please inspect the attached file(s).', cursorLane, [codexLane, cursorLane], runId),
+            label: 'Cursor',
+          },
+        ]
+        : targetMultiAgents.map(agent => ({
+          agent,
+          prompt: buildMultiAgentPrompt(prompt || 'Please inspect the attached file(s).', agent, targetMultiAgents, runId),
+        }));
+      const laneSessions: Array<{ agent: string; sessionId: string; workdir: string; label: 'Codex' | 'Cursor' }> = [];
+      Promise.allSettled(runs.map(async run => {
+        const agent = run.agent;
         const status = agents.find(a => a.agent === agent) || null;
         const model = (status?.selectedModel || '').trim() || null;
         const effort = agent === 'gemini' ? null : ((status?.selectedEffort || '').trim() || null);
-        const res = await api.sendSessionMessage(workdir, agent, '', buildMultiAgentPrompt(prompt || 'Please inspect the attached file(s).', agent, targetMultiAgents, runId), {
+        const res = await api.sendSessionMessage(workdir, agent, '', run.prompt, {
           attachments,
           model,
           effort,
           previousAgent: previousAgent && previousAgent !== agent ? previousAgent : null,
           previousSessionId: previousAgent && previousAgent !== agent ? previousSessionId : null,
+          contextSources,
         });
         if (!res.ok) throw new Error(res.error || `Failed to start ${agent}`);
         const nextSession = typeof res.sessionKey === 'string' ? parseSessionKey(res.sessionKey) : null;
         if (nextSession) startedSessions.push({ ...nextSession, workdir });
+        if (autoCrossCheck && run.label && nextSession) laneSessions.push({ ...nextSession, workdir, label: run.label });
         return res;
       }))
         .then(results => {
-          if (startedSessions.length) onMultiSessionChange?.(startedSessions, prompt);
+          if (startedSessions.length) onMultiSessionChange?.(startedSessions, visiblePrompt);
+          if (startedSessions.length) onReferenceContextClear?.();
           if (results.some(result => result.status === 'rejected') || !startedSessions.length) onSendFailed?.();
+          if (autoCrossCheck && laneSessions.length) {
+            void (async () => {
+              const laneResults = await waitForCrossCheckResults(laneSessions);
+              const synthesisPrompt = buildAutoSynthesisPrompt(visiblePrompt || 'Please inspect the attached file(s).', runId, composerMode, laneResults);
+              const synth = await api.sendSessionMessage(workdir, targetAgent, '', synthesisPrompt, {
+                model: targetModel || undefined,
+                effort: targetEffort || undefined,
+              });
+              if (!synth.ok) {
+                onSendFailed?.();
+                return;
+              }
+              const nextSession = typeof synth.sessionKey === 'string' ? parseSessionKey(synth.sessionKey) : null;
+              if (nextSession) onMultiSessionChange?.([{ ...nextSession, workdir }], visiblePrompt);
+            })();
+          }
         })
         .finally(() => {
           setUploadingAttachmentCount(0);
@@ -874,7 +1057,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     const previousSessionId = isAgentSwitch && session.sessionId ? session.sessionId : null;
     setSending(true);
     // Stash content for potential recall restoration
-    lastSentRef.current = { prompt, files: attachments };
+    lastSentRef.current = { prompt: visiblePrompt, files: attachments };
     inputValueRef.current = '';
     setInput('');
     onClearPendingReviewComments?.();
@@ -887,8 +1070,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       : undefined;
     clearComposerAttachments();
     setUploadingAttachmentCount(attachments.length);
-    if (typeof editAtTurn === 'number') onEditSendStart?.(prompt, editAtTurn);
-    onSendStart(prompt, previewUrls);
+    if (typeof editAtTurn === 'number') onEditSendStart?.(visiblePrompt, editAtTurn);
+    onSendStart(visiblePrompt, previewUrls);
     onStreamQueued(); // Start polling immediately — don't wait for API response
     api.sendSessionMessage(workdir, targetAgent, targetSessionId, prompt, {
       attachments,
@@ -896,12 +1079,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       effort: targetEffort,
       previousAgent,
       previousSessionId,
+      contextSources,
     })
       .then(res => {
         if (!res.ok) {
           onSendFailed?.();
           return;
         }
+        onReferenceContextClear?.();
         if (res.taskId) {
           setLocalTaskId(res.taskId);
           onSendTaskAssigned?.(res.taskId);
@@ -931,11 +1116,17 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     onEditSendStart,
     onSessionChange,
     onMultiSessionChange,
+    onReferenceContextClear,
     onStreamQueued,
     buildMultiAgentPrompt,
+    buildAutoCrossCheckPrompt,
+    buildAutoSynthesisPrompt,
     selectedAgent,
     selectedEffort,
     selectedModel,
+    referenceContextPrompt,
+    referenceContextLabel,
+    contextSources,
     composerMode,
     multiAgentIds,
     sending,
@@ -1125,14 +1316,21 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   }, [addComposerAttachments]);
 
   const effectiveAgent = selectedAgent
-    || session.agent
-    || agents.find(a => a.isDefault)?.agent
-    || agents.find(a => a.installed)?.agent
-    || agents[0]?.agent
+    || (session.agent !== 'openclaw' ? session.agent : '')
+    || selectableAgents.find(a => a.isDefault)?.agent
+    || selectableAgents.find(a => a.installed)?.agent
+    || selectableAgents[0]?.agent
     || '';
   const currentAgent = agents.find(a => a.agent === effectiveAgent) || null;
   const cascadeAgentId = pendingAgent || effectiveAgent;
   const cascadeAgent = agents.find(a => a.agent === cascadeAgentId) || currentAgent;
+  const agentAcceptsProfiles = useCallback((agentId: string) => {
+    return (AGENT_ACCEPTED_PROVIDER_KINDS[agentId as keyof typeof AGENT_ACCEPTED_PROVIDER_KINDS] || []).length > 0;
+  }, []);
+  const canShowModelStep = useCallback((agent: AgentRuntimeStatus | null | undefined) => {
+    if (!agent) return false;
+    return agent.capabilities?.modelSwitch !== false || agentAcceptsProfiles(agent.agent);
+  }, [agentAcceptsProfiles]);
   // Unified model list — native catalogue + "我的模型" Profiles the agent can
   // route through. Each row carries kind + profileId so the click handler
   // knows whether to clear the active Profile binding (native) or set it
@@ -1154,13 +1352,15 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     const out: CascadeModelRow[] = [];
     // Native section — the agent CLI's own model list. byokModels is no longer
     // used here because Profiles are now first-class entries below.
-    for (const m of cascadeAgent.models || []) {
-      out.push({
-        id: m.id,
-        label: m.id,
-        kind: 'native',
-        description: m.alias && m.alias.toLowerCase() !== m.id.toLowerCase() ? m.alias : undefined,
-      });
+    if (cascadeAgent.capabilities?.modelSwitch !== false) {
+      for (const m of cascadeAgent.models || []) {
+        out.push({
+          id: m.id,
+          label: m.id,
+          kind: 'native',
+          description: m.alias && m.alias.toLowerCase() !== m.id.toLowerCase() ? m.alias : undefined,
+        });
+      }
     }
     // 我的模型 section — Profiles compatible with this agent's BYOK kinds.
     const acceptedKinds = new Set(AGENT_ACCEPTED_PROVIDER_KINDS[cascadeAgentId] || []);
@@ -1207,7 +1407,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       : null;
   const hasPendingAttachments = composerAttachments.some(item => item.status === 'adding');
   const hasFailedAttachments = composerAttachments.some(item => item.status === 'failed');
-  const installedMultiAgents = multiAgentIds.filter(agent => agents.some(a => a.installed && a.agent === agent));
+  const installedMultiAgents = multiAgentIds.filter(agent => selectableAgents.some(a => a.installed && a.agent === agent));
   const canSend = (!!input.trim() || pendingReviewComments.length > 0 || composerAttachments.length > 0)
     && !sending
     && (composerMode === 'multi' ? installedMultiAgents.length > 0 : !!effectiveAgent)
@@ -1290,7 +1490,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     displayModelLabel || null,
     displayEffort ? displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1) : null,
   ].filter(Boolean).join(' / ');
-  const composerModeLabel = composerMode === 'single' ? t('hub.modeSingle') : t('hub.modeMulti');
+  const composerModeLabel = t(composerModeLabelKey(composerMode));
+  const hasReferenceContext = !!String(referenceContextPrompt || '').trim();
+  const showReferenceContextChip = hasReferenceContext && (!!referenceContextLabel || !!onReferenceContextClear);
 
   return (
     <div className={cn('composer-shell shrink-0', compact && 'composer-shell-compact')} ref={composerRef} data-session-composer>
@@ -1542,6 +1744,35 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
             </div>
           )}
 
+          {showReferenceContextChip && (
+            <div className="mx-2.5 mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-primary/25 bg-primary/[0.065] px-2.5 py-1.5 text-[11px] text-fg-4 shadow-sm">
+              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md border border-primary/20 bg-primary/[0.10] text-primary">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />
+                  <path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1" />
+                </svg>
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-semibold text-fg-3">{referenceContextLabel || t('session.referenceContextAttached')}</div>
+                <div className="truncate text-[10px] text-fg-5">{t('session.referenceContextHint')}</div>
+              </div>
+              {onReferenceContextClear && (
+                <button
+                  type="button"
+                  onClick={onReferenceContextClear}
+                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
+                  title={t('session.removeContextSource')}
+                  aria-label={t('session.removeContextSource')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                    <path d="M18 6 6 18" />
+                    <path d="M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Slash command autocomplete */}
           {skillMenuOpen && commandOptions.length > 0 && (
             <div
@@ -1690,7 +1921,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                   : 'border-edge/45 bg-panel-alt/35 text-fg-4 hover:border-edge-h hover:bg-panel-h/60 hover:text-fg-2',
               )}
             >
-              {composerMode === 'single' ? (
+              {composerMode !== 'multi' ? (
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden="true">
                   <rect x="4" y="5" width="16" height="14" rx="2.5" />
                   <path d="M8 10h8" />
@@ -1717,11 +1948,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
             {modeMenuOpen && modeMenuPos && createPortal(
               <div
                 id="composer-mode-portal"
-                className="fixed z-[205] overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-lg animate-in"
+                className="fixed z-[205] overflow-hidden rounded-xl border border-edge-h bg-[var(--th-dropdown)] p-1 shadow-[0_24px_64px_rgba(2,6,23,0.22)] ring-1 ring-black/[0.04] animate-in"
                 style={{ left: modeMenuPos.left, bottom: modeMenuPos.bottom, width: modeMenuPos.width }}
                 role="menu"
               >
-                {(['single', 'multi'] as ComposerMode[]).map(mode => (
+                {COMPOSER_MODES.map(mode => (
                 <button
                   key={mode}
                   type="button"
@@ -1747,7 +1978,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                       <polyline points="20 6 9 17 4 12" />
                     </svg>
                   </span>
-                  <span className="min-w-0 flex-1 truncate">{mode === 'single' ? t('hub.modeSingle') : t('hub.modeMulti')}</span>
+                  <span className="min-w-0 flex-1 truncate">{t(composerModeLabelKey(mode))}</span>
                   {mode === 'multi' && installedMultiAgents.length > 0 && (
                     <span className="rounded-md bg-inset px-1.5 py-0.5 font-mono text-[9px] text-fg-5 tabular-nums">
                       {installedMultiAgents.length}
@@ -1760,7 +1991,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
             )}
 
             {/* Cascade config trigger */}
-            {composerMode === 'single' ? (
+            {composerMode !== 'multi' ? (
               <button
                 ref={triggerRef}
                 onClick={toggleCascade}
@@ -1816,7 +2047,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
 
             {composerMode === 'multi' && (
               <div className="flex min-w-0 shrink items-center gap-1">
-                {agents.filter(a => a.installed).map(agent => {
+                {selectableAgents.filter(a => a.installed).map(agent => {
                   const selected = multiAgentIds.includes(agent.agent);
                   const meta = getAgentMeta(agent.agent);
                   return (
@@ -1852,7 +2083,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
             {cascadeStep !== 'closed' && cascadePos && createPortal(
               <div
                 id="cascade-portal"
-                className="fixed z-[200] w-[300px] rounded-xl border border-edge-h/70 bg-dropdown shadow-lg overflow-hidden animate-in"
+                className="fixed z-[200] w-[300px] overflow-hidden rounded-xl border border-edge-h bg-[var(--th-dropdown)] shadow-[0_24px_64px_rgba(2,6,23,0.24)] ring-1 ring-black/[0.04] animate-in"
                 style={{ left: cascadePos.left, bottom: cascadePos.bottom }}
               >
                 {/* Step header */}
@@ -1861,11 +2092,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                     <button
                       onClick={() => {
                         if (cascadeStep === 'effort') {
-                          // For agents that don't support model switching the
-                          // model step was skipped on the way in, so back from
-                          // effort goes straight to agent.
-                          const supportsModelSwitch = cascadeAgent?.capabilities?.modelSwitch !== false;
-                          setCascadeStep(supportsModelSwitch ? 'model' : 'agent');
+                          // Agents with either native models or compatible Profiles
+                          // visit the model step; others go straight back to agent.
+                          setCascadeStep(canShowModelStep(cascadeAgent) ? 'model' : 'agent');
                         } else {
                           setCascadeStep('agent');
                         }
@@ -1882,8 +2111,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                   </span>
                   <div className="ml-auto flex items-center gap-0.5">
                     {(() => {
-                      const supportsModelSwitch = cascadeAgent?.capabilities?.modelSwitch !== false;
-                      const steps = supportsModelSwitch
+                      const steps = canShowModelStep(cascadeAgent)
                         ? (['agent', 'model', 'effort'] as const)
                         : (['agent', 'effort'] as const);
                       const activeIdx = steps.indexOf(cascadeStep as any);
@@ -1899,18 +2127,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
 
                 {/* Step content */}
                 <div className="max-h-[200px] overflow-y-auto py-1">
-                  {cascadeStep === 'agent' && agents.filter(a => a.installed).map(a => {
+                  {cascadeStep === 'agent' && selectableAgents.filter(a => a.installed).map(a => {
                     const am = getAgentMeta(a.agent);
                     return (
                       <CascadeItem key={a.agent} selected={a.agent === (pendingAgent || effectiveAgent)} onClick={() => {
                         setPendingAgent(a.agent);
                         setPendingModel(a.selectedModel || '');
                         setPendingEffort(a.selectedEffort || '');
-                        // Agents that lock the model at profile-binding time skip the
-                        // model step. We jump straight to effort (or close if the
-                        // agent has no effort knob either).
-                        const supportsModelSwitch = a.capabilities?.modelSwitch !== false;
-                        if (!supportsModelSwitch) {
+                        // Agents without native models or compatible Profiles skip
+                        // model selection and continue to effort if available.
+                        if (!canShowModelStep(a)) {
                           const efforts = EFFORT_OPTIONS[a.agent as keyof typeof EFFORT_OPTIONS] || [];
                           if (efforts.length) setCascadeStep('effort');
                           else { void applyCascade(a.agent, a.selectedModel || '', null); }

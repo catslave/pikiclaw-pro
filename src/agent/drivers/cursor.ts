@@ -23,6 +23,8 @@ import type {
 import {
   dedupeModelList,
   runSimpleCliStream,
+  type SimpleCliCommand,
+  type SimpleCliParsedOutput,
   simpleCliSessionMessages,
   simpleCliSessions,
   simpleCliSessionTail,
@@ -30,11 +32,19 @@ import {
 } from './simple-cli.js';
 
 function cursorModel(opts: StreamOpts): string | null {
-  return (opts.cursorModel || opts.model || '').trim() || null;
+  const model = (opts.cursorModel || opts.model || '').trim();
+  if (!model || model.toLowerCase() === 'auto') return null;
+  return model;
 }
 
 function cursorArgs(opts: StreamOpts, prompt: string): string[] {
-  const args = ['--print', '--output-format', 'text', '--trust', '--workspace', opts.workdir];
+  const args = [
+    '--print',
+    '--output-format', 'stream-json',
+    '--stream-partial-output',
+    '--trust',
+    '--workspace', opts.workdir,
+  ];
   const model = cursorModel(opts);
   if (model) args.push('--model', model);
   if (!opts.cursorExtraArgs?.some(arg => arg === '--force' || arg === '--yolo')) {
@@ -43,6 +53,59 @@ function cursorArgs(opts: StreamOpts, prompt: string): string[] {
   if (opts.cursorExtraArgs?.length) args.push(...opts.cursorExtraArgs);
   args.push(prompt);
   return args;
+}
+
+function cursorTextFromMessage(message: any): string {
+  const content = message?.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map(part => part?.type === 'text' && typeof part.text === 'string' ? part.text : '')
+    .filter(Boolean)
+    .join('');
+}
+
+function appendCursorText(current: string, next: string): string {
+  if (!next) return current;
+  if (!current) return next;
+  if (next === current || current.includes(next)) return current;
+  if (next.startsWith(current)) return next;
+  return `${current}${next}`;
+}
+
+function parseCursorStream(stdout: string): { text: string; model: string | null } {
+  let text = '';
+  let result = '';
+  let model: string | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: any = null;
+    try { event = JSON.parse(trimmed); } catch { continue; }
+    if (event?.type === 'system' && typeof event.model === 'string' && event.model.trim()) {
+      model = event.model.trim();
+    }
+    if (event?.type === 'assistant') {
+      text = appendCursorText(text, cursorTextFromMessage(event.message));
+    }
+    if (event?.type === 'result' && typeof event.result === 'string') {
+      result = event.result;
+    }
+  }
+  return { text: (result || text).trim(), model };
+}
+
+function renderCursorStdout(stdout: string, _stderr: string, _command: SimpleCliCommand): string {
+  return parseCursorStream(stdout).text;
+}
+
+function parseCursorOutput(stdout: string, stderr: string, command: SimpleCliCommand): SimpleCliParsedOutput {
+  const parsed = parseCursorStream(stdout);
+  if (!parsed.text) {
+    const fallback = stdout.trim();
+    if (fallback) return { message: fallback, model: parsed.model || command.model };
+    throw new Error(stderr.trim() || 'Cursor Agent returned no textual response.');
+  }
+  return { message: parsed.text, model: parsed.model || command.model };
 }
 
 function listCursorModels(): ModelListResult {
@@ -84,6 +147,8 @@ export async function doCursorStream(opts: StreamOpts): Promise<StreamResult> {
       model: cursorModel(runOpts),
       prompt,
     }),
+    renderStdout: renderCursorStdout,
+    parseOutput: parseCursorOutput,
   });
 }
 

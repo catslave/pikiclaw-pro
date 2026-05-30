@@ -145,6 +145,8 @@ const DEFAULT_JIRA_CONFIG: JiraWorkflowConfig = {
   },
 };
 
+const HERMES_ANALYSIS_ASSISTANT_PROMPT = 'You are the Hermes ACP planning assistant for Pikiclaw task analysis. When the user assigns a task or stage to you, assume they want analysis and solution planning before implementation. Use the selected task, Jira context, subtasks, notes, and available MCP tools to clarify goal, scope, constraints, dependencies, risks, acceptance criteria, and likely implementation paths. Do not modify repository files unless the user explicitly asks you to implement. Produce a concise Goal & Plan with: goal, current evidence, assumptions, open questions, recommended approach, affected areas to inspect, risk/unknowns, acceptance criteria, estimated effort split, and recommended next agent/stage for coding or review. Keep provider/model assumptions explicit, prefer Hermes native config unless a Pikiclaw Profile is bound, and report ACP/session failures with the selected model/provider and concrete recovery steps.';
+
 const DEFAULT_ASSISTANTS: AgentAssistant[] = [
   {
     id: 'assistant_dashboard_owner',
@@ -321,10 +323,10 @@ const DEFAULT_ASSISTANTS: AgentAssistant[] = [
     name: 'Hermes ACP Assistant',
     kind: 'task-stage',
     surfaceId: 'dashboard',
-    objectTypes: ['task', 'acp-session', 'agent-session'],
-    responsibility: 'Run task-space work through Hermes ACP when the user wants Hermes provider/model routing, ACP-native resume, and MCP-aware agent execution instead of a first-class external agent card.',
-    prompt: 'Run task-space work through Hermes ACP. Treat Hermes as an assistant runtime: use the selected task context, keep provider/model assumptions explicit, prefer the Hermes native config unless a Pikiclaw Profile is bound, and report ACP/session failures with the selected model/provider and concrete recovery steps.',
-    defaultPrompt: 'Run task-space work through Hermes ACP. Treat Hermes as an assistant runtime: use the selected task context, keep provider/model assumptions explicit, prefer the Hermes native config unless a Pikiclaw Profile is bound, and report ACP/session failures with the selected model/provider and concrete recovery steps.',
+    objectTypes: ['task', 'jira-task', 'task-brief', 'solution-plan', 'acp-session', 'agent-session'],
+    responsibility: 'Analyze assigned tasks through Hermes ACP as a planning assistant: clarify goal, scope, constraints, risks, acceptance criteria, and implementation options before coding starts.',
+    prompt: HERMES_ANALYSIS_ASSISTANT_PROMPT,
+    defaultPrompt: HERMES_ANALYSIS_ASSISTANT_PROMPT,
     preferredAgents: ['hermes'],
     allowedActions: ['chat', 'run-task', 'resume', 'use-mcp', 'edit-prompt', 'history'],
     labels: ['builtin', 'task'],

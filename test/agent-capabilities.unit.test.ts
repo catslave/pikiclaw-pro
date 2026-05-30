@@ -4,7 +4,7 @@ import { allDriverIds, getDriverCapabilities } from '../src/agent/index.ts';
 describe('agent capability matrix', () => {
   it('declares plan and goal modes for every integrated driver', () => {
     const ids = allDriverIds().sort();
-    expect(ids).toEqual(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw']);
+    expect(ids).toEqual(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes']);
 
     for (const id of ids) {
       const caps = getDriverCapabilities(id);
@@ -22,14 +22,13 @@ describe('agent capability matrix', () => {
     expect(getDriverCapabilities('hermes').plan?.mode).toBe('unsupported');
     expect(getDriverCapabilities('copilot').plan?.mode).toBe('portable');
     expect(getDriverCapabilities('cursor').plan?.mode).toBe('portable');
-    expect(getDriverCapabilities('openclaw').plan?.mode).toBe('portable');
   });
 
   it('keeps native goal ownership limited to codex and claude', () => {
     expect(getDriverCapabilities('codex').goal?.source).toContain('thread/goal');
     expect(getDriverCapabilities('codex').goal?.mode).toBe('native');
     expect(getDriverCapabilities('claude').goal?.mode).toBe('native');
-    for (const id of ['copilot', 'cursor', 'gemini', 'hermes', 'openclaw']) {
+    for (const id of ['copilot', 'cursor', 'gemini', 'hermes']) {
       expect(getDriverCapabilities(id).goal?.mode).toBe('portable');
     }
   });

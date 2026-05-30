@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
-import { createTodoItem, deleteTodoItem, listTodoItems } from '../src/pro/todos.ts';
+import { createTodoItem, deleteTodoItem, listTodoItems, updateTodoItem } from '../src/pro/todos.ts';
 
 let tmpDir: string;
 let previousTodoFile: string | undefined;
@@ -56,5 +56,40 @@ describe('Pro todo store', () => {
 
     expect(deleted.id).toBe(todo.id);
     expect(listTodoItems()).toHaveLength(0);
+  });
+
+  it('persists image attachments and updates todo content', () => {
+    const todo = createTodoItem({
+      body: 'Check this screenshot.',
+      images: [{
+        id: 'image-1',
+        kind: 'image',
+        name: 'screen.png',
+        mimeType: 'image/png',
+        size: 12,
+        dataUrl: 'data:image/png;base64,aGVsbG8=',
+      }],
+    });
+
+    expect(todo.images?.[0]?.name).toBe('screen.png');
+
+    const updated = updateTodoItem(todo.id, {
+      title: 'Updated screenshot note',
+      body: 'Use the new screenshot.',
+      images: [{
+        id: 'image-2',
+        kind: 'image',
+        name: 'new-screen.png',
+        mimeType: 'image/png',
+        size: 16,
+        dataUrl: 'data:image/png;base64,d29ybGQ=',
+      }],
+    });
+
+    expect(updated.title).toBe('Updated screenshot note');
+    expect(updated.body).toBe('Use the new screenshot.');
+    expect(updated.images).toHaveLength(1);
+    expect(updated.images?.[0]?.name).toBe('new-screen.png');
+    expect(listTodoItems()[0].id).toBe(todo.id);
   });
 });

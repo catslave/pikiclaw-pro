@@ -35,6 +35,7 @@ import type {
   SessionSideChatParentRef,
   SessionSideChatRef,
   SessionOrigin,
+  SessionContextSource,
 } from './types.js';
 import {
   dedupeStrings,
@@ -47,6 +48,8 @@ import {
 } from './utils.js';
 import { getDriver } from './driver.js';
 import { collapseSkillPrompt } from './skills.js';
+import { readSessionOutputs } from './session-outputs.js';
+import { normalizeSessionContextSources } from './context-sources.js';
 import { SESSION_RUNNING_THRESHOLD_MS } from '../core/constants.js';
 
 // ---------------------------------------------------------------------------
@@ -310,6 +313,7 @@ interface EnsureSessionWorkspaceOpts {
   title?: string | null;
   threadId?: string | null;
   handoverFrom?: HandoverRef | null;
+  contextSources?: SessionContextSource[];
   origin?: Partial<SessionOrigin> | null;
 }
 
@@ -439,11 +443,13 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     lastMessageText: typeof raw?.lastMessageText === 'string' ? raw.lastMessageText : null,
     lastThinking: trimSessionText(raw?.lastThinking),
     lastPlan: normalizeStreamPreviewPlan(raw?.lastPlan),
+    outputs: readSessionOutputs(workspacePath, { workdir, agent, sessionId }),
     migratedFrom: raw?.migratedFrom ?? null,
     migratedTo: raw?.migratedTo ?? null,
     linkedSessions: Array.isArray(raw?.linkedSessions) ? raw.linkedSessions : [],
     sideChatOf: normalizeSideChatParentRef(raw?.sideChatOf),
     sideChats: normalizeSideChatRefs(raw?.sideChats),
+    contextSources: normalizeSessionContextSources(raw?.contextSources),
     handoverFrom: normalizeHandoverRef(raw?.handoverFrom),
   };
 }
@@ -496,6 +502,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     linkedSessions: record.linkedSessions,
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
+    contextSources: normalizeSessionContextSources(record.contextSources),
     handoverFrom: record.handoverFrom ?? null,
   });
 }
@@ -661,6 +668,7 @@ export function updateSessionMeta(
       linkedSessions: [],
       sideChatOf: null,
       sideChats: [],
+      contextSources: [],
       handoverFrom: null,
     };
     index.sessions.unshift(record);
@@ -979,12 +987,14 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       lastThinking: null, lastPlan: null,
       migratedFrom: null, migratedTo: null, linkedSessions: [],
       sideChatOf: null, sideChats: [],
+      contextSources: normalizeSessionContextSources(opts.contextSources),
       handoverFrom: normalizeHandoverRef(opts.handoverFrom),
     };
   }
   if (!record.threadId) record.threadId = normalizeThreadId(opts.threadId) || legacyThreadId(record.agent, record.sessionId);
   // Backfill handoverFrom on first staging only — never overwrite an existing one.
   if (!record.handoverFrom) record.handoverFrom = normalizeHandoverRef(opts.handoverFrom);
+  if (!record.contextSources?.length) record.contextSources = normalizeSessionContextSources(opts.contextSources);
   if (!record.origin) {
     record.origin = normalizeSessionOrigin(opts.origin, record.createdAt);
   } else {
@@ -1053,11 +1063,13 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText,
+    outputs: readSessionOutputs(record.workspacePath, { workdir: record.workdir, agent: record.agent, sessionId: record.sessionId }),
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
+    contextSources: normalizeSessionContextSources(record.contextSources),
     numTurns: record.numTurns ?? null,
     handoverFrom: record.handoverFrom ?? null,
   };
@@ -1281,6 +1293,7 @@ export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInf
     sessionId: opts.sessionId,
     title: opts.title,
     threadId: opts.threadId,
+    contextSources: opts.contextSources,
     origin: opts.origin,
   });
   if (!session.record.title && opts.title) {
@@ -1310,6 +1323,7 @@ export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFile
     title: opts.title,
     threadId: opts.threadId,
     handoverFrom: opts.handoverFrom,
+    contextSources: opts.contextSources,
     origin: opts.origin,
   });
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.files);
@@ -1324,6 +1338,7 @@ export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFile
     threadId: session.record.threadId,
     importedFiles,
     handoverFrom: session.record.handoverFrom ?? null,
+    contextSources: normalizeSessionContextSources(session.record.contextSources),
   };
 }
 
@@ -1411,6 +1426,8 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       linkedSessions: managed.linkedSessions?.length ? managed.linkedSessions : (native.linkedSessions ?? []),
       sideChatOf: managed.sideChatOf ?? native.sideChatOf ?? null,
       sideChats: managed.sideChats?.length ? managed.sideChats : (native.sideChats ?? []),
+      contextSources: managed.contextSources?.length ? managed.contextSources : (native.contextSources ?? []),
+      outputs: managed.outputs?.length ? managed.outputs : (native.outputs ?? []),
       numTurns: useNativeTimeline ? (native.numTurns ?? managed.numTurns ?? null) : (managed.numTurns ?? native.numTurns ?? null),
     });
   }

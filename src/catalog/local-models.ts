@@ -72,6 +72,19 @@ export const LOCAL_MODELS: LocalModelEntry[] = [
     ollamaTag: 'gemma3:4b',
     homepage: 'https://ai.google.dev/gemma',
   },
+  {
+    id: 'deepseek-r1-0528-qwen3-8b',
+    name: 'DeepSeek-R1 0528 Qwen3 8B',
+    publisher: 'DeepSeek',
+    paramsB: 8,
+    sizeGb: 5,
+    minRamGb: 16,
+    description: 'Updated compact reasoning model; useful for debugging, planning, and code review side tasks.',
+    descriptionZh: '新版轻量推理模型，适合调试、方案推演和代码审查辅助。',
+    ollamaTag: 'deepseek-r1:8b-0528-qwen3-q4_K_M',
+    mlxModel: 'mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit',
+    homepage: 'https://huggingface.co/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B',
+  },
 
   // ── Tier B: 24-32 GB sweet spot ────────────────────────────────────────────
   {
@@ -87,6 +100,19 @@ export const LOCAL_MODELS: LocalModelEntry[] = [
     homepage: 'https://github.com/deepseek-ai/DeepSeek-Coder-V2',
   },
   {
+    id: 'deepseek-r1-distill-qwen-14b',
+    name: 'DeepSeek-R1 Distill Qwen 14B',
+    publisher: 'DeepSeek',
+    paramsB: 14,
+    sizeGb: 9,
+    minRamGb: 24,
+    description: 'Reasoning-focused Qwen distill; stronger on math/logic than small chat models, but slower for edit loops.',
+    descriptionZh: '偏推理的 Qwen 蒸馏模型，数学/逻辑强于小聊天模型，但代码编辑循环会更慢。',
+    ollamaTag: 'deepseek-r1:14b-qwen-distill-q4_K_M',
+    mlxModel: 'mlx-community/DeepSeek-R1-Distill-Qwen-14B-4bit',
+    homepage: 'https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B',
+  },
+  {
     id: 'phi-4',
     name: 'Phi-4 14B',
     publisher: 'Microsoft',
@@ -97,6 +123,19 @@ export const LOCAL_MODELS: LocalModelEntry[] = [
     descriptionZh: '14B 推理向模型，代码与工具任务上超出参数量预期。',
     ollamaTag: 'phi4:14b',
     homepage: 'https://huggingface.co/microsoft/phi-4',
+  },
+  {
+    id: 'qwen3-coder-30b-a3b',
+    name: 'Qwen3-Coder 30B-A3B',
+    publisher: 'Alibaba Qwen',
+    paramsB: 30,
+    sizeGb: 19,
+    minRamGb: 24,
+    description: 'Agentic coding upgrade over Qwen2.5-Coder; excellent long-context repo work, tight on 24 GB.',
+    descriptionZh: '比 Qwen2.5-Coder 更偏 agentic coding，长上下文仓库任务强；24GB 上属于勉强可跑。',
+    ollamaTag: 'qwen3-coder:30b-a3b-q4_K_M',
+    mlxModel: 'mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit',
+    homepage: 'https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct',
   },
 
   // ── Tier S: 36+ GB unified memory ──────────────────────────────────────────

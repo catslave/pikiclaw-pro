@@ -10,6 +10,7 @@ import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, JiraCycl
 import { cn } from '../../utils';
 import { SessionPanel, type SessionPanelChange } from '../sessions/SessionPanel';
 import { createMdComponents, mdPlugins } from '../sessions/markdown';
+import type { SelectionActionRequest, SelectionSideChatRequest } from '../sessions/TurnView';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const VISIBLE_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'done'];
@@ -40,6 +41,7 @@ type JiraColumnSortModes = Record<JiraColumnKey, JiraColumnSortMode>;
 type JiraColumnManualOrder = Partial<Record<JiraColumnKey, string[]>>;
 type TaskMetaPatch = { workdir?: string | null; prUrl?: string | null };
 type TaskDetailLayout = 'side' | 'modal';
+type TaskSelectionSessionHandler<T extends SelectionActionRequest = SelectionActionRequest> = (session: StageSessionRef, request: T) => void | Promise<void>;
 const JIRA_COLUMN_ORDER_STORAGE_KEY = 'pikiclaw:jira-dashboard:column-order:v1';
 const TASK_SPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:tasks:space-sidebar-collapsed:v1';
 const TASK_DETAIL_LAYOUT_STORAGE_KEY = 'pikiclaw:tasks:detail-layout:v1';
@@ -454,10 +456,101 @@ function TicketTypeIcon({ task, showLabel = false }: { task: ProTask; showLabel?
   );
 }
 
+function AssistantInlinePicker({
+  value,
+  options,
+  onChange,
+  compact = false,
+  showChevron = false,
+}: {
+  value: string;
+  options: Array<{ id: string; name: string }>;
+  onChange: (assistantId: string) => void;
+  compact?: boolean;
+  showChevron?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selected = options.find(option => option.id === value);
+  const label = selected?.name || 'None';
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative min-w-0 flex-1">
+      <button
+        type="button"
+        onClick={() => setOpen(value => !value)}
+        className={cn(
+          'group/assignee inline-flex min-w-0 items-center rounded-md text-left text-fg-3 transition hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+          compact ? 'max-w-full px-1 py-0.5 text-[12px]' : 'px-1.5 py-1 text-[12px]',
+        )}
+        title={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        {showChevron && (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={cn('ml-1 shrink-0 text-fg-5 transition-transform group-hover/assignee:text-fg-3', open && 'rotate-180')}>
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        )}
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          className="absolute right-0 top-[calc(100%+6px)] z-[80] w-[min(240px,calc(100vw-48px))] overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
+        >
+          {[{ id: '', name: 'None' }, ...options].map(option => {
+            const active = option.id === value;
+            return (
+              <button
+                key={option.id || 'none'}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onChange(option.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  'flex h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2.5 text-left text-[12px] transition-colors',
+                  active ? 'bg-primary/[0.10] font-semibold text-primary' : 'text-fg-3 hover:bg-panel-h hover:text-fg',
+                )}
+              >
+                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-primary' : 'bg-fg-5/35')} />
+                <span className="min-w-0 flex-1 truncate">{option.name}</span>
+                {active && (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
+                    <path d="m5 12 4 4L19 6" />
+                  </svg>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TaskCard({
   task,
   selected,
-  busyStage,
   assistants,
   draggable,
   isDragging,
@@ -477,19 +570,9 @@ function TaskCard({
   onDragStart?: (task: ProTask, event: ReactDragEvent<HTMLDivElement>) => void;
   onDragEnd?: () => void;
 }) {
-  const latestRun = task.stageRuns[0];
-  const progress = subtaskProgress(task);
   const cardDescription = cleanTaskDescription(task);
   const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
   const assistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
-  const progressLabel = latestRun
-    ? `${STAGE_LABEL[latestRun.stage]} · ${latestRun.status}`
-    : progress.total > 0
-      ? `Subtasks · ${progress.done}/${progress.total}`
-      : STATUS_LABEL[displayTaskStatus(task.status)];
-  const progressDetail = latestRun?.session?.sessionId
-    ? `${latestRun.session.agent}:${latestRun.session.sessionId.slice(0, 8)}`
-    : null;
   return (
     <div
       role="button"
@@ -525,26 +608,19 @@ function TaskCard({
         </div>
       </div>
       {cardDescription && <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-fg-4">{cardDescription}</div>}
-      <div className="mt-2 flex min-w-0 items-center gap-1.5 rounded-md border border-edge/65 bg-panel-alt/62 px-2 py-1.5 text-[11px] text-fg-4">
-        {latestRun && busyStage === latestRun.stage ? <Spinner className="h-3 w-3" /> : <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-fg-5/45" />}
-        <span className="shrink-0 font-medium text-fg-3">{progressLabel}</span>
-        {progressDetail && <span className="min-w-0 truncate">{progressDetail}</span>}
-      </div>
-      <label
-        className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-fg-5"
+      <div
+        className="mt-2 flex min-w-0 items-center gap-2 text-[12px] text-fg-5"
         onClick={event => event.stopPropagation()}
         onPointerDown={event => event.stopPropagation()}
       >
         <span className="shrink-0">Assignee</span>
-        <select
+        <AssistantInlinePicker
           value={assignedAssistantId}
-          onChange={event => onAssignAssistant(task, event.target.value)}
-          className="h-7 min-w-0 flex-1 rounded-md border border-edge bg-inset px-2 text-[11px] text-fg outline-none transition focus:border-primary/45"
-        >
-          <option value="">None</option>
-          {assistantOptions.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
-        </select>
-      </label>
+          options={assistantOptions}
+          onChange={(assistantId) => onAssignAssistant(task, assistantId)}
+          compact
+        />
+      </div>
     </div>
   );
 }
@@ -965,7 +1041,7 @@ function CreateTaskSpaceModal({
           <label className="space-y-1">
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Default agent</div>
             <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
+              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
             </select>
           </label>
           <label className="space-y-1">
@@ -1077,6 +1153,27 @@ const START_CODING_PROMPT = [
   'Start coding this ticket based on the agreed Goal & Plan.',
   'Keep changes minimal, inspect the relevant code paths first, and summarize the implementation and verification result when done.',
 ].join(' ');
+
+function buildTaskSelectionSideChatPrompt(request: SelectionSideChatRequest, locale: string): string {
+  if (locale.startsWith('zh')) {
+    return [
+      '请基于下面从 task chat output 中选中的内容开启一个 side card 对话。',
+      '',
+      '选中内容：',
+      request.quote.split('\n').map(line => `> ${line}`).join('\n'),
+      '',
+      `用户想继续处理的问题：${request.question || request.note}`,
+    ].join('\n');
+  }
+  return [
+    'Use the selected task chat output below as context for this side card.',
+    '',
+    'Selected text:',
+    request.quote.split('\n').map(line => `> ${line}`).join('\n'),
+    '',
+    `User question: ${request.question || request.note}`,
+  ].join('\n');
+}
 
 function JiraAssistantConfigModal({
   open,
@@ -1685,9 +1782,10 @@ function TaskChatWindow({
   defaultAgent,
   showProgress,
   onStartStatusChat,
-  onOpenTicket,
   onOpenArtifacts,
   artifactCount,
+  onCreateSideChatFromSelection,
+  onCreateTodoFromSelection,
 }: {
   task: ProTask;
   actions?: ReactNode;
@@ -1696,9 +1794,10 @@ function TaskChatWindow({
   defaultAgent: string;
   showProgress?: boolean;
   onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
-  onOpenTicket: () => void;
   onOpenArtifacts: () => void;
   artifactCount: number;
+  onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
+  onCreateTodoFromSelection?: TaskSelectionSessionHandler;
 }) {
   const currentDefaultAgent = taskAssignee(task, defaultAgent);
   const [loading, setLoading] = useState(false);
@@ -1862,7 +1961,13 @@ function TaskChatWindow({
     <div className="relative w-full overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
       <div className="relative px-3.5 py-3">
-        <div className="line-clamp-2 text-[12px] leading-relaxed text-fg-4">
+        <div className="mb-2 flex min-w-0 items-center gap-2">
+          <span className="shrink-0 rounded-md border border-primary/20 bg-primary/[0.08] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.13em] text-primary">
+            Desc
+          </span>
+          <span className="min-w-0 truncate text-[11px] text-fg-5">Ticket brief and current task context</span>
+        </div>
+        <div className="line-clamp-3 border-t border-edge/45 pt-2 text-[12px] leading-relaxed text-fg-4">
           {ticketSummary}
         </div>
         <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
@@ -1874,12 +1979,9 @@ function TaskChatWindow({
     </div>
   );
   const taskTop = (
-    <div className={cn(
-      'grid w-full items-start gap-5',
-      showProgress && 'min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]',
-    )}>
-      <div className="w-full min-w-0 min-[1180px]:max-w-[1120px] min-[1180px]:justify-self-end">{taskHeader}</div>
-      {showProgress && <div className="min-w-0 w-full max-w-[360px] min-[1180px]:justify-self-end">
+    <div className={cn('relative w-full', showProgress && 'min-[1180px]:min-h-[178px]')}>
+      <div className="mx-auto w-full max-w-[920px] min-w-0">{taskHeader}</div>
+      {showProgress && <div className="mx-auto mt-4 w-full max-w-[920px] min-[1180px]:absolute min-[1180px]:right-0 min-[1180px]:top-0 min-[1180px]:mt-0 min-[1180px]:w-[360px]">
         <TaskFlowMap task={task} busyStage={busyStage} />
       </div>}
     </div>
@@ -1926,6 +2028,8 @@ function TaskChatWindow({
             initialPendingPrompt={isPendingSession ? run.prompt : null}
             initialPendingCreatedAt={isPendingSession ? run.startedAt || null : null}
             onSessionChange={handleRunSessionChange}
+            onCreateSideChatFromSelection={(request) => onCreateSideChatFromSelection?.(runSession, request)}
+            onCreateTodoFromSelection={(request) => onCreateTodoFromSelection?.(runSession, request)}
           />
         </div>
       </div>
@@ -2384,6 +2488,8 @@ function TaskDetail({
   onUpdateSubtaskStatus,
   onStartSubtask,
   onReopen,
+  onCreateSideChatFromSelection,
+  onCreateTodoFromSelection,
 }: {
   task: ProTask | null;
   actions?: ReactNode;
@@ -2403,11 +2509,13 @@ function TaskDetail({
   onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
   onReopen?: (task: ProTask) => void;
+  onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
+  onCreateTodoFromSelection?: TaskSelectionSessionHandler;
 }) {
   const locale = useStore(s => s.locale);
   const t = useMemo(() => createT(locale), [locale]);
-  const [shelfTab, setShelfTab] = useState<'status' | 'outputs' | 'files' | 'browser' | 'ticket'>('status');
-  const [contextOpen, setContextOpen] = useState(true);
+  const [shelfTab, setShelfTab] = useState<'outputs' | 'files' | 'status'>('outputs');
+  const [contextOpen, setContextOpen] = useState(false);
   const [fileBrowserPath, setFileBrowserPath] = useState('');
   const sortedRuns = useMemo(() => [...(task?.stageRuns || [])].sort((a, b) => {
     const bTime = Date.parse(b.startedAt || b.completedAt || '');
@@ -2467,8 +2575,8 @@ function TaskDetail({
   const latestRunWorkdir = sortedRuns.find(run => run.session?.workdir)?.session.workdir || '';
   const inferredWorkdir = latestRunWorkdir || task?.workdir || fallbackWorkdir || '';
   useEffect(() => {
-    setContextOpen(true);
-    setShelfTab('status');
+    setContextOpen(false);
+    setShelfTab('outputs');
     setFileBrowserPath(inferredWorkdir);
   }, [inferredWorkdir, task?.id]);
   if (!task) {
@@ -2483,13 +2591,9 @@ function TaskDetail({
   }
   const fields = task.jiraFields || {};
   const remoteStatus = fields.status || jiraRemoteSyncField(task.description, 'Status');
-  const priority = fields.priority || jiraRemoteSyncField(task.description, 'Priority');
   const assignee = fields.assignee || jiraRemoteSyncField(task.description, 'Assignee');
   const updatedAt = fields.updatedAt || jiraRemoteSyncField(task.description, 'Updated') || task.updatedAt;
   const createdAt = task.createdAt || jiraRemoteSyncField(task.description, 'Created');
-  const reporter = fields.reporter || jiraRemoteSyncField(task.description, 'Reporter');
-  const ticketType = ticketTypeInfo(task);
-  const labels = fields.labels || [];
   const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
   const assignAssistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
   const workspaceOptions = new Map<string, string>();
@@ -2503,12 +2607,10 @@ function TaskDetail({
   addWorkspace(task.workdir);
   addWorkspace(fallbackWorkdir, 'Current workspace');
   const currentWorkdir = inferredWorkdir;
-  const shelfTabs: Array<{ id: 'status' | 'outputs' | 'files' | 'browser' | 'ticket'; label: string; count?: number }> = [
+  const shelfTabs: Array<{ id: 'outputs' | 'files' | 'status'; label: string; count?: number }> = [
+    { id: 'outputs', label: 'Output', count: outputItems.length },
+    { id: 'files', label: 'File', count: fileItems.length },
     { id: 'status', label: 'Overview' },
-    { id: 'outputs', label: 'Outputs', count: outputItems.length },
-    { id: 'files', label: 'Files', count: fileItems.length },
-    { id: 'browser', label: 'Browser' },
-    { id: 'ticket', label: 'Ticket' },
   ];
 
   return (
@@ -2537,13 +2639,13 @@ function TaskDetail({
         </div>
       </div>
       <div className={cn(
-        'grid min-h-0 flex-1 overflow-hidden',
+        'relative grid min-h-0 flex-1 overflow-hidden',
         contextOpen
           ? 'grid-rows-[minmax(0,1fr)_minmax(260px,38%)] min-[980px]:grid-cols-[minmax(0,1fr)_390px] min-[980px]:grid-rows-[minmax(0,1fr)]'
           : 'grid-cols-1',
       )}>
-        <main className={cn('min-h-0 min-w-0 overflow-hidden', !contextOpen && 'flex justify-center')}>
-          <div className={cn('h-full min-h-0 w-full', !contextOpen && 'max-w-[980px]')}>
+        <main className="min-h-0 min-w-0 overflow-hidden">
+          <div className="h-full min-h-0 w-full">
             <TaskChatWindow
               task={task}
               actions={actions}
@@ -2552,14 +2654,15 @@ function TaskDetail({
               busyStage={busy?.taskId === task.id ? busy.stage : null}
               showProgress={!contextOpen}
               onStartStatusChat={onStartStatusChat}
-              onOpenTicket={() => setShelfTab('ticket')}
               onOpenArtifacts={() => setShelfTab('outputs')}
               artifactCount={outputItems.length}
+              onCreateSideChatFromSelection={onCreateSideChatFromSelection}
+              onCreateTodoFromSelection={onCreateTodoFromSelection}
             />
           </div>
         </main>
 
-        {contextOpen && <aside className="relative min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
+        {contextOpen ? <aside className="relative min-h-0 min-w-0 overflow-hidden border-t border-edge/60 bg-panel/78 min-[980px]:border-l min-[980px]:border-t-0">
           <div className="flex h-full min-h-0 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
               <div className="mb-3 flex min-w-0 gap-1 overflow-x-auto rounded-lg border border-edge/55 bg-inset/35 p-1">
@@ -2587,16 +2690,11 @@ function TaskDetail({
                     <dl className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[12px]">
                       <dt className="text-fg-5">Assign</dt>
                       <dd className="min-w-0">
-                        <select
+                        <AssistantInlinePicker
                           value={assignedAssistantId}
-                          onChange={event => onAssignAssistant(task, event.target.value)}
-                          className="h-7 w-full rounded-md border border-transparent bg-transparent px-0 text-[12px] text-fg-3 outline-none transition hover:border-edge hover:bg-panel focus:border-primary/40"
-                        >
-                          <option value="">None</option>
-                          {assignAssistantOptions.map(assistant => (
-                            <option key={assistant.id} value={assistant.id}>{assistant.name}</option>
-                          ))}
-                        </select>
+                          options={assignAssistantOptions}
+                          onChange={(assistantId) => onAssignAssistant(task, assistantId)}
+                        />
                       </dd>
                       <dt className="text-fg-5">Created</dt>
                       <dd className="min-w-0 truncate text-fg-3">{formatTime(createdAt)}</dd>
@@ -2643,12 +2741,6 @@ function TaskDetail({
 
               {shelfTab === 'files' && (
                 <div className="space-y-3">
-                  <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
-                    <div className="text-[12px] font-semibold text-fg-2">Task context center</div>
-                    <div className="mt-1 text-[11.5px] leading-relaxed text-fg-5">
-                      Use Files to inspect the workspace, referenced paths, and source context for this task.
-                    </div>
-                  </section>
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">Workspace</div>
                     <select
@@ -2710,12 +2802,6 @@ function TaskDetail({
 
               {shelfTab === 'outputs' && (
                 <div className="space-y-2">
-                  <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
-                    <div className="text-[12px] font-semibold text-fg-2">Task result center</div>
-                    <div className="mt-1 text-[11.5px] leading-relaxed text-fg-5">
-                      Outputs collects plans, documents, diffs, links, final answers, and review-ready results.
-                    </div>
-                  </section>
                   {outputItems.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center text-[12px] text-fg-5">
                       Goal & Plan, implementation notes, diffs, links, and verification results will appear here.
@@ -2733,54 +2819,9 @@ function TaskDetail({
                 </div>
               )}
 
-              {shelfTab === 'browser' && (
-                <div className="space-y-3">
-                  <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center text-[12px] leading-relaxed text-fg-5">
-                    Browser previews opened by task runs will appear here.
-                  </div>
-                  {task.jiraUrl && (
-                    <a
-                      href={task.jiraUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex h-8 items-center rounded-md border border-edge px-3 text-[12px] font-medium text-fg-3 transition hover:border-edge-h hover:bg-panel-h hover:text-fg"
-                    >
-                      Open ticket page
-                    </a>
-                  )}
-                </div>
-              )}
-
-              {shelfTab === 'ticket' && (
-                <div className="space-y-4">
-                  <div className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
-                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                      <TicketTypeIcon task={task} showLabel />
-                      {priority && <Badge variant="muted">{priority}</Badge>}
-                    </div>
-                    <dl className="grid grid-cols-[76px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[12px]">
-                      <dt className="text-fg-5">Reporter</dt>
-                      <dd className="truncate text-fg-3">{reporter || '--'}</dd>
-                      <dt className="text-fg-5">Sprint</dt>
-                      <dd className="truncate text-fg-3">{task.sprint || '--'}</dd>
-                      <dt className="text-fg-5">Type</dt>
-                      <dd className="truncate text-fg-3">{fields.issueType || ticketType.label}</dd>
-                      {labels.length > 0 && (
-                        <>
-                          <dt className="text-fg-5">Labels</dt>
-                          <dd className="truncate text-fg-3">{labels.slice(0, 5).join(', ')}</dd>
-                        </>
-                      )}
-                    </dl>
-                  </div>
-                  <div className="rounded-lg border border-edge/65 bg-panel/60 px-3 py-3">
-                    <TaskDescriptionMarkdown task={task} />
-                  </div>
-                </div>
-              )}
             </div>
           </div>
-        </aside>}
+        </aside> : null}
       </div>
     </div>
   );
@@ -2805,6 +2846,8 @@ function TaskInlineWorkbench({
   onStartSubtask,
   onReopen,
   onOpenFull,
+  onCreateSideChatFromSelection,
+  onCreateTodoFromSelection,
 }: {
   task: ProTask | null;
   defaultAgent: string;
@@ -2824,6 +2867,8 @@ function TaskInlineWorkbench({
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
   onReopen?: (task: ProTask) => void;
   onOpenFull: () => void;
+  onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
+  onCreateTodoFromSelection?: TaskSelectionSessionHandler;
 }) {
   if (!task) {
     return (
@@ -2859,6 +2904,8 @@ function TaskInlineWorkbench({
         onUpdateSubtaskStatus={onUpdateSubtaskStatus}
         onStartSubtask={onStartSubtask}
         onReopen={onReopen}
+        onCreateSideChatFromSelection={onCreateSideChatFromSelection}
+        onCreateTodoFromSelection={onCreateTodoFromSelection}
         actions={(
           <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={onOpenFull}>
             Open
@@ -3800,6 +3847,35 @@ export function TasksTab() {
     }
   }, [deletingTaskId, taskDeleteTarget, toast]);
 
+  const createTodoFromTaskSelection = useCallback(async (session: StageSessionRef, request: SelectionActionRequest) => {
+    if (!request.quote.trim() || !request.note.trim()) return;
+    const result = await api.createProTodo({
+      kind: 'todo',
+      title: request.note,
+      body: request.note,
+      source: {
+        type: 'chat-selection',
+        workdir: session.workdir,
+        agent: session.agent,
+        sessionId: session.sessionId,
+        turnIndex: request.turnIndex,
+        quote: request.quote,
+      },
+    });
+    if (!result.ok) throw new Error(result.error || 'Failed to save todo');
+    toast('Todo saved');
+  }, [toast]);
+
+  const createSideChatFromTaskSelection = useCallback(async (session: StageSessionRef, request: SelectionSideChatRequest) => {
+    if (!request.quote.trim() || !request.question.trim()) return;
+    const created = await api.createSideChat(session.workdir, session.agent, session.sessionId, 'Task side card');
+    if (!created.ok || !created.session?.sessionId) throw new Error(created.error || 'Failed to create side card');
+    const prompt = buildTaskSelectionSideChatPrompt(request, locale);
+    const sent = await api.sendSessionMessage(created.session.workdir || session.workdir, created.session.agent || session.agent, created.session.sessionId, prompt);
+    if (!sent.ok) throw new Error(sent.error || 'Failed to start side card');
+    toast('Side card created');
+  }, [locale, toast]);
+
   const updateTaskJiraFields = useCallback(async (
     task: ProTask,
     fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] },
@@ -4502,6 +4578,8 @@ export function TasksTab() {
                   onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
                   onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
                   onReopen={(task) => { void reopenClosedTask(task); }}
+                  onCreateSideChatFromSelection={createSideChatFromTaskSelection}
+                  onCreateTodoFromSelection={createTodoFromTaskSelection}
                   onOpenFull={() => setDetailOpen(true)}
                 />
               )}
@@ -4571,9 +4649,19 @@ export function TasksTab() {
           setDetailOpen(false);
         }}
         wide
-        panelStyle={{ maxWidth: 'min(1180px, calc(100vw - 32px))' }}
+        panelClassName="rounded-[20px] border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] ring-1 ring-[color:var(--th-chat-window-ring)]"
+        contentClassName="h-full max-h-full overflow-hidden"
+        panelStyle={{
+          width: 'min(1512px, calc(100vw - clamp(32px, 4vw, 56px)))',
+          maxWidth: 'min(1512px, calc(100vw - clamp(32px, 4vw, 56px)))',
+          height: 'min(920px, calc(100dvh - clamp(32px, 4vw, 56px)))',
+          maxHeight: 'calc(100dvh - clamp(32px, 4vw, 56px))',
+          borderRadius: 20,
+          background: 'var(--th-chat-window-bg)',
+          boxShadow: 'var(--th-chat-window-shadow-focus)',
+        }}
       >
-        <div className="h-[min(82vh,840px)]">
+        <div data-task-detail-modal className="h-full min-h-0">
           <TaskDetail
             task={selectedTask}
             defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
@@ -4592,6 +4680,8 @@ export function TasksTab() {
             onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
             onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
             onReopen={(task) => { void reopenClosedTask(task); }}
+            onCreateSideChatFromSelection={createSideChatFromTaskSelection}
+            onCreateTodoFromSelection={createTodoFromTaskSelection}
             actions={selectedTask ? (
               <>
                 <div className="relative z-[60]">
@@ -4610,6 +4700,21 @@ export function TasksTab() {
                       className="absolute right-0 top-[calc(100%+8px)] z-[120] w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
                       role="menu"
                     >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setDetailMenuOpen(false);
+                          setCreateOpen(true);
+                        }}
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-fg-3 transition-colors hover:bg-panel-h hover:text-fg"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M12 5v14" />
+                          <path d="M5 12h14" />
+                        </svg>
+                        <span>Create task</span>
+                      </button>
                       <button
                         type="button"
                         role="menuitem"

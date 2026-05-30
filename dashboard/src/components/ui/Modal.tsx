@@ -7,12 +7,16 @@ export function Modal({
   open,
   onClose,
   wide,
+  panelClassName,
+  contentClassName,
   panelStyle,
   children,
 }: {
   open: boolean;
   onClose: () => void;
   wide?: boolean;
+  panelClassName?: string;
+  contentClassName?: string;
   panelStyle?: CSSProperties;
   children: ReactNode;
 }) {
@@ -29,7 +33,7 @@ export function Modal({
   if (typeof document === 'undefined') return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-100 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-100">
       <div
         className="absolute inset-0 backdrop-blur-[10px] backdrop-saturate-125"
         style={{ background: 'linear-gradient(180deg, color-mix(in oklab, var(--th-overlay) 68%, transparent), color-mix(in oklab, var(--th-overlay) 92%, transparent))' }}
@@ -41,15 +45,16 @@ export function Modal({
       />
       <div
         className={cn(
-          'glass-strong relative max-h-[min(88vh,860px)] w-full overflow-hidden rounded-xl border border-edge-h shadow-[0_32px_96px_rgba(2,6,23,0.28),0_8px_24px_rgba(15,23,42,0.08)] animate-scale',
-          wide ? 'max-w-[720px]' : 'max-w-[480px]'
+          'glass-strong fixed left-1/2 top-1/2 max-h-[min(88vh,860px)] w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border border-edge-h shadow-[0_32px_96px_rgba(2,6,23,0.28),0_8px_24px_rgba(15,23,42,0.08)] animate-scale',
+          wide ? 'max-w-[720px]' : 'max-w-[480px]',
+          panelClassName,
         )}
         style={{
-          ...panelStyle,
           background: 'linear-gradient(180deg, color-mix(in oklab, var(--th-modal-bg) 90%, white 10%), color-mix(in oklab, var(--th-modal-bg) 97%, white 3%))',
+          ...panelStyle,
         }}
       >
-        <div className="max-h-[inherit] overflow-y-auto p-6">{children}</div>
+        <div className={contentClassName || 'max-h-[inherit] overflow-y-auto p-6'}>{children}</div>
       </div>
     </div>,
     document.body,

@@ -227,6 +227,7 @@
   --color-panel-h: var(--th-panel-h);
   --color-panel-alt: var(--th-panel-alt);
   --color-inset: var(--th-inset);
+  --color-dropdown: var(--th-dropdown);
 
   --color-edge: var(--th-edge);
   --color-edge-h: var(--th-edge-h);

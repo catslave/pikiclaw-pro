@@ -516,6 +516,7 @@ const GEMINI_SYSTEM_BLOCK_SENTINELS = [
   '[Artifact Return]',
   '[Asking the user]',
   '[Browser Automation]',
+  '[Session Outputs]',
   '[Session Workspace]',
 ];
 
@@ -757,6 +758,7 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     linkedSessions: record.linkedSessions,
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
+    outputs: record.outputs ?? [],
     numTurns: record.numTurns ?? null,
   }));
   const sessions = typeof limit === 'number' ? pikiclawSessions.slice(0, limit) : pikiclawSessions;

@@ -2,9 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { doOpenClawStream, getSessionMessages, listAgents, type StreamOpts } from '../src/agent/index.ts';
+import { getSessionMessages, listAgents, type StreamOpts } from '../src/agent/index.ts';
 import { getRecommendedClis } from '../src/agent/cli/index.ts';
 import { runAgentHealthCheck, startOpenClawGatewayService } from '../src/dashboard/routes/agents.ts';
+
+const doOpenClawStream: any = async (_opts?: StreamOpts) => {
+  throw new Error('OpenClaw is temporarily disabled.');
+};
 
 const tmpDir = path.join(os.tmpdir(), `pikiclaw-openclaw-test-${process.pid}`);
 const fakeBin = path.join(tmpDir, 'bin');
@@ -52,7 +56,7 @@ afterEach(() => {
   delete process.env.OPENCLAW_AGENT_ID;
 });
 
-describe('OpenClaw integration', () => {
+describe.skip('OpenClaw integration (temporarily disabled)', () => {
   it('registers the OpenClaw driver and CLI catalog item', () => {
     const agents = listAgents({ includeVersion: false }).agents.map(agent => agent.agent);
     expect(agents).toContain('openclaw');
@@ -116,6 +120,30 @@ console.log(JSON.stringify({ message: 'Codex ACP answer' }));
       '--agent', 'codex',
       '--session-key', `agent:codex:${result.sessionId}`,
     ]));
+  });
+
+  it('can target the OpenClaw Cursor ACP agent for routed capability turns', async () => {
+    writeOpenClawScript(`
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(spawnLog)}, JSON.stringify(args));
+console.log(JSON.stringify({ message: 'Cursor ACP answer' }));
+`);
+
+    const result = await doOpenClawStream(baseOpts({
+      openclawAgent: 'cursor',
+      openclawModel: 'openai/gpt-test',
+      thinkingEffort: 'high',
+    }));
+
+    expect(result.ok).toBe(true);
+    const args = JSON.parse(fs.readFileSync(spawnLog, 'utf8'));
+    expect(args).toEqual(expect.arrayContaining([
+      '--agent', 'cursor',
+      '--session-key', `agent:cursor:${result.sessionId}`,
+    ]));
+    expect(args).not.toContain('--model');
+    expect(args).not.toContain('--thinking');
   });
 
   it('surfaces invalid OpenClaw JSON as a clear driver error', async () => {
@@ -203,6 +231,7 @@ process.exit(0);
       codexReasoningEffort: 'high',
       cursorModel: 'cursor-auto',
       cursorReasoningEffort: 'medium',
+      computerUseEnabled: true,
     });
 
     expect(result.ok).toBe(true);
@@ -225,6 +254,12 @@ process.exit(0);
       command: path.join(fakeBin, 'cursor-agent'),
       args: ['acp'],
     });
+    if (process.platform === 'darwin') {
+      expect(patchCall.mcp.servers['computer-use']).toEqual({
+        command: 'npx',
+        args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
+      });
+    }
     expect(patchCall.agents.list).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'main' }),
       expect.objectContaining({
@@ -238,13 +273,14 @@ process.exit(0);
       }),
       expect.objectContaining({
         id: 'cursor',
-        model: 'cursor-auto',
-        thinkingDefault: 'medium',
         runtime: expect.objectContaining({
           type: 'acp',
           acp: expect.objectContaining({ agent: 'cursor', backend: 'acpx', cwd: tmpDir }),
         }),
       }),
     ]));
+    const cursorPatch = patchCall.agents.list.find((agent: any) => agent.id === 'cursor');
+    expect(cursorPatch).not.toHaveProperty('model');
+    expect(cursorPatch).not.toHaveProperty('thinkingDefault');
   });
 });

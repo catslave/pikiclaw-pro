@@ -22,6 +22,7 @@ import type {
   JiraSyncRun,
   JiraWorkflowConfig,
   JiraCycle,
+  LocalModelActionResponse,
   LocalModelsProbeResponse,
   LsDirResult,
   McpCatalogItem,
@@ -49,6 +50,7 @@ import type {
   SessionGoalView,
   SessionPlanView,
   SessionMessagesResult,
+  SessionContextSource,
   SkillInfo,
   StreamActivityEvents,
   StreamActivitySummary,
@@ -78,6 +80,7 @@ export interface SessionSendRequestOptions extends ApiRequestOptions {
    */
   previousAgent?: string | null;
   previousSessionId?: string | null;
+  contextSources?: SessionContextSource[];
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -386,6 +389,18 @@ export const api = {
   // connect step. See src/dashboard/routes/local-models.ts for the contract.
   probeLocalModels: (opts?: ApiRequestOptions) =>
     json<LocalModelsProbeResponse>('/api/local-models/probe', { timeoutMs: 8_000, ...opts }),
+  installLocalBackend: (backend: string, opts?: ApiRequestOptions) =>
+    post<LocalModelActionResponse>(
+      '/api/local-models/install',
+      { backend },
+      { timeoutMs: 20 * 60_000, ...opts },
+    ),
+  loadLocalModel: (backend: string, modelEntryId: string, opts?: ApiRequestOptions) =>
+    post<LocalModelActionResponse>(
+      '/api/local-models/load',
+      { backend, modelEntryId },
+      { timeoutMs: 60 * 60_000, ...opts },
+    ),
 
   // Session hub
   getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),
@@ -495,7 +510,7 @@ export const api = {
     parentSessionId: string,
     agent: string,
     sessionId: string,
-    purgeNative = false,
+    purgeNative = true,
     opts?: ApiRequestOptions,
   ) =>
     post<{
@@ -539,6 +554,7 @@ export const api = {
       effort,
       previousAgent,
       previousSessionId,
+      contextSources = [],
       ...opts
     } = options;
     const prevAgent = typeof previousAgent === 'string' ? previousAgent.trim() : '';
@@ -551,6 +567,7 @@ export const api = {
       ...(typeof model === 'string' && model.trim() ? { model: model.trim() } : {}),
       ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
       ...(prevAgent && prevSessionId ? { previousAgent: prevAgent, previousSessionId: prevSessionId } : {}),
+      ...(contextSources.length ? { contextSources } : {}),
     };
 
     if (!attachments.length) {
@@ -572,6 +589,7 @@ export const api = {
       body.set('previousAgent', prevAgent);
       body.set('previousSessionId', prevSessionId);
     }
+    if (contextSources.length) body.set('contextSources', JSON.stringify(contextSources));
     for (const attachment of attachments) {
       body.append('attachments', attachment, attachment.name || 'image');
     }
@@ -741,10 +759,24 @@ export const api = {
       title?: string;
       body?: string;
       source?: TodoItemSource;
+      images?: TodoItem['images'];
     },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; item?: TodoItem; error?: string }>('/api/pro/todos', item, opts),
+  updateProTodo: (
+    todoId: string,
+    item: {
+      title?: string;
+      body?: string;
+      images?: TodoItem['images'];
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; item?: TodoItem; error?: string }>(
+      `/api/pro/todos/${encodeURIComponent(todoId)}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item), ...opts },
+    ),
   deleteProTodo: (todoId: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; item?: TodoItem; error?: string }>(
       `/api/pro/todos/${encodeURIComponent(todoId)}`,

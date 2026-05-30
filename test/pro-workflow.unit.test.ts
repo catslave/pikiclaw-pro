@@ -51,6 +51,10 @@ describe('Pro workflow store', () => {
     }));
     expect(assistants.find(item => item.id === 'assistant_dashboard_owner')?.labels).toEqual(expect.arrayContaining(['builtin', 'page-owner']));
     expect(assistants.find(item => item.id === 'assistant_refinement')?.labels).toEqual(expect.arrayContaining(['builtin', 'task']));
+    const hermesAssistant = assistants.find(item => item.id === 'assistant_hermes_acp');
+    expect(hermesAssistant?.responsibility).toContain('planning assistant');
+    expect(hermesAssistant?.prompt).toContain('Goal & Plan');
+    expect(hermesAssistant?.prompt).toContain('Do not modify repository files');
 
     const promptInfo = getAssistantPrompt('assistant_dashboard_owner');
     expect(promptInfo.prompt).toContain('backlog -> refinement -> working -> done');

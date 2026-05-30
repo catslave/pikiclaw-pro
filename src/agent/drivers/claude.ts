@@ -1164,6 +1164,7 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     linkedSessions: record.linkedSessions,
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
+    outputs: record.outputs ?? [],
     numTurns: record.numTurns ?? null,
   }));
   const sessions = typeof limit === 'number' ? pikiclawSessions.slice(0, limit) : pikiclawSessions;

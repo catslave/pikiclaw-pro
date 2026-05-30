@@ -37,6 +37,10 @@ const OPENCLAW_NODE_MIN_VERSION = '22.19.0';
 const OPENCLAW_ACP_BACKEND = 'acpx';
 const OPENCLAW_ACP_AGENT_IDS = ['codex', 'cursor'] as const;
 const OPENCLAW_ACP_INSTALL_COMMAND = 'Install Codex CLI and Cursor Agent from the pikiclaw Agents page, then start OpenClaw again.';
+const COMPUTER_USE_MCP_SERVER = {
+  command: 'npx',
+  args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
+};
 type OpenClawAcpAgentId = (typeof OPENCLAW_ACP_AGENT_IDS)[number];
 
 // ---------------------------------------------------------------------------
@@ -373,6 +377,8 @@ function openClawAcpAgentPatch(
   const existingAcpxEntry = isPlainObject(existingPluginEntries.acpx) ? existingPluginEntries.acpx : {};
   const existingAcpxConfig = isPlainObject(existingAcpxEntry.config) ? existingAcpxEntry.config : {};
   const existingAcpxAgents = isPlainObject(existingAcpxConfig.agents) ? existingAcpxConfig.agents : {};
+  const existingMcp = isPlainObject(existing.mcp) ? existing.mcp : {};
+  const existingMcpServers = isPlainObject(existingMcp.servers) ? existingMcp.servers : {};
   const existingList = Array.isArray(existingAgents.list) ? existingAgents.list : [];
   const nextList = existingList
     .filter(item => isPlainObject(item) && typeof item.id === 'string' && item.id.trim())
@@ -412,8 +418,13 @@ function openClawAcpAgentPatch(
         },
       },
     };
-    setStringDefault(next, 'model', runtime.getRuntimeModel(id, config));
-    setStringDefault(next, 'thinkingDefault', runtime.getRuntimeEffort(id, config));
+    if (id === 'cursor') {
+      delete next.model;
+      delete next.thinkingDefault;
+    } else {
+      setStringDefault(next, 'model', runtime.getRuntimeModel(id, config));
+      setStringDefault(next, 'thinkingDefault', runtime.getRuntimeEffort(id, config));
+    }
     if (index >= 0) nextList[index] = next;
     else nextList.push(next);
   };
@@ -423,6 +434,15 @@ function openClawAcpAgentPatch(
 
   const nextAcpxAgents: Record<string, unknown> = { ...existingAcpxAgents };
   if (!isPlainObject(nextAcpxAgents.cursor)) nextAcpxAgents.cursor = cursorAcpCommand();
+
+  const computerUseEnabled = (config as Record<string, unknown>).computerUseEnabled === true
+    || (config as Record<string, unknown>).peekabooEnabled === true;
+  const nextMcpServers: Record<string, unknown> = { ...existingMcpServers };
+  if (computerUseEnabled && process.platform === 'darwin') {
+    nextMcpServers['computer-use'] = isPlainObject(nextMcpServers['computer-use'])
+      ? { ...COMPUTER_USE_MCP_SERVER, ...nextMcpServers['computer-use'] }
+      : COMPUTER_USE_MCP_SERVER;
+  }
 
   return {
     acp: {
@@ -461,6 +481,10 @@ function openClawAcpAgentPatch(
           },
         },
       },
+    },
+    mcp: {
+      ...existingMcp,
+      servers: nextMcpServers,
     },
     agents: {
       list: nextList,

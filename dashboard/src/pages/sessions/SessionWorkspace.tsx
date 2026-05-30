@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useLayoutEffect, useCallback, useRef, memo, useMemo, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useLayoutEffect, useCallback, useRef, memo, useMemo, type ChangeEvent as ReactChangeEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store';
@@ -23,7 +23,7 @@ import {
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
-import type { AppState, SessionInfo, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
+import type { AppState, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
 import { InputComposer } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
@@ -31,6 +31,7 @@ import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal
 import type { FileLinkTarget } from './markdown';
 import type { SessionPanelChange } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
+import { formatFileSize, isImageFile } from './utils';
 
 // Kick off SessionPanel import the moment this module loads so the lazy boundary
 // resolves before the user can compose & send a new message. The previous
@@ -104,6 +105,32 @@ function TodoGlyph({ className }: { className?: string }) {
   );
 }
 
+const TODO_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
+function readTodoImageDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function makeTodoImageAttachment(file: File): Promise<TodoImageAttachment> {
+  if (!isImageFile(file)) throw new Error('Only image files are supported');
+  if (file.size > TODO_IMAGE_MAX_BYTES) throw new Error('Image is too large');
+  const dataUrl = await readTodoImageDataUrl(file);
+  if (!dataUrl) throw new Error('Failed to read image');
+  return {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'image',
+    name: file.name || 'todo-image.png',
+    mimeType: file.type || 'image/png',
+    size: file.size,
+    dataUrl,
+  };
+}
+
 function sideChatDisplayTitle(fallbackIndex: number, sideChatLabel: string): string {
   return `${sideChatLabel} ${fallbackIndex + 1}`;
 }
@@ -131,6 +158,145 @@ function buildSelectionSideChatPrompt({ quote, question }: SelectionSideChatRequ
     'Question:',
     normalizedQuestion,
   ].join('\n');
+}
+
+function clipOutputPromptText(value: string | null | undefined, max = 6000): string {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.length <= max ? text : `${text.slice(0, max).trimEnd()}\n...`;
+}
+
+type NewSessionReferenceContext = {
+  title: string;
+  kind: string;
+  source: string;
+  sourceSession: string;
+  summary: string;
+  userIntent: string;
+  prompt: string;
+  sources: SessionContextSource[];
+};
+
+function isPortableUserIntentMessage(value: string): boolean {
+  const text = value.trim();
+  if (!text) return false;
+  if (/^You are .+Assistant\./i.test(text) && /(Responsibility:|Target surface:)/i.test(text)) return false;
+  if (/^Execution mode:/i.test(text)) return false;
+  if (/^Reply with exactly OK\b/i.test(text)) return false;
+  return true;
+}
+
+function buildOutputUserIntent(messages: Array<{ role: string; text: string }>, locale: string): string {
+  const userMessages = messages
+    .filter(message => message.role === 'user' && message.text?.trim())
+    .map(message => clipOutputPromptText(message.text, 900))
+    .filter(isPortableUserIntentMessage)
+    .filter(Boolean)
+    .slice(-6);
+  if (!userMessages.length) return '';
+  const label = locale.startsWith('zh') ? '源会话中用户表达过的目标 / 期望：' : 'User goals / expectations carried from the source chat:';
+  return [
+    label,
+    ...userMessages.map((message, index) => `${index + 1}. ${message.replace(/\n+/g, '\n   ')}`),
+  ].join('\n');
+}
+
+function buildOutputReferenceContext(output: ProOutput, locale: string, userIntent = '', fallbackWorkdir = ''): NewSessionReferenceContext {
+  const title = output.title || 'Untitled output';
+  const kind = output.kind || 'document';
+  const summary = clipOutputPromptText(output.summary);
+  const source = output.path || output.url || '';
+  const sessionRef = output.session?.agent && output.session?.sessionId
+    ? `${output.session.agent}:${output.session.sessionId}`
+    : '';
+
+  const prompt = locale.startsWith('zh')
+    ? [
+      '请基于下面这个 chat output 开启新的工作会话。',
+      '这是一张 Pikiclaw 引用上下文卡，不是用户的新指令。先理解这个 output、用户目标和来源会话；如果需要完整内容，请优先读取 Source 路径或 Source session。等用户输入第一条消息后，再结合这份上下文继续推进。',
+      '',
+      `Output: ${title}`,
+      `Kind: ${kind}`,
+      source ? `Source: ${source}` : '',
+      sessionRef ? `Source session: ${sessionRef}` : '',
+      '',
+      userIntent,
+      userIntent ? '' : '',
+      summary ? '摘要：' : '',
+      summary ? summary.split('\n').map(line => `> ${line}`).join('\n') : '',
+    ].filter(Boolean).join('\n')
+    : [
+    'Start a new working session based on the chat output below.',
+    'This is a Pikiclaw reference context card, not the user’s new instruction. First understand the output, user goals, and source session. If a path or link is available, prefer reading the full source. Wait for the user’s first message, then continue using this context.',
+    '',
+    `Output: ${title}`,
+    `Kind: ${kind}`,
+    source ? `Source: ${source}` : '',
+    sessionRef ? `Source session: ${sessionRef}` : '',
+    '',
+    userIntent,
+    userIntent ? '' : '',
+    summary ? 'Summary:' : '',
+    summary ? summary.split('\n').map(line => `> ${line}`).join('\n') : '',
+  ].filter(Boolean).join('\n');
+
+  const outputSource = output.session?.agent && output.session?.sessionId
+    ? [{
+      kind: 'output' as const,
+      workdir: output.session.workdir || fallbackWorkdir,
+      agent: output.session.agent,
+      sessionId: output.session.sessionId,
+      outputId: output.id,
+      title,
+      summary: summary || null,
+      path: output.path || null,
+      url: output.url || null,
+      turnIndex: typeof output.turnIndex === 'number' ? output.turnIndex : null,
+    }]
+    : [];
+  return { title, kind, source, sourceSession: sessionRef, summary, userIntent, prompt, sources: outputSource };
+}
+
+function buildSessionReferenceContext(session: SessionInfo, workdir: string, locale: string): NewSessionReferenceContext {
+  const title = sessionListDisplayText(session).slice(0, 160) || session.sessionId.slice(0, 16);
+  const sourceSession = session.agent && session.sessionId ? `${session.agent}:${session.sessionId}` : '';
+  const summary = session.lastMessageText || session.lastAnswer || session.lastQuestion || '';
+  const prompt = locale.startsWith('zh')
+    ? [
+      '请基于下面这个 source session 开启新的工作会话。',
+      '这是一张 Pikiclaw source context 卡，不是用户的新指令。先理解来源会话；等用户输入第一条消息后，再结合这份上下文继续推进。',
+      '',
+      `Source session: ${sourceSession}`,
+      `Mode: compact`,
+      summary ? '摘要：' : '',
+      summary ? `> ${clipOutputPromptText(summary, 1200)}` : '',
+    ].filter(Boolean).join('\n')
+    : [
+      'Start a new working session based on the source session below.',
+      'This is a Pikiclaw source context card, not the user’s new instruction. First understand the source session. Wait for the user’s first message, then continue using this context.',
+      '',
+      `Source session: ${sourceSession}`,
+      `Mode: compact`,
+      summary ? 'Summary:' : '',
+      summary ? `> ${clipOutputPromptText(summary, 1200)}` : '',
+    ].filter(Boolean).join('\n');
+  return {
+    title,
+    kind: 'session',
+    source: '',
+    sourceSession,
+    summary,
+    userIntent: '',
+    prompt,
+    sources: [{
+      kind: 'session',
+      workdir,
+      agent: session.agent || '',
+      sessionId: session.sessionId,
+      title,
+      mode: 'compact',
+    }],
+  };
 }
 
 function isAbsoluteLocalPath(filePath: string): boolean {
@@ -212,6 +378,8 @@ type FocusFloatingSession = {
   hidden?: boolean;
   x?: number;
   y?: number;
+  initialDraftPrompt?: string | null;
+  referenceContext?: NewSessionReferenceContext | null;
   pendingPrompt?: string | null;
   pendingImageUrls?: string[];
   pendingCreatedAt?: string | null;
@@ -277,6 +445,13 @@ type SideChatPanelOpenMap = Record<string, boolean>;
 type SideChatRef = NonNullable<SessionInfo['sideChats']>[number];
 type SideChatRefsMap = Record<string, SideChatRef[]>;
 type SideChatWidthsMap = Record<string, number>;
+type ParentReferenceContext = {
+  prompt: string;
+  label: string;
+  draftPrompt: string;
+  sourceKey: string;
+  createdAt: string;
+};
 type WorkspaceRenameTarget = { path: string; name: string; originalName: string };
 type FilePanelRequest = { workdir: string; path: string; line?: number; nonce: number };
 
@@ -441,6 +616,119 @@ function sideChatSlotKey(slot: Pick<SessionSlot, 'agent' | 'sessionId'>) {
 
 function sameSideChatIdentity(a: Pick<SessionSlot, 'agent' | 'sessionId'>, b: Pick<SessionSlot, 'agent' | 'sessionId'>) {
   return a.agent === b.agent && a.sessionId === b.sessionId;
+}
+
+function formatSideChatOutputReferences(outputs: ProOutput[] | null | undefined, locale: string): string {
+  if (!outputs?.length) return '';
+  const lines = locale.startsWith('zh') ? ['Side chat 产出：'] : ['Side chat outputs:'];
+  outputs.slice(0, 6).forEach((output, index) => {
+    const title = output.title || output.path || output.url || output.id || 'Untitled output';
+    lines.push(`${index + 1}. ${title}`);
+    if (output.kind) lines.push(`   Kind: ${output.kind}`);
+    if (output.path) lines.push(`   Path: ${output.path}`);
+    if (output.url) lines.push(`   URL: ${output.url}`);
+    const summary = clipOutputPromptText(output.summary, 1200);
+    if (summary) {
+      lines.push(locale.startsWith('zh') ? '   摘要：' : '   Summary:');
+      for (const line of summary.split('\n')) lines.push(`   > ${line}`);
+    }
+  });
+  return lines.join('\n');
+}
+
+function buildSideChatReturnReferenceContext(
+  parentSlot: SessionSlot,
+  parentInfo: SessionInfo,
+  sideSlot: SessionSlot,
+  sideInfo: SessionInfo,
+  sideTitle: string,
+  locale: string,
+): ParentReferenceContext {
+  const parentTitle = sessionListDisplayText(parentInfo).slice(0, 160) || parentSlot.sessionId.slice(0, 16);
+  const sourceKey = `${sideSlot.agent}:${sideSlot.sessionId}`;
+  const summary = clipOutputPromptText(
+    sideInfo.lastAnswer || sideInfo.lastMessageText || sideInfo.lastQuestion || '',
+    5000,
+  );
+  const outputRefs = formatSideChatOutputReferences(sideInfo.outputs, locale);
+  const hasZh = locale.startsWith('zh');
+  const prompt = hasZh
+    ? [
+      '这是从 side chat 带回当前父 session 的一次性引用上下文。',
+      '它不是父 session 的历史，也不会持续同步。请把它作为背景材料，用来解释、修正或补充当前父 session 中相关的 plan / review 疑点。',
+      '',
+      `Parent session: ${parentSlot.agent}:${parentSlot.sessionId}`,
+      `Parent title: ${parentTitle}`,
+      `Side chat: ${sourceKey}`,
+      `Side chat title: ${sideTitle}`,
+      '',
+      summary ? 'Side chat 最新结论 / 摘要：' : '',
+      summary ? summary.split('\n').map(line => `> ${line}`).join('\n') : '',
+      summary && outputRefs ? '' : '',
+      outputRefs,
+    ].filter(Boolean).join('\n')
+    : [
+      'This is a one-shot reference brought back from a side chat into the current parent session.',
+      'It is not parent-session history and will not keep syncing. Use it as background to explain, revise, or extend the relevant plan/review point in the parent session.',
+      '',
+      `Parent session: ${parentSlot.agent}:${parentSlot.sessionId}`,
+      `Parent title: ${parentTitle}`,
+      `Side chat: ${sourceKey}`,
+      `Side chat title: ${sideTitle}`,
+      '',
+      summary ? 'Side chat latest conclusion / summary:' : '',
+      summary ? summary.split('\n').map(line => `> ${line}`).join('\n') : '',
+      summary && outputRefs ? '' : '',
+      outputRefs,
+    ].filter(Boolean).join('\n');
+  return {
+    prompt,
+    label: hasZh ? `引用 ${sideTitle} 回主会话` : `Reference ${sideTitle} in parent`,
+    draftPrompt: hasZh
+      ? '请基于引用的 side chat 结论，回到当前 review 上下文，解释这个疑点，并说明它对 plan 的影响和建议。'
+      : 'Use the referenced side chat conclusion to explain this question in the current review context, including its impact on the plan and recommended next steps.',
+    sourceKey,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function SideChatReturnHeader({
+  title,
+  outputCount,
+  onReturn,
+  t,
+}: {
+  title: string;
+  outputCount: number;
+  onReturn: () => void;
+  t: (key: string) => string;
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-edge/55 bg-panel-alt/70 px-3 py-2 text-[11px] shadow-sm">
+      <div className="min-w-0 flex-1">
+        <div className="truncate font-semibold text-fg-3">{title}</div>
+        <div className="truncate text-[10px] text-fg-5">
+          {outputCount > 0
+            ? t('session.sideChatReturnWithOutputs').replace('{count}', String(outputCount))
+            : t('session.sideChatReturnHint')}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={event => {
+          event.stopPropagation();
+          onReturn();
+        }}
+        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-primary/25 bg-primary/[0.075] px-2 text-[11px] font-semibold text-primary transition-colors hover:bg-primary/[0.12]"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M19 12H5" />
+          <path d="m12 19-7-7 7-7" />
+        </svg>
+        {t('session.referenceBackToParent')}
+      </button>
+    </div>
+  );
 }
 
 function dedupeSideChatSlots(slots: SessionSlot[]): SessionSlot[] {
@@ -1041,6 +1329,42 @@ function measureSessionSlotRects(): Map<number, DOMRect> {
   return rects;
 }
 
+function findVerticalScrollParent(element: HTMLElement): HTMLElement | null {
+  let parent = element.parentElement;
+  while (parent) {
+    const style = window.getComputedStyle(parent);
+    if (/(auto|scroll|overlay)/.test(style.overflowY)) return parent;
+    parent = parent.parentElement;
+  }
+  return null;
+}
+
+function scrollSessionSlotIntoView(slotIndex: number, center = false) {
+  if (typeof document === 'undefined') return;
+  const slotEl = document.querySelector(`[data-session-slot-index="${slotIndex}"]`) as HTMLElement | null;
+  if (!slotEl) return;
+  if (!center) {
+    slotEl.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    return;
+  }
+  const scroller = findVerticalScrollParent(slotEl);
+  if (!scroller) {
+    slotEl.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+    return;
+  }
+  const slotRect = slotEl.getBoundingClientRect();
+  const scrollerRect = scroller.getBoundingClientRect();
+  const desiredOffset = slotRect.height + 32 >= scroller.clientHeight
+    ? 16
+    : (scroller.clientHeight - slotRect.height) / 2;
+  const targetTop = scroller.scrollTop + (slotRect.top - scrollerRect.top) - desiredOffset;
+  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  scroller.scrollTo({
+    top: Math.max(0, Math.min(maxTop, targetTop)),
+    behavior: 'smooth',
+  });
+}
+
 function readSessionSlotLayoutItems(): SlotDragLayoutItem[] {
   if (typeof document === 'undefined') return [];
   return Array.from(document.querySelectorAll<HTMLElement>('[data-session-slot-index]'))
@@ -1211,17 +1535,19 @@ const TASK_STAGE_LABEL: Record<ProTaskStage, string> = {
   knowledge: 'Knowledge',
 };
 const CONTEXT_QUICK_LABEL: Record<ContextShelfTab, string> = {
-  outputs: 'Outputs',
+  outputs: 'Output',
   'side-chats': 'Side',
-  files: 'Files',
+  files: 'File',
   browser: 'Browser',
-  status: 'State',
+  status: 'Overview',
   ticket: 'Ticket',
 };
 const FOCUS_CONTEXT_SHELF_TABS = new Set<ContextShelfTab>(['outputs', 'side-chats', 'files', 'browser']);
 const FOCUS_CONTEXT_SHELF_TAB_ORDER: ContextShelfTab[] = ['outputs', 'files', 'browser', 'side-chats'];
 const FOCUS_CONTEXT_TAB_LABELS: Partial<Record<ContextShelfTab, string>> = {
-  outputs: 'Outputs',
+  outputs: 'Output',
+  files: 'File',
+  status: 'Overview',
   'side-chats': 'Side',
 };
 
@@ -1455,6 +1781,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [draggingContextCardKey, setDraggingContextCardKey] = useState<string | null>(null);
   const [sideChatRefsByParent, setSideChatRefsByParent] = useState<SideChatRefsMap>({});
   const [sideChatInfoMap, setSideChatInfoMap] = useState<Record<string, SessionInfo>>({});
+  const [parentReferenceByKey, setParentReferenceByKey] = useState<Record<string, ParentReferenceContext>>({});
   const [activeSlotIndex, setActiveSlotIndexRaw] = useState(readStoredActiveSlot);
   const [spotlightSlotIndex, setSpotlightSlotIndex] = useState<number | null>(null);
   const [focusedSlotIndex, setFocusedSlotIndex] = useState<number | null>(readStoredFocusedSlot);
@@ -1649,6 +1976,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [showNewSession, setShowNewSessionRaw] = useState<string | null>(readStoredNewSessionWorkdir);
   const [newSessionTemplateAgent, setNewSessionTemplateAgent] = useState('');
   const [newSessionInitialDraftPrompt, setNewSessionInitialDraftPrompt] = useState<string | null>(null);
+  const [newSessionReferenceContext, setNewSessionReferenceContext] = useState<NewSessionReferenceContext | null>(null);
   const [newSessionInitialAutoSend, setNewSessionInitialAutoSend] = useState(false);
   const setShowNewSession = useCallback((updater: string | null | ((prev: string | null) => string | null)) => {
     setShowNewSessionRaw(prev => {
@@ -1723,8 +2051,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setInboxFocusedSlot(null);
   }, []);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
+  const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
   const [quickTodoText, setQuickTodoText] = useState('');
+  const [quickTodoImages, setQuickTodoImages] = useState<TodoImageAttachment[]>([]);
   const [quickTodoSaving, setQuickTodoSaving] = useState(false);
+  const [quickTodoImageAdding, setQuickTodoImageAdding] = useState(false);
   const [todoModalOpen, setTodoModalOpen] = useState(false);
   const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
   const [todoLoading, setTodoLoading] = useState(false);
@@ -1967,7 +2298,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const hydrateSession = useCallback((session: SessionInfo): SessionInfo => {
     const agent = session.agent || '';
     if (!agent || !session.sessionId) return session;
-    const hydrated = applyLiveSessionState(session, liveSessionStates[sKey(agent, session.sessionId)] || null);
+    const key = sKey(agent, session.sessionId);
+    const liveState = liveSessionStates[key]
+      || Object.values(liveSessionStates).find(state => state.resolvedKey === key)
+      || null;
+    const hydrated = applyLiveSessionState(session, liveState);
     return isLocallyReadSession(hydrated, locallyReadSessionMarkers)
       ? { ...hydrated, userStatus: 'done' as const }
       : hydrated;
@@ -2568,7 +2903,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (deletingSession) return;
     setDeletingSession(true);
     try {
-      const res = await api.deleteSession(target.workdir, target.agent, target.sessionId, false);
+      const res = await api.deleteSession(target.workdir, target.agent, target.sessionId, true);
       if (!res.ok) {
         const msg = res.error?.includes('still running') ? t('session.deleteRunningError') : (res.error || t('session.deleteFailed'));
         toastSession(msg, false);
@@ -2722,6 +3057,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setNewSessionPendingImageUrls(pendingImageUrls && pendingImageUrls.length ? pendingImageUrls : []);
       setNewSessionPendingCreatedAt(createdAt);
       setNewSessionInitialDraftPrompt(null);
+      setNewSessionReferenceContext(null);
       setNewSessionInitialAutoSend(false);
       setShowNewSession(null);
       setOpenSessions(prev => {
@@ -2945,6 +3281,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           agent: registered.agent,
           sessionId: registered.sessionId,
           hidden: false,
+          initialDraftPrompt: null,
+          referenceContext: null,
           x: item.x,
           y: item.y,
           pendingPrompt: registered.pendingPrompt,
@@ -2988,7 +3326,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [focusFloatingSessions, registerFocusFloatingSession]);
 
-  const openFloatingSessionDraft = useCallback((workdirOverride?: string, agentOverride?: string) => {
+  const openFloatingSessionDraft = useCallback((
+    workdirOverride?: string,
+    agentOverride?: string,
+    initialDraftPrompt?: string | null,
+    referenceContext?: NewSessionReferenceContext | null,
+  ) => {
     const baseSlot = focusedSlotIndex != null
       ? openSessionsRef.current[focusedSlotIndex]
       : openSessionsRef.current[activeSlotRef.current];
@@ -3000,11 +3343,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       agent: agentOverride ?? baseSlot?.agent ?? '',
       mountKey: nextMountKey(),
       hidden: false,
+      initialDraftPrompt: initialDraftPrompt || null,
+      referenceContext: referenceContext || null,
     };
     setFocusFloatingSessions(prev => {
       const placement = defaultFocusFloatingPosition(prev.filter(current => !current.hidden).length);
       return [...prev, { ...item, ...placement }];
     });
+    return item.id;
   }, [focusedSlotIndex, runtimeWorkdir, selectedSession?.workdir, workspaces]);
 
   const handleFocusFloatingSessionRequest = useCallback(() => {
@@ -3078,9 +3424,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const handleNewSessionRequest = useCallback((wsPath: string) => {
     const shouldFloatDraft = chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
     const templateAgent = openSessionsRef.current[activeSlotRef.current]?.agent || '';
+    setNewSessionInitialDraftPrompt(null);
+    setNewSessionReferenceContext(null);
+    setNewSessionInitialAutoSend(false);
     if (shouldFloatDraft) {
-      setNewSessionInitialDraftPrompt(null);
-      setNewSessionInitialAutoSend(false);
       setShowNewSession(null);
       openFloatingSessionDraft(wsPath, templateAgent);
       return;
@@ -3089,6 +3436,72 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setShowNewSession(wsPath);
     if (!shouldFloatDraft) setActiveSlotIndex(openSessionsRef.current.length);
   }, [chatLayout, isNarrowWorkbench, openFloatingSessionDraft, setActiveSlotIndex, setShowNewSession, taskFocusId]);
+
+  const handleNewSessionWithContext = useCallback((target: SessionActionTarget) => {
+    const sourceSession = (sessionsMap[target.workdir] || []).find(
+      session => session.agent === target.agent && session.sessionId === target.sessionId,
+    ) ?? {
+      sessionId: target.sessionId,
+      agent: target.agent,
+      title: target.title || null,
+      runState: 'completed' as const,
+    };
+    const referenceContext = buildSessionReferenceContext(hydrateSession(sourceSession), target.workdir, locale);
+    const shouldFloatDraft = chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
+    setSessionMenu(null);
+    setSlotMenu(null);
+    setDeleteConfirmKey(null);
+    setNewSessionTemplateAgent(target.agent);
+    setNewSessionReferenceContext(referenceContext);
+    setNewSessionInitialAutoSend(false);
+    setNewSessionInitialDraftPrompt(null);
+    if (shouldFloatDraft) {
+      setShowNewSession(null);
+      openFloatingSessionDraft(target.workdir, target.agent, null, referenceContext);
+      return;
+    }
+    setShowNewSession(target.workdir);
+    setActiveSlotIndex(openSessionsRef.current.length);
+  }, [chatLayout, hydrateSession, isNarrowWorkbench, locale, openFloatingSessionDraft, sessionsMap, setActiveSlotIndex, setShowNewSession, taskFocusId]);
+
+  const handleCreateSessionFromOutput = useCallback(async (output: ProOutput) => {
+    const baseSlot = openSessionsRef.current[activeSlotRef.current] || selectedSession || null;
+    const workdir = output.session?.workdir
+      || baseSlot?.workdir
+      || runtimeWorkdir
+      || workspaces[0]?.path
+      || '';
+    if (!workdir) return;
+    const agent = output.session?.agent || baseSlot?.agent || '';
+    let userIntent = '';
+    if (output.session?.agent && output.session?.sessionId) {
+      try {
+        const history = await api.getSessionMessages(output.session.workdir || workdir, output.session.agent, output.session.sessionId, {
+          rich: false,
+          lastNTurns: 12,
+        }, { timeoutMs: 2500 });
+        userIntent = buildOutputUserIntent(history.messages || [], locale);
+      } catch {
+        userIntent = '';
+      }
+    }
+    const referenceContext = buildOutputReferenceContext(output, locale, userIntent, workdir);
+    const shouldFloatDraft = chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
+    startTransition(() => {
+      setNewSessionTemplateAgent(agent);
+      setNewSessionReferenceContext(referenceContext);
+      setNewSessionInitialAutoSend(false);
+      if (shouldFloatDraft) {
+        setNewSessionInitialDraftPrompt(null);
+        setShowNewSession(null);
+        openFloatingSessionDraft(workdir, agent, null, referenceContext);
+        return;
+      }
+      setNewSessionInitialDraftPrompt(null);
+      setShowNewSession(workdir);
+      setActiveSlotIndex(openSessionsRef.current.length);
+    });
+  }, [chatLayout, isNarrowWorkbench, locale, openFloatingSessionDraft, runtimeWorkdir, selectedSession, setActiveSlotIndex, setShowNewSession, taskFocusId, workspaces]);
 
   const resolveNewSessionTemplate = useCallback(() => {
     const slots = openSessionsRef.current;
@@ -3111,6 +3524,46 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setShowNewSession(template.workdir);
     setActiveSlotIndex(openSessionsRef.current.length);
   }, [resolveNewSessionTemplate, setActiveSlotIndex, setShowNewSession]);
+
+  const openCreateQuickTodo = useCallback(() => {
+    setEditingTodoItem(null);
+    setQuickTodoText('');
+    setQuickTodoImages([]);
+    setQuickTodoOpen(true);
+  }, []);
+
+  const closeQuickTodo = useCallback(() => {
+    setQuickTodoOpen(false);
+    setEditingTodoItem(null);
+    setQuickTodoText('');
+    setQuickTodoImages([]);
+    setQuickTodoImageAdding(false);
+  }, []);
+
+  const openEditTodo = useCallback((item: TodoItem) => {
+    setEditingTodoItem(item);
+    setQuickTodoText(item.body || item.title || '');
+    setQuickTodoImages(item.images || []);
+    setQuickTodoOpen(true);
+  }, []);
+
+  const handleAddQuickTodoImages = useCallback(async (files: ArrayLike<File> | null | undefined) => {
+    const nextFiles = Array.from(files || []).filter(isImageFile);
+    if (!nextFiles.length) return;
+    setQuickTodoImageAdding(true);
+    try {
+      const nextImages = await Promise.all(nextFiles.map(makeTodoImageAttachment));
+      setQuickTodoImages(prev => [...prev, ...nextImages].slice(0, 12));
+    } catch (err: any) {
+      toastSession(err?.message || t('todo.imageReadFailed'), false);
+    } finally {
+      setQuickTodoImageAdding(false);
+    }
+  }, [t, toastSession]);
+
+  const handleRemoveQuickTodoImage = useCallback((imageId: string) => {
+    setQuickTodoImages(prev => prev.filter(image => image.id !== imageId));
+  }, []);
 
   const handleCreateTodoChat = useCallback(async (todoIds: string[]) => {
     const ids = Array.from(new Set(todoIds.filter(Boolean)));
@@ -3235,6 +3688,39 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [markSessionReadOnOpen, setSelectedSession, setShowNewSession, setWorkspaceSidebarCollapsed, warmSession]);
 
+  const openSidebarSessionFloating = useCallback((session: SessionInfo, workdir: string) => {
+    const agent = session.agent || '';
+    if (!agent || !session.sessionId) return;
+    if (chatLayout !== 'single' || taskFocusId || isNarrowWorkbench || openSessionsRef.current.length === 0) {
+      handleSelectSession(session, workdir);
+      return;
+    }
+    warmSession(session, workdir);
+    markSessionReadOnOpen(session, workdir);
+    setShowNewSession(null);
+    setFocusFloatingSessions(prev => {
+      const existing = prev.find(item => (
+        item.workdir === workdir
+        && item.agent === agent
+        && item.sessionId === session.sessionId
+      ));
+      const visibleCount = prev.filter(item => !item.hidden).length;
+      const placement = defaultFocusFloatingPosition(existing?.hidden ? visibleCount : Math.max(0, visibleCount - (existing && !existing.hidden ? 1 : 0)));
+      const nextItem: FocusFloatingSession = existing
+        ? { ...existing, hidden: false, ...(existing.hidden ? placement : {}) }
+        : {
+          id: `focus-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+          workdir,
+          agent,
+          sessionId: session.sessionId,
+          mountKey: nextMountKey(),
+          hidden: false,
+          ...placement,
+        };
+      return [...prev.filter(item => item.id !== nextItem.id), nextItem];
+    });
+  }, [chatLayout, handleSelectSession, isNarrowWorkbench, markSessionReadOnOpen, setShowNewSession, taskFocusId, warmSession]);
+
   const handlePanelSessionChange = useCallback((next: SessionPanelChange, fromSlotIdx?: number) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
     startTransition(() => {
@@ -3288,6 +3774,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const updated = { ...prev };
               delete updated[oldParentKey];
               updated[newParentKey] = width;
+              return updated;
+            });
+            setParentReferenceByKey(prev => {
+              const reference = prev[oldParentKey];
+              if (!reference) return prev;
+              const updated = { ...prev };
+              delete updated[oldParentKey];
+              updated[newParentKey] = reference;
               return updated;
             });
           }
@@ -3461,29 +3955,41 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const handleSaveQuickTodo = useCallback(async () => {
     const body = quickTodoText.trim();
-    if (!body || quickTodoSaving) return;
+    if ((!body && quickTodoImages.length === 0) || quickTodoSaving || quickTodoImageAdding) return;
     setQuickTodoSaving(true);
     try {
-      const result = await api.createProTodo({
-        kind: 'todo',
-        title: body,
-        body,
-        source: {
-          type: 'quick-capture',
-          workdir: runtimeWorkdir,
-        },
-      });
+      const title = body || t('todo.imageTodoTitle');
+      const payload = {
+        title,
+        body: body || undefined,
+        images: quickTodoImages,
+      };
+      const result = editingTodoItem
+        ? await api.updateProTodo(editingTodoItem.id, payload)
+        : await api.createProTodo({
+          kind: 'todo',
+          ...payload,
+          source: {
+            type: 'quick-capture',
+            workdir: runtimeWorkdir,
+          },
+        });
       if (!result.ok) throw new Error(result.error || t('session.todoSaveFailed'));
-      setQuickTodoText('');
-      setQuickTodoOpen(false);
-      toastSession(t('session.todoSaved'));
+      if (result.item) {
+        setTodoItems(prev => {
+          const without = prev.filter(item => item.id !== result.item?.id);
+          return [result.item!, ...without].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+        });
+      }
+      closeQuickTodo();
+      toastSession(editingTodoItem ? t('todo.updated') : t('session.todoSaved'));
       void refreshTodos();
     } catch (e: any) {
-      toastSession(e?.message || t('session.todoSaveFailed'));
+      toastSession(e?.message || t('session.todoSaveFailed'), false);
     } finally {
       setQuickTodoSaving(false);
     }
-  }, [quickTodoSaving, quickTodoText, refreshTodos, runtimeWorkdir, t, toastSession]);
+  }, [closeQuickTodo, editingTodoItem, quickTodoImageAdding, quickTodoImages, quickTodoSaving, quickTodoText, refreshTodos, runtimeWorkdir, t, toastSession]);
 
   const handleDeleteSideChat = useCallback(async (parentSlot: SessionSlot, sideSlot: SessionSlot) => {
     if (!sideSlot.agent || !sideSlot.sessionId) return;
@@ -3539,7 +4045,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       if (!res.ok) throw new Error(res.error || 'Failed to delete side chat');
     } catch {
       try {
-        const fallback = await api.deleteSession(sideSlot.workdir, sideSlot.agent, sideSlot.sessionId, false);
+        const fallback = await api.deleteSession(sideSlot.workdir, sideSlot.agent, sideSlot.sessionId, true);
         if (!fallback.ok) toastSession(fallback.error || 'Failed to delete side chat', false);
       } catch (fallbackErr) {
         toastSession(fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr), false);
@@ -3787,6 +4293,21 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
   }, [loadSessionsForWorkspace, setActiveSideChatByParent, setOpenSideChatsByParent]);
 
+  const handleReferenceSideChatBackToParent = useCallback((
+    slotIdx: number,
+    parentSlot: SessionSlot,
+    parentInfo: SessionInfo,
+    sideSlot: SessionSlot,
+    sideInfo: SessionInfo,
+    sideTitle: string,
+  ) => {
+    const parentKey = sessionSlotStorageKey(parentSlot);
+    const reference = buildSideChatReturnReferenceContext(parentSlot, parentInfo, sideSlot, sideInfo, sideTitle, locale);
+    setParentReferenceByKey(prev => ({ ...prev, [parentKey]: reference }));
+    setActiveSlotIndex(slotIdx);
+    toastSession(t('session.sideChatReferenceAdded'));
+  }, [locale, setActiveSlotIndex, t, toastSession]);
+
   /* ── Filter sessions — memoized per workspace to avoid new-array-on-every-render ── */
   const filterFn = useCallback((sessions: SessionInfo[]): SessionInfo[] => {
     let result = sessions;
@@ -3875,9 +4396,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   // All open session keys for sidebar highlight
   const openSessionKeys = useMemo(() => new Set(openSessions.map(s => sKey(s.agent, s.sessionId))), [openSessions]);
+  const sidebarOpenSessionKeys = useMemo(
+    () => (isMultiChatLayout(chatLayout) && !taskFocusId ? openSessionKeys : new Set<string>()),
+    [chatLayout, openSessionKeys, taskFocusId],
+  );
   const selectedKey = selectedSession ? sKey(selectedSession.agent, selectedSession.sessionId) : null;
   const selectedSlotWorkdir = selectedSession?.workdir
     ?? (showNewSession && activeSlotIndex >= openSessions.length ? showNewSession : null);
+  const suggestedNewSessionReferenceContext = useMemo(() => {
+    if (!selectedSession?.agent || !selectedSession.sessionId || !selectedSession.workdir) return null;
+    return buildSessionReferenceContext(resolveSlotInfo(selectedSession), selectedSession.workdir, locale);
+  }, [locale, resolveSlotInfo, selectedSession?.agent, selectedSession?.sessionId, selectedSession?.workdir]);
   const workspaceStatusSummary = useMemo<WorkspaceStatusSummary>(() => {
     const sessionsByKey = new Map<string, { session: SessionInfo; workdir: string }>();
     for (const ws of workspaces) {
@@ -4034,6 +4563,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           {todoItems.some(item => item.status === 'open') && (
             <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_0_2px_var(--th-panel)]" />
           )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={openCreateQuickTodo}
+          title={t('todo.quickAction')}
+          aria-label={t('todo.quickAction')}
+          className="!h-8 !w-8"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
         </Button>
         <Button
           variant={inboxAlertCount > 0 ? 'secondary' : 'ghost'}
@@ -4512,6 +5053,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     : '100%';
   const floatingSessionLayerVisible = focusedSlotIndex != null
     || (effectiveChatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && renderedSlotEntries.length > 0);
+  const canOpenSidebarSessionFloating = effectiveChatLayout === 'single'
+    && !taskFocusId
+    && !isNarrowWorkbench
+    && openSessions.length > 0;
   const hiddenFocusFloatingSessionCount = focusFloatingSessions.filter(item => item.hidden).length;
   useEffect(() => {
     if (focusedSlotIndex != null) return;
@@ -4519,10 +5064,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       skipNextSlotAutoScrollRef.current = false;
       return;
     }
-    if (isSessionComposerFocused()) return;
     const timer = window.setTimeout(() => {
-      const el = document.querySelector(`[data-session-slot-index="${activeSlotIndex}"]`) as HTMLElement | null;
-      el?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+      window.requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-session-slot-index="${activeSlotIndex}"]`) as HTMLElement | null;
+        const isNewSessionDraft = el?.hasAttribute('data-new-session-draft') === true;
+        if (!isNewSessionDraft && isSessionComposerFocused()) return;
+        scrollSessionSlotIntoView(activeSlotIndex, isNewSessionDraft);
+      });
     }, 50);
     return () => window.clearTimeout(timer);
   }, [activeSlotIndex, focusedSlotIndex, openSessions.length, showNewSession]);
@@ -4578,12 +5126,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const multiItemFlexBasis = multiWidgetGrid
     ? `calc((100% - ${(multiGridColumnCount - 1) * multiItemGapPx}px) / ${multiGridColumnCount})`
     : undefined;
-  const multiItemTall = multiWideWorkbench || (multiWidgetGrid && multiGridColumnCount <= 2 && gridRowCount <= 1);
-  const canResizeMultiRows = multiWidgetGrid && !multiSingleChatPresentation && layoutSlotCount > 1;
-  const compactMultiItemHeight = multiRowHeightPx == null
+  const multiGridHasMultipleRows = multiWidgetGrid && gridRowCount > 1;
+  const effectiveMultiRowHeightPx = multiGridHasMultipleRows ? multiRowHeightPx : null;
+  const multiItemTall = multiWidgetGrid && gridRowCount <= 1
+    ? true
+    : multiWideWorkbench;
+  const canResizeMultiRows = multiGridHasMultipleRows && !multiSingleChatPresentation && layoutSlotCount > 1;
+  const compactMultiItemHeight = effectiveMultiRowHeightPx == null
     ? 'min(640px, calc(100dvh - 120px))'
-    : `${clampMultiRowHeightForViewport(multiRowHeightPx)}px`;
-  const multiItemHeight = multiRowHeightPx != null
+    : `${clampMultiRowHeightForViewport(effectiveMultiRowHeightPx)}px`;
+  const multiItemHeight = effectiveMultiRowHeightPx != null
     ? compactMultiItemHeight
     : (multiItemTall ? 'calc(100dvh - 32px)' : compactMultiItemHeight);
   const appRailVisible = mode === 'workspace' || mode === 'dashboard' || mode === 'settings';
@@ -4706,6 +5258,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_0_2px_var(--th-panel)]" />
               )}
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={openCreateQuickTodo}
+              title={t('todo.quickAction')}
+              aria-label={t('todo.quickAction')}
+              className="h-8 w-8 shrink-0"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </Button>
           </div>
         </div>
 
@@ -4727,8 +5291,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   isActive={ws.path === runtimeWorkdir}
                   selectedKey={selectedKey}
                   selectedWorkdir={selectedSlotWorkdir}
-                  openSessionKeys={openSessionKeys}
+                  openSessionKeys={sidebarOpenSessionKeys}
                   onSelectSession={handleSelectSession}
+                  canOpenFloatingSession={canOpenSidebarSessionFloating}
+                  onOpenFloatingSession={openSidebarSessionFloating}
                   onNewSession={handleNewSessionRequest}
 	                  onRefresh={handleRefreshWorkspace}
 	                  onMarkAllRead={handleMarkWorkspaceInboxRead}
@@ -4761,45 +5327,27 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               loading={todoLoading}
               creating={todoCreating}
               onClose={() => setTodoModalOpen(false)}
-              onCreateTodo={() => setQuickTodoOpen(true)}
+              onCreateTodo={openCreateQuickTodo}
+              onEdit={openEditTodo}
               onCreateChat={(ids) => void handleCreateTodoChat(ids)}
               onDelete={(id) => void handleDeleteTodo(id)}
-              onRefresh={() => void refreshTodos()}
               t={t}
             />
           ), document.body)}
           {quickTodoOpen && createPortal((
-            <div
-              className="fixed inset-0 z-[240] flex items-center justify-center bg-black/20 px-4 py-10 backdrop-blur-[2px]"
-              onMouseDown={() => setQuickTodoOpen(false)}
-            >
-              <div
-                className="w-full max-w-[420px] rounded-xl border border-edge-h bg-panel p-3 shadow-xl"
-                onMouseDown={event => event.stopPropagation()}
-              >
-                <div className="mb-2 text-[13px] font-semibold text-fg">{t('todo.quickAdd')}</div>
-                <textarea
-                  autoFocus
-                  value={quickTodoText}
-                  onChange={event => setQuickTodoText(event.target.value)}
-                  onKeyDown={event => {
-                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                      event.preventDefault();
-                      void handleSaveQuickTodo();
-                    }
-                  }}
-                  placeholder={t('todo.quickAddPlaceholder')}
-                  className="min-h-24 w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
-                />
-                <div className="mt-2 flex justify-end gap-2">
-                  <Button variant="ghost" onClick={() => setQuickTodoOpen(false)}>{t('common.cancel')}</Button>
-                  <Button variant="primary" disabled={!quickTodoText.trim() || quickTodoSaving} onClick={handleSaveQuickTodo}>
-                    {quickTodoSaving ? <Spinner /> : null}
-                    {t('common.save')}
-                  </Button>
-                </div>
-              </div>
-            </div>
+            <TodoEditorModal
+              editing={!!editingTodoItem}
+              text={quickTodoText}
+              images={quickTodoImages}
+              saving={quickTodoSaving}
+              addingImages={quickTodoImageAdding}
+              onTextChange={setQuickTodoText}
+              onAddImages={(files) => void handleAddQuickTodoImages(files)}
+              onRemoveImage={handleRemoveQuickTodoImage}
+              onClose={closeQuickTodo}
+              onSave={() => void handleSaveQuickTodo()}
+              t={t}
+            />
           ), document.body)}
           <div className="flex items-center gap-2 rounded-lg border border-edge/45 bg-panel/55 px-2 py-1.5 text-[11px] text-fg-4">
             <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
@@ -4879,7 +5427,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 className={cn(
                   multiWidgetGrid ? 'flex flex-wrap' : 'grid',
                   multiWidgetGrid
-                    ? cn('min-h-full content-start items-stretch', multiWideWorkbench ? 'gap-4 py-0' : 'gap-3 py-1')
+                    ? cn(
+                      'min-h-full content-start items-stretch',
+                      multiWideWorkbench ? 'gap-4 py-0' : 'gap-3 py-1',
+                      showNewSession && 'pb-[min(28vh,220px)]',
+                    )
                     : 'min-h-full gap-4',
                   workspaceSingleChatCentered && 'mx-auto w-full max-w-[1120px]',
                 )}
@@ -4908,6 +5460,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 return (
                   <div
                     key={`new-${showNewSession}`}
+                    data-session-slot
+                    data-session-slot-index={activeSlotIndex}
+                    data-new-session-draft
                     className={cn(
                       'min-w-0 overflow-hidden flex flex-col',
                       multiWidgetGrid
@@ -4932,11 +5487,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       workspaces={workspaces}
                       initialAgent={newSessionTemplateAgent}
                       initialDraftPrompt={newSessionInitialDraftPrompt}
+                      referenceContext={newSessionReferenceContext}
+                      suggestedReferenceContext={suggestedNewSessionReferenceContext}
                       initialAutoSend={newSessionInitialAutoSend}
                       onSessionCreated={handleNewSessionCreated}
                       onMultiSessionCreated={handleMultiSessionCreated}
                       onClose={() => {
+                        preserveSessionGridScroll();
                         setNewSessionInitialDraftPrompt(null);
+                        setNewSessionReferenceContext(null);
                         setNewSessionInitialAutoSend(false);
                         setShowNewSession(null);
                         setActiveSlotIndex(prev => (
@@ -5012,6 +5571,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 && headerRenameTarget.agent === slot.agent
                 && headerRenameTarget.sessionId === slot.sessionId;
 	              const parentSlotKey = sessionSlotStorageKey(slot);
+	              const parentReference = parentReferenceByKey[parentSlotKey] || null;
 	              const taskWorkbenchForSlot = taskWorkbench && taskWorkbench.task.stageRuns?.some(run => sessionMatchesStageRun(slot, run))
 	                ? taskWorkbench
 	                : null;
@@ -5040,11 +5600,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	              const sideChatPanelOpen = sideChatPanelOpenByParent[parentSlotKey] === true;
 	              const contextSurfaceOpen = sideChatPanelOpen && (isFocused || shouldInlineSideChat);
 		              const contextShelfTabs: ContextShelfTab[] = taskWorkbenchForSlot
-		                ? ['outputs', 'files', 'side-chats', 'browser', 'status', 'ticket']
+		                ? ['outputs', 'files', 'status']
 		                : ['outputs', 'side-chats', 'files', 'browser', 'status'];
 		              const activeContextShelfTab = contextShelfTabByParent[parentSlotKey] || (taskWorkbenchForSlot ? 'outputs' : 'side-chats');
 		              const visibleContextShelfTabs = isFocused
-		                ? FOCUS_CONTEXT_SHELF_TAB_ORDER.filter(tab => contextShelfTabs.includes(tab))
+		                ? taskWorkbenchForSlot
+		                  ? contextShelfTabs
+		                  : FOCUS_CONTEXT_SHELF_TAB_ORDER.filter(tab => contextShelfTabs.includes(tab))
 		                : contextShelfTabs;
 		              const effectiveContextShelfTab = visibleContextShelfTabs.includes(activeContextShelfTab)
 		                ? activeContextShelfTab
@@ -5056,7 +5618,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                && !isFocused
 	                && activeContextShelfTab === 'side-chats'
 	                && contextCardPlacement.mode !== 'docked';
-	              const taskOutputCount = taskWorkbenchForSlot?.outputs.length || 0;
+	              const contextOutputs = taskWorkbenchForSlot?.outputs || info.outputs || [];
+	              const contextOutputCount = contextOutputs.length;
 	              const sideChatRefSlots = sideChatRefs.map(ref => ({
                 agent: ref.agent || slot.agent,
                 sessionId: ref.sessionId,
@@ -5082,10 +5645,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const sideChatWidth = sideChatWidthsByParent[parentSlotKey] || SIDE_CHAT_DEFAULT_WIDTH;
               const contextFileCount = taskWorkbenchForSlot?.files.length || 0;
               const quickContextTabs: ContextShelfTab[] = taskWorkbenchForSlot
-                ? ['outputs', 'files', 'side-chats', 'browser', 'ticket']
-                : ['side-chats', 'files', 'browser', 'status'];
+                ? ['outputs', 'files', 'status']
+                : ['outputs', 'side-chats', 'files', 'browser', 'status'];
 	              const contextCountForTab = (tab: ContextShelfTab) => {
-	                if (tab === 'outputs') return taskOutputCount;
+	                if (tab === 'outputs') return contextOutputCount;
 	                if (tab === 'side-chats') return uniqueSideChatKnownSlots.length;
 	                if (tab === 'files') return contextFileCount;
 	                if (tab === 'browser') return 0;
@@ -5095,23 +5658,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	              const focusSideCardTabButtons = isFocused && visibleOpenSideSlots.length > 0
 	                ? (
 	                  <>
-	                    {visibleOpenSideSlots.map((sideSlot, sideSlotIdx) => {
-	                      const sideInfo = resolveSideSlotInfo(info, sideSlot);
-	                      const sideTitle = sideChatDisplayTitle(sideSlotIdx, t('session.sideChat'));
-	                      const sideKey = sideChatSlotKey(sideSlot);
-                      const tabActive = effectiveContextShelfTab === 'side-chats'
-                        && !!activeSideSlot
-                        && sideKey === sideChatSlotKey(activeSideSlot);
-                      const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
-                      const sideDisplayState = sessionDisplayState(sideInfo);
-                      const sideAttention: SessionAttentionKind | null = sideDisplayState === 'running'
-                        ? 'running'
-                        : sideDisplayState === 'incomplete'
-                          ? 'warn'
-                          : sideUnread
-                            ? 'unread'
-                            : null;
-                      return (
+		                    {visibleOpenSideSlots.map((sideSlot, sideSlotIdx) => {
+		                      const sideInfo = resolveSideSlotInfo(info, sideSlot);
+		                      const sideTitle = sideChatDisplayTitle(sideSlotIdx, t('session.sideChat'));
+		                      const sideKey = sideChatSlotKey(sideSlot);
+	                      const tabActive = effectiveContextShelfTab === 'side-chats'
+		                        && !!activeSideSlot
+		                        && sideKey === sideChatSlotKey(activeSideSlot);
+		                      const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
+		                      const sideDisplayState = sessionDisplayState(sideInfo);
+		                      const sideAttention: SessionAttentionKind | null = sideDisplayState === 'running'
+		                        ? 'running'
+		                        : sideDisplayState === 'incomplete'
+		                          ? 'warn'
+		                          : sideUnread
+		                            ? 'unread'
+		                            : null;
+		                      return (
 	                        <button
 	                          key={sideSlot.mountKey || sessionSlotStorageKey(sideSlot)}
 	                          type="button"
@@ -5128,9 +5691,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                          title={sideTitle}
 	                          aria-label={sideTitle}
 	                        >
-                          {sideAttention && <SessionAttentionDot kind={sideAttention} compact />}
-                          <span>{sideTitle}</span>
-                        </button>
+		                          {sideAttention && <SessionAttentionDot kind={sideAttention} compact />}
+		                          <span>{sideTitle}</span>
+		                        </button>
 	                      );
 	                    })}
 	                  </>
@@ -5208,6 +5771,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   key={slot.mountKey || sKey(slot.agent, slot.sessionId)}
                   data-session-slot
                   data-session-slot-index={slotIdx}
+                  data-session-slot-key={parentSlotKey}
                   data-focus-session-host={useFloatingSessionToolbar ? 'true' : undefined}
                   className={cn(
                     'group/session-slot min-h-0 min-w-0 overflow-hidden border flex flex-col transition-[border-color,box-shadow,opacity,background-color,transform] duration-200',
@@ -5225,7 +5789,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                    ...(isFocused
 	                      ? isNarrowWorkbench
 	                        ? { top: 8, bottom: 8, left: 8, right: 8 }
-	                        : { top: 28, bottom: 28, left: '50%', right: 'auto', width: 'min(1512px, calc(100vw - 56px))', transform: 'translateX(-50%)' }
+	                        : {
+                          top: '50%',
+                          left: '50%',
+                          right: 'auto',
+                          bottom: 'auto',
+                          width: 'min(1512px, calc(100vw - 56px))',
+                          height: 'min(920px, calc(100dvh - 56px))',
+                          maxHeight: 'calc(100dvh - 56px)',
+                          transform: 'translate(-50%, -50%)',
+                        }
 	                      : null),
                     ...(multiWidgetGrid && !isFocused
                       ? {
@@ -5269,111 +5842,117 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     title={isMultiWidget ? t('hub.dragSession') : undefined}
                   >
                     {/* Left: status · workdir / title */}
-                    {!isMultiWidget && (slotState === 'running' ? (
-                      <SessionAttentionDot kind="running" compact />
-                    ) : slotState === 'incomplete' ? (
-                      <SessionAttentionDot kind="warn" compact />
-                    ) : hasUnreadCompletedState ? (
-                      <SessionAttentionDot kind="unread" />
-                    ) : null)}
+	                    {!isMultiWidget && (slotState === 'running' ? (
+	                      <SessionAttentionDot kind="running" compact />
+	                    ) : slotState === 'incomplete' ? (
+	                      <SessionAttentionDot kind="warn" compact />
+	                    ) : hasUnreadCompletedState ? (
+	                      <SessionAttentionDot kind="unread" />
+	                    ) : null)}
                     {isMultiWidget && (
                       <span
                         aria-hidden="true"
                         className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm"
                       >
                         <BrandIcon brand={slot.agent || ''} size={16} />
-                        {(slotState === 'running' || slotState === 'incomplete' || hasUnreadCompletedState) && (
-                          <SessionAttentionDot
-                            kind={slotState === 'running' ? 'running' : slotState === 'incomplete' ? 'warn' : 'unread'}
-                            compact
-                            className="absolute -right-0.5 -top-0.5 border-2 border-panel"
-                          />
-                        )}
+	                        {(slotState === 'running' || slotState === 'incomplete' || hasUnreadCompletedState) && (
+	                          <SessionAttentionDot
+	                            kind={slotState === 'running' ? 'running' : slotState === 'incomplete' ? 'warn' : 'unread'}
+	                            compact
+	                            className="absolute -right-0.5 -top-0.5 border-2 border-panel"
+	                          />
+	                        )}
                       </span>
                     )}
                     <div className="flex-1 min-w-0 flex items-center gap-1.5">
-                      <span
-                        className={cn(
-                          'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold shadow-sm transition-colors',
-                          isMultiWidget && 'hidden',
-                          isActive
-                            ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)] text-fg'
-                            : 'border-edge/45 bg-control/70 text-fg-4',
-                        )}
-                        title={slot.workdir}
-                      >
-                        {workspaceDisplayName}
-                      </span>
-                      <span className={cn('shrink-0 text-fg-6 text-[10px]', isMultiWidget && 'hidden')}>/</span>
-                      {isHeaderRenaming ? (
-                        <input
-                          ref={headerRenameInputRef}
-                          data-focus-ignore
-                          value={headerRenameTitle}
-                          disabled={headerRenamingSession}
-                          onChange={e => setHeaderRenameTitle(e.target.value)}
-                          onMouseDown={e => e.stopPropagation()}
-                          onClick={e => e.stopPropagation()}
-                          onDoubleClick={e => e.stopPropagation()}
-                          onBlur={() => {
-                            if (skipHeaderRenameBlurRef.current) {
-                              skipHeaderRenameBlurRef.current = false;
-                              return;
-                            }
-                            void executeHeaderRenameSession();
-                          }}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              skipHeaderRenameBlurRef.current = true;
-                              void executeHeaderRenameSession();
-                            }
-                            if (e.key === 'Escape') {
-                              e.preventDefault();
-                              cancelHeaderRenameSession();
-                            }
-                          }}
-                          className="h-6 min-w-0 flex-1 rounded-md border border-control-border bg-panel px-1.5 text-[11px] font-semibold text-fg shadow-sm outline-none transition focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)] disabled:opacity-60"
-                          aria-label={t('session.rename')}
-                        />
+                      {taskWorkbenchForSlot ? (
+                        <span className="sr-only">{slotTitle}</span>
                       ) : (
-                        <div
-                          className={cn(
-                            'min-w-0 flex items-center gap-1 rounded-md font-semibold transition-colors',
-                            isMultiWidget ? 'px-0 py-0 text-[12px]' : 'px-1 py-0.5 text-[11px]',
-                            isActive && !isMultiWidget ? 'bg-[var(--th-selected-bg)] text-fg shadow-sm' : 'text-fg',
-                          )}
-                          title={slotTitle}
-                        >
-                          <span className="min-w-0 truncate">{slotTitle}</span>
-                          {hasUnreadCompletedState && (
-                            <span className="shrink-0 rounded border border-ok/25 bg-ok/[0.10] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-ok">
-                              {t('session.statusCompleted')}
-                            </span>
-                          )}
-                          <button
-                            data-focus-ignore
-                            type="button"
-                            onMouseDown={e => e.stopPropagation()}
-                            onClick={e => {
-                              e.stopPropagation();
-                              setActiveSlotIndex(slotIdx);
-                              openHeaderRenameSession(slotActionTarget);
-                            }}
-	                          className={cn(
-	                            'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-fg-5/60 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover:opacity-100',
-	                            isMultiWidget && 'hidden',
-	                            isFocused && 'hidden',
-	                          )}
-                            title={t('session.rename')}
-                            aria-label={t('session.rename')}
+                        <>
+                          <span
+                            className={cn(
+                              'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold shadow-sm transition-colors',
+                              isMultiWidget && 'hidden',
+                              isActive
+                                ? 'border-[color:var(--th-selection-border)] bg-[var(--th-selected-bg)] text-fg'
+                                : 'border-edge/45 bg-control/70 text-fg-4',
+                            )}
+                            title={slot.workdir}
                           >
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <path d="M12 20h9" />
-                              <path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4Z" />
-                            </svg>
-                          </button>
-                        </div>
+                            {workspaceDisplayName}
+                          </span>
+                          <span className={cn('shrink-0 text-fg-6 text-[10px]', isMultiWidget && 'hidden')}>/</span>
+                          {isHeaderRenaming ? (
+                            <input
+                              ref={headerRenameInputRef}
+                              data-focus-ignore
+                              value={headerRenameTitle}
+                              disabled={headerRenamingSession}
+                              onChange={e => setHeaderRenameTitle(e.target.value)}
+                              onMouseDown={e => e.stopPropagation()}
+                              onClick={e => e.stopPropagation()}
+                              onDoubleClick={e => e.stopPropagation()}
+                              onBlur={() => {
+                                if (skipHeaderRenameBlurRef.current) {
+                                  skipHeaderRenameBlurRef.current = false;
+                                  return;
+                                }
+                                void executeHeaderRenameSession();
+                              }}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  skipHeaderRenameBlurRef.current = true;
+                                  void executeHeaderRenameSession();
+                                }
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  cancelHeaderRenameSession();
+                                }
+                              }}
+                              className="h-6 min-w-0 flex-1 rounded-md border border-control-border bg-panel px-1.5 text-[11px] font-semibold text-fg shadow-sm outline-none transition focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)] disabled:opacity-60"
+                              aria-label={t('session.rename')}
+                            />
+                          ) : (
+                            <div
+                              className={cn(
+                                'min-w-0 flex items-center gap-1 rounded-md font-semibold transition-colors',
+                                isMultiWidget ? 'px-0 py-0 text-[12px]' : 'px-1 py-0.5 text-[11px]',
+                                isActive && !isMultiWidget ? 'bg-[var(--th-selected-bg)] text-fg shadow-sm' : 'text-fg',
+                              )}
+                              title={slotTitle}
+                            >
+                              <span className="min-w-0 truncate">{slotTitle}</span>
+                              {hasUnreadCompletedState && (
+                                <span className="shrink-0 rounded border border-ok/25 bg-ok/[0.10] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-ok">
+                                  {t('session.statusCompleted')}
+                                </span>
+                              )}
+                              <button
+                                data-focus-ignore
+                                type="button"
+                                onMouseDown={e => e.stopPropagation()}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setActiveSlotIndex(slotIdx);
+                                  openHeaderRenameSession(slotActionTarget);
+                                }}
+                                className={cn(
+                                  'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-fg-5/60 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] group-hover:opacity-100',
+                                  isMultiWidget && 'hidden',
+                                  isFocused && 'hidden',
+                                )}
+                                title={t('session.rename')}
+                                aria-label={t('session.rename')}
+                              >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M12 20h9" />
+                                  <path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4Z" />
+                                </svg>
+                              </button>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                     {/* Right: compact meta + explicit action menu */}
@@ -5486,7 +6065,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                               setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: false }));
                               return;
                             }
-	                            const preferredTaskContextTab: ContextShelfTab = taskOutputCount > 0
+	                            const preferredTaskContextTab: ContextShelfTab = contextOutputCount > 0
 	                              ? 'outputs'
 	                              : contextFileCount > 0
 	                                ? 'files'
@@ -5496,8 +6075,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                              : isFocused
 	                              ? FOCUS_CONTEXT_SHELF_TABS.has(activeContextShelfTab)
 	                                ? activeContextShelfTab
-	                                : (taskOutputCount > 0 ? 'outputs' : 'side-chats')
-	                              : activeContextShelfTab;
+	                                : (contextOutputCount > 0 ? 'outputs' : 'side-chats')
+	                              : contextOutputCount > 0
+	                                ? 'outputs'
+	                                : activeContextShelfTab;
 	                            openContextShelf(nextTab);
 	                          }}
 		                          className={cn(
@@ -5510,22 +6091,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                           aria-label={sideChatToggleLabel}
                         >
                           <SideChatCollapseIcon className="h-3.5 w-3.5 shrink-0" />
-                          {!contextSurfaceOpen && taskOutputCount > 0 && (
+                          {!contextSurfaceOpen && contextOutputCount > 0 && (
                             <span className="absolute -right-1 -top-1 min-w-[14px] rounded-full border border-panel bg-primary px-0.5 text-center text-[8px] font-semibold leading-[13px] text-primary-fg">
-                              {Math.min(taskOutputCount, 9)}
+                              {Math.min(contextOutputCount, 9)}
                             </span>
                           )}
-                          {!contextSurfaceOpen && (sideChatsHaveRunning || sideChatsHaveUnread) && (
-                            <span
-                              className={cn(
-                                'absolute right-1 top-1 rounded-full',
-                                sideChatsHaveRunning
-                                  ? 'h-2 w-2 animate-pulse bg-primary shadow-[0_0_8px_var(--th-selection-ring)]'
-                                  : 'h-2 w-2 bg-ok shadow-[0_0_8px_var(--th-ok-glow)]',
-                              )}
-                              aria-hidden="true"
-                            />
-                          )}
+	                          {!contextSurfaceOpen && (sideChatsHaveRunning || sideChatsHaveUnread) && (
+	                            <SessionAttentionDot kind={sideChatsHaveRunning ? 'running' : 'unread'} compact className="absolute right-1 top-1" />
+	                          )}
                         </button>
                       )}
 	                      {isFocused ? (
@@ -5624,6 +6197,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                            readOnly={slot.archiveOnly === true}
 	                            compact={isMultiWidget}
 	                            transcriptHeader={slotTaskBrief}
+	                            initialDraftPrompt={parentReference?.draftPrompt || null}
+	                            referenceContextPrompt={parentReference?.prompt || null}
+	                            referenceContextLabel={parentReference?.label || null}
+	                            onReferenceContextClear={parentReference ? () => {
+	                              setParentReferenceByKey(prev => {
+	                                if (!prev[parentSlotKey]) return prev;
+	                                const next = { ...prev };
+	                                delete next[parentSlotKey];
+	                                return next;
+	                              });
+	                            } : undefined}
 	                            onSessionChange={slot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, slotIdx)}
                             onMultiSessionChange={slot.archiveOnly ? undefined : handleMultiSessionCreated}
                             onOpenFileLink={(target) => handleOpenFileLink(slotIdx, slot.workdir, target)}
@@ -5663,10 +6247,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 				                          onCreateSideCard={isFocused ? () => { void handleOpenSideChat(slotIdx, slot, info); } : undefined}
 			                          createSideCardLabel={t('session.newSideChat')}
 			                          filesContent={<WorkspaceFilesShelfPane workdir={slot.workdir} request={filePanelRequest?.workdir === slot.workdir ? filePanelRequest : null} t={t} />}
-			                          outputs={taskWorkbenchForSlot?.outputs || []}
+			                          outputs={contextOutputs}
 		                          files={taskWorkbenchForSlot?.files || []}
 	                          ticket={taskWorkbenchForSlot?.ticketSnapshot || null}
 	                          onOpenPath={(path, workdir) => handleOpenFileLink(slotIdx, workdir || slot.workdir, { path })}
+	                          onCreateSessionFromOutput={handleCreateSessionFromOutput}
 	                          statusContent={(
 	                            <div className="space-y-3">
 	                              <div className="rounded-lg border border-edge/55 bg-panel/70 px-3 py-3">
@@ -5699,6 +6284,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                            <div className="h-full min-h-0 overflow-hidden bg-[var(--th-session-bg)]">
 	                              {activeSideSlot ? (() => {
 	                                const sideInfo = resolveSideSlotInfo(info, activeSideSlot);
+	                                const activeSideIdx = Math.max(0, visibleOpenSideSlots.findIndex(sideSlot => sameSideChatIdentity(sideSlot, activeSideSlot)));
+	                                const sideTitle = sideChatDisplayTitle(activeSideIdx, t('session.sideChat'));
 	                                return (
 	                                  <Suspense fallback={<div className="h-full" />}>
 	                                    <SessionPanel
@@ -5706,6 +6293,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                                      session={sideInfo}
 	                                      workdir={activeSideSlot.workdir}
 	                                      active={active && isActive && !inboxOpen}
+	                                      transcriptHeader={(
+	                                        <SideChatReturnHeader
+	                                          title={sideTitle}
+	                                          outputCount={sideInfo.outputs?.length || 0}
+	                                          onReturn={() => handleReferenceSideChatBackToParent(slotIdx, slot, info, activeSideSlot, sideInfo, sideTitle)}
+	                                          t={t}
+	                                        />
+	                                      )}
 	                                      onSessionChange={(next) => handleSideChatSessionChange(slot, activeSideSlot, next)}
 	                                      onOpenFileLink={(target) => handleOpenFileLink(slotIdx, activeSideSlot.workdir, target)}
 	                                      onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(activeSideSlot, request)}
@@ -5826,6 +6421,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 		                              <div className="min-h-0 flex flex-1 flex-col overflow-hidden bg-[var(--th-session-bg)]">
 	                                {activeSideSlot ? (() => {
 	                                  const sideInfo = resolveSideSlotInfo(info, activeSideSlot);
+	                                  const activeSideIdx = Math.max(0, visibleOpenSideSlots.findIndex(sideSlot => sameSideChatIdentity(sideSlot, activeSideSlot)));
+	                                  const sideTitle = sideChatDisplayTitle(activeSideIdx, t('session.sideChat'));
 	                                  return (
 	                                    <Suspense fallback={<div className="h-full" />}>
 	                                      <SessionPanel
@@ -5833,6 +6430,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                                        session={sideInfo}
 	                                        workdir={activeSideSlot.workdir}
 	                                        active={active && isActive && !inboxOpen}
+	                                        transcriptHeader={(
+	                                          <SideChatReturnHeader
+	                                            title={sideTitle}
+	                                            outputCount={sideInfo.outputs?.length || 0}
+	                                            onReturn={() => handleReferenceSideChatBackToParent(slotIdx, slot, info, activeSideSlot, sideInfo, sideTitle)}
+	                                            t={t}
+	                                          />
+	                                        )}
 	                                        onSessionChange={(next) => handleSideChatSessionChange(slot, activeSideSlot, next)}
 	                                        onOpenFileLink={(target) => handleOpenFileLink(slotIdx, activeSideSlot.workdir, target)}
 	                                        onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(activeSideSlot, request)}
@@ -5930,7 +6535,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                    key={item.id}
 	                    data-focus-floating-session
 	                    className={cn(
-	                      'fixed z-[84] flex h-[min(620px,calc(100dvh-86px))] w-[min(430px,calc(100vw-92px))] overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[0_24px_72px_rgba(2,6,23,0.22)] ring-1 ring-[color:var(--th-chat-window-ring)] transition-shadow',
+	                      'animate-scale fixed z-[84] flex h-[min(620px,calc(100dvh-86px))] w-[min(430px,calc(100vw-92px))] overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[0_24px_72px_rgba(2,6,23,0.22)] ring-1 ring-[color:var(--th-chat-window-ring)] transition-shadow',
 	                      focusFloatingDraggingId === item.id && 'shadow-[0_32px_90px_rgba(2,6,23,0.30)] ring-primary/30',
 	                      item.hidden && 'hidden',
 	                    )}
@@ -6031,6 +6636,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                        workspaceName={workspaces.find(ws => ws.path === item.workdir)?.name || item.workdir.split('/').pop() || ''}
 	                        workspaces={workspaces}
 	                        initialAgent={item.agent}
+	                        initialDraftPrompt={item.initialDraftPrompt || null}
+	                        referenceContext={item.referenceContext || null}
+	                        suggestedReferenceContext={suggestedNewSessionReferenceContext}
 	                        onSessionCreated={(next, pendingPrompt, pendingImageUrls, pendingCreatedAt) => handleFocusFloatingSessionCreated(item.id, next, pendingPrompt, pendingImageUrls, pendingCreatedAt)}
 	                        onMultiSessionCreated={(nextSessions, prompt) => handleFocusFloatingMultiSessionCreated(item.id, nextSessions, prompt)}
 	                        onClose={() => closeFocusFloatingSession(item.id)}
@@ -6055,11 +6663,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     workspaces={workspaces}
                     initialAgent={newSessionTemplateAgent}
                     initialDraftPrompt={newSessionInitialDraftPrompt}
+                    referenceContext={newSessionReferenceContext}
+                    suggestedReferenceContext={suggestedNewSessionReferenceContext}
                     initialAutoSend={newSessionInitialAutoSend}
                     onSessionCreated={handleNewSessionCreated}
                     onMultiSessionCreated={handleMultiSessionCreated}
                     onClose={() => {
                       setNewSessionInitialDraftPrompt(null);
+                      setNewSessionReferenceContext(null);
                       setNewSessionInitialAutoSend(false);
                       setShowNewSession(null);
                     }}
@@ -6187,11 +6798,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
       {/* Session row actions popover — anchored under the kebab button */}
       {sessionMenu && (() => {
-        const MENU_WIDTH = 176;
+        const MENU_WIDTH = 220;
         // Right-align to the kebab; clamp to viewport with 8px margins.
         const left = Math.max(8, Math.min(sessionMenu.anchor.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
         const top = Math.min(sessionMenu.anchor.bottom + 4, window.innerHeight - 60);
-        const canResetMultiRowHeight = isMultiChatLayout(effectiveChatLayout) && !taskFocusId && multiRowHeightPx != null;
+        const canResetMultiRowHeight = multiGridHasMultipleRows && !taskFocusId && multiRowHeightPx != null;
         return (
           <div
             className="fixed z-[60] min-w-[176px] rounded-md border border-edge bg-panel/95 backdrop-blur-md py-1"
@@ -6230,6 +6841,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4Z" />
               </svg>
               {t('session.rename')}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => handleNewSessionWithContext(sessionMenu.target)}
+              className={menuItemClass('primary')}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />
+                <path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1" />
+              </svg>
+              {t('session.newWithContext')}
             </button>
             {canResetMultiRowHeight && (
               <button
@@ -6279,7 +6902,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
       {/* Chat window actions popover — anchored under the header kebab */}
       {slotMenu && (() => {
-        const MENU_WIDTH = 176;
+        const MENU_WIDTH = 220;
         const left = Math.max(8, Math.min(slotMenu.anchor.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8));
         const top = Math.min(slotMenu.anchor.bottom + 4, window.innerHeight - 180);
         const runSlotAction = (action: () => void) => {
@@ -6313,6 +6936,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                   </svg>
                   {t('hub.newSession')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => runSlotAction(() => handleNewSessionWithContext(slotMenu.target))}
+                  className={menuItemClass('primary')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />
+                    <path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1" />
+                  </svg>
+                  {t('session.newWithContext')}
                 </button>
                 <button
                   type="button"
@@ -6620,6 +7255,98 @@ function MultiNewSessionPlaceholder({
   );
 }
 
+function oneLinePreview(value: string, max = 140): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length <= max ? text : `${text.slice(0, max).trimEnd()}...`;
+}
+
+const CONTEXT_SOURCE_MODE_OPTIONS: SessionContextSourceMode[] = ['compact', 'last_n_turns', 'full'];
+
+function contextSourceModeLabel(mode: SessionContextSourceMode, t: (key: string) => string): string {
+  if (mode === 'last_n_turns') return t('session.contextModeLastTurns');
+  if (mode === 'full') return t('session.contextModeFull');
+  if (mode === 'selected_turns') return t('session.contextModeSelected');
+  return t('session.contextModeCompact');
+}
+
+function OutputReferenceContextCard({
+  context,
+  compact = false,
+  disabled = false,
+  onRemove,
+  onModeChange,
+  t,
+}: {
+  context: NewSessionReferenceContext;
+  compact?: boolean;
+  disabled?: boolean;
+  onRemove?: () => void;
+  onModeChange?: (mode: SessionContextSourceMode) => void;
+  t: (key: string) => string;
+}) {
+  const sessionSource = context.sources.find(source => source.kind === 'session');
+  const sourceMode = sessionSource?.kind === 'session' ? sessionSource.mode : null;
+  const label = context.kind === 'session' ? t('session.contextSourceSession') : t('session.contextSourceOutput');
+  const meta = [context.kind === 'session' ? '' : context.kind, context.sourceSession].filter(Boolean).join(' · ');
+  const preview = oneLinePreview(context.userIntent || context.summary, compact ? 96 : 140);
+  return (
+    <div className={cn(
+      'w-full rounded-lg border border-primary/20 bg-primary/[0.045] px-3 py-2 shadow-[0_8px_24px_rgba(37,99,235,0.06)] ring-1 ring-primary/10',
+      compact && 'px-2.5 py-2',
+    )}>
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="shrink-0 rounded-md border border-primary/20 bg-primary/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-primary">
+          {label}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 truncate text-[12px] font-semibold text-fg">{context.title}</span>
+            {meta && <span className="hidden min-w-0 truncate text-[10px] text-fg-5 sm:block">{meta}</span>}
+          </div>
+          {preview && (
+            <div className="mt-0.5 truncate text-[11px] text-fg-4">
+              {preview}
+            </div>
+          )}
+        </div>
+        {sourceMode && onModeChange && (
+          <select
+            value={sourceMode}
+            disabled={disabled}
+            onChange={event => onModeChange(event.target.value as SessionContextSourceMode)}
+            className="h-7 shrink-0 rounded-md border border-control-border bg-control px-2 text-[10px] font-medium text-fg-3 outline-none transition focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)] disabled:cursor-not-allowed disabled:opacity-60"
+            aria-label={t('session.contextMode')}
+          >
+            {CONTEXT_SOURCE_MODE_OPTIONS.map(mode => (
+              <option key={mode} value={mode}>{contextSourceModeLabel(mode, t)}</option>
+            ))}
+          </select>
+        )}
+        {onRemove && (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onRemove}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent disabled:hover:text-fg-5"
+            aria-label={t('session.removeContextSource')}
+            title={t('session.removeContextSource')}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        )}
+      </div>
+      {context.source && (
+        <div className="mt-1 truncate font-mono text-[9px] text-fg-5/80" title={context.source}>
+          {context.source}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ══════════════════════════════════════════════════════
    New Session View — empty chat + InputComposer
    Looks identical to a regular session: header, empty
@@ -6630,7 +7357,10 @@ export function NewSessionView({
   workspaceName,
   workspaces,
   initialAgent = '',
+  autoFocus = true,
   initialDraftPrompt = null,
+  referenceContext = null,
+  suggestedReferenceContext = null,
   initialAutoSend = false,
   onSessionCreated,
   onMultiSessionCreated,
@@ -6644,7 +7374,10 @@ export function NewSessionView({
   workspaceName: string;
   workspaces: WorkspaceEntry[];
   initialAgent?: string;
+  autoFocus?: boolean;
   initialDraftPrompt?: string | null;
+  referenceContext?: NewSessionReferenceContext | null;
+  suggestedReferenceContext?: NewSessionReferenceContext | null;
   initialAutoSend?: boolean;
   onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => void;
   onMultiSessionCreated: (next: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => void;
@@ -6658,6 +7391,7 @@ export function NewSessionView({
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
   const [pendingCreatedAt, setPendingCreatedAt] = useState<string | null>(null);
+  const [activeReferenceContext, setActiveReferenceContext] = useState<NewSessionReferenceContext | null>(referenceContext);
   const pendingRef = useRef<string | null>(null);
   const pendingImageUrlsRef = useRef<string[]>([]);
   const pendingCreatedAtRef = useRef<string | null>(null);
@@ -6683,6 +7417,10 @@ export function NewSessionView({
     setSelectedWorkdir(workdir);
   }, [workdir]);
 
+  useEffect(() => {
+    setActiveReferenceContext(referenceContext);
+  }, [referenceContext]);
+
   const noop = useCallback(() => {}, []);
 
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
@@ -6704,6 +7442,31 @@ export function NewSessionView({
     onSessionCreated(next, pendingRef.current || undefined, urls.length ? urls : undefined, pendingCreatedAtRef.current);
   }, [onSessionCreated]);
 
+  const contextSources = useMemo(() => activeReferenceContext?.sources || [], [activeReferenceContext]);
+
+  const handleReferenceModeChange = useCallback((mode: SessionContextSourceMode) => {
+    setActiveReferenceContext(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        sources: prev.sources.map(source => (
+          source.kind === 'session'
+            ? {
+              ...source,
+              mode,
+              lastNTurns: mode === 'last_n_turns' ? (source.lastNTurns || 12) : source.lastNTurns,
+            }
+            : source
+        )),
+      };
+    });
+  }, []);
+
+  const handleAddSuggestedContext = useCallback(() => {
+    if (!suggestedReferenceContext) return;
+    setActiveReferenceContext(suggestedReferenceContext);
+  }, [suggestedReferenceContext]);
+
   useEffect(() => {
     const prompt = String(initialDraftPrompt || '').trim();
     if (!initialAutoSend || !prompt || !initialAgent || !selectedWorkdir) return;
@@ -6711,7 +7474,9 @@ export function NewSessionView({
     if (autoSendKeyRef.current === key) return;
     autoSendKeyRef.current = key;
     handleSendStart(prompt);
-    api.sendSessionMessage(selectedWorkdir, initialAgent, '', prompt)
+    api.sendSessionMessage(selectedWorkdir, initialAgent, '', prompt, {
+      contextSources,
+    })
       .then(res => {
         if (!res.ok) throw new Error(res.error || 'Failed to start test chat');
         const nextSession = parseSessionKeyValue(res.sessionKey);
@@ -6724,9 +7489,20 @@ export function NewSessionView({
         pendingRef.current = null;
         pendingCreatedAtRef.current = null;
       });
-  }, [handleSendStart, handleSessionCreated, initialAgent, initialAutoSend, initialDraftPrompt, selectedWorkdir]);
+  }, [contextSources, handleSendStart, handleSessionCreated, initialAgent, initialAutoSend, initialDraftPrompt, selectedWorkdir]);
 
   const hasPending = !!pendingPrompt || pendingImageUrls.length > 0;
+  const referenceCard = activeReferenceContext ? (
+    <OutputReferenceContextCard
+      context={activeReferenceContext}
+      compact={hasPending}
+      disabled={hasPending}
+      onRemove={hasPending ? undefined : () => setActiveReferenceContext(null)}
+      onModeChange={hasPending ? undefined : handleReferenceModeChange}
+      t={t}
+    />
+  ) : null;
+  const fallbackContextPrompt = contextSources.length ? null : activeReferenceContext?.prompt || null;
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
@@ -6784,9 +7560,9 @@ export function NewSessionView({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded text-fg-5 hover:text-fg-2 transition-colors"
-            title={t('hub.closePanel')}
-            aria-label={t('hub.closePanel')}
+            className="p-1 rounded text-fg-5 transition-colors hover:bg-err/10 hover:text-err"
+            title={t('hub.discardDraft')}
+            aria-label={t('hub.discardDraft')}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -6798,16 +7574,34 @@ export function NewSessionView({
       {/* ── Message area ── */}
       <div className="flex-1 overflow-y-auto">
         {hasPending ? (
-          <div className="max-w-[900px] mx-auto px-6 py-6 space-y-0">
+          <div className="max-w-[900px] mx-auto px-5 py-4 space-y-3">
+            {referenceCard}
             <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} createdAt={pendingCreatedAt} t={t} />
             <div className="mt-3 mb-4 animate-in">
               <ThinkingDots className="text-fg-5" />
             </div>
           </div>
+        ) : activeReferenceContext ? (
+          <div className="mx-auto flex w-full max-w-[900px] flex-col justify-start px-5 py-4">
+            {referenceCard}
+          </div>
         ) : (
           <div className="flex h-full w-full items-center justify-center px-8">
-            <div className="mx-auto w-full max-w-[300px] space-y-1.5 text-center">
+            <div className="mx-auto w-full max-w-[320px] space-y-2 text-center">
               <div className="mx-auto w-full break-words text-center text-[13px] leading-relaxed text-fg-5">{t('hub.newSessionHint')}</div>
+              {suggestedReferenceContext && (
+                <button
+                  type="button"
+                  onClick={handleAddSuggestedContext}
+                  className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-primary/20 bg-primary/[0.055] px-2.5 text-[11px] font-semibold text-primary transition hover:bg-primary/[0.10]"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />
+                    <path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1" />
+                  </svg>
+                  {t('session.addContextSource')}
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -6817,7 +7611,10 @@ export function NewSessionView({
       <InputComposer
         session={stubSession}
         workdir={selectedWorkdir}
+        autoFocus={autoFocus}
         initialDraftPrompt={initialDraftPrompt}
+        referenceContextPrompt={fallbackContextPrompt}
+        contextSources={contextSources}
         onStreamQueued={noop}
         onSendStart={handleSendStart}
         onSessionChange={handleSessionCreated}
@@ -6829,15 +7626,139 @@ export function NewSessionView({
   );
 }
 
+function TodoEditorModal({
+  editing,
+  text,
+  images,
+  saving,
+  addingImages,
+  onTextChange,
+  onAddImages,
+  onRemoveImage,
+  onClose,
+  onSave,
+  t,
+}: {
+  editing: boolean;
+  text: string;
+  images: TodoImageAttachment[];
+  saving: boolean;
+  addingImages: boolean;
+  onTextChange: (value: string) => void;
+  onAddImages: (files: FileList | null) => void;
+  onRemoveImage: (imageId: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  t: (key: string) => string;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const canSave = !!text.trim() || images.length > 0;
+
+  return (
+    <div
+      className="fixed inset-0 z-[240] flex items-center justify-center bg-black/20 px-4 py-10 backdrop-blur-[2px]"
+      onMouseDown={onClose}
+    >
+      <div
+        className="flex max-h-[min(680px,calc(100vh-64px))] w-full max-w-[460px] flex-col overflow-hidden rounded-xl border border-edge-h bg-panel shadow-xl"
+        onMouseDown={event => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={editing ? t('todo.editTodo') : t('todo.quickAdd')}
+      >
+        <div className="shrink-0 border-b border-edge/40 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-[13px] font-semibold text-fg">{editing ? t('todo.editTodo') : t('todo.quickAdd')}</div>
+            <button type="button" onClick={onClose} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-fg-5 transition hover:bg-panel-h hover:text-fg" aria-label={t('common.close')}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <textarea
+            autoFocus
+            value={text}
+            onChange={event => onTextChange(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                if (canSave && !saving && !addingImages) onSave();
+              }
+            }}
+            placeholder={t('todo.quickAddPlaceholder')}
+            className="min-h-24 w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
+          />
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(event: ReactChangeEvent<HTMLInputElement>) => {
+              onAddImages(event.target.files);
+              event.target.value = '';
+            }}
+          />
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <Button variant="ghost" size="sm" disabled={addingImages} onClick={() => inputRef.current?.click()}>
+              {addingImages ? <Spinner className="h-3 w-3" /> : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 15l-4.5-4.5L9 18" />
+                </svg>
+              )}
+              {t('hub.addImages')}
+            </Button>
+            {images.length > 0 && <span className="text-[11px] text-fg-5">{images.length}</span>}
+          </div>
+          {images.length > 0 && (
+            <div className="mt-2 grid grid-cols-4 gap-2">
+              {images.map(image => (
+                <div key={image.id} className="group relative aspect-square overflow-hidden rounded-lg border border-edge/45 bg-inset">
+                  <img src={image.dataUrl} alt={image.name} className="h-full w-full object-cover" />
+                  <div className="absolute inset-x-0 bottom-0 bg-black/45 px-1 py-0.5 text-[9px] leading-tight text-white/80">
+                    <div className="truncate">{image.name}</div>
+                    {typeof image.size === 'number' && <div className="truncate text-white/60">{formatFileSize(image.size)}</div>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveImage(image.id)}
+                    className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white opacity-0 transition hover:bg-black/75 group-hover:opacity-100 focus-visible:opacity-100"
+                    aria-label={t('hub.removeImage')}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                      <path d="M18 6 6 18" /><path d="M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="shrink-0 border-t border-edge/35 px-3 py-2.5">
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
+            <Button variant="primary" disabled={!canSave || saving || addingImages} onClick={onSave}>
+              {saving ? <Spinner /> : null}
+              {t('common.save')}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TodoCenterModal({
   items,
   loading,
   creating,
   onClose,
   onCreateTodo,
+  onEdit,
   onCreateChat,
   onDelete,
-  onRefresh,
   t,
 }: {
   items: TodoItem[];
@@ -6845,9 +7766,9 @@ function TodoCenterModal({
   creating: boolean;
   onClose: () => void;
   onCreateTodo: () => void;
+  onEdit: (item: TodoItem) => void;
   onCreateChat: (todoIds: string[]) => void;
   onDelete: (todoId: string) => void;
-  onRefresh: () => void;
   t: (key: string) => string;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -6867,6 +7788,7 @@ function TodoCenterModal({
   }, []);
   const selectedActiveIds = selectedIds.filter(id => activeItems.some(item => item.id === id));
   const startChatIds = selectedActiveIds.length ? selectedActiveIds : activeItems.slice(0, 1).map(item => item.id);
+  const menuItem = menu ? activeItems.find(item => item.id === menu.itemId) : null;
 
   return (
     <div className="fixed inset-0 z-[230] flex items-center justify-center bg-black/24 px-4 py-8 backdrop-blur-[2px]" onMouseDown={onClose}>
@@ -6896,10 +7818,6 @@ function TodoCenterModal({
             </button>
           </div>
           <div className="mt-3 flex flex-wrap justify-end gap-2">
-            <Button variant="ghost" size="sm" onClick={onRefresh} disabled={loading}>
-              {loading ? <Spinner className="h-3 w-3" /> : null}
-              {t('hub.refresh')}
-            </Button>
             <Button variant="secondary" size="sm" onClick={onCreateTodo}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
@@ -6938,10 +7856,26 @@ function TodoCenterModal({
                   />
                   <div className="min-w-0 flex-1 text-left">
                     <div className="truncate text-[13px] font-medium text-fg-3 group-hover:text-fg">{item.title}</div>
+                    {item.body && item.body !== item.title && <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-fg-5">{item.body}</div>}
                     {item.source?.quote && <div className="mt-1.5 line-clamp-3 rounded-md bg-inset px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">{item.source.quote}</div>}
+                    {item.images?.length ? (
+                      <div className="mt-2 flex gap-1.5 overflow-hidden">
+                        {item.images.slice(0, 4).map(image => (
+                          <div key={image.id} className="h-12 w-12 shrink-0 overflow-hidden rounded-md border border-edge/45 bg-inset">
+                            <img src={image.dataUrl} alt={image.name} className="h-full w-full object-cover" />
+                          </div>
+                        ))}
+                        {item.images.length > 4 && (
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-edge/45 bg-inset text-[11px] font-medium text-fg-5">
+                            +{item.images.length - 4}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
                     <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-fg-5">
                       <span>{item.kind}</span>
                       <span>{item.status}</span>
+                      {item.images?.length ? <span>{item.images.length} image{item.images.length > 1 ? 's' : ''}</span> : null}
                       <span>{fmtRelative(item.createdAt || item.updatedAt)}</span>
                     </div>
                   </div>
@@ -6974,6 +7908,12 @@ function TodoCenterModal({
                 </svg>
               )}
               {t('todo.createChat')}
+            </button>
+            <button type="button" role="menuitem" disabled={!menuItem} onClick={() => menuItem && runMenuAction(() => onEdit(menuItem))} className={cn(menuItemClass(), 'disabled:cursor-not-allowed disabled:opacity-45')}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                <path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+              {t('todo.edit')}
             </button>
             <button type="button" role="menuitem" onClick={() => runMenuAction(() => onDelete(menu.itemId))} className={menuItemClass('danger')}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
@@ -7050,10 +7990,10 @@ function InboxDrawer({
           aria-label={focusedTitle}
         >
           <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge/45 bg-panel/82 px-3 backdrop-blur-md">
-            <Dot
-              variant={focusedDisplayState === 'running' ? 'running' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
-              pulse={focusedDisplayState === 'running'}
-            />
+	            <Dot
+	              variant={focusedDisplayState === 'running' ? 'running' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
+	              pulse={focusedDisplayState === 'running'}
+	            />
             {focusedMeta && (
               <BrandIcon brand={focusedSession.agent || ''} size={14} />
             )}
@@ -7192,7 +8132,7 @@ function DashboardTaskCard({
           <span className="ml-auto shrink-0 tabular-nums">{time}</span>
         </div>
 	        <div className="mt-1.5 flex items-start gap-2">
-          {!selected && <Dot variant={displayState === 'running' ? 'running' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
+		          {!selected && <Dot variant={displayState === 'running' ? 'running' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
 	          <div className="min-w-0 flex-1">
 	            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
 	            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
@@ -7217,6 +8157,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   selectedWorkdir,
   openSessionKeys,
   onSelectSession,
+  canOpenFloatingSession,
+  onOpenFloatingSession,
   onNewSession,
   onRefresh,
   onMarkAllRead,
@@ -7244,6 +8186,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   selectedWorkdir: string | null;
   openSessionKeys?: Set<string>;
   onSelectSession: (s: SessionInfo, wsPath: string) => void;
+  canOpenFloatingSession?: boolean;
+  onOpenFloatingSession: (s: SessionInfo, wsPath: string) => void;
   onNewSession: (wsPath: string) => void;
   onRefresh: (wsPath: string) => void;
   onMarkAllRead: (wsPath: string) => void;
@@ -7360,7 +8304,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
             </span>
           )}
         </div>
-        {groupAttention && <SessionAttentionDot kind={groupAttention} compact />}
+	        {groupAttention && <SessionAttentionDot kind={groupAttention} compact />}
         <button
           type="button"
           onClick={e => {
@@ -7519,6 +8463,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
                     isOpen={openSessionKeys?.has(sk) ?? false}
                     forkDepth={depth}
                     onClick={() => onSelectSession(session, wsPath)}
+                    canOpenFloating={!!canOpenFloatingSession && selectedKey !== sk}
+                    onOpenFloating={() => onOpenFloatingSession(session, wsPath)}
                     onWarm={() => onWarmSession(session, wsPath)}
                     onCancelWarm={() => onCancelWarmSession(session, wsPath)}
                     onShowMenu={anchor => onSessionMenuOpen(anchor, session, wsPath)}
@@ -7555,6 +8501,8 @@ const SessionCard = memo(function SessionCard({
   isOpen,
   forkDepth = 0,
   onClick,
+  canOpenFloating = false,
+  onOpenFloating,
   onWarm,
   onCancelWarm,
   onShowMenu,
@@ -7567,6 +8515,8 @@ const SessionCard = memo(function SessionCard({
   /** 0 = top-level. >0 = fork descendant; rendered with indent + connector. */
   forkDepth?: number;
   onClick: () => void;
+  canOpenFloating?: boolean;
+  onOpenFloating?: () => void;
   onWarm: () => void;
   onCancelWarm: () => void;
   /** Called when the user clicks the kebab — receives its bounding rect so the
@@ -7585,10 +8535,10 @@ const SessionCard = memo(function SessionCard({
   const baseLeftPx = 14;
   const rowStateClass = isSelected
     ? 'bg-primary/[0.075] text-fg ring-1 ring-inset ring-primary/12 hover:bg-primary/[0.09]'
-    : isOpen
-      ? 'bg-primary/[0.045] text-fg-2 ring-1 ring-inset ring-primary/8 hover:bg-primary/[0.065]'
-      : displayState === 'running'
-        ? 'bg-transparent text-fg-3 hover:bg-warn/[0.035]'
+	    : isOpen
+	      ? 'bg-primary/[0.045] text-fg-2 ring-1 ring-inset ring-primary/8 hover:bg-primary/[0.065]'
+	      : displayState === 'running'
+	        ? 'bg-transparent text-fg-3 hover:bg-warn/[0.035]'
         : displayState === 'incomplete'
           ? 'bg-transparent text-fg-3 hover:bg-err/[0.035]'
           : 'bg-transparent text-fg-3 hover:bg-panel-h/52';
@@ -7601,12 +8551,12 @@ const SessionCard = memo(function SessionCard({
 	      aria-hidden="true"
 	      className={cn(
 	        'pointer-events-none absolute inset-y-1 left-0 w-[2px] rounded-full opacity-0 transition-opacity duration-150',
-        isSelected || isOpen
-          ? 'bg-primary'
-          : displayState === 'running'
-            ? 'bg-warn'
-          : displayState === 'incomplete'
-            ? 'bg-err'
+		        isSelected || isOpen
+		          ? 'bg-primary'
+		          : displayState === 'running'
+		            ? 'bg-warn'
+	            : displayState === 'incomplete'
+	              ? 'bg-err'
 	              : 'bg-primary',
 	        (isSelected || isOpen) && 'opacity-100',
 	        !isSelected && !isOpen && 'group-hover/session:opacity-60',
@@ -7630,7 +8580,10 @@ const SessionCard = memo(function SessionCard({
         paddingLeft: baseLeftPx + indentPx,
       }}
     >
-		      <div className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_46px] items-center gap-2 overflow-hidden">
+		      <div className={cn(
+		        'grid h-full min-w-0 items-center gap-2 overflow-hidden',
+		        canOpenFloating ? 'grid-cols-[minmax(0,1fr)_64px]' : 'grid-cols-[minmax(0,1fr)_46px]',
+		      )}>
 	        <span className="flex min-w-0 items-center gap-1.5">
 	          {forkDepth > 0 && (
 	            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-fg-5/55" aria-label="Fork">
@@ -7659,9 +8612,9 @@ const SessionCard = memo(function SessionCard({
 	          <span className="max-w-[40px] truncate text-right tabular-nums" title={lastActivityIso ? new Date(lastActivityIso).toLocaleString() : undefined}>
 	            {lastActivityLabel}
           </span>
-          {showStateDot ? (
-            <SessionAttentionDot kind={attentionVariant} />
-          ) : (
+	          {showStateDot ? (
+	            <SessionAttentionDot kind={attentionVariant} />
+	          ) : (
             <span
               aria-hidden="true"
               className={cn(
@@ -7673,6 +8626,27 @@ const SessionCard = memo(function SessionCard({
         </span>
       </div>
     </button>
+      {canOpenFloating && (
+        <button
+          data-session-floating-open
+          type="button"
+          aria-label={t('hub.openFloatingSession')}
+          onMouseDown={e => { e.stopPropagation(); }}
+          onClick={e => {
+            e.stopPropagation();
+            e.preventDefault();
+            onOpenFloating?.();
+          }}
+          title={t('hub.openFloatingSession')}
+          className="absolute top-1/2 right-8 inline-flex h-6 w-6 -translate-y-1/2 scale-95 items-center justify-center rounded-md border border-primary/20 bg-primary/[0.08] text-primary opacity-0 shadow-sm transition-[opacity,transform,background,border-color,color] duration-150 group-hover/session:scale-100 group-hover/session:opacity-100 focus-visible:scale-100 focus-visible:opacity-100 hover:border-primary/35 hover:bg-primary/[0.13]"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
+            <rect x="4" y="5" width="16" height="14" rx="2.5" />
+            <path d="M10 14 16 8" />
+            <path d="M11 8h5v5" />
+          </svg>
+        </button>
+      )}
       {/* Kebab — hidden by default, fades in on row hover/focus. Anchors the
           actions popover via getBoundingClientRect, so it never spawns at the
           mouse pointer. */}

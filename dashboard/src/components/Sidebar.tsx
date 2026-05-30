@@ -151,8 +151,9 @@ export function Sidebar({
               </NavLink>
             ))}
           </nav>
+          <div id="global-inbox-host" className="mt-3 flex shrink-0 flex-col items-center gap-1 empty:hidden" />
           <div className="mt-3 h-px w-6 bg-edge/70" />
-          <div className="mt-auto flex min-h-0 flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="mt-auto flex shrink-0 flex-col items-center gap-1 py-1">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center" title={appStatus.badgeContent} aria-label={appStatus.badgeContent}>
               <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
             </div>
@@ -192,7 +193,6 @@ export function Sidebar({
             >
               {locale === 'zh-CN' ? 'EN' : '\u4e2d'}
             </Button>
-            <div id="global-inbox-host" className="mt-1 flex shrink-0 flex-col items-center gap-1 empty:hidden" />
           </div>
         </div>
       </header>

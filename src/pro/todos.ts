@@ -15,6 +15,15 @@ export interface TodoItemSource {
   quote?: string;
 }
 
+export interface TodoImageAttachment {
+  id: string;
+  kind: 'image';
+  name: string;
+  mimeType: string;
+  size?: number;
+  dataUrl: string;
+}
+
 export interface TodoItem {
   id: string;
   kind: TodoItemKind;
@@ -23,6 +32,7 @@ export interface TodoItem {
   status: TodoItemStatus;
   createdAt: string;
   updatedAt: string;
+  images?: TodoImageAttachment[];
   source?: TodoItemSource;
   linkedChat?: {
     workdir: string;
@@ -41,6 +51,13 @@ export interface CreateTodoInput {
   title?: string;
   body?: string;
   source?: TodoItemSource;
+  images?: unknown;
+}
+
+export interface UpdateTodoInput {
+  title?: string;
+  body?: string;
+  images?: unknown;
 }
 
 function todoFilePath() {
@@ -56,13 +73,77 @@ function normalizeText(value: unknown, max = 16_000): string {
   return text.length > max ? text.slice(0, max).trimEnd() : text;
 }
 
+function normalizeTodoImages(value: unknown): TodoImageAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const images: TodoImageAttachment[] = [];
+  for (const raw of value.slice(0, 12)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const item = raw as Partial<TodoImageAttachment>;
+    const dataUrl = normalizeText(item.dataUrl, 12 * 1024 * 1024);
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(dataUrl)) continue;
+    const mimeType = normalizeText(item.mimeType, 120) || (dataUrl.match(/^data:([^;,]+)[;,]/i)?.[1] || 'image/png');
+    if (!mimeType.toLowerCase().startsWith('image/')) continue;
+    images.push({
+      id: normalizeText(item.id, 120) || newId('img'),
+      kind: 'image',
+      name: normalizeText(item.name, 240) || 'todo-image.png',
+      mimeType,
+      size: typeof item.size === 'number' && Number.isFinite(item.size) && item.size >= 0 ? Math.round(item.size) : undefined,
+      dataUrl,
+    });
+  }
+  return images;
+}
+
+function deriveTodoTitle(kind: TodoItemKind, body: string, source?: TodoItemSource, hasImages = false): string {
+  const quoteTitle = source?.quote ? source.quote.split(/\s+/).slice(0, 12).join(' ') : '';
+  return body.split(/\s+/).slice(0, 14).join(' ')
+    || quoteTitle
+    || (hasImages ? 'Image todo' : '')
+    || (kind === 'review-comment' ? 'Review comment' : 'Todo');
+}
+
+function normalizeTodoItem(raw: TodoItem): TodoItem | null {
+  const id = normalizeText(raw.id, 160);
+  const kind: TodoItemKind = raw.kind === 'review-comment' ? 'review-comment' : 'todo';
+  const source = normalizeSource(raw.source);
+  const body = normalizeText(raw.body);
+  const images = normalizeTodoImages(raw.images);
+  const title = normalizeText(raw.title, 240) || deriveTodoTitle(kind, body, source, images.length > 0);
+  if (!id || !title) return null;
+  const status: TodoItemStatus = raw.status === 'chat-created' || raw.status === 'done' || raw.status === 'archived'
+    ? raw.status
+    : 'open';
+  return {
+    id,
+    kind,
+    title,
+    body: body || undefined,
+    status,
+    createdAt: normalizeText(raw.createdAt, 80) || new Date().toISOString(),
+    updatedAt: normalizeText(raw.updatedAt, 80) || normalizeText(raw.createdAt, 80) || new Date().toISOString(),
+    images: images.length ? images : undefined,
+    source,
+    linkedChat: raw.linkedChat && typeof raw.linkedChat === 'object'
+      ? {
+        workdir: normalizeText(raw.linkedChat.workdir, 2048),
+        agent: normalizeText(raw.linkedChat.agent, 120),
+        sessionId: normalizeText(raw.linkedChat.sessionId, 240),
+      }
+      : undefined,
+  };
+}
+
 function readFile(): TodoFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(todoFilePath(), 'utf-8')) as TodoFile;
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.items)) return { version: 1, items: [] };
     return {
       version: 1,
-      items: parsed.items.filter(item => item && typeof item.id === 'string' && typeof item.title === 'string'),
+      items: parsed.items
+        .filter(item => item && typeof item.id === 'string')
+        .map(item => normalizeTodoItem(item))
+        .filter((item): item is TodoItem => !!item),
     };
   } catch {
     return { version: 1, items: [] };
@@ -106,8 +187,8 @@ export function createTodoItem(input: CreateTodoInput): TodoItem {
   const body = normalizeText(input.body);
   const explicitTitle = normalizeText(input.title, 240);
   const source = normalizeSource(input.source);
-  const quoteTitle = source?.quote ? source.quote.split(/\s+/).slice(0, 12).join(' ') : '';
-  const title = explicitTitle || body.split(/\s+/).slice(0, 14).join(' ') || quoteTitle || (kind === 'review-comment' ? 'Review comment' : 'Todo');
+  const images = normalizeTodoImages(input.images);
+  const title = explicitTitle || deriveTodoTitle(kind, body, source, images.length > 0);
   const now = new Date().toISOString();
   const item: TodoItem = {
     id: newId(kind === 'review-comment' ? 'comment' : 'todo'),
@@ -117,10 +198,35 @@ export function createTodoItem(input: CreateTodoInput): TodoItem {
     status: 'open',
     createdAt: now,
     updatedAt: now,
+    images: images.length ? images : undefined,
     source,
   };
   const file = readFile();
   file.items.unshift(item);
+  writeFile(file);
+  return item;
+}
+
+export function updateTodoItem(todoId: string, input: UpdateTodoInput): TodoItem {
+  const id = normalizeText(todoId, 160);
+  if (!id) throw new Error('todo id is required');
+  const file = readFile();
+  const item = file.items.find(candidate => candidate.id === id);
+  if (!item) throw new Error('todo not found');
+
+  const hasBody = Object.prototype.hasOwnProperty.call(input, 'body');
+  const hasTitle = Object.prototype.hasOwnProperty.call(input, 'title');
+  const hasImages = Object.prototype.hasOwnProperty.call(input, 'images');
+  const nextBody = hasBody ? normalizeText(input.body) : normalizeText(item.body);
+  const nextImages = hasImages ? normalizeTodoImages(input.images) : (item.images || []);
+  const nextTitle = hasTitle
+    ? normalizeText(input.title, 240)
+    : normalizeText(item.title, 240);
+
+  item.body = nextBody || undefined;
+  item.images = nextImages.length ? nextImages : undefined;
+  item.title = nextTitle || deriveTodoTitle(item.kind, nextBody, item.source, nextImages.length > 0);
+  item.updatedAt = new Date().toISOString();
   writeFile(file);
   return item;
 }

@@ -54,16 +54,18 @@ export function AssistantMsg({
   ));
   const hasWorking = activityBlocks.length > 0 || subAgents.length > 0 || !!latestPlan?.plan || !!thinkingText || !!workingNarrativeText;
   const hasContent = activityBlocks.length > 0 || subAgentBlocks.length > 0 || !!latestPlan?.plan || thinkingBlocks.length > 0 || narrativeBlocks.length > 0 || outputBlocks.length > 0 || noticeBlocks.length > 0;
+  const effectiveRunError = runError
+    || (hasWorking && renderedOutputBlocks.length === 0 ? t('hub.noOutputRecordedDetail') : null);
   if (!hasContent) return null;
   return (
-    <div className="space-y-3">
+    <div data-assistant-selectable className="space-y-3">
       {hasWorking && (
         <CompletedWorkDisclosure
           t={t}
-          defaultOpen={false}
+          defaultOpen={!!effectiveRunError}
           startedAt={startedAt ?? null}
           completedAt={completedAt ?? message.createdAt ?? null}
-          error={runError ?? null}
+          error={effectiveRunError}
         >
           <div className="space-y-3 px-3.5 py-3">
             <WorkingNarrativeBlock text={workingNarrativeText} t={t} />
@@ -353,7 +355,17 @@ function splitProposedPlan(text: string): { before: string; plan: string; after:
   return { before, plan, after };
 }
 
-function insertComposerCommand(text: string) {
+export function textHasProposedPlan(text: string | null | undefined): boolean {
+  return !!text && /<proposed_plan>[\s\S]*?<\/proposed_plan>/i.test(text);
+}
+
+export function messageHasProposedPlan(message: RichMessage | null | undefined): boolean {
+  if (!message) return false;
+  if (textHasProposedPlan(message.text)) return true;
+  return message.blocks.some(block => block.type === 'text' && textHasProposedPlan(block.content));
+}
+
+export function insertComposerCommand(text: string) {
   window.dispatchEvent(new CustomEvent('pikiclaw:composer-insert', { detail: { text } }));
 }
 
@@ -366,33 +378,10 @@ function ProposedPlanCard({
 }) {
   return (
     <div className="rounded-md border border-sky-500/25 bg-sky-500/[0.055]">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-500/15 px-3 py-2">
+      <div className="border-b border-sky-500/15 px-3 py-2">
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-300">Proposed plan</div>
           <div className="mt-0.5 text-[11px] text-fg-5">Rendered from agent planning output</div>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => insertComposerCommand('/plan implement')}
-            className="rounded-md border border-sky-400/30 bg-sky-400/[0.12] px-2 py-1 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-400/[0.18]"
-          >
-            Implement
-          </button>
-          <button
-            type="button"
-            onClick={() => insertComposerCommand('/plan clarify ')}
-            className="rounded-md border border-edge/40 bg-control px-2 py-1 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
-          >
-            Continue Clarifying
-          </button>
-          <button
-            type="button"
-            onClick={() => insertComposerCommand('/plan cancel')}
-            className="rounded-md border border-edge/40 bg-transparent px-2 py-1 text-[11px] font-semibold text-fg-5 transition hover:border-edge-h hover:text-fg-3"
-          >
-            Cancel
-          </button>
         </div>
       </div>
       <div className="session-md px-3 py-3 text-[13px] leading-[1.7] text-fg-2">

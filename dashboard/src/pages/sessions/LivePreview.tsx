@@ -125,7 +125,7 @@ export function LivePreview({
     || structuredStepCount > 0;
 
   return (
-    <div className="space-y-3">
+    <div data-assistant-selectable className="space-y-3">
       {showWorking && (
         showLiveWorking && !terminalError ? (
           <WorkingCard

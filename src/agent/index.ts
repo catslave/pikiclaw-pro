@@ -20,13 +20,13 @@ import './drivers/copilot.js';
 import './drivers/cursor.js';
 import './drivers/gemini.js';
 import './drivers/hermes.js';
-import './drivers/openclaw.js';
 
 // ── Re-export: types ────────────────────────────────────────────────────────
 export type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
   AgentDriverCapabilities, AgentCapabilityDescriptor, AgentCapabilityMode, AgentCapabilityAction,
   SessionLineageRef, HandoverRef,
+  SessionContextSource, SessionContextSourceMode, SessionContextSessionSource, SessionContextOutputSource,
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
@@ -37,6 +37,7 @@ export type {
   TailMessage, MessageBlock, RichMessage,
   SessionTailResult, SessionTailOpts,
   SessionMessagesOpts, SessionMessagesWindow, SessionMessagesResult,
+  SessionOutput, SessionOutputKind, SessionOutputRef,
   StageSessionFilesOpts, StageSessionFilesResult, EnsureManagedSessionOpts,
   ExportSessionOpts, ExportSessionResult, ImportSessionOpts, ImportSessionResult,
   MigrateSessionOpts,
@@ -44,6 +45,9 @@ export type {
   UsageWindowInfo, UsageResult, UsageOpts,
 } from './types.js';
 export { IMAGE_EXTS } from './types.js';
+
+export { normalizeSessionContextSources } from './context-sources.js';
+export { buildContextSourceBundle } from './context-bundle.js';
 
 // ── Re-export: image pipeline ──────────────────────────────────────────────
 export {
@@ -80,6 +84,12 @@ export {
   isPendingSessionId, emitSessionIdUpdate,
   sessionListDisplayTitle,
 } from './utils.js';
+
+export {
+  resolveCapabilityRoute,
+  type CapabilityRouteDecision,
+  type RoutedCapability,
+} from './capability-router.js';
 
 // ── Re-export: session management ───────────────────────────────────────────
 export {
@@ -135,6 +145,12 @@ export {
   extractProposedPlan, sessionPlanPath,
   type SessionPlanView, type SessionPlanStatus,
 } from './plan.js';
+
+// ── Re-export: session outputs ──────────────────────────────────────────────
+export {
+  readSessionOutputs, saveSessionOutput, normalizeSessionOutputs,
+  SESSION_OUTPUT_KINDS,
+} from './session-outputs.js';
 
 // ── Re-export: native codex goal bridge ──────────────────────────────────────
 export {
@@ -202,4 +218,3 @@ export { doCopilotStream } from './drivers/copilot.js';
 export { doCursorStream } from './drivers/cursor.js';
 export { doGeminiStream } from './drivers/gemini.js';
 export { doHermesStream } from './drivers/hermes.js';
-export { doOpenClawStream } from './drivers/openclaw.js';

@@ -34,6 +34,8 @@ export interface McpToolModule {
 export interface ToolContext {
   workspace: string;
   workdir?: string;
+  agent?: string;
+  sessionId?: string;
   stagedFiles: string[];
   callbackUrl: string;
 }

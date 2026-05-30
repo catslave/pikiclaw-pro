@@ -6,13 +6,11 @@
  * CLI page on purpose:
  *
  *   1. Tile grid: Ollama + mlx-lm, each opens a modal.
- *   2. Modal step A — Status: probe + version + brew/pipx install commands
- *      for the current OS, plus the "start the server" command.
+ *   2. Modal step A — Status: probe + version + install button / fallback
+ *      commands for the current OS, plus the "start the server" command.
  *   3. Modal step B — Models: list installed; for the recommended catalog, show
- *      the user-runnable shell command (`ollama pull <tag>` / `mlx_lm.server
- *      --model <repo>`) with a copy button. We deliberately do NOT stream
- *      downloads from the dashboard — they take minutes-to-hours and the user
- *      is better served running them in a real terminal where Ctrl-C works.
+ *      a load button plus the equivalent shell command (`ollama pull <tag>` /
+ *      `mlx_lm.server --model <repo>`) with a copy button for fallback.
  *
  * There is no "connect to agents" step: a detected backend is auto-attached
  * server-side and shows up as a Provider in the Model Providers list above.
@@ -72,6 +70,8 @@ interface Copy {
   statusRecheck: string;
   statusRechecking: string;
   statusInstallHeader: string;
+  statusInstallAction: string;
+  statusInstallingAction: string;
   statusInstallDocs: string;
   statusRunHint: string;
   statusHomepageCta: string;
@@ -85,9 +85,15 @@ interface Copy {
   fitTight: string;
   fitNoGo: string;
   modelInstalledBadge: string;
+  loadModelAction: string;
+  loadingModelAction: string;
   pullPrefix: string;
   copyCommand: string;
   copied: string;
+  installDone: string;
+  modelLoadDone: string;
+  modelLoadStarted: string;
+  actionFailed: string;
 
   closeBtn: string;
 }
@@ -121,6 +127,8 @@ function getCopy(locale: Locale): Copy {
       statusRecheck: '重新检测',
       statusRechecking: '检测中…',
       statusInstallHeader: '安装命令',
+      statusInstallAction: '安装',
+      statusInstallingAction: '安装中…',
       statusInstallDocs: '官方安装文档',
       statusRunHint: '启动服务（安装后）',
       statusHomepageCta: '官网',
@@ -128,15 +136,21 @@ function getCopy(locale: Locale): Copy {
 
       modelsInstalledHeader: n => `已就绪（${n}）`,
       modelsInstalledEmpty: '后端在线，但尚未加载任何模型。在终端按下方命令准备一个。',
-      modelsRecommendedHeader: '推荐模型 · 在终端执行以下命令准备',
-      modelsBackendOffline: '启动后端后再返回此处准备模型。',
+      modelsRecommendedHeader: '推荐模型 · 选择一个加载',
+      modelsBackendOffline: '可以直接选择下方模型；pikiclaw 会先安装/启动后端再加载模型。',
       fitOk: '推荐',
       fitTight: '勉强可跑',
       fitNoGo: '内存不足',
       modelInstalledBadge: '已就绪',
+      loadModelAction: '加载这个模型',
+      loadingModelAction: '加载中…',
       pullPrefix: '终端执行',
       copyCommand: '复制',
       copied: '已复制',
+      installDone: '安装完成，已重新检测',
+      modelLoadDone: '模型已就绪',
+      modelLoadStarted: '模型服务已启动，稍后刷新查看状态',
+      actionFailed: '操作失败',
 
       closeBtn: '完成',
     };
@@ -168,6 +182,8 @@ function getCopy(locale: Locale): Copy {
     statusRecheck: 'Re-check',
     statusRechecking: 'Checking…',
     statusInstallHeader: 'Install commands',
+    statusInstallAction: 'Install',
+    statusInstallingAction: 'Installing…',
     statusInstallDocs: 'Official install docs',
     statusRunHint: 'Start the server (after install)',
     statusHomepageCta: 'Homepage',
@@ -175,15 +191,21 @@ function getCopy(locale: Locale): Copy {
 
     modelsInstalledHeader: n => `Ready (${n})`,
     modelsInstalledEmpty: 'Backend is up but no model is loaded. Use the command below to prepare one.',
-    modelsRecommendedHeader: 'Recommended models — run these in your terminal',
-    modelsBackendOffline: 'Start the backend first, then come back to prepare models.',
+    modelsRecommendedHeader: 'Recommended models — choose one to load',
+    modelsBackendOffline: 'Choose a model below; pikiclaw will install/start the backend before loading it.',
     fitOk: 'Recommended',
     fitTight: 'Tight fit',
     fitNoGo: 'Not enough RAM',
     modelInstalledBadge: 'Ready',
+    loadModelAction: 'Load this model',
+    loadingModelAction: 'Loading…',
     pullPrefix: 'Run in terminal',
     copyCommand: 'Copy',
     copied: 'Copied',
+    installDone: 'Installed and re-checked',
+    modelLoadDone: 'Model is ready',
+    modelLoadStarted: 'Model server started. Refresh in a moment to check status.',
+    actionFailed: 'Action failed',
 
     closeBtn: 'Done',
   };
@@ -285,12 +307,16 @@ export function useLocalBackends(): LocalBackendsSnapshot {
 function BackendTile({
   backend,
   copy,
+  installing,
   onClick,
+  onInstall,
 }: {
   backend: LocalBackendStatus;
   copy: Copy;
   locale: Locale;
+  installing: boolean;
   onClick: () => void;
+  onInstall: (backend: LocalBackendStatus) => void;
 }) {
   const unsupported = !backend.supportedOnThisOs;
   const blurb = backend.id === 'ollama' ? copy.tileBlurbOllama : copy.tileBlurbMlx;
@@ -308,20 +334,36 @@ function BackendTile({
     : blurb;
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group relative flex h-[104px] flex-col rounded-lg border border-edge bg-panel-alt px-4 py-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge-strong hover:bg-panel hover:shadow-[0_4px_16px_rgba(15,23,42,0.06)]"
+    <div
+      className="group relative flex min-h-[122px] flex-col rounded-lg border border-edge bg-panel-alt text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge-strong hover:bg-panel hover:shadow-[0_4px_16px_rgba(15,23,42,0.06)]"
     >
-      <div className="flex w-full items-start justify-between gap-2">
-        <BrandIcon brand={backend.id} size={32} />
-        {badge}
-      </div>
-      <div className="mt-auto min-w-0">
-        <div className="truncate text-[14px] font-semibold tracking-tight text-fg group-hover:text-fg">{backend.label}</div>
-        <div className="mt-1 truncate text-[11.5px] leading-relaxed text-fg-5" title={detail}>{detail}</div>
-      </div>
-    </button>
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex flex-1 flex-col px-4 py-3.5 text-left focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
+      >
+        <div className="flex w-full items-start justify-between gap-2">
+          <BrandIcon brand={backend.id} size={32} />
+          {badge}
+        </div>
+        <div className="mt-auto min-w-0">
+          <div className="truncate text-[14px] font-semibold tracking-tight text-fg group-hover:text-fg">{backend.label}</div>
+          <div className="mt-1 truncate text-[11.5px] leading-relaxed text-fg-5" title={detail}>{detail}</div>
+        </div>
+      </button>
+      {!unsupported && !backend.detected && (
+        <div className="px-4 pb-3.5">
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={installing}
+            onClick={() => onInstall(backend)}
+          >
+            {installing ? <><Spinner className="h-3 w-3" /> {copy.statusInstallingAction}</> : copy.statusInstallAction}
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -397,6 +439,8 @@ function CatalogRow({
   copy,
   locale,
   onCopy,
+  onLoadModel,
+  loading,
 }: {
   entry: LocalModelCatalogEntry;
   backend: LocalBackendStatus;
@@ -404,6 +448,8 @@ function CatalogRow({
   copy: Copy;
   locale: Locale;
   onCopy: (cmd: string) => void;
+  onLoadModel: (entry: LocalModelCatalogEntry, backend: LocalBackendStatus) => void;
+  loading: boolean;
 }) {
   const fit = fitFor(totalRamGb, entry.minRamGb);
   const blurb = locale === 'zh-CN' ? entry.descriptionZh : entry.description;
@@ -438,7 +484,17 @@ function CatalogRow({
           )}
         </div>
         {!installedId && fit !== 'no-go' && cmd && (
-          <CommandRow label={copy.pullPrefix} cmd={cmd} copy={copy} onCopy={onCopy} />
+          <div className="space-y-2">
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={loading}
+              onClick={() => onLoadModel(entry, backend)}
+            >
+              {loading ? <><Spinner className="h-3 w-3" /> {copy.loadingModelAction}</> : copy.loadModelAction}
+            </Button>
+            <CommandRow label={copy.pullPrefix} cmd={cmd} copy={copy} onCopy={onCopy} />
+          </div>
         )}
       </div>
     </div>
@@ -457,9 +513,13 @@ function LocalBackendModal({
   currentOs,
   copy,
   locale,
+  installingBackend,
+  loadingModelKey,
   onClose,
   onRefresh,
   onCopy,
+  onInstallBackend,
+  onLoadModel,
 }: {
   open: boolean;
   backend: LocalBackendStatus | null;
@@ -468,9 +528,13 @@ function LocalBackendModal({
   currentOs: LocalBackendOs | null;
   copy: Copy;
   locale: Locale;
+  installingBackend: LocalBackendStatus['id'] | null;
+  loadingModelKey: string | null;
   onClose: () => void;
   onRefresh: () => Promise<{ addedProviderIds: string[] }>;
   onCopy: (cmd: string) => void;
+  onInstallBackend: (backend: LocalBackendStatus) => void;
+  onLoadModel: (entry: LocalModelCatalogEntry, backend: LocalBackendStatus) => void;
 }) {
   const [rechecking, setRechecking] = useState(false);
   useEffect(() => { setRechecking(false); }, [backend?.detected, backend?.id]);
@@ -566,6 +630,16 @@ function LocalBackendModal({
             {/* Install + run commands — CLI-style. Hidden once detected. */}
             {!unsupported && !backend.detected && (
               <div className="space-y-2 pt-1">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={installingBackend === backend.id}
+                  onClick={() => onInstallBackend(backend)}
+                >
+                  {installingBackend === backend.id
+                    ? <><Spinner className="h-3 w-3" /> {copy.statusInstallingAction}</>
+                    : copy.statusInstallAction}
+                </Button>
                 {installCommands.length > 0 && (
                   <div className="space-y-1.5">
                     <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
@@ -606,12 +680,13 @@ function LocalBackendModal({
         <section className="space-y-2">
           <StepHeader index={2} label={copy.stepModels} done={backend.detected && backend.models.length > 0} />
 
-          {!backend.detected ? (
-            <div className="rounded-md border border-edge bg-panel-alt px-3.5 py-3 text-[12px] text-fg-5">
-              {copy.modelsBackendOffline}
-            </div>
-          ) : (
-            <div className="space-y-3">
+          <div className="space-y-3">
+            {!backend.detected && !unsupported && (
+              <div className="rounded-md border border-edge bg-panel-alt px-3.5 py-3 text-[12px] text-fg-5">
+                {copy.modelsBackendOffline}
+              </div>
+            )}
+            {backend.detected && (
               <div className="rounded-md border border-edge bg-panel-alt px-3.5 py-3">
                 <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
                   {copy.modelsInstalledHeader(backend.models.length)}
@@ -626,29 +701,31 @@ function LocalBackendModal({
                   </div>
                 )}
               </div>
+            )}
 
-              {backendCatalog.length > 0 && (
-                <div className="space-y-2">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
-                    {copy.modelsRecommendedHeader}
-                  </div>
-                  <div className="space-y-1.5">
-                    {backendCatalog.map(entry => (
-                      <CatalogRow
-                        key={entry.id}
-                        entry={entry}
-                        backend={backend}
-                        totalRamGb={totalRamGb}
-                        copy={copy}
-                        locale={locale}
-                        onCopy={onCopy}
-                      />
-                    ))}
-                  </div>
+            {!unsupported && backendCatalog.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
+                  {copy.modelsRecommendedHeader}
                 </div>
-              )}
-            </div>
-          )}
+                <div className="space-y-1.5">
+                  {backendCatalog.map(entry => (
+                    <CatalogRow
+                      key={entry.id}
+                      entry={entry}
+                      backend={backend}
+                      totalRamGb={totalRamGb}
+                      copy={copy}
+                      locale={locale}
+                      onCopy={onCopy}
+                      onLoadModel={onLoadModel}
+                      loading={loadingModelKey === `${backend.id}:${entry.id}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </section>
       </div>
 
@@ -685,6 +762,8 @@ export function LocalModelsSection({
   const { backends, catalog, currentOs, loading, error, refresh } = eff;
 
   const [openId, setOpenId] = useState<LocalBackendStatus['id'] | null>(null);
+  const [installingBackend, setInstallingBackend] = useState<LocalBackendStatus['id'] | null>(null);
+  const [loadingModelKey, setLoadingModelKey] = useState<string | null>(null);
   const openBackend = useMemo(
     () => backends.find(b => b.id === openId) ?? null,
     [backends, openId],
@@ -712,6 +791,44 @@ export function LocalModelsSection({
     void navigator.clipboard?.writeText(cmd);
     toast(copy.copied);
   }, [copy.copied, toast]);
+
+  const applyActionSnapshot = useCallback(async (res: { backends?: LocalBackendStatus[]; addedProviderIds?: string[] }) => {
+    await handleRefresh();
+    if (onConnected && (res.addedProviderIds?.length || res.backends?.some(b => b.existingProviderId))) {
+      await onConnected();
+    }
+  }, [handleRefresh, onConnected]);
+
+  const handleInstallBackend = useCallback(async (backend: LocalBackendStatus) => {
+    if (installingBackend) return;
+    setInstallingBackend(backend.id);
+    try {
+      const res = await api.installLocalBackend(backend.id);
+      if (!res.ok) throw new Error(res.error || copy.actionFailed);
+      toast(copy.installDone, true);
+      await applyActionSnapshot(res);
+    } catch (e: any) {
+      toast(e?.message || copy.actionFailed, false);
+    } finally {
+      setInstallingBackend(null);
+    }
+  }, [applyActionSnapshot, copy.actionFailed, copy.installDone, installingBackend, toast]);
+
+  const handleLoadModel = useCallback(async (entry: LocalModelCatalogEntry, backend: LocalBackendStatus) => {
+    const key = `${backend.id}:${entry.id}`;
+    if (loadingModelKey) return;
+    setLoadingModelKey(key);
+    try {
+      const res = await api.loadLocalModel(backend.id, entry.id);
+      if (!res.ok) throw new Error(res.error || copy.actionFailed);
+      toast(res.ready === false ? (res.message || copy.modelLoadStarted) : copy.modelLoadDone, true);
+      await applyActionSnapshot(res);
+    } catch (e: any) {
+      toast(e?.message || copy.actionFailed, false);
+    } finally {
+      setLoadingModelKey(null);
+    }
+  }, [applyActionSnapshot, copy.actionFailed, copy.modelLoadDone, copy.modelLoadStarted, loadingModelKey, toast]);
 
   const totalRamGb = host?.totalMem ? host.totalMem / 1024 ** 3 : null;
   const hostSummary = host
@@ -764,7 +881,9 @@ export function LocalModelsSection({
               backend={b}
               copy={copy}
               locale={locale}
+              installing={installingBackend === b.id}
               onClick={() => setOpenId(b.id)}
+              onInstall={handleInstallBackend}
             />
           ))}
         </div>
@@ -784,9 +903,13 @@ export function LocalModelsSection({
         currentOs={currentOs}
         copy={copy}
         locale={locale}
+        installingBackend={installingBackend}
+        loadingModelKey={loadingModelKey}
         onClose={() => setOpenId(null)}
         onRefresh={handleRefresh}
         onCopy={handleCopy}
+        onInstallBackend={handleInstallBackend}
+        onLoadModel={handleLoadModel}
       />
     </div>
   );

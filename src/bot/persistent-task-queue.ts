@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { Agent, HandoverRef } from '../agent/index.js';
+import type { Agent, HandoverRef, SessionContextSource } from '../agent/index.js';
 import type { ChatId } from '../core/utils.js';
 
 export interface PersistedQueuedTask {
@@ -26,6 +26,7 @@ export interface PersistedQueuedTask {
   modelId?: string | null;
   thinkingEffort?: string | null;
   handoverFrom?: HandoverRef | null;
+  contextSources?: SessionContextSource[];
   goalContinuation?: { kind: 'continuation' | 'budget_wrapup'; goalId: string };
   forkOf?: { parentSessionId: string; atTurn: number };
 }

@@ -2,6 +2,8 @@
  * Public session task control surface for dashboard and API routes.
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   getProjectSkillPaths,
@@ -18,16 +20,32 @@ import {
   writeSessionPlan,
   readSessionPlan,
   clearSessionPlan,
+  resolveCapabilityRoute,
   type Agent,
+  type CapabilityRouteDecision,
   type AgentCapabilityDescriptor,
   type HandoverRef,
   type SessionOrigin,
+  type SessionContextSource,
 } from '../agent/index.js';
+import { normalizeSessionContextSources } from '../agent/context-sources.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { isLogTraceSlash, runLogTraceSkill } from '../platform/logtrace.js';
 import { runtime } from './runtime.js';
 
-const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw']);
+const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes']);
+
+function hasOpenClawCodexAuth(): boolean {
+  if (String(process.env.OPENAI_API_KEY || '').trim()) return true;
+  const authPath = path.join(os.homedir(), '.openclaw', 'agents', 'codex', 'agent', 'auth-profiles.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return false;
+    return JSON.stringify(parsed).trim().length > 2;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Parse a `/goal[ args]` prompt typed in the dashboard chat box. Returns null
@@ -156,6 +174,7 @@ export interface QueueSessionTaskRequest {
   previousAgent?: Agent | string | null;
   previousSessionId?: string | null;
   origin?: Partial<SessionOrigin> | null;
+  contextSources?: SessionContextSource[];
 }
 
 /**
@@ -189,12 +208,18 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     ? request.agent as Agent
     : runtime.getRuntimeDefaultAgent(config);
   const modelId = typeof request.model === 'string' ? request.model.trim() : '';
-  const thinkingEffort = resolvedAgent === 'gemini'
+  let effectiveAgent = resolvedAgent;
+  let capabilityRoute: CapabilityRouteDecision | null = null;
+  let thinkingEffort = effectiveAgent === 'gemini'
     ? ''
     : (typeof request.effort === 'string' ? request.effort.trim().toLowerCase() : '');
 
   let sessionId = request.sessionId;
   let attachments = request.attachments || [];
+  const contextSources = normalizeSessionContextSources(request.contextSources);
+  if (contextSources.length && sessionId && !isPendingSessionId(sessionId)) {
+    return { ok: false as const, error: 'contextSources can only be used when creating a new session' };
+  }
 
   // /logtrace — platform-owned skill. Pikiclaw runs the log CLI through a
   // controlled adapter first, then sends the collected trace/report evidence to
@@ -258,26 +283,56 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     runtime.debug(`[session-send] resolved skill: ${skillResult.skillName}`);
   }
 
+  if (!skillResult) {
+    capabilityRoute = resolveCapabilityRoute({
+      prompt: prompt || '',
+      selectedAgent: resolvedAgent,
+      attachments,
+      openclawAvailable: hasOpenClawCodexAuth(),
+    });
+    if (capabilityRoute) {
+      const previousAgent = resolvedAgent;
+      const previousSessionId = sessionId;
+      effectiveAgent = capabilityRoute.agent;
+      prompt = capabilityRoute.prompt;
+      thinkingEffort = effectiveAgent === 'gemini'
+        ? ''
+        : (typeof request.effort === 'string' ? request.effort.trim().toLowerCase() : '');
+      if (previousAgent !== effectiveAgent) {
+        if (previousSessionId && !isPendingSessionId(previousSessionId)) {
+          request.previousAgent = previousAgent;
+          request.previousSessionId = previousSessionId;
+        }
+        sessionId = '';
+      }
+      runtime.debug(
+        `[session-send] auto capability route=${capabilityRoute.capability} ` +
+        `agent=${effectiveAgent} openclawAgent=${capabilityRoute.openclawAgent} reason=${capabilityRoute.reason}`,
+      );
+    }
+  }
+
   // Resolve handover source. Only meaningful when we're about to stage a fresh
   // session (sessionId blank or pending). For an existing session we never
   // replay handover — that session's own --resume history is canonical.
   const isFreshSession = !sessionId || isPendingSessionId(sessionId);
   const existingHandoverFrom = isFreshSession && sessionId
-    ? (findPikiclawSession(request.workdir, resolvedAgent, sessionId)?.handoverFrom ?? null)
+    ? (findPikiclawSession(request.workdir, effectiveAgent, sessionId)?.handoverFrom ?? null)
     : null;
-  const handoverFrom = isFreshSession ? (resolveHandoverFrom(request, resolvedAgent) ?? existingHandoverFrom) : null;
+  const handoverFrom = isFreshSession ? (resolveHandoverFrom(request, effectiveAgent) ?? existingHandoverFrom) : null;
 
   // Stage files into the session workspace so temp uploads survive cleanup.
   // Also creates a new pending session when no sessionId is provided.
   if (!sessionId || attachments.length) {
     const staged = stageSessionFiles({
-      agent: resolvedAgent,
+      agent: effectiveAgent,
       workdir: request.workdir,
       files: attachments,
       sessionId: sessionId || null,
       title: userPrompt || request.prompt || 'New session',
       threadId: null,
       handoverFrom,
+      contextSources,
       origin: request.origin,
     });
     if (!sessionId) sessionId = staged.sessionId;
@@ -288,7 +343,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
 
   return bot.submitSessionTask({
     workdir: request.workdir,
-    agent: resolvedAgent,
+    agent: effectiveAgent,
     sessionId,
     prompt: prompt || 'Please inspect the attached file(s).',
     ...((userPrompt && userPrompt !== prompt) ? { displayPrompt: userPrompt } : {}),
@@ -296,6 +351,8 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
     ...(handoverFrom ? { handoverFrom } : {}),
+    ...(contextSources.length ? { contextSources } : {}),
+    ...(capabilityRoute ? { capabilityRoute } : {}),
   });
 }
 

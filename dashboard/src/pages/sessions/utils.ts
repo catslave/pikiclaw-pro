@@ -87,10 +87,11 @@ export function groupIntoTurns(msgs: RichMessage[]): Turn[] {
 function stripInternalHandoverMessages(messages: RichMessage[]): RichMessage[] {
   return messages.flatMap(message => {
     if (message.role !== 'user') return [message];
-    const stripped = stripHandoverSeed(message.text);
-    if (!stripped.handover) return [message];
+    const strippedHandover = stripHandoverSeed(message.text);
+    const strippedContext = stripPikiclawContextSeed(strippedHandover.text);
+    if (!strippedHandover.handover && !strippedContext.context) return [message];
 
-    const text = stripped.text.trimStart();
+    const text = strippedContext.text.trimStart();
     const nonTextBlocks = message.blocks.filter(block => block.type !== 'text');
     if (!text && nonTextBlocks.length === 0) return [];
     return [{
@@ -102,6 +103,24 @@ function stripInternalHandoverMessages(messages: RichMessage[]): RichMessage[] {
       ],
     }];
   });
+}
+
+export function stripPikiclawContextSeed(text: string): { context: boolean; text: string } {
+  const leadingWhitespace = text.match(/^\s*/)?.[0] || '';
+  const trimmedStart = text.slice(leadingWhitespace.length);
+  const open = trimmedStart.search(/<pikiclaw_context\b/i);
+  if (open < 0) return { context: false, text };
+
+  const close = trimmedStart.search(/<\/pikiclaw_context>/i);
+  if (close < open) return { context: true, text: trimmedStart.slice(0, open) };
+
+  const beforeOpen = trimmedStart.slice(0, open);
+  const afterClose = trimmedStart.slice(close).replace(/^<\/pikiclaw_context>/i, '');
+  const withoutTrailer = afterClose.replace(
+    /^\s*\[Reference context above was attached by Pikiclaw\.[^\]]*\]\s*/i,
+    '',
+  );
+  return { context: true, text: `${leadingWhitespace}${beforeOpen}${withoutTrailer}` };
 }
 
 export function stripHandoverSeed(text: string): { handover: boolean; text: string } {

@@ -2350,6 +2350,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     linkedSessions: record.linkedSessions,
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
+    outputs: record.outputs ?? [],
     numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);

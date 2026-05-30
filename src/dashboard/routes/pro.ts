@@ -2,6 +2,9 @@
  * Dashboard API routes for Pikiclaw Pro workflow objects.
  */
 
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { Hono } from 'hono';
 import { loadUserConfig } from '../../core/config/user-config.js';
 import { findPikiclawSessionInfo } from '../../agent/session.js';
@@ -47,7 +50,7 @@ import {
   updateTaskSpace,
   type VerificationResult,
 } from '../../pro/tasks.js';
-import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems } from '../../pro/todos.js';
+import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems, updateTodoItem, type TodoImageAttachment, type TodoItem } from '../../pro/todos.js';
 import { closeActiveJiraCycle, deleteJiraCycle, kickOffJiraCycle, listJiraCycles } from '../../pro/jira-cycles.js';
 import { buildProUsageSummary } from '../../pro/usage-summary.js';
 import {
@@ -79,6 +82,64 @@ const JIRA_MCP_SYNC_AUTOMATION_KEY = 'jira-mcp-sync';
 
 function readString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function extensionForTodoImage(mimeType: string): string {
+  switch (mimeType.toLowerCase()) {
+    case 'image/png': return '.png';
+    case 'image/jpeg': return '.jpg';
+    case 'image/jpg': return '.jpg';
+    case 'image/webp': return '.webp';
+    case 'image/gif': return '.gif';
+    case 'image/svg+xml': return '.svg';
+    case 'image/avif': return '.avif';
+    case 'image/bmp': return '.bmp';
+    default: return '.png';
+  }
+}
+
+function sanitizeTodoImageFilename(image: TodoImageAttachment, index: number): string {
+  const baseName = path.basename(image.name || `todo-image-${index + 1}`);
+  const parsed = path.parse(baseName);
+  const safeStem = (parsed.name || `todo-image-${index + 1}`)
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || `todo-image-${index + 1}`;
+  const ext = parsed.ext || extensionForTodoImage(image.mimeType);
+  return `${String(index + 1).padStart(2, '0')}-${safeStem}${ext.toLowerCase()}`;
+}
+
+function decodeTodoImageDataUrl(image: TodoImageAttachment): Buffer | null {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i.exec(image.dataUrl || '');
+  if (!match) return null;
+  const buffer = Buffer.from(match[2], 'base64');
+  return buffer.length ? buffer : null;
+}
+
+async function materializeTodoImages(items: TodoItem[]): Promise<{ attachments: string[]; cleanup: () => Promise<void> }> {
+  const images = items.flatMap(item => item.images || []);
+  if (!images.length) return { attachments: [], cleanup: async () => {} };
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pikiclaw-todo-images-'));
+  try {
+    const attachments: string[] = [];
+    for (const [index, image] of images.entries()) {
+      const buffer = decodeTodoImageDataUrl(image);
+      if (!buffer) continue;
+      const filePath = path.join(tempDir, sanitizeTodoImageFilename(image, index));
+      await fs.writeFile(filePath, buffer);
+      attachments.push(filePath);
+    }
+    return {
+      attachments,
+      cleanup: async () => {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      },
+    };
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function pickAssistantAgent(assistant?: AgentAssistant, fallbackAgent?: string | null): string | null {
@@ -325,10 +386,26 @@ app.post('/api/pro/todos', async (c) => {
       title: body?.title,
       body: body?.body,
       source: body?.source,
+      images: body?.images,
     });
     return c.json({ ok: true, item });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/todos/:todoId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const update: { title?: string; body?: string; images?: unknown } = {};
+    if (body && Object.prototype.hasOwnProperty.call(body, 'title')) update.title = body.title;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'body')) update.body = body.body;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'images')) update.images = body.images;
+    const item = updateTodoItem(c.req.param('todoId'), update);
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    const status = e?.message === 'todo not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
   }
 });
 
@@ -357,32 +434,38 @@ app.post('/api/pro/todos/chat', async (c) => {
       ...items.map((item, index) => [
         `Item ${index + 1}: ${item.title}`,
         item.body ? `Note: ${item.body}` : '',
+        item.images?.length ? `Images: ${item.images.map(image => image.name).join(', ')}` : '',
         item.source?.quote ? `Quoted context:\n${item.source.quote}` : '',
         item.source?.agent && item.source?.sessionId ? `Source session: ${item.source.agent}:${item.source.sessionId}${typeof item.source.turnIndex === 'number' ? ` turn ${item.source.turnIndex}` : ''}` : '',
       ].filter(Boolean).join('\n')),
       userPrompt ? `\nUser instruction:\n${userPrompt}` : '',
     ].join('\n\n');
-    const queued = await queueDashboardSessionTask({
-      workdir,
-      agent: readString(body?.agent) || null,
-      sessionId: '',
-      prompt,
-      model: readString(body?.model) || null,
-      effort: readString(body?.effort) || null,
-      attachments: [],
-    });
-    if (!queued.ok) {
-      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
-      return c.json(queued, statusCode);
-    }
-    const session = parseSessionKey(queued.sessionKey);
-    for (const item of items) {
-      if (session) {
-        linkTodoChat(item.id, { workdir, agent: session.agent, sessionId: session.sessionId });
+    const imageUploads = await materializeTodoImages(items);
+    try {
+      const queued = await queueDashboardSessionTask({
+        workdir,
+        agent: readString(body?.agent) || null,
+        sessionId: '',
+        prompt,
+        model: readString(body?.model) || null,
+        effort: readString(body?.effort) || null,
+        attachments: imageUploads.attachments,
+      });
+      if (!queued.ok) {
+        const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+        return c.json(queued, statusCode);
       }
-      deleteTodoItem(item.id);
+      const session = parseSessionKey(queued.sessionKey);
+      for (const item of items) {
+        if (session) {
+          linkTodoChat(item.id, { workdir, agent: session.agent, sessionId: session.sessionId });
+        }
+        deleteTodoItem(item.id);
+      }
+      return c.json({ ok: true, queued, items: getTodoItems(items.map(item => item.id)) });
+    } finally {
+      await imageUploads.cleanup();
     }
-    return c.json({ ok: true, queued, items: getTodoItems(items.map(item => item.id)) });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
   }
@@ -396,6 +479,7 @@ app.post('/api/pro/review-comments', async (c) => {
       title: body?.title,
       body: body?.body,
       source: { ...(body?.source || {}), type: 'review-comment' },
+      images: body?.images,
     });
     return c.json({ ok: true, item });
   } catch (e: any) {

@@ -1,4 +1,4 @@
-import { useState, memo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { useState, memo, useRef, useCallback, type Dispatch, type MouseEvent as ReactMouseEvent, type ReactNode, type SetStateAction } from 'react';
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
@@ -14,6 +14,17 @@ import type { Turn } from './utils';
 export type SelectionActionRequest = { quote: string; note: string; turnIndex?: number };
 export type SelectionSideChatRequest = SelectionActionRequest & { question: string };
 
+type SelectionDraft = {
+  quote: string;
+  rect: { left: number; top: number; width: number; height: number };
+  highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
+  note: string;
+  creating: null | 'comment' | 'side-chat' | 'todo';
+  expanded: boolean;
+};
+
+const selectionDraftCache = new Map<string, SelectionDraft>();
+const assistantSelectableSelector = '[data-assistant-selectable], .session-md';
 type ReviewCommentCardItem = { index: number; note: string; turn?: string; quote: string };
 type ReviewCommentCardData = { comments: ReviewCommentCardItem[]; trailingText: string };
 
@@ -66,6 +77,7 @@ function parseReviewCommentCard(text: string): ReviewCommentCardData | null {
   if (!comments.length) return null;
   return { comments, trailingText: tail.join('\n\n').trim() };
 }
+
 export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent, assistantRunError }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
@@ -95,6 +107,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   // a phantom header reads as "Claude said something invisible" to users.
   const showAssistant = !!turn.assistant && hasRenderableAssistant(turn.assistant);
   const showLiveAssistant = !!liveAssistant;
+  const showRunErrorOnly = !!assistantRunError && !showAssistant && !showLiveAssistant;
   const mdComponents = createMdComponents({ onOpenFileLink, workdir });
 
   return (
@@ -109,17 +122,30 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
           </ReactMarkdown>
         </div>
       )}
-      {(showAssistant || showLiveAssistant) && (
+      {(showAssistant || showLiveAssistant || showRunErrorOnly) && (
         <>
           <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={previewMeta ?? turn.assistant?.usage ?? null} />
           {showLiveAssistant
-            ? <div className="mb-6">{liveAssistant}</div>
-            : <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} runError={assistantRunError ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} />}
+            ? <AssistantMessageFrame liveContent={liveAssistant} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} cacheKeyExtra="live" />
+            : showAssistant
+              ? <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} runError={assistantRunError ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} />
+              : <RunErrorNotice detail={assistantRunError!} t={t} />}
         </>
       )}
     </div>
   );
 });
+
+function RunErrorNotice({ detail, t }: { detail: string; t: (key: string) => string }) {
+  return (
+    <div className="mb-6 rounded-lg border border-amber-500/35 bg-amber-500/[0.08] px-3 py-2.5 text-[12.5px] leading-relaxed text-amber-700 dark:text-amber-100/90">
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-700/80 dark:text-amber-200/80">
+        {t('hub.statusStopped')}
+      </div>
+      <div>{detail}</div>
+    </div>
+  );
+}
 
 /** Lightbox for full-screen image preview */
 export function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
@@ -313,6 +339,8 @@ function dedupeImageBlocks(blocks: MessageBlock[]): MessageBlock[] {
 
 function AssistantMessageFrame({
   message,
+  liveContent,
+  cacheKeyExtra,
   turnIndex,
   t,
   startedAt,
@@ -324,7 +352,9 @@ function AssistantMessageFrame({
   onCreateReviewCommentFromSelection,
   workdir,
 }: {
-  message: RichMessage;
+  message?: RichMessage;
+  liveContent?: ReactNode;
+  cacheKeyExtra?: string;
   turnIndex?: number;
   t: (k: string) => string;
   startedAt?: string | null;
@@ -339,15 +369,29 @@ function AssistantMessageFrame({
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const [selectionDraft, setSelectionDraft] = useState<{
-    quote: string;
-    rect: { left: number; top: number; width: number; height: number };
-    highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
-    note: string;
-    creating: null | 'comment' | 'side-chat' | 'todo';
-    expanded: boolean;
-  } | null>(null);
-  const copyText = stripOaiMemoryCitations(message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n'));
+  const copyText = message ? stripOaiMemoryCitations(message.text || message.blocks.map(block => block.content).filter(Boolean).join('\n\n')) : '';
+  const messageCreatedAt = message?.createdAt || '';
+  const selectionDraftCacheKey = `${workdir || ''}:${turnIndex ?? ''}:${cacheKeyExtra || messageCreatedAt}:${copyText.length}:${copyText.slice(0, 80)}`;
+  const [selectionDraft, setSelectionDraftState] = useState<SelectionDraft | null>(() => selectionDraftCache.get(selectionDraftCacheKey) ?? null);
+
+  useEffect(() => {
+    setSelectionDraftState(selectionDraftCache.get(selectionDraftCacheKey) ?? null);
+  }, [selectionDraftCacheKey]);
+
+  const setSelectionDraft: Dispatch<SetStateAction<SelectionDraft | null>> = useCallback((next) => {
+    setSelectionDraftState(current => {
+      const resolved = typeof next === 'function'
+        ? (next as (value: SelectionDraft | null) => SelectionDraft | null)(current)
+        : next;
+      if (resolved) selectionDraftCache.set(selectionDraftCacheKey, resolved);
+      return resolved;
+    });
+  }, [selectionDraftCacheKey]);
+
+  const clearSelectionDraft = useCallback((opts: { forget?: boolean } = {}) => {
+    if (opts.forget) selectionDraftCache.delete(selectionDraftCacheKey);
+    setSelectionDraftState(null);
+  }, [selectionDraftCacheKey]);
 
   const handleCopy = () => {
     if (!copyText) return;
@@ -357,34 +401,36 @@ function AssistantMessageFrame({
   useEffect(() => {
     if (!selectionDraft) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setSelectionDraft(null);
+      if (event.key === 'Escape') clearSelectionDraft({ forget: true });
     };
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest('[data-selection-side-chat-popover]')) return;
-      if (target?.closest('.session-md')) {
+      if (selectionDraft.expanded && selectionDraft.note.trim()) return;
+      if (target?.closest(assistantSelectableSelector)) {
         window.getSelection()?.removeAllRanges();
-        setSelectionDraft(null);
+        clearSelectionDraft({ forget: true });
         return;
       }
       if (frameRef.current?.contains(target)) return;
-      setSelectionDraft(null);
+      clearSelectionDraft({ forget: true });
     };
-    const clearSelectionDraft = () => {
+    const clearTransientSelectionDraft = () => {
+      if (selectionDraft.expanded && selectionDraft.note.trim()) return;
       window.getSelection()?.removeAllRanges();
-      setSelectionDraft(null);
+      clearSelectionDraft({ forget: true });
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('scroll', clearSelectionDraft, true);
-    window.addEventListener('resize', clearSelectionDraft);
+    window.addEventListener('scroll', clearTransientSelectionDraft, true);
+    window.addEventListener('resize', clearTransientSelectionDraft);
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('scroll', clearSelectionDraft, true);
-      window.removeEventListener('resize', clearSelectionDraft);
+      window.removeEventListener('scroll', clearTransientSelectionDraft, true);
+      window.removeEventListener('resize', clearTransientSelectionDraft);
     };
-  }, [selectionDraft]);
+  }, [clearSelectionDraft, selectionDraft]);
 
   const handleSelectionEnd = () => {
     if (!frameRef.current || (!onCreateSideChatFromSelection && !onCreateTodoFromSelection && !onCreateReviewCommentFromSelection)) return;
@@ -398,7 +444,7 @@ function AssistantMessageFrame({
       ? ancestor as Element
       : ancestor.parentElement;
     if (!element || !frameRef.current.contains(element)) return;
-    if (!element.closest('.session-md')) return;
+    if (!element.closest(assistantSelectableSelector)) return;
     const rect = range.getBoundingClientRect();
     if (!rect.width && !rect.height) return;
     const highlightRects = Array.from(range.getClientRects())
@@ -418,9 +464,10 @@ function AssistantMessageFrame({
   const handleSelectionStart = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!selectionDraft) return;
     const target = event.target as HTMLElement | null;
-    if (!target?.closest('.session-md')) return;
+    if (!target?.closest(assistantSelectableSelector)) return;
+    if (selectionDraft.expanded && selectionDraft.note.trim()) return;
     window.getSelection()?.removeAllRanges();
-    setSelectionDraft(null);
+    clearSelectionDraft({ forget: true });
   };
 
   const submitSelectionAction = async (action: 'comment' | 'side-chat' | 'todo') => {
@@ -441,7 +488,7 @@ function AssistantMessageFrame({
         await onCreateReviewCommentFromSelection(request);
       }
       window.getSelection()?.removeAllRanges();
-      setSelectionDraft(null);
+      clearSelectionDraft({ forget: true });
     } catch {
       setSelectionDraft(current => current ? { ...current, creating: null } : current);
     }
@@ -457,11 +504,11 @@ function AssistantMessageFrame({
       onMouseUp={handleSelectionEnd}
       onKeyUp={handleSelectionEnd}
     >
-      <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} runError={runError ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} />
+      {liveContent ?? (message ? <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} runError={runError ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} /> : null)}
       <HoverMessageActions
         align="left"
-        visible={showActions}
-        createdAt={message.createdAt}
+        visible={showActions && !!message}
+        createdAt={message?.createdAt}
         canCopy={!!copyText}
         copied={copied}
         t={t}

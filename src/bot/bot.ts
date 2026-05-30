@@ -15,6 +15,8 @@ import {
   readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
   extractProposedPlan, readSessionPlan, writeSessionPlan, createSessionPlanView, getDriverCapabilities,
+  saveSessionOutput,
+  type CapabilityRouteDecision,
   setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
   getClaudeNativeGoal, buildClaudeSetGoalPrompt, buildClaudeClearGoalPrompt,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type StreamActivityEvents, type StreamActivityKind, type StreamActivitySummary, type SessionInfo, type UsageResult,
@@ -23,10 +25,12 @@ import {
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
   type ThreadGoal, type GoalStatus, type CodexThreadGoal, type ClaudeNativeGoal,
-  type HandoverRef, type SessionOrigin,
+  type HandoverRef, type SessionOrigin, type SessionContextSource,
   type ReconciledOrphanedRunningSession,
 } from '../agent/index.js';
 import { compactForHandover, describeHandoverRef } from '../agent/handover.js';
+import { buildContextSourceBundle } from '../agent/context-bundle.js';
+import { normalizeSessionContextSources } from '../agent/context-sources.js';
 import { getActiveProfileId, setActiveProfile, getProfile } from '../model/index.js';
 import {
   querySessions, querySessionTail, updateSession,
@@ -114,6 +118,16 @@ function buildMcpDeliveryPrompt(): string {
   ].join('\n');
 }
 
+function buildSessionOutputsPrompt(): string {
+  return [
+    '[Session Outputs]',
+    'When you create a durable plan, report, analysis note, generated document, file summary, or final deliverable, register it for the current chat by calling `pikiclaw_save_output` after the file or content exists.',
+    'Follow the workspace instructions for the durable location first. For example, repo/wiki analysis should still be written to the user\'s Obsidian Vault when instructed; then call `pikiclaw_save_output` with the title, kind, short summary, and the resulting file path.',
+    'If there is no durable file yet but the user asked for a document/report/plan, call `pikiclaw_save_output` with Markdown `content`; Pikiclaw will save it under this session workspace and show it in the Output tab.',
+    'Do not register ordinary conversational replies. Register only artifacts the user would expect to find later.',
+  ].join('\n');
+}
+
 function buildClaudeAskUserPrompt(): string {
   // Claude is heavily trained on its built-in `AskUserQuestion` tool, so just
   // registering `mcp__pikiclaw__im_ask_user` alongside it isn't enough — the
@@ -143,6 +157,24 @@ function buildBrowserAutomationPrompt(browserEnabled: boolean): string {
     'A Playwright MCP browser server is already configured to use the local Chrome channel with a persistent profile.',
     'Do not call browser_install unless a browser tool explicitly reports that Chrome or the browser is missing.',
     'If you need a new tab, use browser_tabs with action="new".',
+  ].join('\n');
+}
+
+function buildComputerUsePrompt(computerUseEnabled: boolean): string {
+  if (!computerUseEnabled || process.platform !== 'darwin') {
+    return [
+      '[Computer Use]',
+      'Native desktop Computer Use is disabled for this session.',
+      'Do not claim you can operate the user\'s current desktop apps unless a Computer Use MCP server/tool is available.',
+    ].join('\n');
+  }
+  return [
+    '[Computer Use]',
+    'A native macOS Computer Use MCP server is configured for this session. It can inspect windows/screens, click, type, scroll, and operate menus/apps through Accessibility and Screen Recording permissions.',
+    'Choose the browser/control surface by intent. Use Computer Use when the user mentions current Chrome, current tab/page, active browser window, already-signed-in content, logged-in internal pages, or desktop UI. Use managed Browser Automation for test/verify flows, localhost/dashboard checks, public pages, repeatable web automation, screenshots, and isolated browser validation.',
+    'User wording overrides the default route: if the user explicitly asks for Computer Use/current Chrome, use Computer Use; if they explicitly asks for Browser Automation/managed browser/playwright-style verification, use Browser Automation.',
+    'When opening a URL in the user\'s current Chrome, create a new tab or focus the browser address bar first (for example Command+L), then enter the URL and navigate. Never type/paste a URL into the current web page body, editor, chat input, or form field unless the user explicitly asks to fill that field.',
+    'Before interacting with an existing page, observe/see first, then target element IDs over raw coordinates whenever possible.',
   ].join('\n');
 }
 
@@ -186,6 +218,7 @@ export interface SessionRuntime {
    * the first turn completes the new agent owns the canonical session file.
    */
   handoverFrom?: HandoverRef | null;
+  contextSources?: SessionContextSource[];
 }
 
 /** Events emitted to dashboard listeners during a stream. */
@@ -379,6 +412,7 @@ export interface SubmitSessionTaskOpts {
    * can pick it up without re-reading from disk.
    */
   handoverFrom?: HandoverRef | null;
+  contextSources?: SessionContextSource[];
   /**
    * When set, this task is a runtime-injected goal continuation, not a user
    * message. Stream events carry the flag so UIs can hide or label it, and the
@@ -393,6 +427,7 @@ export interface SubmitSessionTaskOpts {
    * the agent emits its native session ID.
    */
   forkOf?: { parentSessionId: string; atTurn: number };
+  capabilityRoute?: CapabilityRouteDecision | null;
   onText?: (
     text: string,
     thinking: string,
@@ -1254,6 +1289,7 @@ export class Bot {
           modelId: task.modelId ?? undefined,
           thinkingEffort: task.thinkingEffort ?? undefined,
           handoverFrom: task.handoverFrom ?? undefined,
+          contextSources: task.contextSources ?? undefined,
           goalContinuation: task.goalContinuation,
           forkOf: task.forkOf,
         });
@@ -1319,6 +1355,7 @@ export class Bot {
     modelId?: string | null;
     thinkingEffort?: string | null;
     handoverFrom?: HandoverRef | null;
+    contextSources?: SessionContextSource[];
     origin?: SessionOrigin | null;
   }): SessionRuntime | null {
     if (!session.sessionId) return null;
@@ -1332,6 +1369,7 @@ export class Bot {
       modelId: session.modelId ?? null,
       thinkingEffort: session.thinkingEffort ?? null,
       handoverFrom: session.handoverFrom ?? null,
+      contextSources: session.contextSources ?? [],
       origin: session.origin ?? null,
     });
   }
@@ -1346,6 +1384,7 @@ export class Bot {
     thinkingEffort?: string | null;
     workdir?: string;
     handoverFrom?: HandoverRef | null;
+    contextSources?: SessionContextSource[];
     origin?: SessionOrigin | null;
   }): SessionRuntime {
     const workdir = path.resolve(session.workdir || this.workdir);
@@ -1370,6 +1409,9 @@ export class Bot {
       if (session.handoverFrom !== undefined && !existing.handoverFrom) {
         existing.handoverFrom = session.handoverFrom;
       }
+      if (session.contextSources !== undefined && !existing.contextSources?.length) {
+        existing.contextSources = normalizeSessionContextSources(session.contextSources);
+      }
       if (session.origin !== undefined && !existing.origin) existing.origin = session.origin;
       return existing;
     }
@@ -1386,6 +1428,7 @@ export class Bot {
       thinkingEffort: session.thinkingEffort ?? null,
       runningTaskIds: new Set<string>(),
       handoverFrom: session.handoverFrom ?? null,
+      contextSources: normalizeSessionContextSources(session.contextSources),
       origin: session.origin ?? null,
     };
     this.sessionStates.set(requestedKey, runtime);
@@ -1649,6 +1692,7 @@ export class Bot {
       modelId: this.modelForAgent(cs.agent),
       thinkingEffort: this.effortForAgent(cs.agent),
       handoverFrom: staged.handoverFrom,
+      contextSources: staged.contextSources,
     });
     this.attachSessionOrigin(runtime, origin);
     this.applySessionSelection(cs, runtime);
@@ -1678,6 +1722,7 @@ export class Bot {
       modelId: opts.modelId ?? null,
       thinkingEffort: opts.thinkingEffort ?? null,
       handoverFrom: opts.handoverFrom ?? session.handoverFrom ?? null,
+      contextSources: normalizeSessionContextSources(opts.contextSources ?? session.contextSources),
       ...(opts.goalContinuation ? { goalContinuation: opts.goalContinuation } : {}),
       ...(opts.forkOf ? { forkOf: opts.forkOf } : {}),
     };
@@ -2236,6 +2281,7 @@ export class Bot {
       ...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
       ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
       ...(opts.handoverFrom !== undefined ? { handoverFrom: opts.handoverFrom } : {}),
+      ...(opts.contextSources !== undefined ? { contextSources: opts.contextSources } : {}),
     });
     const taskId = opts.taskId?.trim() || `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const prompt = opts.prompt.trim();
@@ -2297,6 +2343,7 @@ export class Bot {
           undefined,
           undefined,
           { ...(opts.forkOf ? { forkOf: opts.forkOf } : {}), queueWaitMs: Date.now() - queuedAt },
+          opts.capabilityRoute || null,
         );
         this.emitStreamDone(taskId, session.key, {
           sessionId: result.sessionId || session.sessionId,
@@ -2376,6 +2423,22 @@ export class Bot {
           steps,
         });
       writeSessionPlan(session.workdir, session.agent, sessionId, next);
+      const workspacePath = result.workspacePath || session.workspacePath;
+      if (proposed && workspacePath) {
+        saveSessionOutput({
+          workspacePath,
+          workdir: session.workdir,
+          agent: session.agent,
+          sessionId,
+          input: {
+            id: `plan-${next.planId}`,
+            kind: 'document',
+            title: 'Proposed plan',
+            summary: proposed.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 8).join('\n'),
+            content: proposed,
+          },
+        });
+      }
     } catch (err: any) {
       this.debug(`[plan] failed to record plan view: ${err?.message || err}`);
     }
@@ -3072,11 +3135,12 @@ export class Bot {
       this.switchWorkdir(nextWorkdir, { persist: false });
     }
 
-    const nextDefaultAgent = normalizeAgent(String(config.defaultAgent || 'codex').trim().toLowerCase() || 'codex');
+    const requestedDefaultAgent = String(config.defaultAgent || 'codex').trim().toLowerCase() || 'codex';
+    const nextDefaultAgent = hasDriver(requestedDefaultAgent) ? normalizeAgent(requestedDefaultAgent) : normalizeAgent('codex');
     if (opts.initial) this.defaultAgent = nextDefaultAgent;
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
 
-    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'] as Agent[]) {
+    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'] as Agent[]) {
       const nextModel = resolveAgentModel(config, agent);
       if (nextModel && this.modelForAgent(agent) !== nextModel) {
         if (opts.initial) this.agentConfigs[agent].model = nextModel;
@@ -3094,7 +3158,7 @@ export class Bot {
   }
 
   async runStream(
-    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'threadId' | 'handoverFrom'> | ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'threadId' | 'handoverFrom' | 'contextSources'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
     mcpSendFile?: import('../agent/mcp/bridge.js').McpSendFileCallback,
@@ -3103,6 +3167,7 @@ export class Bot {
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
     extras?: { forkOf?: { parentSessionId: string; atTurn: number }; queueWaitMs?: number },
+    capabilityRoute?: CapabilityRouteDecision | null,
   ): Promise<StreamResult> {
     const agentConfig = this.agentConfigs[cs.agent] || {};
     // Session-level config stored on disk — used as fallback between explicit override and global defaults
@@ -3115,13 +3180,30 @@ export class Bot {
       ? cs.thinkingEffort.trim().toLowerCase()
       : (storedConfig?.thinkingEffort || agentConfig.reasoningEffort || 'high');
     const extraArgs: string[] = agentConfig.extraArgs || [];
-    const browserEnabled = resolveGuiIntegrationConfig(getActiveUserConfig()).browserEnabled;
+    const guiIntegration = resolveGuiIntegrationConfig(getActiveUserConfig());
     const sessionWorkdir = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir
       ? path.resolve(cs.workdir)
       : this.workdir;
     this.debug(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${sessionWorkdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     this.debug(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
+
+    const contextSources = 'contextSources' in cs ? normalizeSessionContextSources(cs.contextSources) : [];
+    if (isFirstTurnOfSession && contextSources.length) {
+      try {
+        const bundle = await buildContextSourceBundle({
+          sources: contextSources,
+          targetAgent: cs.agent,
+          targetModel: resolvedModel,
+        });
+        if (bundle) {
+          prompt = bundle + '\n\n' + prompt;
+          this.debug(`[runStream] injected context source bundle agent=${cs.agent} sources=${contextSources.length}`);
+        }
+      } catch (e: any) {
+        this.warn(`[runStream] context source bundle failed: ${e?.message || e}; proceeding without source bundle`);
+      }
+    }
 
     // ── Cross-agent handover ──
     // First turn of a session created by an agent switch: read the prior agent's
@@ -3158,10 +3240,16 @@ export class Bot {
     }
     const mcpSystemPrompt = appendExtraPrompt(
       appendExtraPrompt(
-        mcpSendFile ? buildMcpDeliveryPrompt() : '',
+        appendExtraPrompt(
+          mcpSendFile ? buildMcpDeliveryPrompt() : '',
+          buildSessionOutputsPrompt(),
+        ),
         onInteraction && cs.agent === 'claude' ? buildClaudeAskUserPrompt() : '',
       ),
-      buildBrowserAutomationPrompt(browserEnabled),
+      appendExtraPrompt(
+        buildBrowserAutomationPrompt(guiIntegration.browserEnabled),
+        buildComputerUsePrompt(guiIntegration.peekabooEnabled),
+      ),
     );
     // mcpSystemPrompt carries behaviour directives (use im_ask_user instead of
     // built-in AskUserQuestion, browser automation status, artifact delivery)
@@ -3224,6 +3312,7 @@ export class Bot {
       // openclaw-specific
       openclawModel: cs.agent === 'openclaw' ? resolvedModel : (this.agentConfigs.openclaw?.model || ''),
       openclawExtraArgs: (this.agentConfigs.openclaw?.extraArgs || []).length ? this.agentConfigs.openclaw.extraArgs : undefined,
+      openclawAgent: cs.agent === 'openclaw' ? capabilityRoute?.openclawAgent : undefined,
       // MCP bridge
       mcpSendFile,
       abortSignal,

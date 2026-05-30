@@ -91,7 +91,7 @@ function targetOpenClawAgent(extraArgs: string[]): string {
 
 function openclawArgs(opts: StreamOpts, prompt: string, sessionId: string): string[] {
   const extraArgs = opts.openclawExtraArgs || [];
-  const targetAgent = targetOpenClawAgent(extraArgs);
+  const targetAgent = String(opts.openclawAgent || '').trim() || targetOpenClawAgent(extraArgs);
   const args = [
     'agent',
     '--agent', targetAgent,
@@ -100,10 +100,12 @@ function openclawArgs(opts: StreamOpts, prompt: string, sessionId: string): stri
     '--json',
     '--timeout', String(Math.max(1, Math.floor(opts.timeout || 600))),
   ];
-  const model = openclawModel(opts);
-  if (model) args.push('--model', model);
-  const effort = String(opts.thinkingEffort || '').trim().toLowerCase();
-  if (effort) args.push('--thinking', effort);
+  if (targetAgent !== 'cursor') {
+    const model = openclawModel(opts);
+    if (model) args.push('--model', model);
+    const effort = String(opts.thinkingEffort || '').trim().toLowerCase();
+    if (effort) args.push('--thinking', effort);
+  }
   if (extraArgs.length) {
     args.push(...stripFlagWithValue(extraArgs, ['--agent', '--session-key', '--message', '--timeout']));
   }

@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeTmpDir } from './support/env.js';
+import { makeTmpDir, withTempHome } from './support/env.js';
+import sessionRoutes from '../src/dashboard/routes/sessions.js';
+import { claudeProjectDirName } from '../src/agent/drivers/claude.js';
 
 // Import after side-effectful driver registration runs.
 import {
@@ -92,5 +94,30 @@ describe('deleteAgentSession', () => {
     expect(result.ok).toBe(true);
     expect(result.recordRemoved).toBe(false);
     expect(result.pikiclawPathsRemoved).toEqual([]);
+  });
+
+  it('dashboard delete purges native session even if an old client sends purgeNative false', async () => {
+    await withTempHome(async (home) => {
+      const workdir = makeTmpDir('pikiclaw-del-');
+      const sessionId = 'sess-native';
+      saveSessionRecord(workdir, makeRecord(workdir, sessionId));
+
+      const nativeFile = path.join(home, '.claude', 'projects', claudeProjectDirName(workdir), `${sessionId}.jsonl`);
+      fs.mkdirSync(path.dirname(nativeFile), { recursive: true });
+      fs.writeFileSync(nativeFile, JSON.stringify({ type: 'summary', summary: 'Native session' }) + '\n');
+
+      const res = await sessionRoutes.request('/api/session-hub/session/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workdir, agent: 'claude', sessionId, purgeNative: false }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ ok: true, recordRemoved: true });
+      expect(body.nativePathsRemoved).toEqual([nativeFile]);
+      expect(findPikiclawSession(workdir, 'claude', sessionId)).toBeNull();
+      expect(fs.existsSync(nativeFile)).toBe(false);
+    });
   });
 });

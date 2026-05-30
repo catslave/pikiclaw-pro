@@ -8,8 +8,8 @@
  *   GET  /api/local-models/probe    → which backends are running, what models
  *                                     they expose, install/run hints, and
  *                                     whether a Provider already points at each.
- *   POST /api/local-models/connect  → idempotently create the Provider for the
- *                                     named backend.
+ *   POST /api/local-models/install  → install / start the named backend.
+ *   POST /api/local-models/load     → pull / start the chosen model.
  *
  * Endpoints we expect:
  *   - Ollama  baseURL → http://127.0.0.1:11434
@@ -20,17 +20,19 @@
  *   - mlx-lm  baseURL → http://127.0.0.1:8080   (mlx_lm.server default)
  *             probe   → GET /v1/models   (200 OK iff server up; no version)
  *
- * Model downloads stay manual (user runs `ollama pull <tag>` or restarts
- * `mlx_lm.server --model <repo>` in their own terminal). The install spec
- * is shipped alongside detection so the UI can mirror the CLI tools page.
+ * The dashboard can now run the safe local install/load paths directly. Manual
+ * commands remain in the response for transparency and fallback.
  */
 
 import { Hono } from 'hono';
+import { spawn } from 'node:child_process';
 import { LOCAL_MODELS, type LocalModelEntry } from '../../catalog/local-models.js';
 import {
   listProviders, addProvider, listProfiles, addProfile,
   type ProviderConfig,
 } from '../../model/index.js';
+import { processEnvWithUserBins, resolveExecutablePath } from '../../core/platform.js';
+import { runtime } from '../runtime.js';
 
 const router = new Hono();
 
@@ -124,6 +126,11 @@ const BACKENDS: BackendSpec[] = [
 ];
 
 const PROBE_TIMEOUT_MS = 1500;
+const BACKEND_INSTALL_TIMEOUT_MS = 20 * 60_000;
+const MODEL_PULL_TIMEOUT_MS = 60 * 60_000;
+const OLLAMA_START_TIMEOUT_MS = 20_000;
+const MLX_START_TIMEOUT_MS = 45_000;
+const OUTPUT_LIMIT = 16_000;
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -141,6 +148,163 @@ async function fetchJson<T>(url: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<
   } finally {
     clearTimeout(timer);
   }
+}
+
+function clipOutput(text: string, limit = OUTPUT_LIMIT): string {
+  if (text.length <= limit) return text;
+  return text.slice(text.length - limit);
+}
+
+function runCommand(
+  cmd: string,
+  args: string[],
+  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ ok: boolean; stdout: string; stderr: string; error: string | null; exitCode: number | null }> {
+  return new Promise(resolve => {
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+    const spawnEnv = processEnvWithUserBins({
+      ...process.env,
+      ...(opts.env || {}),
+      NO_COLOR: '1',
+      TERM: 'dumb',
+    });
+    const resolvedCmd = resolveExecutablePath(cmd, spawnEnv) || cmd;
+    const child = spawn(resolvedCmd, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: spawnEnv,
+      shell: process.platform === 'win32' && !resolvedCmd.toLowerCase().endsWith('.exe'),
+      windowsHide: true,
+    });
+    const timeoutMs = Math.max(1_000, opts.timeoutMs ?? 30_000);
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      child.kill('SIGTERM');
+      resolve({
+        ok: false,
+        stdout: clipOutput(stdout),
+        stderr: clipOutput(stderr),
+        error: `Timed out after ${Math.round(timeoutMs / 1000)}s`,
+        exitCode: null,
+      });
+    }, timeoutMs);
+
+    child.stdout?.on('data', chunk => { stdout = clipOutput(stdout + String(chunk)); });
+    child.stderr?.on('data', chunk => { stderr = clipOutput(stderr + String(chunk)); });
+    child.on('error', err => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ ok: false, stdout: clipOutput(stdout), stderr: clipOutput(stderr), error: err.message, exitCode: null });
+    });
+    child.on('close', code => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        stdout: clipOutput(stdout),
+        stderr: clipOutput(stderr),
+        error: code === 0 ? null : `Command exited with code ${code}`,
+        exitCode: code,
+      });
+    });
+  });
+}
+
+function spawnDetached(cmd: string, args: string[], label: string): void {
+  const env = processEnvWithUserBins({ ...process.env, NO_COLOR: '1', TERM: 'dumb' });
+  const resolvedCmd = resolveExecutablePath(cmd, env);
+  if (!resolvedCmd) throw new Error(`${cmd} is not installed or not on PATH.`);
+  const child = spawn(resolvedCmd, args, {
+    stdio: 'ignore',
+    env,
+    detached: true,
+    shell: process.platform === 'win32' && !resolvedCmd.toLowerCase().endsWith('.exe'),
+    windowsHide: true,
+  });
+  child.on('error', err => runtime.log(`[local-models] ${label} failed: ${err.message}`));
+  child.unref();
+  runtime.log(`[local-models] ${label} started pid=${child.pid || 'unknown'}`);
+}
+
+function backendBinary(spec: BackendSpec): string {
+  return spec.id === 'ollama' ? 'ollama' : 'mlx_lm.server';
+}
+
+function isBackendBinaryAvailable(spec: BackendSpec): boolean {
+  return !!resolveExecutablePath(backendBinary(spec), processEnvWithUserBins());
+}
+
+async function waitForBackend(spec: BackendSpec, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = spec.id === 'ollama' ? await probeOllama(spec) : await probeMlx(spec);
+    if (status.detected) return true;
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
+  return false;
+}
+
+async function ensureOllamaServer(spec: BackendSpec): Promise<{ ok: boolean; started: boolean; error?: string }> {
+  const current = await probeOllama(spec);
+  if (current.detected) return { ok: true, started: false };
+  if (!isBackendBinaryAvailable(spec)) return { ok: false, started: false, error: 'Ollama CLI is not installed or not on PATH.' };
+  try {
+    spawnDetached('ollama', ['serve'], 'ollama serve');
+  } catch (e: any) {
+    return { ok: false, started: false, error: e?.message || 'Failed to start Ollama.' };
+  }
+  const ready = await waitForBackend(spec, OLLAMA_START_TIMEOUT_MS);
+  return ready
+    ? { ok: true, started: true }
+    : { ok: false, started: true, error: 'Ollama was started, but did not become ready yet.' };
+}
+
+function resolveBackendInstallCommand(spec: BackendSpec): { label: string; cmd: string; args: string[] } | null {
+  const os = currentOs();
+  if (!spec.platforms.includes(os)) return null;
+
+  if (spec.id === 'ollama') {
+    if (os === 'darwin' && resolveExecutablePath('brew')) {
+      return { label: 'Homebrew', cmd: 'brew', args: ['install', 'ollama'] };
+    }
+    if (os === 'linux') {
+      return { label: 'Install script', cmd: 'sh', args: ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'] };
+    }
+    if (os === 'win') {
+      return {
+        label: 'winget',
+        cmd: 'winget',
+        args: ['install', 'Ollama.Ollama', '--accept-package-agreements', '--accept-source-agreements'],
+      };
+    }
+  }
+
+  if (spec.id === 'mlx' && os === 'darwin') {
+    if (resolveExecutablePath('pipx')) return { label: 'pipx', cmd: 'pipx', args: ['install', 'mlx-lm'] };
+    if (resolveExecutablePath('python3')) return { label: 'pip', cmd: 'python3', args: ['-m', 'pip', 'install', '--user', 'mlx-lm'] };
+    if (resolveExecutablePath('python')) return { label: 'pip', cmd: 'python', args: ['-m', 'pip', 'install', '--user', 'mlx-lm'] };
+  }
+
+  return null;
+}
+
+async function ensureBackendInstalled(spec: BackendSpec): Promise<{ ok: boolean; output?: string; error?: string; installedNow: boolean }> {
+  if (isBackendBinaryAvailable(spec)) return { ok: true, installedNow: false };
+  const command = resolveBackendInstallCommand(spec);
+  if (!command) {
+    return { ok: false, installedNow: false, error: `No automatic installer is available for ${spec.label} on this machine.` };
+  }
+  runtime.log(`[local-models] installing ${spec.id} via ${command.label}: ${command.cmd} ${command.args.join(' ')}`);
+  const result = await runCommand(command.cmd, command.args, { timeoutMs: BACKEND_INSTALL_TIMEOUT_MS });
+  const output = clipOutput([result.stdout, result.stderr].filter(Boolean).join('\n'));
+  if (!result.ok) {
+    return { ok: false, installedNow: false, output, error: result.error || output || `Failed to install ${spec.label}.` };
+  }
+  return { ok: true, output, installedNow: true };
 }
 
 function currentOs(): OsKey {
@@ -318,6 +482,50 @@ async function ensureProviderForBackend(spec: BackendSpec): Promise<string | nul
   }
 }
 
+async function probeAndAttachLocalModels(): Promise<{
+  backends: BackendStatus[];
+  catalog: CatalogJoinEntry[];
+  currentOs: OsKey;
+  addedProviderIds: string[];
+}> {
+  const initialProviders = listProviders();
+  const backends = await Promise.all(BACKENDS.map(spec => probeBackend(spec, initialProviders)));
+  const addedProviderIds: string[] = [];
+  for (const b of backends) {
+    if (!b.detected) continue;
+    const spec = BACKENDS.find(s => s.id === b.id);
+    if (!spec) continue;
+    let providerId = b.existingProviderId;
+    if (!providerId) {
+      providerId = await ensureProviderForBackend(spec);
+      if (providerId) {
+        b.existingProviderId = providerId;
+        addedProviderIds.push(providerId);
+      }
+    }
+    if (providerId) syncLocalProfilesForBackend(providerId, b.models);
+  }
+  return {
+    backends,
+    catalog: joinCatalog(backends),
+    currentOs: currentOs(),
+    addedProviderIds,
+  };
+}
+
+function backendById(raw: unknown): BackendSpec | null {
+  const id = String(raw || '').trim();
+  return BACKENDS.find(b => b.id === id) || null;
+}
+
+function modelTargetForBackend(spec: BackendSpec, entryId: string): { entry: LocalModelEntry; model: string } | null {
+  const entry = LOCAL_MODELS.find(e => e.id === entryId);
+  if (!entry) return null;
+  const model = entry[spec.modelField];
+  if (!model) return null;
+  return { entry, model };
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -337,25 +545,117 @@ async function ensureProviderForBackend(spec: BackendSpec): Promise<string | nul
  */
 router.get('/api/local-models/probe', async c => {
   try {
-    const initialProviders = listProviders();
-    const backends = await Promise.all(BACKENDS.map(spec => probeBackend(spec, initialProviders)));
-    const addedProviderIds: string[] = [];
-    for (const b of backends) {
-      if (!b.detected) continue;
-      const spec = BACKENDS.find(s => s.id === b.id);
-      if (!spec) continue;
-      let providerId = b.existingProviderId;
-      if (!providerId) {
-        providerId = await ensureProviderForBackend(spec);
-        if (providerId) {
-          b.existingProviderId = providerId;
-          addedProviderIds.push(providerId);
-        }
-      }
-      if (providerId) syncLocalProfilesForBackend(providerId, b.models);
+    return c.json({ ok: true, ...(await probeAndAttachLocalModels()) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+router.post('/api/local-models/install', async c => {
+  try {
+    let body: any = {};
+    try { body = await c.req.json(); } catch { body = {}; }
+    const spec = backendById(body.backend);
+    if (!spec) return c.json({ ok: false, error: 'Invalid backend' }, 400);
+    if (!spec.platforms.includes(currentOs())) {
+      return c.json({ ok: false, error: `${spec.label} is not supported on this OS.` }, 400);
     }
-    const catalog = joinCatalog(backends);
-    return c.json({ ok: true, backends, catalog, currentOs: currentOs(), addedProviderIds });
+
+    const install = await ensureBackendInstalled(spec);
+    if (!install.ok) return c.json({ ok: false, error: install.error, output: install.output }, 500);
+
+    let serviceStarted = false;
+    let serviceReady = spec.id === 'mlx';
+    if (spec.id === 'ollama') {
+      const service = await ensureOllamaServer(spec);
+      serviceStarted = service.started;
+      serviceReady = service.ok;
+      if (!service.ok) {
+        return c.json({
+          ok: false,
+          error: service.error,
+          output: install.output,
+          installedNow: install.installedNow,
+          serviceStarted,
+        }, 500);
+      }
+    }
+
+    const snapshot = await probeAndAttachLocalModels();
+    const backend = snapshot.backends.find(b => b.id === spec.id) || null;
+    return c.json({
+      ok: true,
+      backend,
+      output: install.output,
+      installedNow: install.installedNow,
+      serviceStarted,
+      serviceReady,
+      ...snapshot,
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+router.post('/api/local-models/load', async c => {
+  try {
+    let body: any = {};
+    try { body = await c.req.json(); } catch { body = {}; }
+    const spec = backendById(body.backend);
+    if (!spec) return c.json({ ok: false, error: 'Invalid backend' }, 400);
+    if (!spec.platforms.includes(currentOs())) {
+      return c.json({ ok: false, error: `${spec.label} is not supported on this OS.` }, 400);
+    }
+    const target = modelTargetForBackend(spec, String(body.modelEntryId || '').trim());
+    if (!target) return c.json({ ok: false, error: 'Model is not available for this backend.' }, 400);
+
+    const install = await ensureBackendInstalled(spec);
+    if (!install.ok) return c.json({ ok: false, error: install.error, output: install.output }, 500);
+
+    if (spec.id === 'ollama') {
+      const service = await ensureOllamaServer(spec);
+      if (!service.ok) return c.json({ ok: false, error: service.error }, 500);
+
+      runtime.log(`[local-models] pulling ollama model ${target.model}`);
+      const pull = await runCommand('ollama', ['pull', target.model], { timeoutMs: MODEL_PULL_TIMEOUT_MS });
+      const output = clipOutput([pull.stdout, pull.stderr].filter(Boolean).join('\n'));
+      if (!pull.ok) {
+        return c.json({ ok: false, error: pull.error || output || `Failed to load ${target.entry.name}.`, output }, 500);
+      }
+      return c.json({
+        ok: true,
+        ready: true,
+        model: target.model,
+        output,
+        ...(await probeAndAttachLocalModels()),
+      });
+    }
+
+    const current = await probeMlx(spec);
+    if (current.detected) {
+      const already = current.models.some(m => m.id === target.model);
+      if (!already) {
+        const loaded = current.models.map(m => m.id).filter(Boolean).join(', ') || 'another model';
+        return c.json({
+          ok: false,
+          error: `mlx-lm is already running with ${loaded}. Stop that server before switching models.`,
+        }, 409);
+      }
+      return c.json({ ok: true, ready: true, model: target.model, ...(await probeAndAttachLocalModels()) });
+    }
+
+    runtime.log(`[local-models] starting mlx-lm model ${target.model}`);
+    spawnDetached('mlx_lm.server', ['--model', target.model, '--port', '8080'], `mlx_lm.server ${target.model}`);
+    const ready = await waitForBackend(spec, MLX_START_TIMEOUT_MS);
+    return c.json({
+      ok: true,
+      ready,
+      model: target.model,
+      message: ready
+        ? undefined
+        : 'mlx-lm is starting or downloading the model. Refresh this panel in a moment.',
+      ...(await probeAndAttachLocalModels()),
+    });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
   }

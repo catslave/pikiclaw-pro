@@ -74,6 +74,7 @@ export interface SimpleCliRunOptions {
   label: string;
   buildCommand: (opts: StreamOpts, prompt: string, sessionId: string) => SimpleCliCommand;
   includeHistory?: boolean;
+  renderStdout?: (stdout: string, stderr: string, command: SimpleCliCommand) => string;
   parseOutput?: (stdout: string, stderr: string, command: SimpleCliCommand) => SimpleCliParsedOutput;
 }
 
@@ -177,6 +178,7 @@ function recordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     linkedSessions: record.linkedSessions,
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
+    outputs: record.outputs ?? [],
     numTurns: record.numTurns ?? null,
     handoverFrom: record.handoverFrom ?? null,
   };
@@ -270,7 +272,11 @@ export async function runSimpleCliStream(opts: StreamOpts, runOptions: SimpleCli
   });
 
   const emit = () => {
-    try { opts.onText(stripAnsi(stdout).trimStart(), '', `${runOptions.label} running...`); } catch {}
+    try {
+      const raw = stripAnsi(stdout).trimStart();
+      const rendered = runOptions.renderStdout ? runOptions.renderStdout(raw, stderr, command) : raw;
+      opts.onText(rendered, '', `${runOptions.label} running...`);
+    } catch {}
   };
   const abortStream = () => {
     if (interrupted || child.killed) return;

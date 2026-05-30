@@ -10,7 +10,7 @@ import { hasPlan } from '../../components/PlanProgressCard';
 import type { AgentCapabilityDescriptor, InteractionSnapshot, MessageBlock, SessionGoalView, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
-import { hasRenderableAssistant } from './AssistantContent';
+import { hasRenderableAssistant, insertComposerCommand, messageHasProposedPlan, textHasProposedPlan } from './AssistantContent';
 import { InputComposer, type PendingReviewComment } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
 import type { OpenFileLinkHandler } from './markdown';
@@ -171,11 +171,41 @@ function GoalStatusBar({
   );
 }
 
+function PlanDecisionBar({ compact }: { compact: boolean }) {
+  return (
+    <div className={cn('mx-auto w-full', compact ? 'max-w-[560px] px-2.5 pt-1.5' : 'max-w-[860px] px-4 pt-2 sm:px-3')}>
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-sky-500/25 bg-sky-500/[0.07] px-3 py-2 shadow-[0_8px_22px_rgba(15,23,42,0.08)] backdrop-blur-md">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-300" />
+          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-sky-300">Proposed plan</span>
+          <span className="min-w-0 truncate text-[11px] text-fg-5">Choose the next step when you are ready.</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => insertComposerCommand('/plan implement')}
+            className="rounded-md border border-sky-400/30 bg-sky-400/[0.14] px-2.5 py-1 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-400/[0.2]"
+          >
+            Implement
+          </button>
+          <button
+            type="button"
+            onClick={() => insertComposerCommand('/plan clarify ')}
+            className="rounded-md border border-edge/50 bg-control px-2.5 py-1 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
+          >
+            Continue Clarifying
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialDraftPrompt = null, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
@@ -184,12 +214,16 @@ export const SessionPanel = memo(function SessionPanel({
   compact?: boolean;
   transcriptHeader?: ReactNode;
   transcriptFooter?: ReactNode;
+  referenceContextPrompt?: string | null;
+  referenceContextLabel?: string | null;
+  onReferenceContextClear?: () => void;
   onSessionChange?: (next: SessionPanelChange) => void;
   onMultiSessionChange?: (next: SessionPanelChange[], prompt: string) => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  initialDraftPrompt?: string | null;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
    *  Ownership transfers to this panel: we revoke them once the turn completes. */
@@ -291,10 +325,12 @@ export const SessionPanel = memo(function SessionPanel({
   const liveStreamRef = useRef(liveStream);
   const streamingRef = useRef(streaming);
   const streamPhaseRef = useRef(streamPhase);
+  const streamTaskIdRef = useRef(streamTaskId);
   const queuedTaskIdsRef = useRef(queuedTaskIds);
   liveStreamRef.current = liveStream;
   streamingRef.current = streaming;
   streamPhaseRef.current = streamPhase;
+  streamTaskIdRef.current = streamTaskId;
   queuedTaskIdsRef.current = queuedTaskIds;
   const scrollRef = useRef<HTMLDivElement>(null);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
@@ -999,10 +1035,41 @@ export const SessionPanel = memo(function SessionPanel({
   // stop button so the user's expectation that "stop = halt this conversation"
   // holds even when they've already queued follow-ups behind the active turn.
   const handleStopAll = useCallback(async () => {
+    const taskIds = [
+      streamTaskIdRef.current,
+      pendingTaskIdRef.current,
+      liveStreamRef.current?.taskId ?? null,
+      ...queuedTaskIdsRef.current,
+    ].filter((taskId): taskId is string => !!taskId);
+    const uniqueTaskIds = [...new Set(taskIds)];
+
+    setPendingStopped(true);
+    setStreaming(false);
+    setStreamPhase('done');
+    setStreamTaskId(null);
+    setQueuedTaskIds([]);
+    setQueuedTasks([]);
+    setInteractions([]);
+    clearPendingQueuedSends();
+    localStreamPendingRef.current = false;
+    clearLiveStreamOnLoadRef.current = true;
+    setLiveStream(prev => prev ? {
+      ...prev,
+      phase: 'done',
+      error: prev.error || 'Stopped by user',
+      completedAt: prev.completedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } : prev);
+
     try {
       await api.stopSession(session.agent || '', session.sessionId);
     } catch { /* server-side already logged */ }
-  }, [session.agent, session.sessionId]);
+    if (uniqueTaskIds.length) {
+      await Promise.all(uniqueTaskIds.map(taskId => api.recallSessionMessage(taskId).catch(() => null)));
+    }
+    requestStreamPolling();
+    void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: false });
+  }, [clearPendingQueuedSends, loadLatestTurns, requestStreamPolling, session.agent, session.sessionId]);
 
   const handleResendText = useCallback((txt: string) => {
     forceScrollToBottomRef.current = true;
@@ -1489,6 +1556,12 @@ export const SessionPanel = memo(function SessionPanel({
     effectiveLiveStream?.text?.length || 0,
     effectiveLiveStream?.activity?.length || 0,
   ].join(':');
+  const hasVisiblePlanDecision = useMemo(() => {
+    if (streamIsActive) return false;
+    if (textHasProposedPlan(effectiveLiveStream?.text)) return true;
+    const latestTurn = turns[turns.length - 1];
+    return messageHasProposedPlan(latestTurn?.assistant);
+  }, [effectiveLiveStream?.text, streamIsActive, turns]);
   useLayoutEffect(() => {
     if (!stickToBottomRef.current) return;
     scheduleBottomScroll(scrollToBottomRef.current || forceScrollToBottomRef.current);
@@ -1660,10 +1733,15 @@ export const SessionPanel = memo(function SessionPanel({
             onResume={() => void runGoalAction('resume')}
             onClear={() => void runGoalAction('clear')}
           />
+          {hasVisiblePlanDecision && <PlanDecisionBar compact={compact} />}
           <InputComposer
             session={session}
             workdir={workdir}
             compact={compact}
+            initialDraftPrompt={initialDraftPrompt}
+            referenceContextPrompt={referenceContextPrompt}
+            referenceContextLabel={referenceContextLabel}
+            onReferenceContextClear={onReferenceContextClear}
             onStreamQueued={requestStreamPolling}
             onSendStart={handleSendStart}
             onSendTaskAssigned={handleSendTaskAssigned}
