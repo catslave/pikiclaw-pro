@@ -689,20 +689,27 @@ function CreateJiraTaskModal({
     description: '',
     workdir: defaultWorkdir,
     defaultAgent,
-    defaultAssistantId: defaultAssistantId || assistants.find(item => item.id === 'assistant_refinement')?.id || '',
+    defaultAssistantId: defaultAssistantId || '',
   });
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (!open) return;
-    setDraft(prev => ({
-      ...prev,
-      workdir: prev.workdir || defaultWorkdir,
-      defaultAgent: prev.defaultAgent || defaultAgent,
-      defaultAssistantId: prev.defaultAssistantId || defaultAssistantId || assistants.find(item => item.id === 'assistant_refinement')?.id || '',
-    }));
-  }, [assistants, defaultAgent, defaultAssistantId, defaultWorkdir, open]);
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
+    setDraft({
+      title: '',
+      description: '',
+      workdir: defaultWorkdir,
+      defaultAgent,
+      defaultAssistantId: defaultAssistantId || '',
+    });
+  }, [defaultAgent, defaultAssistantId, defaultWorkdir, open]);
 
-  const assistantLabel = assistants.find(assistant => assistant.id === draft.defaultAssistantId)?.name || 'Runtime default';
+  const assistantLabel = assistants.find(assistant => assistant.id === draft.defaultAssistantId)?.name || 'None';
   const workspaceLabel = workspaces.find(workspace => workspace.path === draft.workdir)?.name || workspaceShortLabel(draft.workdir) || 'Workspace';
   const canCreate = !!(draft.title.trim() || draft.description.trim()) && !creating;
 
@@ -714,47 +721,42 @@ function CreateJiraTaskModal({
         onClose={onClose}
       />
       <div className="space-y-3">
-        <textarea
+        <Input
           autoFocus
+          value={draft.title}
+          onChange={event => setDraft(prev => ({ ...prev, title: event.target.value }))}
+          placeholder="Title optional"
+        />
+        <textarea
           value={draft.description}
           onChange={event => setDraft(prev => ({ ...prev, description: event.target.value }))}
           placeholder="Describe what you want done, what success looks like, and any constraints..."
           className="min-h-40 w-full resize-y rounded-lg border border-control-border bg-control px-3.5 py-3 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/65 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
         />
-        <Input
-          value={draft.title}
-          onChange={event => setDraft(prev => ({ ...prev, title: event.target.value }))}
-          placeholder="Title optional"
-        />
-        <div className="rounded-lg border border-edge/60 bg-panel-alt/45 px-3 py-2">
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-fg-5">
-            <span className="font-medium text-fg-3">{assistantLabel}</span>
-            <span>·</span>
-            <span>{draft.defaultAgent}</span>
-            <span>·</span>
-            <span className="truncate">{workspaceLabel}</span>
+        <div className="rounded-lg border border-edge/60 bg-panel-alt/35 px-3">
+          <div className="flex items-center justify-between border-b border-edge/45 py-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Task fields</div>
+            <div className="max-w-[220px] truncate text-[11px] text-fg-5">{assistantLabel} · {workspaceLabel}</div>
           </div>
-          <div className="grid gap-2 md:grid-cols-3">
-            <label className="space-y-1">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</div>
-              <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-                <option value="">Runtime default</option>
-                {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Agent</div>
-              <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-                {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes', 'openclaw'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Workspace</div>
-              <select value={draft.workdir} onChange={event => setDraft(prev => ({ ...prev, workdir: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-                {workspaces.map(ws => <option key={ws.path} value={ws.path}>{ws.name || ws.path.split('/').pop() || ws.path}</option>)}
-              </select>
-            </label>
-          </div>
+          <label className="flex items-center justify-between gap-3 py-2">
+            <div className="min-w-0">
+              <div className="text-[12px] font-medium text-fg-2">Assign</div>
+              <div className="text-[11px] text-fg-5">Optional owner for the first pass</div>
+            </div>
+            <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-8 w-[210px] max-w-[54%] rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              <option value="">None</option>
+              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center justify-between gap-3 border-t border-edge/35 py-2">
+            <div className="min-w-0">
+              <div className="text-[12px] font-medium text-fg-2">Workspace</div>
+              <div className="truncate text-[11px] text-fg-5">Files and context for this task</div>
+            </div>
+            <select value={draft.workdir} onChange={event => setDraft(prev => ({ ...prev, workdir: event.target.value }))} className="h-8 w-[210px] max-w-[54%] rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
+              {workspaces.map(ws => <option key={ws.path} value={ws.path}>{ws.name || ws.path.split('/').pop() || ws.path}</option>)}
+            </select>
+          </label>
         </div>
       </div>
       <div className="mt-4 flex justify-end gap-2">
