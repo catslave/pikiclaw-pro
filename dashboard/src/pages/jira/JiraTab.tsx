@@ -233,31 +233,6 @@ function taskStatusTone(status: ProTaskStatus): 'ok' | 'warn' | 'muted' | 'accen
   return 'muted';
 }
 
-function taskStatusDisplay(status: ProTaskStatus): { ring: string; glyph: string; text: string } {
-  if (status === 'done') return { ring: 'border-ok text-ok bg-ok/10 shadow-[0_0_0_4px_rgba(34,197,94,0.08)]', glyph: 'border-l-ok', text: 'text-ok' };
-  if (status === 'resolved') return { ring: 'border-sky-500 text-sky-500 bg-sky-500/10 shadow-[0_0_0_4px_rgba(14,165,233,0.08)]', glyph: 'border-l-sky-500', text: 'text-sky-500' };
-  if (status === 'coding' || status === 'refinement') return { ring: 'border-warn text-warn bg-warn/10 shadow-[0_0_0_4px_var(--th-badge-warn-bg)]', glyph: 'border-l-warn', text: 'text-warn' };
-  return { ring: 'border-primary text-primary bg-primary/10 shadow-[0_0_0_4px_rgba(154,91,0,0.08)]', glyph: 'border-l-primary', text: 'text-primary' };
-}
-
-function TaskStatusDisplay({ status }: { status: ProTaskStatus }) {
-  const display = taskStatusDisplay(status);
-
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className={cn('inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border', display.ring)}>
-        <span className={cn('ml-0.5 h-0 w-0 border-y-[4px] border-l-[6px] border-y-transparent', display.glyph)} />
-      </span>
-      <span className="min-w-0">
-        <span className="block text-[12px] font-medium leading-none tracking-normal text-fg-5">Task status</span>
-        <span className={cn('mt-0.5 block truncate text-[12px] font-semibold leading-none tracking-normal', display.text)}>
-          {STATUS_LABEL[status]}
-        </span>
-      </span>
-    </div>
-  );
-}
-
 function workspaceShortLabel(path: string): string {
   const parts = path.split('/').filter(Boolean);
   return parts.slice(-2).join('/') || path;
@@ -2113,6 +2088,12 @@ function taskAssignee(task: ProTask, fallbackAgent: string): string {
   return task.execution?.agent || task.defaultAgent || fallbackAgent || 'Unassigned';
 }
 
+function taskAssignedAssistant(task: ProTask, assistants: AgentAssistant[]): string {
+  const assistantId = task.execution?.assistantId || task.defaultAssistantId;
+  if (!assistantId) return 'None';
+  return assistants.find(assistant => assistant.id === assistantId)?.name || assistantId;
+}
+
 function taskProjectName(task: ProTask): string {
   const labels = task.jiraFields?.labels || [];
   const projectLabel = labels.find(label => /ivar|nova|air|asm|iag|cac/i.test(label));
@@ -2362,13 +2343,12 @@ function TaskDetail({
   actions,
   defaultAgent,
   agents,
+  assistants,
   busy,
   reopening,
-  cycles,
   workspaces,
   fallbackWorkdir,
   subtaskDraft,
-  onCycleChange,
   onMetaChange,
   onStartStatusChat,
   onSubtaskDraftChange,
@@ -2381,13 +2361,12 @@ function TaskDetail({
   actions?: ReactNode;
   defaultAgent: string;
   agents: AgentRuntimeStatus[];
+  assistants: AgentAssistant[];
   busy?: { taskId: string; stage: ProTaskStage } | null;
   reopening?: boolean;
-  cycles: JiraCycle[];
   workspaces: WorkspaceEntry[];
   fallbackWorkdir?: string;
   subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
-  onCycleChange: (task: ProTask, cycleId: string | null) => void;
   onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void;
   onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
   onSubtaskDraftChange: (draft: { title: string; description: string; assignedAgent: string; assistantId: string }) => void;
@@ -2482,7 +2461,7 @@ function TaskDetail({
   const reporter = fields.reporter || jiraRemoteSyncField(task.description, 'Reporter');
   const ticketType = ticketTypeInfo(task);
   const labels = fields.labels || [];
-  const cycle = cycles.find(item => item.id === task.cycleId) || null;
+  const assignedAssistant = taskAssignedAssistant(task, assistants);
   const workspaceOptions = new Map<string, string>();
   const addWorkspace = (path?: string | null, label?: string | null) => {
     const cleanPath = path?.trim();
@@ -2552,30 +2531,29 @@ function TaskDetail({
               {shelfTab === 'status' && (
                 <div className="space-y-4">
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
-                    <div className="mb-3 flex items-start justify-between gap-3">
-                      <TaskStatusDisplay status={task.status} />
-                      {isClosedRemoteTask(task) && onReopen && (
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          className="h-7 shrink-0 px-2.5 text-[11px]"
-                          disabled={reopening}
-                          onClick={() => onReopen(task)}
-                        >
-                          {reopening ? <Spinner /> : null}
-                          Reopen
-                        </Button>
-                      )}
-                    </div>
                     <dl className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[12px]">
-                      <dt className="text-fg-5">Assistant</dt>
-                      <dd className="min-w-0 truncate text-fg-3">{taskAssignee(task, defaultAgent)}</dd>
+                      <dt className="text-fg-5">Assign</dt>
+                      <dd className="min-w-0 truncate text-fg-3">{assignedAssistant}</dd>
                       <dt className="text-fg-5">Created</dt>
                       <dd className="min-w-0 truncate text-fg-3">{formatTime(createdAt)}</dd>
                       <dt className="text-fg-5">Updated</dt>
                       <dd className="min-w-0 truncate text-fg-3">{formatTime(updatedAt)}</dd>
                       <dt className="text-fg-5">Remote status</dt>
-                      <dd className="min-w-0 truncate text-fg-3">{remoteStatus || '--'}</dd>
+                      <dd className="flex min-w-0 items-center gap-2">
+                        <span className="min-w-0 truncate text-fg-3">{remoteStatus || '--'}</span>
+                        {isClosedRemoteTask(task) && onReopen && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-6 shrink-0 px-2 text-[11px]"
+                            disabled={reopening}
+                            onClick={() => onReopen(task)}
+                          >
+                            {reopening ? <Spinner /> : null}
+                            Reopen
+                          </Button>
+                        )}
+                      </dd>
                       <dt className="text-fg-5">Ticket owner</dt>
                       <dd className="min-w-0 truncate text-fg-3">{assignee || '--'}</dd>
                       <dt className="text-fg-5">Workspace</dt>
@@ -2590,18 +2568,6 @@ function TaskDetail({
                           {Array.from(workspaceOptions, ([path, label]) => (
                             <option key={path} value={path}>{label}</option>
                           ))}
-                        </select>
-                      </dd>
-                      <dt className="text-fg-5">Cycle</dt>
-                      <dd className="min-w-0">
-                        <select
-                          value={task.cycleId || ''}
-                          onChange={event => onCycleChange(task, event.target.value || null)}
-                          className="h-7 w-full rounded-md border border-transparent bg-transparent px-0 text-[12px] text-fg-3 outline-none transition hover:border-edge hover:bg-panel focus:border-primary/40"
-                          title={cycle?.name || 'No cycle'}
-                        >
-                          <option value="">No cycle</option>
-                          {cycles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
                         </select>
                       </dd>
                       <dt className="text-fg-5">PR</dt>
@@ -2748,13 +2714,12 @@ function TaskInlineWorkbench({
   task,
   defaultAgent,
   agents,
+  assistants,
   busy,
   reopening,
-  cycles,
   workspaces,
   fallbackWorkdir,
   subtaskDraft,
-  onCycleChange,
   onMetaChange,
   onStartStatusChat,
   onSubtaskDraftChange,
@@ -2767,13 +2732,12 @@ function TaskInlineWorkbench({
   task: ProTask | null;
   defaultAgent: string;
   agents: AgentRuntimeStatus[];
+  assistants: AgentAssistant[];
   busy?: { taskId: string; stage: ProTaskStage } | null;
   reopening?: boolean;
-  cycles: JiraCycle[];
   workspaces: WorkspaceEntry[];
   fallbackWorkdir?: string;
   subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
-  onCycleChange: (task: ProTask, cycleId: string | null) => void;
   onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void;
   onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
   onSubtaskDraftChange: (draft: { title: string; description: string; assignedAgent: string; assistantId: string }) => void;
@@ -2803,13 +2767,12 @@ function TaskInlineWorkbench({
         task={task}
         defaultAgent={defaultAgent}
         agents={agents}
+        assistants={assistants}
         busy={busy}
         reopening={reopening}
-        cycles={cycles}
         workspaces={workspaces}
         fallbackWorkdir={fallbackWorkdir}
         subtaskDraft={subtaskDraft}
-        onCycleChange={onCycleChange}
         onMetaChange={onMetaChange}
         onStartStatusChat={onStartStatusChat}
         onSubtaskDraftChange={onSubtaskDraftChange}
@@ -4433,13 +4396,12 @@ export function TasksTab() {
                   task={selectedTask}
                   defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
                   agents={agentStatus?.agents || []}
+                  assistants={assistants}
                   busy={busy}
                   reopening={selectedTask ? reopeningTaskId === selectedTask.id : false}
-                  cycles={cycles}
                   workspaces={workspaces}
                   fallbackWorkdir={state?.runtimeWorkdir}
                   subtaskDraft={subtaskDraft}
-                  onCycleChange={(task, cycleId) => { void updateTaskCycle(task, cycleId); }}
                   onMetaChange={(task, patch) => { void updateTaskMeta(task, patch); }}
                   onStartStatusChat={startStatusChat}
                   onSubtaskDraftChange={setSubtaskDraft}
@@ -4540,13 +4502,12 @@ export function TasksTab() {
             task={selectedTask}
             defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
             agents={agentStatus?.agents || []}
+            assistants={assistants}
             busy={busy}
             reopening={selectedTask ? reopeningTaskId === selectedTask.id : false}
-            cycles={cycles}
             workspaces={workspaces}
             fallbackWorkdir={state?.runtimeWorkdir}
             subtaskDraft={subtaskDraft}
-            onCycleChange={(task, cycleId) => { void updateTaskCycle(task, cycleId); }}
             onMetaChange={(task, patch) => { void updateTaskMeta(task, patch); }}
             onStartStatusChat={startStatusChat}
             onSubtaskDraftChange={setSubtaskDraft}
