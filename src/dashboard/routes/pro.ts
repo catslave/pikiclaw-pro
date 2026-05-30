@@ -582,6 +582,7 @@ app.post('/api/pro/assistants', async (c) => {
       prompt: body?.prompt,
       defaultPrompt: body?.defaultPrompt,
       allowedActions: body?.allowedActions,
+      labels: body?.labels,
       enabled: body?.enabled,
     });
     return c.json({ ok: true, assistant });
@@ -603,6 +604,7 @@ app.patch('/api/pro/assistants/:assistantId', async (c) => {
       prompt: body?.prompt,
       defaultPrompt: body?.defaultPrompt,
       allowedActions: body?.allowedActions,
+      labels: body?.labels,
       enabled: body?.enabled,
     });
     return c.json({ ok: true, assistant });
@@ -1021,6 +1023,7 @@ app.patch('/api/pro/tasks/:taskId/execution', async (c) => {
       ownerMode: body?.ownerMode,
       agent: body?.agent,
       assistantId: body?.assistantId,
+      defaultAssistantId: body?.defaultAssistantId,
       mode: body?.mode,
     });
     return c.json({ ok: true, task });

@@ -47,7 +47,10 @@ describe('Pro workflow store', () => {
       id: 'assistant_hermes_acp',
       name: 'Hermes ACP Assistant',
       preferredAgents: ['hermes'],
+      labels: expect.arrayContaining(['builtin', 'task']),
     }));
+    expect(assistants.find(item => item.id === 'assistant_dashboard_owner')?.labels).toEqual(expect.arrayContaining(['builtin', 'page-owner']));
+    expect(assistants.find(item => item.id === 'assistant_refinement')?.labels).toEqual(expect.arrayContaining(['builtin', 'task']));
 
     const promptInfo = getAssistantPrompt('assistant_dashboard_owner');
     expect(promptInfo.prompt).toContain('backlog -> refinement -> working -> done');
@@ -67,8 +70,9 @@ describe('Pro workflow store', () => {
       name: 'Bug refinery',
       responsibility: 'Analyze bugs and estimate user understanding time.',
       preferredAgents: ['codex', 'claude'],
+      labels: ['task'],
     });
-    expect(listAgentAssistants().some(item => item.id === assistant.id)).toBe(true);
+    expect(listAgentAssistants().find(item => item.id === assistant.id)?.labels).toEqual(['task']);
 
     const automation = createAutomationRule({
       name: 'Daily Jira sync',

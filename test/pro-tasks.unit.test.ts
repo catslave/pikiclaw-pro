@@ -16,6 +16,7 @@ import {
   startVerificationRun,
   syncJiraTask,
   updateJiraFields,
+  updateProTaskExecution,
   updateProTaskStatus,
   updateStageRun,
   updateSubtask,
@@ -76,6 +77,34 @@ describe('Pro task spaces', () => {
     expect(task.kind).toBe('manual');
     expect(task.spaceId).toBe(space.id);
     expect(listProTasks({ spaceId: space.id })).toHaveLength(1);
+  });
+
+  it('updates task assistant ownership without assigning an agent as owner', () => {
+    const task = createProTask({ title: 'Assign ticket', defaultAgent: 'codex' });
+
+    const assigned = updateProTaskExecution(task.id, {
+      ownerMode: 'assistant',
+      assistantId: 'assistant_refinement',
+      defaultAssistantId: 'assistant_refinement',
+      agent: null,
+    });
+    expect(assigned.defaultAgent).toBe('codex');
+    expect(assigned.defaultAssistantId).toBe('assistant_refinement');
+    expect(assigned.execution).toMatchObject({
+      ownerMode: 'assistant',
+      assistantId: 'assistant_refinement',
+    });
+    expect(assigned.execution?.agent).toBeUndefined();
+
+    const cleared = updateProTaskExecution(task.id, {
+      ownerMode: 'status',
+      assistantId: null,
+      defaultAssistantId: null,
+      agent: null,
+    });
+    expect(cleared.defaultAssistantId).toBeUndefined();
+    expect(cleared.execution?.assistantId).toBeUndefined();
+    expect(cleared.execution?.agent).toBeUndefined();
   });
 
   it('links stage runs to subtasks', () => {

@@ -803,6 +803,7 @@ export const api = {
       prompt?: string;
       defaultPrompt?: string;
       allowedActions?: string[];
+      labels?: string[];
       enabled?: boolean;
     },
     opts?: ApiRequestOptions,
@@ -820,6 +821,7 @@ export const api = {
       prompt?: string;
       defaultPrompt?: string;
       allowedActions?: string[];
+      labels?: string[];
       enabled?: boolean;
     },
     opts?: ApiRequestOptions,
@@ -1021,7 +1023,7 @@ export const api = {
     ),
   updateProTaskExecution: (
     taskId: string,
-    execution: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; mode?: 'direct' | 'interactive' },
+    execution: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; defaultAssistantId?: string | null; mode?: 'direct' | 'interactive' },
     opts?: ApiRequestOptions,
   ) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(

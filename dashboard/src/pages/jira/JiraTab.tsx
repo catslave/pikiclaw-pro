@@ -260,6 +260,26 @@ function defaultKindForSpace(spaceId: string): ProTask['kind'] {
   return spaceId === JIRA_TASK_SPACE_ID ? 'jira-ticket' : 'manual';
 }
 
+function assistantHasLabel(assistant: AgentAssistant, label: string): boolean {
+  return (assistant.labels || []).some(item => item.toLowerCase() === label);
+}
+
+function isTaskAssistant(assistant: AgentAssistant): boolean {
+  if (assistant.enabled === false) return false;
+  if ((assistant.labels || []).length) return assistantHasLabel(assistant, 'task');
+  return assistant.kind === 'task-stage' || (assistant.objectTypes || []).some(type => /(^|-)task$|jira-task/.test(type));
+}
+
+function taskAssistantOptions(assistants: AgentAssistant[], currentAssistantId?: string | null): AgentAssistant[] {
+  const current = currentAssistantId?.trim();
+  const options = assistants.filter(isTaskAssistant);
+  if (current && !options.some(assistant => assistant.id === current)) {
+    const selected = assistants.find(assistant => assistant.id === current);
+    if (selected) options.unshift(selected);
+  }
+  return options;
+}
+
 function TaskPrField({ task, onMetaChange }: { task: ProTask; onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void }) {
   const [draft, setDraft] = useState(task.prUrl || '');
   const skipCommitRef = useRef(false);
@@ -684,6 +704,7 @@ function CreateJiraTaskModal({
     });
   }, [defaultAgent, defaultAssistantId, defaultWorkdir, open]);
 
+  const assistantOptions = useMemo(() => taskAssistantOptions(assistants, draft.defaultAssistantId), [assistants, draft.defaultAssistantId]);
   const assistantLabel = assistants.find(assistant => assistant.id === draft.defaultAssistantId)?.name || 'None';
   const workspaceLabel = workspaces.find(workspace => workspace.path === draft.workdir)?.name || workspaceShortLabel(draft.workdir) || 'Workspace';
   const canCreate = !!(draft.title.trim() || draft.description.trim()) && !creating;
@@ -720,7 +741,7 @@ function CreateJiraTaskModal({
             </div>
             <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-8 w-[210px] max-w-[54%] rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
               <option value="">None</option>
-              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+              {assistantOptions.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
             </select>
           </label>
           <label className="flex items-center justify-between gap-3 border-t border-edge/35 py-2">
@@ -925,6 +946,7 @@ function CreateTaskSpaceModal({
   onCreate: (draft: { name: string; defaultWorkdir: string; defaultAgent: string; defaultAssistantId: string }) => void;
 }) {
   const [draft, setDraft] = useState({ name: '', defaultWorkdir, defaultAgent, defaultAssistantId: defaultAssistantId || '' });
+  const assistantOptions = useMemo(() => taskAssistantOptions(assistants, draft.defaultAssistantId), [assistants, draft.defaultAssistantId]);
 
   useEffect(() => {
     if (!open) return;
@@ -956,7 +978,7 @@ function CreateTaskSpaceModal({
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Default assistant</div>
             <select value={draft.defaultAssistantId} onChange={event => setDraft(prev => ({ ...prev, defaultAssistantId: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
               <option value="">Runtime default</option>
-              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+              {assistantOptions.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
             </select>
           </label>
         </div>
@@ -1095,7 +1117,7 @@ function JiraAssistantConfigModal({
         className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
       >
         <option value="">Runtime default</option>
-        {assistants.map(assistant => (
+        {taskAssistantOptions(assistants, draft[field] as string | undefined).map(assistant => (
           <option key={assistant.id} value={assistant.id}>{assistant.name}</option>
         ))}
       </select>
@@ -1125,7 +1147,7 @@ function JiraAssistantConfigModal({
               className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40"
             >
               <option value="">No assistant / runtime default</option>
-              {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+              {taskAssistantOptions(assistants, workflow.assistantId).map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
             </select>
           </label>
           <label className="space-y-1">
@@ -1187,7 +1209,7 @@ function JiraAssistantConfigModal({
                 className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40 disabled:opacity-50"
               >
                 <option value="">Runtime default</option>
-                {assistants.map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
+                {taskAssistantOptions(assistants, draft.lifecycleAssistantId).map(assistant => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}
               </select>
             </label>
           </div>
@@ -2088,12 +2110,6 @@ function taskAssignee(task: ProTask, fallbackAgent: string): string {
   return task.execution?.agent || task.defaultAgent || fallbackAgent || 'Unassigned';
 }
 
-function taskAssignedAssistant(task: ProTask, assistants: AgentAssistant[]): string {
-  const assistantId = task.execution?.assistantId || task.defaultAssistantId;
-  if (!assistantId) return 'None';
-  return assistants.find(assistant => assistant.id === assistantId)?.name || assistantId;
-}
-
 function taskProjectName(task: ProTask): string {
   const labels = task.jiraFields?.labels || [];
   const projectLabel = labels.find(label => /ivar|nova|air|asm|iag|cac/i.test(label));
@@ -2350,6 +2366,7 @@ function TaskDetail({
   fallbackWorkdir,
   subtaskDraft,
   onMetaChange,
+  onAssignAssistant,
   onStartStatusChat,
   onSubtaskDraftChange,
   onCreateSubtask,
@@ -2368,6 +2385,7 @@ function TaskDetail({
   fallbackWorkdir?: string;
   subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
   onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void;
+  onAssignAssistant: (task: ProTask, assistantId: string) => void;
   onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
   onSubtaskDraftChange: (draft: { title: string; description: string; assignedAgent: string; assistantId: string }) => void;
   onCreateSubtask: (task: ProTask) => void;
@@ -2461,7 +2479,8 @@ function TaskDetail({
   const reporter = fields.reporter || jiraRemoteSyncField(task.description, 'Reporter');
   const ticketType = ticketTypeInfo(task);
   const labels = fields.labels || [];
-  const assignedAssistant = taskAssignedAssistant(task, assistants);
+  const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
+  const assignAssistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
   const workspaceOptions = new Map<string, string>();
   const addWorkspace = (path?: string | null, label?: string | null) => {
     const cleanPath = path?.trim();
@@ -2559,7 +2578,18 @@ function TaskDetail({
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
                     <dl className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[12px]">
                       <dt className="text-fg-5">Assign</dt>
-                      <dd className="min-w-0 truncate text-fg-3">{assignedAssistant}</dd>
+                      <dd className="min-w-0">
+                        <select
+                          value={assignedAssistantId}
+                          onChange={event => onAssignAssistant(task, event.target.value)}
+                          className="h-7 w-full rounded-md border border-transparent bg-transparent px-0 text-[12px] text-fg-3 outline-none transition hover:border-edge hover:bg-panel focus:border-primary/40"
+                        >
+                          <option value="">None</option>
+                          {assignAssistantOptions.map(assistant => (
+                            <option key={assistant.id} value={assistant.id}>{assistant.name}</option>
+                          ))}
+                        </select>
+                      </dd>
                       <dt className="text-fg-5">Created</dt>
                       <dd className="min-w-0 truncate text-fg-3">{formatTime(createdAt)}</dd>
                       <dt className="text-fg-5">Updated</dt>
@@ -2759,6 +2789,7 @@ function TaskInlineWorkbench({
   fallbackWorkdir,
   subtaskDraft,
   onMetaChange,
+  onAssignAssistant,
   onStartStatusChat,
   onSubtaskDraftChange,
   onCreateSubtask,
@@ -2777,6 +2808,7 @@ function TaskInlineWorkbench({
   fallbackWorkdir?: string;
   subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
   onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void;
+  onAssignAssistant: (task: ProTask, assistantId: string) => void;
   onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
   onSubtaskDraftChange: (draft: { title: string; description: string; assignedAgent: string; assistantId: string }) => void;
   onCreateSubtask: (task: ProTask) => void;
@@ -2812,6 +2844,7 @@ function TaskInlineWorkbench({
         fallbackWorkdir={fallbackWorkdir}
         subtaskDraft={subtaskDraft}
         onMetaChange={onMetaChange}
+        onAssignAssistant={onAssignAssistant}
         onStartStatusChat={onStartStatusChat}
         onSubtaskDraftChange={onSubtaskDraftChange}
         onCreateSubtask={onCreateSubtask}
@@ -3962,7 +3995,7 @@ export function TasksTab() {
 
   const updateTaskExecution = useCallback(async (
     task: ProTask,
-    patch: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; mode?: 'direct' | 'interactive' },
+    patch: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; defaultAssistantId?: string | null; mode?: 'direct' | 'interactive' },
   ) => {
     try {
       const current = resolveTaskExecution(task, jiraConfig);
@@ -3970,6 +4003,7 @@ export function TasksTab() {
         ownerMode: patch.ownerMode || current.ownerMode,
         agent: patch.agent !== undefined ? patch.agent : current.agent,
         assistantId: patch.assistantId !== undefined ? patch.assistantId : current.assistantId,
+        defaultAssistantId: patch.defaultAssistantId,
         mode: patch.mode || current.mode,
       });
       if (!result.ok || !result.task) throw new Error(result.error || 'Failed to update execution settings');
@@ -3978,6 +4012,16 @@ export function TasksTab() {
       toast(err instanceof Error ? err.message : 'Failed to update execution settings', false);
     }
   }, [jiraConfig, toast, upsertTask]);
+
+  const assignTaskAssistant = useCallback(async (task: ProTask, assistantId: string) => {
+    const selectedAssistantId = assistantId.trim();
+    await updateTaskExecution(task, {
+      ownerMode: selectedAssistantId ? 'assistant' : 'status',
+      agent: null,
+      assistantId: selectedAssistantId || null,
+      defaultAssistantId: selectedAssistantId || null,
+    });
+  }, [updateTaskExecution]);
 
   const createSubtask = useCallback(async (task: ProTask) => {
     const title = subtaskDraft.title.trim();
@@ -4441,6 +4485,7 @@ export function TasksTab() {
                   fallbackWorkdir={state?.runtimeWorkdir}
                   subtaskDraft={subtaskDraft}
                   onMetaChange={(task, patch) => { void updateTaskMeta(task, patch); }}
+                  onAssignAssistant={(task, assistantId) => { void assignTaskAssistant(task, assistantId); }}
                   onStartStatusChat={startStatusChat}
                   onSubtaskDraftChange={setSubtaskDraft}
                   onCreateSubtask={(task) => { void createSubtask(task); }}
@@ -4530,6 +4575,7 @@ export function TasksTab() {
             fallbackWorkdir={state?.runtimeWorkdir}
             subtaskDraft={subtaskDraft}
             onMetaChange={(task, patch) => { void updateTaskMeta(task, patch); }}
+            onAssignAssistant={(task, assistantId) => { void assignTaskAssistant(task, assistantId); }}
             onStartStatusChat={startStatusChat}
             onSubtaskDraftChange={setSubtaskDraft}
             onCreateSubtask={(task) => { void createSubtask(task); }}

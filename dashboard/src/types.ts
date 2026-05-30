@@ -1302,6 +1302,7 @@ export interface AgentAssistant {
   defaultPrompt?: string;
   preferredAgents: string[];
   allowedActions?: string[];
+  labels?: string[];
   builtIn?: boolean;
   enabled?: boolean;
   avatarSeed?: string;

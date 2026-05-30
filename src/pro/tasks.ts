@@ -320,6 +320,7 @@ export interface UpdateTaskExecutionInput {
   ownerMode?: unknown;
   agent?: unknown;
   assistantId?: unknown;
+  defaultAssistantId?: unknown;
   mode?: unknown;
 }
 
@@ -1081,6 +1082,9 @@ export function updateProTaskExecution(taskId: string, input: UpdateTaskExecutio
   if (!task) throw new Error('task not found');
   const ownerMode = normalizeText(input.ownerMode, 40);
   const mode = normalizeText(input.mode, 40);
+  if (Object.prototype.hasOwnProperty.call(input, 'defaultAssistantId')) {
+    task.defaultAssistantId = normalizeText(input.defaultAssistantId, 160) || undefined;
+  }
   task.execution = {
     ownerMode: ownerMode === 'agent' || ownerMode === 'assistant' ? ownerMode : ownerMode === 'status' ? 'status' : task.execution?.ownerMode,
     agent: normalizeText(input.agent, 80) || undefined,
