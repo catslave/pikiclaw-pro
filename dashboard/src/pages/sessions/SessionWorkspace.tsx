@@ -4513,7 +4513,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const multiItemHeight = multiRowHeightPx != null
     ? compactMultiItemHeight
     : (multiItemTall ? 'calc(100dvh - 32px)' : compactMultiItemHeight);
-  const appRailVisible = mode === 'workspace' || mode === 'dashboard';
+  const appRailVisible = mode === 'workspace' || mode === 'dashboard' || mode === 'settings';
   const workspaceCenterClass = mode === 'workspace'
     ? workspaceSidebarVisible
       ? 'py-2 pr-2 md:py-3 md:pr-3'
