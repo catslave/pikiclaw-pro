@@ -470,7 +470,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(s.workspacePath).toBe('/tmp/pikiclaw/workspace');
   });
 
-  it('filters codex subagent native sessions from session listings', async () => {
+  it('only lists managed codex sessions even when native sessions exist in the workdir', async () => {
     await withTempHome(async (homeDir) => {
       const workdir = makeTmpDir('pikiclaw-workdir-');
       const otherWorkdir = makeTmpDir('pikiclaw-other-workdir-');
@@ -506,11 +506,24 @@ describe('buildCodexTurnInput and usage helpers', () => {
           },
         },
       });
+      writeRollout('rollout-native-only.jsonl', {
+        id: 'sess-native-only',
+        timestamp: '2026-03-28T00:13:30.000Z',
+        cwd: workdir,
+        originator: 'codex',
+      });
       writeRollout('rollout-other.jsonl', {
         id: 'sess-other',
         timestamp: '2026-03-28T00:14:00.000Z',
         cwd: otherWorkdir,
         originator: 'pikiclaw',
+      });
+
+      ensureManagedSession({
+        agent: 'codex',
+        workdir,
+        sessionId: 'sess-parent',
+        title: 'Managed parent',
       });
 
       const result = await getSessions({ agent: 'codex', workdir });

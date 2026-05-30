@@ -2354,12 +2354,16 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
   const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'codex', pikiclawSessions, nativeSessions);
-  const mergedSessions = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
+  const nativeById = new Map(nativeSessions.map(session => [session.sessionId, session]));
+  const mergedSessions = managedSessions.map((managed) => {
+    const native = managed.sessionId ? nativeById.get(managed.sessionId) : null;
+    return native ? mergeManagedAndNativeSessions([managed], [native])[0] || managed : managed;
+  });
   const sessions = typeof limit === 'number' ? mergedSessions.slice(0, limit) : mergedSessions;
   const sessionsDir = path.join(getHome(), '.codex', 'sessions');
   agentLog(
     `[sessions:codex] workdir=${resolvedWorkdir} sessionsDir=${sessionsDir} sessionsDirExists=${fs.existsSync(sessionsDir)} ` +
-    `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
+    `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} returned=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }
