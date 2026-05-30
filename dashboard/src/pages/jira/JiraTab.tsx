@@ -1761,7 +1761,6 @@ function TaskChatWindow({
   const missingSessionHistory = !!run && !!error && /session history file not found/i.test(error);
   const canSendToRun = !!run && !agentDiffersFromRun && !missingSessionHistory;
   const fields = task.jiraFields || {};
-  const priority = fields.priority || jiraRemoteSyncField(task.description, 'Priority');
   const brief = taskBriefSummary(task);
   const summaryFallback = 'No ticket description yet. Ask the agent to inspect the task and create a plan.';
   const ticketSummary = brief || summaryFallback;
@@ -1868,29 +1867,8 @@ function TaskChatWindow({
     <div className="relative mx-auto max-w-[760px] overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
       <div className="relative px-3.5 py-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="mt-0.5 shrink-0"><TicketTypeIcon task={task} /></div>
-          <div className="min-w-0 flex-1">
-            <div className="mb-1 flex flex-wrap items-center gap-1.5">
-              {task.jiraKey && <span className="font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
-              <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
-              <Badge variant={stageTone(activeStage)}>{STAGE_LABEL[activeStage]}</Badge>
-              {priority && <Badge variant="muted">{priority}</Badge>}
-            </div>
-            <div className="flex min-w-0 items-start gap-2">
-              <div
-                className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-fg"
-                title={task.title}
-              >
-                {task.title}
-              </div>
-            </div>
-            <div
-              className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-fg-4"
-            >
-              {ticketSummary}
-            </div>
-          </div>
+        <div className="line-clamp-2 text-[12px] leading-relaxed text-fg-4">
+          {ticketSummary}
         </div>
         <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
           <button type="button" onClick={onOpenArtifacts} className="rounded-md px-1.5 py-1 transition hover:bg-panel-h hover:text-fg-3">
@@ -2520,19 +2498,11 @@ function TaskDetail({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
-      <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-edge/55 bg-panel/72 px-4 backdrop-blur-md">
+      <div className="flex h-[48px] shrink-0 items-center gap-3 border-b border-edge/55 bg-panel/72 px-4 backdrop-blur-md">
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <TicketTypeIcon task={task} />
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              {task.jiraKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
-              <span className="min-w-0 truncate text-[13px] font-semibold text-fg" title={task.title}>{task.title}</span>
-            </div>
-            <div className="mt-1 flex min-w-0 items-center gap-1.5">
-              <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
-              <Badge variant={stageTone(activeBusyStage || STATUS_CHAT_STAGE[displayTaskStatus(task.status)] || 'refinement')}>Task chat</Badge>
-            </div>
-          </div>
+          {task.jiraKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
+          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg" title={task.title}>{task.title}</span>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <Button
