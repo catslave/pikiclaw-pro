@@ -1857,7 +1857,7 @@ function TaskChatWindow({
   }, [run, task.id]);
 
   const taskHeader = (
-    <div className="relative mx-auto max-w-[760px] overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+    <div className="relative w-full max-w-[760px] overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
       <div className="relative px-3.5 py-3">
         <div className="line-clamp-2 text-[12px] leading-relaxed text-fg-4">
@@ -1868,6 +1868,14 @@ function TaskChatWindow({
             {artifactCount ? `${artifactCount} output${artifactCount === 1 ? '' : 's'}` : 'Outputs open in the sidebar'}
           </button>
         </div>
+      </div>
+    </div>
+  );
+  const taskTop = (
+    <div className="mx-auto grid w-full max-w-[1320px] items-start gap-5 min-[1180px]:grid-cols-[minmax(0,760px)_minmax(300px,360px)]">
+      <div className="min-w-0 min-[1180px]:justify-self-center">{taskHeader}</div>
+      <div className="min-w-0 max-w-[360px] min-[1180px]:justify-self-end">
+        <TaskFlowMap task={task} busyStage={busyStage} />
       </div>
     </div>
   );
@@ -1891,11 +1899,8 @@ function TaskChatWindow({
     const isPendingSession = runSession.sessionId.startsWith('pending_');
     return (
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]">
-        <div className="shrink-0 space-y-3 px-5 pb-3 pt-3">
-          {taskHeader}
-          <div className="mx-auto max-w-[760px]">
-            <TaskFlowMap task={task} busyStage={busyStage} />
-          </div>
+        <div className="shrink-0 px-5 pb-3 pt-3">
+          {taskTop}
         </div>
         <div className="min-h-0 flex-1">
           <SessionPanel
@@ -1925,22 +1930,20 @@ function TaskChatWindow({
   return (
     <div className="relative h-full min-h-0 overflow-hidden bg-[var(--th-session-bg)]">
       <div className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-[130px]">
-        <div className="mx-auto max-w-[860px] px-5 pb-5">
+        <div className="pb-5">
           <div className="sticky top-0 z-20 -mx-5 mb-5 px-5 pb-3 pt-3">
             <div className="absolute inset-x-0 top-0 h-[calc(100%+28px)] bg-gradient-to-b from-[var(--th-session-bg)] via-[var(--th-session-bg)]/92 to-transparent" />
-            {taskHeader}
+            {taskTop}
           </div>
-          <div className="mb-5">
-            <TaskFlowMap task={task} busyStage={busyStage} />
-          </div>
-          {run && (
+          <div className="mx-auto max-w-[860px] px-5">
+            {run && (
             <div className="mb-4 flex min-w-0 items-center justify-center gap-2 text-[11px] text-fg-5">
               <span className="h-1.5 w-1.5 rounded-full bg-ok" />
               <span className="max-w-full truncate rounded-md border border-edge/65 bg-panel-alt/70 px-2 py-1 font-mono">
                 {STAGE_LABEL[activeStage]} · {run.session.agent}:{run.session.sessionId}
               </span>
             </div>
-          )}
+            )}
           {loading ? (
             <div className="flex items-center gap-2 text-[12px] text-fg-5"><Spinner /> Loading chat...</div>
           ) : missingSessionHistory ? (
@@ -2026,6 +2029,7 @@ function TaskChatWindow({
               )}
             </div>
           )}
+          </div>
         </div>
       </div>
 
