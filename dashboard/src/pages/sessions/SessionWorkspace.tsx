@@ -911,13 +911,51 @@ function dashboardColumnForSession(
   return null;
 }
 
-function sessionAttentionVariant(session: SessionInfo): 'ok' | 'warn' | null {
+type SessionAttentionKind = 'running' | 'unread' | 'warn';
+
+function sessionAttentionVariant(session: SessionInfo): SessionAttentionKind | null {
   const displayState = sessionDisplayState(session);
   if (session.userStatus === 'done' || session.userStatus === 'parked') return null;
-  if (displayState === 'running') return 'ok';
+  if (displayState === 'running') return 'running';
   if (displayState === 'incomplete') return 'warn';
-  if (isUnreadCompletedSession(session)) return 'ok';
+  if (isUnreadCompletedSession(session)) return 'unread';
   return null;
+}
+
+function SessionAttentionDot({
+  kind,
+  compact = false,
+  className,
+}: {
+  kind: SessionAttentionKind;
+  compact?: boolean;
+  className?: string;
+}) {
+  if (kind === 'running') {
+    return (
+      <span
+        aria-hidden="true"
+        className={cn('relative inline-grid shrink-0 place-items-center rounded-full', compact ? 'h-2 w-2' : 'h-2.5 w-2.5', className)}
+      >
+        <span className="absolute inset-0 rounded-full bg-primary/25 animate-ping" />
+        <span className={cn('relative rounded-full bg-primary shadow-[0_0_8px_var(--th-selection-ring)]', compact ? 'h-1.5 w-1.5' : 'h-2 w-2')} />
+      </span>
+    );
+  }
+
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        'inline-block shrink-0 rounded-full',
+        compact ? 'h-1.5 w-1.5' : 'h-2 w-2',
+        kind === 'warn'
+          ? 'bg-warn shadow-[0_0_8px_var(--th-warn-glow)]'
+          : 'bg-ok shadow-[0_0_8px_var(--th-ok-glow)]',
+        className,
+      )}
+    />
+  );
 }
 
 function isUnreadCompletedSession(session: SessionInfo): boolean {
@@ -968,19 +1006,20 @@ function sessionOriginTitle(session: SessionInfo): string | undefined {
   return parts.join(' ');
 }
 
-function workspaceGroupAttention(sessions: SessionInfo[]): { variant: 'ok' | 'warn'; pulse: boolean } | null {
-  let hasWarn = false;
-  let hasOk = false;
+function workspaceGroupAttention(sessions: SessionInfo[]): SessionAttentionKind | null {
   let hasRunning = false;
+  let hasWarn = false;
+  let hasUnread = false;
   for (const session of sessions) {
     const variant = sessionAttentionVariant(session);
     if (!variant) continue;
-    if (variant === 'warn') hasWarn = true;
-    else hasOk = true;
-    if (sessionDisplayState(session) === 'running') hasRunning = true;
+    if (variant === 'running') hasRunning = true;
+    else if (variant === 'warn') hasWarn = true;
+    else hasUnread = true;
   }
-  if (hasOk) return { variant: 'ok', pulse: hasRunning };
-  if (hasWarn) return { variant: 'warn', pulse: false };
+  if (hasRunning) return 'running';
+  if (hasWarn) return 'warn';
+  if (hasUnread) return 'unread';
   return null;
 }
 
@@ -5026,11 +5065,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                      const sideInfo = resolveSideSlotInfo(info, sideSlot);
 	                      const sideTitle = sideChatDisplayTitle(sideSlotIdx, t('session.sideChat'));
 	                      const sideKey = sideChatSlotKey(sideSlot);
-	                      const tabActive = effectiveContextShelfTab === 'side-chats'
-	                        && !!activeSideSlot
-	                        && sideKey === sideChatSlotKey(activeSideSlot);
-	                      const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
-	                      return (
+                      const tabActive = effectiveContextShelfTab === 'side-chats'
+                        && !!activeSideSlot
+                        && sideKey === sideChatSlotKey(activeSideSlot);
+                      const sideUnread = !tabActive && shouldMarkSessionReadOnOpen(sideInfo);
+                      const sideDisplayState = sessionDisplayState(sideInfo);
+                      const sideAttention: SessionAttentionKind | null = sideDisplayState === 'running'
+                        ? 'running'
+                        : sideDisplayState === 'incomplete'
+                          ? 'warn'
+                          : sideUnread
+                            ? 'unread'
+                            : null;
+                      return (
 	                        <button
 	                          key={sideSlot.mountKey || sessionSlotStorageKey(sideSlot)}
 	                          type="button"
@@ -5047,9 +5094,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                          title={sideTitle}
 	                          aria-label={sideTitle}
 	                        >
-	                          {sideUnread && <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_6px_var(--th-ok-glow)]" />}
-	                          <span>{sideTitle}</span>
-	                        </button>
+                          {sideAttention && <SessionAttentionDot kind={sideAttention} compact />}
+                          <span>{sideTitle}</span>
+                        </button>
 	                      );
 	                    })}
 	                  </>
@@ -5189,14 +5236,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   >
                     {/* Left: status · workdir / title */}
                     {!isMultiWidget && (slotState === 'running' ? (
-                      <Dot variant="ok" pulse />
+                      <SessionAttentionDot kind="running" compact />
                     ) : slotState === 'incomplete' ? (
-                      <Dot variant="warn" />
+                      <SessionAttentionDot kind="warn" compact />
                     ) : hasUnreadCompletedState ? (
-                      <span
-                        aria-hidden="true"
-                        className="h-2.5 w-2.5 shrink-0 rounded-full bg-ok shadow-[0_0_0_3px_var(--th-panel),0_0_8px_var(--th-ok-glow)] ring-1 ring-ok/25"
-                      />
+                      <SessionAttentionDot kind="unread" />
                     ) : null)}
                     {isMultiWidget && (
                       <span
@@ -5205,11 +5249,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       >
                         <BrandIcon brand={slot.agent || ''} size={16} />
                         {(slotState === 'running' || slotState === 'incomplete' || hasUnreadCompletedState) && (
-                          <span
-                            className={cn(
-                              'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-panel',
-                              slotState === 'running' ? 'animate-pulse bg-ok' : slotState === 'incomplete' ? 'bg-warn' : 'bg-ok',
-                            )}
+                          <SessionAttentionDot
+                            kind={slotState === 'running' ? 'running' : slotState === 'incomplete' ? 'warn' : 'unread'}
+                            compact
+                            className="absolute -right-0.5 -top-0.5 border-2 border-panel"
                           />
                         )}
                       </span>
@@ -6969,7 +7012,7 @@ function InboxDrawer({
         >
           <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge/45 bg-panel/82 px-3 backdrop-blur-md">
             <Dot
-              variant={focusedDisplayState === 'running' ? 'ok' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
+              variant={focusedDisplayState === 'running' ? 'active' : focusedDisplayState === 'incomplete' ? 'err' : 'idle'}
               pulse={focusedDisplayState === 'running'}
             />
             {focusedMeta && (
@@ -7110,7 +7153,7 @@ function DashboardTaskCard({
           <span className="ml-auto shrink-0 tabular-nums">{time}</span>
         </div>
 	        <div className="mt-1.5 flex items-start gap-2">
-	          {!selected && <Dot variant={displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
+          {!selected && <Dot variant={displayState === 'running' ? 'active' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
 	          <div className="min-w-0 flex-1">
 	            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
 	            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
@@ -7278,7 +7321,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
             </span>
           )}
         </div>
-        {groupAttention && <Dot variant={groupAttention.variant} pulse={groupAttention.pulse} />}
+        {groupAttention && <SessionAttentionDot kind={groupAttention} compact />}
         <button
           type="button"
           onClick={e => {
@@ -7506,7 +7549,7 @@ const SessionCard = memo(function SessionCard({
     : isOpen
       ? 'bg-primary/[0.045] text-fg-2 ring-1 ring-inset ring-primary/8 hover:bg-primary/[0.065]'
       : displayState === 'running'
-        ? 'bg-transparent text-fg-3 hover:bg-ok/[0.035]'
+        ? 'bg-transparent text-fg-3 hover:bg-primary/[0.035]'
         : displayState === 'incomplete'
           ? 'bg-transparent text-fg-3 hover:bg-warn/[0.035]'
           : 'bg-transparent text-fg-3 hover:bg-panel-h/52';
@@ -7519,10 +7562,10 @@ const SessionCard = memo(function SessionCard({
 	      aria-hidden="true"
 	      className={cn(
 	        'pointer-events-none absolute inset-y-1 left-0 w-[2px] rounded-full opacity-0 transition-opacity duration-150',
-	        isSelected || isOpen
-	          ? 'bg-primary'
-	          : displayState === 'running'
-	            ? 'bg-ok'
+        isSelected || isOpen
+          ? 'bg-primary'
+          : displayState === 'running'
+            ? 'bg-primary'
 	            : displayState === 'incomplete'
 	              ? 'bg-warn'
 	              : 'bg-primary',
@@ -7578,18 +7621,7 @@ const SessionCard = memo(function SessionCard({
 	            {lastActivityLabel}
           </span>
           {showStateDot ? (
-            <span
-              aria-hidden="true"
-              className={cn(
-                'h-2 w-2 rounded-full shadow-[0_0_0_2px_var(--th-panel)]',
-                attentionVariant === 'ok'
-                  ? 'bg-ok'
-                  : attentionVariant === 'warn'
-                    ? 'bg-warn'
-                    : 'bg-primary',
-                displayState === 'running' && 'animate-pulse',
-              )}
-            />
+            <SessionAttentionDot kind={attentionVariant} />
           ) : (
             <span
               aria-hidden="true"

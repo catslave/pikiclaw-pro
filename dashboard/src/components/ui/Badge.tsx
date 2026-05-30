@@ -47,13 +47,14 @@ export function Badge({ variant = 'muted', children, className }: { variant?: Ba
 }
 
 /* ── Dot — status indicator ── */
-type DotVariant = 'ok' | 'warn' | 'err' | 'idle';
+type DotVariant = 'ok' | 'warn' | 'err' | 'active' | 'idle';
 
 export function Dot({ variant = 'idle', pulse }: { variant?: DotVariant; pulse?: boolean }) {
   const styles: Record<DotVariant, string> = {
     ok: 'bg-[var(--th-ok)] shadow-[0_0_10px_var(--th-ok-glow)]',
     warn: 'bg-[var(--th-warn)] shadow-[0_0_10px_var(--th-warn-glow)]',
     err: 'bg-[var(--th-err)] shadow-[0_0_10px_var(--th-err-glow)]',
+    active: 'bg-primary shadow-[0_0_10px_var(--th-selection-ring)]',
     idle: 'bg-fg-5',
   };
 
