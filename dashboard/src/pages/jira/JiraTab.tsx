@@ -2504,7 +2504,7 @@ function TaskDetail({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
-      <div className="flex h-[48px] shrink-0 items-center gap-3 border-b border-edge/55 bg-panel/72 px-4 backdrop-blur-md">
+      <div className="relative z-50 flex h-[48px] shrink-0 items-center gap-3 border-b border-edge/55 bg-panel/72 px-4 backdrop-blur-md">
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <TicketTypeIcon task={task} />
           {task.jiraKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
@@ -4584,7 +4584,7 @@ export function TasksTab() {
             onReopen={(task) => { void reopenClosedTask(task); }}
             actions={selectedTask ? (
               <>
-                <div className="relative">
+                <div className="relative z-[60]">
                   <Button
                     variant="ghost"
                     size="icon"
@@ -4597,7 +4597,7 @@ export function TasksTab() {
                   </Button>
                   {detailMenuOpen && selectedTask && (
                     <div
-                      className="absolute right-0 top-[calc(100%+8px)] z-40 w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
+                      className="absolute right-0 top-[calc(100%+8px)] z-[120] w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
                       role="menu"
                     >
                       <button
