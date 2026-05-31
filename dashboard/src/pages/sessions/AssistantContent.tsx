@@ -1,9 +1,10 @@
-import { useState, useRef, useLayoutEffect, useMemo } from 'react';
+import { useState, useRef, useLayoutEffect, useMemo, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { cn } from '../../utils';
+import { api } from '../../api';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
+import { createMdComponents, mdPlugins, parseFileLinkTarget, type FileLinkTarget, type OpenFileLinkHandler } from './markdown';
 import { stripOaiMemoryCitations } from './messageSanitizers';
 import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
@@ -302,6 +303,7 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
   const imageBlocks = blocks.filter(b => b.type === 'image');
   const text = textBlocks.map(b => b.content).filter(Boolean).join('\n\n');
   const proposedPlan = splitProposedPlan(text);
+  const markdownTargets = useMemo(() => extractMarkdownFileTargets(text), [text]);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
   if (!text.trim() && imageBlocks.length === 0) return null;
@@ -340,8 +342,167 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
           ))}
         </div>
       )}
+      {workdir && markdownTargets.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {markdownTargets.map(target => (
+            <MarkdownFilePreviewCard
+              key={`${target.path}:${target.line || ''}`}
+              target={target}
+              workdir={workdir}
+              onOpenFileLink={onOpenFileLink}
+              t={t}
+            />
+          ))}
+        </div>
+      )}
       {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </>
+  );
+}
+
+const MARKDOWN_LINK_PREVIEW_LIMIT = 2;
+const MARKDOWN_RENDER_MAX_CHARS = 80_000;
+
+function isMarkdownPath(filePath: string): boolean {
+  const clean = filePath.split('#')[0].split('?')[0].toLowerCase();
+  return clean.endsWith('.md') || clean.endsWith('.markdown');
+}
+
+function dedupeMarkdownTargets(targets: FileLinkTarget[]): FileLinkTarget[] {
+  const seen = new Set<string>();
+  const out: FileLinkTarget[] = [];
+  for (const target of targets) {
+    if (!isMarkdownPath(target.path)) continue;
+    const key = `${target.path}:${target.line || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(target);
+    if (out.length >= MARKDOWN_LINK_PREVIEW_LIMIT) break;
+  }
+  return out;
+}
+
+function extractMarkdownFileTargets(text: string): FileLinkTarget[] {
+  const candidates: string[] = [];
+  const markdownLinkPattern = /\[[^\]]{0,240}\]\(([^)]+)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = markdownLinkPattern.exec(text))) {
+    const href = match[1].trim().replace(/\s+["'][^"']*["']\s*$/, '');
+    if (href) candidates.push(href);
+  }
+
+  const autolinkPattern = /<((?:file:\/\/|\/|~\/)[^>\n]+\.m(?:d|arkdown)(?::\d+)?(?:#L?\d+)?)>/gi;
+  while ((match = autolinkPattern.exec(text))) {
+    if (match[1]) candidates.push(match[1]);
+  }
+
+  return dedupeMarkdownTargets(
+    candidates
+      .map(candidate => parseFileLinkTarget(candidate))
+      .filter((target): target is FileLinkTarget => !!target),
+  );
+}
+
+function MarkdownFilePreviewCard({
+  target,
+  workdir,
+  onOpenFileLink,
+  t,
+}: {
+  target: FileLinkTarget;
+  workdir: string;
+  onOpenFileLink?: OpenFileLinkHandler;
+  t: (k: string) => string;
+}) {
+  const [view, setView] = useState<'render' | 'source'>('render');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [content, setContent] = useState('');
+  const [relativePath, setRelativePath] = useState('');
+  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setContent('');
+    setRelativePath('');
+    void api.fileContent(workdir, target.path)
+      .then(result => {
+        if (cancelled) return;
+        if (!result.ok) {
+          setError(result.error || t('hub.previewUnavailable'));
+          setRelativePath(result.relativePath || target.path);
+          return;
+        }
+        setContent(result.content || '');
+        setRelativePath(result.relativePath || result.path || target.path);
+      })
+      .catch(err => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [target.path, t, workdir]);
+
+  const displayContent = content.length > MARKDOWN_RENDER_MAX_CHARS
+    ? content.slice(0, MARKDOWN_RENDER_MAX_CHARS)
+    : content;
+  const truncated = content.length > MARKDOWN_RENDER_MAX_CHARS;
+
+  return (
+    <div className="overflow-hidden rounded-md border border-edge/50 bg-panel/56">
+      <div className="flex min-w-0 items-center gap-2 border-b border-edge/45 bg-panel/72 px-3 py-2">
+        <span className="shrink-0 rounded border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+          {t('hub.markdownPreview')}
+        </span>
+        <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-4" title={target.path}>
+          {relativePath || target.path}
+        </div>
+        {truncated && <span className="shrink-0 text-[10px] text-warn">{t('hub.truncated')}</span>}
+        <div className="shrink-0 rounded-md border border-edge/45 bg-inset/50 p-0.5">
+          {(['render', 'source'] as const).map(nextView => (
+            <button
+              key={nextView}
+              type="button"
+              onClick={() => setView(nextView)}
+              className={cn(
+                'h-6 rounded px-2 text-[10.5px] font-semibold transition-colors',
+                view === nextView ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-5 hover:text-fg-3',
+              )}
+            >
+              {nextView === 'render' ? t('hub.render') : t('hub.raw')}
+            </button>
+          ))}
+        </div>
+        {onOpenFileLink && (
+          <button
+            type="button"
+            onClick={() => onOpenFileLink(target)}
+            className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 transition-colors hover:bg-panel-h hover:text-fg-2"
+          >
+            {t('hub.open')}
+          </button>
+        )}
+      </div>
+      <div className="max-h-[420px] overflow-auto bg-inset/20 px-3 py-3">
+        {loading ? (
+          <div className="py-8 text-center text-[12px] text-fg-5">{t('sessions.loading')}</div>
+        ) : error ? (
+          <div className="text-[12px] text-err">{error}</div>
+        ) : view === 'render' ? (
+          <div className="session-md text-[13px] leading-[1.72] text-fg-2">
+            <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
+              {displayContent}
+            </ReactMarkdown>
+          </div>
+        ) : (
+          <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-[1.65] text-fg-3">{displayContent}</pre>
+        )}
+      </div>
+    </div>
   );
 }
 

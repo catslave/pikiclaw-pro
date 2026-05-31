@@ -192,16 +192,19 @@ function isPathInside(root: string, target: string): boolean {
 function resolveWorkspacePreviewPath(workdir: string, requestedPath: string) {
   const logicalRoot = path.resolve(workdir);
   const root = fs.realpathSync(logicalRoot);
-  const logicalTarget = path.isAbsolute(requestedPath)
-    ? path.resolve(requestedPath)
-    : path.resolve(logicalRoot, requestedPath);
+  const expandedRequest = requestedPath.startsWith('~/') ? expandTilde(requestedPath) : requestedPath;
+  const absoluteRequest = path.isAbsolute(expandedRequest);
+  const logicalTarget = absoluteRequest
+    ? path.resolve(expandedRequest)
+    : path.resolve(logicalRoot, expandedRequest);
+  const logicalInsideRoot = isPathInside(logicalRoot, logicalTarget);
 
-  if (!isPathInside(logicalRoot, logicalTarget)) {
+  if (!absoluteRequest && !logicalInsideRoot) {
     throw new Error('Path is outside the workspace');
   }
 
   const abs = fs.existsSync(logicalTarget) ? fs.realpathSync(logicalTarget) : logicalTarget;
-  if (fs.existsSync(logicalTarget) && !isPathInside(root, abs)) {
+  if (logicalInsideRoot && fs.existsSync(logicalTarget) && !isPathInside(root, abs)) {
     throw new Error('Path is outside the workspace');
   }
 
@@ -209,7 +212,9 @@ function resolveWorkspacePreviewPath(workdir: string, requestedPath: string) {
     root: logicalRoot,
     abs,
     logicalTarget,
-    relativePath: path.relative(logicalRoot, logicalTarget),
+    relativePath: logicalInsideRoot
+      ? path.relative(logicalRoot, logicalTarget)
+      : logicalTarget,
   };
 }
 

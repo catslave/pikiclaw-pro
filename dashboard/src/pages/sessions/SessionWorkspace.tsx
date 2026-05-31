@@ -1,5 +1,6 @@
 import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useLayoutEffect, useCallback, useRef, memo, useMemo, type ChangeEvent as ReactChangeEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import ReactMarkdown from 'react-markdown';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
@@ -28,7 +29,7 @@ import { InputComposer } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
-import type { FileLinkTarget } from './markdown';
+import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
 import type { SessionPanelChange } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
 import { formatFileSize, isImageFile } from './utils';
@@ -1935,13 +1936,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const handleOpenFileLink = useCallback((slotIdx: number, workdir: string, target: FileLinkTarget) => {
     setActiveSlotIndex(slotIdx);
-    if (!isFileLinkInsideWorkspace(workdir, target.path)) {
-      void api.openInEditor(target.path).then(res => {
-        if (!res.ok) toastSession(res.error || `Failed to open ${target.path}`, false);
-      }).catch((error: any) => {
-        toastSession(error?.message || String(error), false);
-      });
-      return;
+    const parentSlot = openSessionsRef.current[slotIdx] || null;
+    if (parentSlot) {
+      const parentKey = sessionSlotStorageKey(parentSlot);
+      setContextShelfTabByParent(prev => ({ ...prev, [parentKey]: 'files' }));
+      setSideChatPanelOpenByParent(prev => ({ ...prev, [parentKey]: true }));
+      setFileTreeOpen(false);
     }
     setFilePanelRequest({
       workdir,
@@ -1950,8 +1950,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       nonce: ++filePanelRequestSeqRef.current,
     });
     setFilePanelWorkdir(workdir);
-    setFileTreeOpen(true);
-  }, [setActiveSlotIndex, toastSession]);
+    if (!parentSlot) setFileTreeOpen(true);
+  }, [setActiveSlotIndex, setContextShelfTabByParent]);
 
   const handleOpenOverlayFileLink = useCallback((workdir: string, target: FileLinkTarget) => {
     if (!isFileLinkInsideWorkspace(workdir, target.path)) {
@@ -9826,6 +9826,7 @@ function CodePreviewPane({
   t: (key: string) => string;
 }) {
   const [copied, setCopied] = useState(false);
+  const [markdownView, setMarkdownView] = useState<'render' | 'source'>('render');
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const title = preview?.relativePath || (preview?.path ? preview.path.split('/').pop() : '') || t('hub.preview');
   const targetLine = preview?.mode === 'file' && preview.line && preview.line > 0 ? preview.line : null;
@@ -9841,10 +9842,16 @@ function CodePreviewPane({
     () => preview?.mode === 'file' ? (preview.content || '').split('\n') : [],
     [preview?.content, preview?.mode],
   );
+  const isMarkdownFile = preview?.mode === 'file' && previewLanguage === 'markdown';
+  const renderedMdComponents = useMemo(
+    () => createMdComponents({ onOpenFileLink: target => onOpenPath(target.path) }),
+    [onOpenPath],
+  );
 
   useEffect(() => {
     setCopied(false);
-  }, [preview?.path, preview?.mode]);
+    setMarkdownView(isMarkdownFile ? 'render' : 'source');
+  }, [isMarkdownFile, preview?.path, preview?.mode]);
 
   useEffect(() => {
     if (!targetLine || preview?.loading || preview?.error) return;
@@ -9872,6 +9879,23 @@ function CodePreviewPane({
         <span className="shrink-0 rounded border border-edge/70 bg-inset px-1.5 py-0.5 text-[10px] font-medium text-fg-4">
           {displayCodeLanguage(previewLanguage)}
         </span>
+        {isMarkdownFile && (
+          <div className="shrink-0 rounded-md border border-edge/45 bg-inset/55 p-0.5">
+            {(['render', 'source'] as const).map(view => (
+              <button
+                key={view}
+                type="button"
+                onClick={() => setMarkdownView(view)}
+                className={cn(
+                  'h-6 rounded px-2 text-[10.5px] font-semibold transition-colors',
+                  markdownView === view ? 'bg-panel-h text-fg shadow-sm' : 'text-fg-5 hover:text-fg-3',
+                )}
+              >
+                {view === 'render' ? t('hub.render') : t('hub.raw')}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-3" title={preview.path}>
           {title}{targetLine ? `:${targetLine}` : ''}
         </div>
@@ -9910,6 +9934,12 @@ function CodePreviewPane({
           ) : (
             <div className="p-4 text-[12px] text-fg-5">{t('hub.noChanges')}</div>
           )
+        ) : isMarkdownFile && markdownView === 'render' ? (
+          <div className="session-md min-h-full px-4 py-3 text-[13px] leading-[1.75] text-fg-2">
+            <ReactMarkdown remarkPlugins={mdPlugins} components={renderedMdComponents}>
+              {preview.content || ''}
+            </ReactMarkdown>
+          </div>
         ) : (
           <pre className="min-w-full py-2 font-mono text-[11px] leading-[18px]">
             {codeLines.map((line, index) => (
