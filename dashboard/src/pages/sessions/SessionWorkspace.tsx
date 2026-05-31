@@ -8849,6 +8849,7 @@ const WorkspaceFilesShelfPane = memo(function WorkspaceFilesShelfPane({
         </div>
         <div className="min-h-0 overflow-hidden">
           <CodePreviewPane
+            workdir={workdir}
             preview={preview}
             onOpenPath={handleOpenPath}
             t={t}
@@ -9097,6 +9098,7 @@ const FloatingFileTree = memo(function FloatingFileTree({
         </div>
 
         <CodePreviewPane
+          workdir={workdir}
           preview={preview}
           onOpenPath={handleOpenPath}
           t={t}
@@ -9817,16 +9819,21 @@ function DiffLineRow({
 }
 
 function CodePreviewPane({
+  workdir,
   preview,
   onOpenPath,
   t,
 }: {
+  workdir: string;
   preview: PreviewState | null;
   onOpenPath: (path: string) => void;
   t: (key: string) => string;
 }) {
+  const toast = useStore(s => s.toast);
   const [copied, setCopied] = useState(false);
   const [markdownView, setMarkdownView] = useState<'render' | 'source'>('render');
+  const [htmlError, setHtmlError] = useState<string | null>(null);
+  const [renderingHtml, setRenderingHtml] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const title = preview?.relativePath || (preview?.path ? preview.path.split('/').pop() : '') || t('hub.preview');
   const targetLine = preview?.mode === 'file' && preview.line && preview.line > 0 ? preview.line : null;
@@ -9850,6 +9857,8 @@ function CodePreviewPane({
 
   useEffect(() => {
     setCopied(false);
+    setHtmlError(null);
+    setRenderingHtml(false);
     setMarkdownView(isMarkdownFile ? 'render' : 'source');
   }, [isMarkdownFile, preview?.path, preview?.mode]);
 
@@ -9869,6 +9878,22 @@ function CodePreviewPane({
       </div>
     );
   }
+
+  const handleRenderHtml = async () => {
+    if (!isMarkdownFile || !preview.path) return;
+    setRenderingHtml(true);
+    setHtmlError(null);
+    try {
+      const result = await api.renderMarkdownHtml(workdir, preview.path);
+      if (!result.ok) throw new Error(result.error || t('hub.renderHtmlFailed'));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setHtmlError(message);
+      toast(message, false);
+    } finally {
+      setRenderingHtml(false);
+    }
+  };
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
@@ -9900,6 +9925,16 @@ function CodePreviewPane({
           {title}{targetLine ? `:${targetLine}` : ''}
         </div>
         {preview.truncated && <span className="shrink-0 text-[10px] text-warn">{t('hub.truncated')}</span>}
+        {isMarkdownFile && (
+          <button
+            type="button"
+            onClick={() => void handleRenderHtml()}
+            disabled={preview.loading || !!preview.error || renderingHtml}
+            className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 hover:bg-panel-h hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {renderingHtml ? t('hub.renderingHtml') : t('hub.renderToHtml')}
+          </button>
+        )}
         <button
           onClick={() => onOpenPath(preview.path)}
           className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 hover:bg-panel-h hover:text-fg-2"
@@ -9920,6 +9955,9 @@ function CodePreviewPane({
       </div>
 
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto bg-inset/30">
+        {htmlError && (
+          <div className="m-3 rounded border border-err/25 bg-err/[0.06] px-2 py-1.5 text-[12px] text-err">{htmlError}</div>
+        )}
         {preview.loading ? (
           <div className="flex h-full items-center justify-center">
             <Spinner className="h-4 w-4 text-fg-5" />

@@ -947,6 +947,15 @@ export interface FileContentResult {
   error?: string;
 }
 
+export interface MarkdownHtmlRenderResult {
+  ok: boolean;
+  path?: string;
+  sourcePath?: string;
+  relativePath?: string;
+  opened?: boolean;
+  error?: string;
+}
+
 export interface GitDiffContentResult {
   ok: boolean;
   path?: string;

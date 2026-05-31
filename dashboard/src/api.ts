@@ -25,6 +25,7 @@ import type {
   LocalModelActionResponse,
   LocalModelsProbeResponse,
   LsDirResult,
+  MarkdownHtmlRenderResult,
   McpCatalogItem,
   McpHealthResult,
   McpSearchResult,
@@ -240,6 +241,8 @@ export const api = {
     const params = new URLSearchParams({ workdir, path: filePath });
     return json<FileContentResult>(`/api/file-content?${params.toString()}`);
   },
+  renderMarkdownHtml: (workdir: string, filePath: string) =>
+    post<MarkdownHtmlRenderResult>('/api/render-markdown-html', { workdir, path: filePath }),
   gitDiffContent: (workdir: string, filePath: string) => {
     const params = new URLSearchParams({ workdir, path: filePath });
     return json<GitDiffContentResult>(`/api/git-diff-content?${params.toString()}`);

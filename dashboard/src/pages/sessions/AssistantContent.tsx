@@ -417,6 +417,8 @@ function MarkdownFilePreviewCard({
   const [view, setView] = useState<'render' | 'source'>('render');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [htmlError, setHtmlError] = useState<string | null>(null);
+  const [renderingHtml, setRenderingHtml] = useState(false);
   const [content, setContent] = useState('');
   const [relativePath, setRelativePath] = useState('');
   const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
@@ -425,6 +427,7 @@ function MarkdownFilePreviewCard({
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setHtmlError(null);
     setContent('');
     setRelativePath('');
     void api.fileContent(workdir, target.path)
@@ -451,6 +454,18 @@ function MarkdownFilePreviewCard({
     ? content.slice(0, MARKDOWN_RENDER_MAX_CHARS)
     : content;
   const truncated = content.length > MARKDOWN_RENDER_MAX_CHARS;
+  const handleRenderHtml = async () => {
+    setRenderingHtml(true);
+    setHtmlError(null);
+    try {
+      const result = await api.renderMarkdownHtml(workdir, target.path);
+      if (!result.ok) throw new Error(result.error || t('hub.renderHtmlFailed'));
+    } catch (err) {
+      setHtmlError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRenderingHtml(false);
+    }
+  };
 
   return (
     <div className="overflow-hidden rounded-md border border-edge/50 bg-panel/56">
@@ -477,6 +492,14 @@ function MarkdownFilePreviewCard({
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={() => void handleRenderHtml()}
+          disabled={loading || !!error || renderingHtml}
+          className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 transition-colors hover:bg-panel-h hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {renderingHtml ? t('hub.renderingHtml') : t('hub.renderToHtml')}
+        </button>
         {onOpenFileLink && (
           <button
             type="button"
@@ -488,6 +511,9 @@ function MarkdownFilePreviewCard({
         )}
       </div>
       <div className="max-h-[420px] overflow-auto bg-inset/20 px-3 py-3">
+        {htmlError && (
+          <div className="mb-2 rounded border border-err/25 bg-err/[0.06] px-2 py-1.5 text-[12px] text-err">{htmlError}</div>
+        )}
         {loading ? (
           <div className="py-8 text-center text-[12px] text-fg-5">{t('sessions.loading')}</div>
         ) : error ? (

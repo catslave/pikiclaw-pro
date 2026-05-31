@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile } from '../../core/config/user-config.js';
 import { expandTilde } from '../../core/platform.js';
@@ -220,6 +221,260 @@ function resolveWorkspacePreviewPath(workdir: string, requestedPath: string) {
 
 function looksBinary(buffer: Buffer): boolean {
   return buffer.subarray(0, Math.min(buffer.length, 4096)).includes(0);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, ch => {
+    switch (ch) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#39;';
+      default: return ch;
+    }
+  });
+}
+
+function escapeAttribute(value: string): string {
+  return escapeHtml(value).replace(/`/g, '&#96;');
+}
+
+function parseMarkdownFrontmatter(markdown: string): { frontmatter: Record<string, string>; body: string } {
+  const normalized = markdown.replace(/\r\n/g, '\n');
+  if (!normalized.startsWith('---\n')) return { frontmatter: {}, body: normalized };
+
+  const end = normalized.indexOf('\n---', 4);
+  if (end < 0) return { frontmatter: {}, body: normalized };
+
+  const frontmatter: Record<string, string> = {};
+  for (const line of normalized.slice(4, end).split('\n')) {
+    const match = line.match(/^([A-Za-z][\w-]*):\s*(.+)$/);
+    if (match) frontmatter[match[1]] = match[2].trim().replace(/^['"]|['"]$/g, '');
+  }
+
+  const bodyStart = normalized.indexOf('\n', end + 1);
+  return { frontmatter, body: bodyStart >= 0 ? normalized.slice(bodyStart + 1) : '' };
+}
+
+function safeMarkdownUrl(value: string): string {
+  const url = value.trim().replace(/^<|>$/g, '');
+  if (/^(javascript|data):/i.test(url)) return '#';
+  return url;
+}
+
+function renderInlineMarkdown(value: string): string {
+  const placeholders: string[] = [];
+  const hold = (html: string) => {
+    const token = `@@PIKICLAW_MD_${placeholders.length}@@`;
+    placeholders.push(html);
+    return token;
+  };
+
+  let text = value
+    .replace(/`([^`]+)`/g, (_match, code) => hold(`<code>${escapeHtml(String(code))}</code>`))
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, alt, src) => {
+      const safeSrc = safeMarkdownUrl(String(src));
+      return hold(`<img alt="${escapeAttribute(String(alt))}" src="${escapeAttribute(safeSrc)}" />`);
+    })
+    .replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, label, href) => {
+      const safeHref = safeMarkdownUrl(String(href));
+      return hold(`<a href="${escapeAttribute(safeHref)}" target="_blank" rel="noreferrer">${escapeHtml(String(label))}</a>`);
+    });
+
+  text = escapeHtml(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>')
+    .replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+
+  placeholders.forEach((html, index) => {
+    text = text.replace(`@@PIKICLAW_MD_${index}@@`, html);
+  });
+
+  return text;
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim());
+}
+
+function isMarkdownTableDivider(line: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function renderMarkdownBody(markdown: string): string {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const blocks: string[] = [];
+  const paragraph: string[] = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(' '))}</p>`);
+    paragraph.length = 0;
+  };
+
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushParagraph();
+      i += 1;
+      continue;
+    }
+
+    if (/^```/.test(trimmed)) {
+      flushParagraph();
+      const language = trimmed.replace(/^```/, '').trim();
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      const languageClass = language ? ` class="language-${escapeAttribute(language)}"` : '';
+      blocks.push(`<pre><code${languageClass}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const level = Math.min(6, heading[1].length);
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      i += 1;
+      continue;
+    }
+
+    if (i + 1 < lines.length && /^\|/.test(trimmed) && isMarkdownTableDivider(lines[i + 1])) {
+      flushParagraph();
+      const headers = splitMarkdownTableRow(trimmed);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && /^\|/.test(lines[i].trim())) {
+        rows.push(splitMarkdownTableRow(lines[i]));
+        i += 1;
+      }
+      blocks.push([
+        '<table>',
+        `<thead><tr>${headers.map(cell => `<th>${renderInlineMarkdown(cell)}</th>`).join('')}</tr></thead>`,
+        `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`,
+        '</table>',
+      ].join(''));
+      continue;
+    }
+
+    const listMatch = trimmed.match(/^([-*+])\s+(.+)$/) || trimmed.match(/^(\d+[.)])\s+(.+)$/);
+    if (listMatch) {
+      flushParagraph();
+      const ordered = /^\d/.test(listMatch[1]);
+      const tag = ordered ? 'ol' : 'ul';
+      const items: string[] = [];
+      while (i < lines.length) {
+        const current = lines[i].trim();
+        const item = ordered
+          ? current.match(/^\d+[.)]\s+(.+)$/)
+          : current.match(/^[-*+]\s+(.+)$/);
+        if (!item) break;
+        items.push(`<li>${renderInlineMarkdown(item[1])}</li>`);
+        i += 1;
+      }
+      blocks.push(`<${tag}>${items.join('')}</${tag}>`);
+      continue;
+    }
+
+    if (trimmed.startsWith('>')) {
+      flushParagraph();
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i += 1;
+      }
+      blocks.push(`<blockquote>${renderMarkdownBody(quoteLines.join('\n'))}</blockquote>`);
+      continue;
+    }
+
+    if (/^---+$/.test(trimmed)) {
+      flushParagraph();
+      blocks.push('<hr />');
+      i += 1;
+      continue;
+    }
+
+    paragraph.push(trimmed);
+    i += 1;
+  }
+
+  flushParagraph();
+  return blocks.join('\n');
+}
+
+function extractMarkdownTitle(body: string, frontmatter: Record<string, string>, fallback: string): string {
+  if (frontmatter.title) return frontmatter.title;
+  const heading = body.match(/^#\s+(.+)$/m);
+  return heading ? heading[1].replace(/[*_`~]/g, '').trim() : fallback;
+}
+
+function slugFileName(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return slug || 'markdown-preview';
+}
+
+function buildMarkdownHtmlDocument(markdown: string, sourcePath: string, relativePath: string): string {
+  const parsed = parseMarkdownFrontmatter(markdown);
+  const title = extractMarkdownTitle(parsed.body, parsed.frontmatter, path.basename(sourcePath));
+  const rendered = renderMarkdownBody(parsed.body);
+  const summary = parsed.frontmatter.summary || parsed.frontmatter.description || '';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    :root { color-scheme: light; --fg: #172033; --muted: #667085; --edge: #d9e1ec; --soft: #f6f8fb; --code: #f1f5f9; --accent: #2563eb; }
+    body { margin: 0; background: #fff; color: var(--fg); font: 15px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 28px 72px; }
+    .meta { margin-bottom: 28px; padding-bottom: 18px; border-bottom: 1px solid var(--edge); color: var(--muted); font-size: 12px; }
+    .meta h1 { margin: 0 0 8px; color: var(--fg); font-size: 30px; line-height: 1.25; letter-spacing: 0; }
+    .summary { margin: 10px 0 0; color: #344054; font-size: 14px; }
+    h1, h2, h3, h4, h5, h6 { margin: 1.45em 0 .55em; line-height: 1.28; letter-spacing: 0; }
+    h1 { font-size: 28px; } h2 { font-size: 22px; border-bottom: 1px solid var(--edge); padding-bottom: 6px; } h3 { font-size: 18px; }
+    p { margin: .65em 0; } a { color: var(--accent); text-decoration-thickness: .08em; text-underline-offset: 2px; }
+    ul, ol { padding-left: 1.45em; } li { margin: .32em 0; }
+    code { border: 1px solid var(--edge); border-radius: 4px; background: var(--code); padding: 0 .28em; font: .9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre { overflow: auto; border: 1px solid var(--edge); border-radius: 8px; background: var(--soft); padding: 14px 16px; }
+    pre code { border: 0; background: transparent; padding: 0; }
+    blockquote { margin: 1em 0; border-left: 4px solid var(--edge); padding: .35em 0 .35em 1em; color: #475467; background: #fbfcfe; }
+    table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 14px; }
+    th, td { border: 1px solid var(--edge); padding: 8px 10px; vertical-align: top; }
+    th { background: var(--soft); text-align: left; }
+    img { max-width: 100%; height: auto; }
+    hr { border: 0; border-top: 1px solid var(--edge); margin: 1.8em 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="meta">
+      <h1>${escapeHtml(title)}</h1>
+      <div>${escapeHtml(relativePath || sourcePath)}</div>
+      ${summary ? `<p class="summary">${escapeHtml(summary)}</p>` : ''}
+    </section>
+    <article>
+${rendered}
+    </article>
+  </main>
+</body>
+</html>
+`;
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +867,48 @@ app.get('/api/file-content', (c) => {
     });
   } catch (err) {
     return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post('/api/render-markdown-html', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
+    const requestedPath = typeof body?.path === 'string' ? body.path.trim() : '';
+    if (!workdir || !requestedPath) return c.json({ ok: false, error: 'workdir and path are required' }, 400);
+
+    const target = resolveWorkspacePreviewPath(workdir, requestedPath);
+    if (!fs.existsSync(target.abs)) return c.json({ ok: false, error: 'File not found' }, 404);
+    const stat = fs.statSync(target.abs);
+    if (stat.isDirectory()) return c.json({ ok: false, error: 'Path is a directory' }, 400);
+    if (stat.size > INLINE_FILE_MAX_BYTES) {
+      return c.json({ ok: false, error: `File is too large to render (${Math.round(stat.size / 1024)} KB)` }, 413);
+    }
+
+    const buffer = fs.readFileSync(target.abs);
+    if (looksBinary(buffer)) return c.json({ ok: false, error: 'Binary file cannot be rendered' }, 415);
+
+    const markdown = buffer.toString('utf8');
+    const html = buildMarkdownHtmlDocument(markdown, target.abs, target.relativePath);
+    const outputDir = path.join(os.tmpdir(), 'pikiclaw-markdown-html');
+    fs.mkdirSync(outputDir, { recursive: true });
+    const hash = crypto.createHash('sha1').update(`${target.abs}:${stat.mtimeMs}:${stat.size}`).digest('hex').slice(0, 10);
+    const baseName = slugFileName(path.basename(target.abs, path.extname(target.abs)));
+    const outputPath = path.join(outputDir, `${baseName}-${hash}.html`);
+    fs.writeFileSync(outputPath, html, 'utf8');
+
+    openPathWithTarget(outputPath, 'default', false);
+    return c.json({
+      ok: true,
+      path: outputPath,
+      sourcePath: target.abs,
+      relativePath: target.relativePath,
+      opened: true,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    runtime.log(`[render-markdown-html] failed: ${detail}`);
+    return c.json({ ok: false, error: detail }, 500);
   }
 });
 
