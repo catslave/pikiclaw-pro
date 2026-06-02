@@ -11,6 +11,8 @@ dashboard-*.png
 /*.png
 .playwright-mcp/
 **/.playwright-mcp/
+.playwright-cli/
+**/.playwright-cli/
 replied_issues.txt
 .scratch/
 .pikiclaw/*

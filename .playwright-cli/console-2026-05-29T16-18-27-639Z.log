@@ -1,6 +1,0 @@
-[  511432ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3939/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3939/assets/SessionPanel-BHWQdepr.js:1
-[  512433ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3939/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3939/assets/SessionPanel-BHWQdepr.js:1
-[  514437ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3939/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3939/assets/SessionPanel-BHWQdepr.js:1
-[  574501ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3939/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3939/assets/SessionPanel-BHWQdepr.js:1
-[  575502ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3939/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3939/assets/SessionPanel-BHWQdepr.js:1
-[  577503ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:3939/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:3939/assets/SessionPanel-BHWQdepr.js:1
