@@ -1,0 +1,15 @@
+# Trellis configuration for pikiclaw.
+#
+# Purpose:
+# - Keep durable AI working context close to the repo.
+# - Make future sessions inherit the same product principles, architecture
+#   boundaries, and verification expectations.
+# - Preserve local task/research notes for long-running product work.
+
+session_commit_message: "chore: record trellis journal"
+max_journal_lines: 2000
+
+# Codex runs best in inline mode here: the main session keeps the full product
+# context and edits directly, while still consulting task PRDs and specs.
+codex:
+  dispatch_mode: inline

@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/product/index.md", "reason": "Review should preserve product identity and conversation-first UX."}
+{"file": ".trellis/spec/architecture/index.md", "reason": "Review should catch layer boundary drift."}
+{"file": ".trellis/spec/dashboard/index.md", "reason": "Review should catch dashboard clutter, overflow, and surface ownership mistakes."}
+{"file": ".trellis/spec/quality/index.md", "reason": "Review should enforce verification and minimal-change expectations."}

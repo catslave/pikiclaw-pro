@@ -1,0 +1,30 @@
+- generic [ref=e4]:
+  - banner:
+    - generic [ref=e5]:
+      - link "Workspace" [ref=e7] [cursor=pointer]:
+        - /url: /
+        - img [ref=e8]
+      - link "任务" [ref=e10] [cursor=pointer]:
+        - /url: /tasks
+        - img [ref=e11]
+      - navigation "Settings navigation" [ref=e17]:
+        - link "Agent" [ref=e18] [cursor=pointer]:
+          - /url: /agents
+          - img [ref=e19]
+        - link "Extension" [ref=e24] [cursor=pointer]:
+          - /url: /extensions
+          - img [ref=e25]
+        - link "System" [ref=e27] [cursor=pointer]:
+          - /url: /system
+          - img [ref=e28]
+      - generic [ref=e32]:
+        - generic "加载中" [ref=e33]
+        - button "重启进程" [ref=e35] [cursor=pointer]:
+          - img [ref=e37]
+        - button "亮色模式" [ref=e40] [cursor=pointer]:
+          - img [ref=e41]
+        - button "Switch to English" [ref=e47] [cursor=pointer]: EN
+  - main [ref=e48]:
+    - generic [ref=e50]:
+      - img [ref=e51]
+      - text: Loading...

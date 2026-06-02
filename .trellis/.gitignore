@@ -1,0 +1,23 @@
+# Developer identity (local only)
+.developer
+
+# Current task pointer and session/window scoped state
+.current-task
+.runtime/
+
+# Local agent/runtime files
+.agents/
+.agent-log
+.session-id
+
+# Task directory runtime files
+.plan-log
+
+# Atomic update and backup temp files
+*.tmp
+.backup-*
+*.new
+
+# Python cache
+**/__pycache__/
+**/*.pyc

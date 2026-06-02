@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/product/index.md", "reason": "Product identity and conversation-first principles are required for all future Pikiclaw work."}
+{"file": ".trellis/spec/architecture/index.md", "reason": "Layer boundaries and local runtime state guide implementation placement."}
+{"file": ".trellis/spec/dashboard/index.md", "reason": "Dashboard UI and workspace layout work is frequent and needs stable product taste."}
+{"file": ".trellis/spec/agent/index.md", "reason": "Agent driver, capability, stream, and MCP work needs shared runtime boundaries."}
+{"file": ".trellis/spec/skills/index.md", "reason": "Skills and Extensions have recurring visibility and workflow rules."}
+{"file": ".trellis/spec/pro-workflow/index.md", "reason": "Pro/Jira/Todo task surfaces need durable flow and product guidance."}
+{"file": ".trellis/spec/quality/index.md", "reason": "Verification and WIP-safety expectations should be loaded by default."}
