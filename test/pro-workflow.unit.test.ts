@@ -6,6 +6,7 @@ import {
   createAgentAssistant,
   createAutomationRule,
   createJiraSyncRun,
+  applyJiraSyncRunItems,
   createKnowledgeEntry,
   getAssistantPrompt,
   getJiraSyncRun,
@@ -13,23 +14,31 @@ import {
   listAutomationRules,
   listKnowledgeEntries,
   markAutomationRun,
+  recordJiraSyncCandidates,
   resetAgentAssistantPrompt,
+  stopJiraSyncRun,
   updateAgentAssistantPrompt,
   updateJiraSyncRun,
 } from '../src/pro/workflow.ts';
+import { listProTasks } from '../src/pro/tasks.ts';
 
 let tmpDir: string;
 let previousWorkflowFile: string | undefined;
+let previousTaskFile: string | undefined;
 
 beforeEach(() => {
   tmpDir = makeTmpDir('pikiclaw-pro-workflow-');
   previousWorkflowFile = process.env.PIKICLAW_PRO_WORKFLOW_FILE;
+  previousTaskFile = process.env.PIKICLAW_PRO_TASK_FILE;
   process.env.PIKICLAW_PRO_WORKFLOW_FILE = path.join(tmpDir, 'workflow.json');
+  process.env.PIKICLAW_PRO_TASK_FILE = path.join(tmpDir, 'tasks.json');
 });
 
 afterEach(() => {
   if (previousWorkflowFile == null) delete process.env.PIKICLAW_PRO_WORKFLOW_FILE;
   else process.env.PIKICLAW_PRO_WORKFLOW_FILE = previousWorkflowFile;
+  if (previousTaskFile == null) delete process.env.PIKICLAW_PRO_TASK_FILE;
+  else process.env.PIKICLAW_PRO_TASK_FILE = previousTaskFile;
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 });
 
@@ -123,5 +132,68 @@ describe('Pro workflow store', () => {
         { jiraKey: 'PRO-2', title: 'Existing bug', action: 'updated', summary: 'Jira issue PRO-2 updated: priority.' },
       ],
     });
+  });
+
+  it('records Jira sync candidates while excluding closed and cancelled tickets', () => {
+    const run = createJiraSyncRun({ assistantId: 'assistant_ticket_sync', agent: 'codex', workdir: '/repo/app' });
+
+    const updated = recordJiraSyncCandidates(run.id, [
+      {
+        jiraKey: 'PRO-1',
+        summary: 'Current sprint task',
+        description: 'Implement active work.',
+        issueType: 'Task',
+        sprint: 'AIR2612(0601-0614)',
+        assignee: 'Michael Yang',
+        reporter: 'PM',
+        status: 'Open',
+        priority: 'Normal',
+        labels: ['air'],
+        updatedAt: '2026-06-01T01:00:00.000Z',
+      },
+      { jiraKey: 'PRO-2', summary: 'Closed task', status: 'Closed', assignee: 'Michael Yang' },
+      { jiraKey: 'PRO-3', summary: 'Cancelled task', status: 'Cancelled', assignee: 'Michael Yang' },
+    ]);
+
+    expect(updated.ticketCount).toBe(1);
+    expect(updated.items).toHaveLength(1);
+    expect(updated.items?.[0]).toMatchObject({
+      jiraKey: 'PRO-1',
+      title: 'Current sprint task',
+      sprint: 'AIR2612(0601-0614)',
+      selected: true,
+      status: 'candidate',
+    });
+    expect(updated.analysisSummary).toContain('Excluded 2 closed/cancelled');
+  });
+
+  it('stops Jira sync runs and prevents later candidate writes', () => {
+    const run = createJiraSyncRun({ assistantId: 'assistant_ticket_sync', agent: 'codex', workdir: '/repo/app' });
+
+    const stopped = stopJiraSyncRun(run.id, 'User stopped sync');
+    expect(stopped.status).toBe('stopped');
+    expect(stopped.error).toBe('User stopped sync');
+
+    expect(() => recordJiraSyncCandidates(run.id, [
+      { jiraKey: 'PRO-1', summary: 'Late issue', status: 'Open' },
+    ])).toThrow('jira sync run stopped');
+  });
+
+  it('applies only selected Jira sync items to Pikiclaw tasks', () => {
+    const run = createJiraSyncRun({ assistantId: 'assistant_ticket_sync', agent: 'codex', workdir: '/repo/app' });
+    const withItems = recordJiraSyncCandidates(run.id, [
+      { jiraKey: 'PRO-1', summary: 'Selected task', status: 'Open', sprint: 'AIR2612(0601-0614)' },
+      { jiraKey: 'PRO-2', summary: 'Unselected task', status: 'Open', sprint: 'AIR2612(0601-0614)' },
+    ]);
+
+    const applied = applyJiraSyncRunItems(run.id, [withItems.items![0].id]);
+
+    expect(applied.taskCount).toBe(1);
+    expect(applied.status).toBe('completed');
+    expect(applied.items?.map(item => ({ key: item.jiraKey, status: item.status, selected: item.selected }))).toEqual([
+      { key: 'PRO-1', status: 'applied', selected: true },
+      { key: 'PRO-2', status: 'candidate', selected: false },
+    ]);
+    expect(listProTasks().map(task => task.jiraKey)).toEqual(['PRO-1']);
   });
 });

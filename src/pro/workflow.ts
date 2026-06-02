@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { syncJiraTask } from './tasks.js';
 
 export interface AgentAssistant {
   id: string;
@@ -66,9 +67,36 @@ export interface JiraSyncRunChange {
   updatedAt?: string;
 }
 
+export interface JiraSyncRunItem {
+  id: string;
+  jiraKey?: string;
+  key?: string;
+  title: string;
+  summary?: string;
+  description?: string;
+  issueType?: string;
+  jiraUrl?: string;
+  url?: string;
+  sprint?: string;
+  fixVersion?: string;
+  fixVersions?: string[];
+  reporter?: string;
+  assignee?: string;
+  ticketStatus?: string;
+  status?: 'candidate' | 'applied';
+  jiraStatus?: string;
+  dueDate?: string;
+  priority?: string;
+  labels?: string[];
+  updatedAt?: string;
+  selected?: boolean;
+  taskId?: string;
+  syncAction?: 'created' | 'updated' | 'unchanged';
+}
+
 export interface JiraSyncRun {
   id: string;
-  status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed';
+  status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed' | 'stopped';
   assistantId?: string;
   assistantName?: string;
   agent?: string;
@@ -79,6 +107,7 @@ export interface JiraSyncRun {
   analysisSummary?: string;
   issueKeys?: string[];
   changes?: JiraSyncRunChange[];
+  items?: JiraSyncRunItem[];
   error?: string;
   startedAt: string;
   updatedAt: string;
@@ -403,6 +432,74 @@ function newAvatarSeed() {
 function normalizeText(value: unknown, max = 16_000): string {
   const text = typeof value === 'string' ? value.trim() : '';
   return text.length > max ? text.slice(0, max).trimEnd() : text;
+}
+
+function issueField(issue: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    const value = issue[key];
+    if (value != null && String(value).trim()) return value;
+  }
+  const fields = issue.fields;
+  if (fields && typeof fields === 'object') {
+    for (const key of keys) {
+      const value = (fields as Record<string, unknown>)[key];
+      if (value != null && String(value).trim()) return value;
+    }
+  }
+  return undefined;
+}
+
+function namedValue(value: unknown): string {
+  if (typeof value === 'string') return normalizeText(value, 240);
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return normalizeText(object.name || object.value || object.displayName || object.display_name || object.email || object.emailAddress, 240);
+  }
+  return '';
+}
+
+function arrayText(value: unknown, max = 120): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.map(item => namedValue(item) || normalizeText(item, max)).filter(Boolean);
+  return items.length ? items.slice(0, 40) : undefined;
+}
+
+function isClosedJiraStatus(status: string): boolean {
+  return /^(closed|close|cancelled|canceled)$/i.test(status.trim());
+}
+
+function normalizeJiraSyncItem(issue: Record<string, unknown>): JiraSyncRunItem | null {
+  const jiraKey = normalizeText(issueField(issue, 'jiraKey', 'key', 'issueKey'), 80);
+  const title = normalizeText(issueField(issue, 'title', 'summary', 'name'), 240);
+  if (!jiraKey && !title) return null;
+  const jiraStatus = namedValue(issueField(issue, 'ticketStatus', 'status', 'jiraStatus'));
+  if (isClosedJiraStatus(jiraStatus)) return null;
+  const fixVersions = arrayText(issueField(issue, 'fixVersions', 'fix_versions', 'fixVersion', 'fixversion'));
+  const jiraUrl = normalizeText(issueField(issue, 'jiraUrl', 'url', 'browseUrl', 'webUrl'), 2048) || undefined;
+  return {
+    id: newId('jira_item'),
+    jiraKey: jiraKey || undefined,
+    key: jiraKey || undefined,
+    title: title || jiraKey || 'Untitled Jira issue',
+    summary: title || undefined,
+    description: normalizeText(issueField(issue, 'description', 'body'), 32_000) || undefined,
+    issueType: namedValue(issueField(issue, 'issueType', 'type', 'issuetype', 'issue_type')) || undefined,
+    jiraUrl,
+    url: jiraUrl,
+    sprint: normalizeText(issueField(issue, 'sprint', 'sprintName'), 120) || undefined,
+    fixVersions,
+    fixVersion: fixVersions?.join(', '),
+    reporter: namedValue(issueField(issue, 'reporter')) || undefined,
+    assignee: namedValue(issueField(issue, 'assignee')) || undefined,
+    ticketStatus: jiraStatus || undefined,
+    jiraStatus: jiraStatus || undefined,
+    status: 'candidate',
+    dueDate: normalizeText(issueField(issue, 'dueDate', 'duedate'), 80) || undefined,
+    priority: namedValue(issueField(issue, 'priority')) || undefined,
+    labels: arrayText(issueField(issue, 'labels')),
+    updatedAt: normalizeText(issueField(issue, 'updatedAt', 'updated'), 80) || undefined,
+    selected: true,
+  };
 }
 
 function readFile(): WorkflowFile {
@@ -757,6 +854,7 @@ export function updateJiraSyncRun(id: string, patch: Partial<Omit<JiraSyncRun, '
   if (typeof patch.taskCount === 'number') run.taskCount = Math.max(0, Math.floor(patch.taskCount));
   if (patch.analysisSummary !== undefined) run.analysisSummary = normalizeText(patch.analysisSummary, 4000) || undefined;
   if (Array.isArray(patch.issueKeys)) run.issueKeys = patch.issueKeys.map(key => normalizeText(key, 80)).filter(Boolean).slice(0, 80);
+  if (Array.isArray((patch as any).items)) run.items = ((patch as any).items as JiraSyncRunItem[]).slice(0, 500);
   if (Array.isArray(patch.changes)) {
     run.changes = patch.changes.slice(0, 100).map(change => ({
       taskId: normalizeText(change.taskId, 160) || undefined,
@@ -774,7 +872,7 @@ export function updateJiraSyncRun(id: string, patch: Partial<Omit<JiraSyncRun, '
     }));
   }
   if (patch.error !== undefined) run.error = normalizeText(patch.error, 2000) || undefined;
-  if (patch.status === 'completed' || patch.status === 'failed') run.completedAt = now;
+  if (patch.status === 'completed' || patch.status === 'failed' || patch.status === 'stopped') run.completedAt = now;
   const label = normalizeText(patch.event?.label, 240);
   if (label) {
     run.events.push({
@@ -788,6 +886,105 @@ export function updateJiraSyncRun(id: string, patch: Partial<Omit<JiraSyncRun, '
   file.jiraSyncRuns = [run, ...(file.jiraSyncRuns || []).filter(item => item.id !== run.id)].slice(0, 50);
   writeFile(file);
   return run;
+}
+
+export function recordJiraSyncCandidates(runId: string, issues: unknown[]): JiraSyncRun {
+  const run = getJiraSyncRun(runId);
+  if (!run) throw new Error('jira sync run not found');
+  if (run.status === 'stopped') throw new Error('jira sync run stopped');
+  const rawIssues = Array.isArray(issues) ? issues : [];
+  const items = rawIssues
+    .map(issue => issue && typeof issue === 'object' ? normalizeJiraSyncItem(issue as Record<string, unknown>) : null)
+    .filter((item): item is JiraSyncRunItem => !!item);
+  const excluded = rawIssues.length - items.length;
+  const summary = [
+    `Found ${rawIssues.length} Jira ticket${rawIssues.length === 1 ? '' : 's'}.`,
+    `Prepared ${items.length} sync candidate${items.length === 1 ? '' : 's'}.`,
+    excluded ? `Excluded ${excluded} closed/cancelled or invalid ticket${excluded === 1 ? '' : 's'}.` : '',
+  ].filter(Boolean).join(' ');
+  return updateJiraSyncRun(runId, {
+    status: 'completed',
+    ticketCount: items.length,
+    taskCount: 0,
+    issueKeys: items.map(item => item.jiraKey).filter((key): key is string => !!key),
+    items,
+    analysisSummary: summary,
+    event: { label: `Prepared ${items.length} Jira sync candidate${items.length === 1 ? '' : 's'}`, detail: summary },
+  } as any);
+}
+
+export function stopJiraSyncRun(runId: string, reason: unknown = 'Jira sync stopped by user'): JiraSyncRun {
+  return updateJiraSyncRun(runId, {
+    status: 'stopped',
+    error: normalizeText(reason, 1000) || 'Jira sync stopped by user',
+    event: { label: 'Jira sync stopped', detail: normalizeText(reason, 1000) || 'Stopped by user.' },
+  });
+}
+
+export function applyJiraSyncRunItems(runId: string, itemIds: unknown[]): JiraSyncRun {
+  const run = getJiraSyncRun(runId);
+  if (!run) throw new Error('jira sync run not found');
+  if (run.status === 'stopped') throw new Error('jira sync run stopped');
+  const selectedIds = new Set((Array.isArray(itemIds) ? itemIds : []).map(item => normalizeText(item, 160)).filter(Boolean));
+  if (!selectedIds.size) throw new Error('at least one sync item is required');
+  const items = (run.items || []).map(item => ({ ...item, selected: selectedIds.has(item.id) }));
+  const tasks = [];
+  const counts = { created: 0, updated: 0, unchanged: 0 };
+  const changes: JiraSyncRunChange[] = [];
+  for (const item of items) {
+    if (!selectedIds.has(item.id)) continue;
+    const task = syncJiraTask({
+      title: item.title,
+      description: item.description,
+      issueType: item.issueType,
+      jiraKey: item.jiraKey,
+      jiraUrl: item.jiraUrl || item.url,
+      sprint: item.sprint,
+      reporter: item.reporter,
+      assignee: item.assignee,
+      ticketStatus: item.ticketStatus || item.jiraStatus,
+      dueDate: item.dueDate,
+      priority: item.priority,
+      labels: item.labels,
+      updatedAt: item.updatedAt,
+    });
+    const latestEvent = task.events?.[0];
+    const action: 'created' | 'updated' | 'unchanged' = latestEvent?.type === 'jira-updated'
+      ? 'updated'
+      : latestEvent?.summary?.includes('no field changes')
+        ? 'unchanged'
+        : 'created';
+    counts[action] += 1;
+    item.status = 'applied';
+    item.taskId = task.id;
+    item.syncAction = action;
+    tasks.push(task);
+    changes.push({
+      taskId: task.id,
+      jiraKey: task.jiraKey,
+      title: task.title,
+      action,
+      summary: latestEvent?.summary,
+      status: task.status,
+      kind: task.kind,
+      sprint: task.sprint,
+      assignee: task.jiraFields?.assignee,
+      priority: task.jiraFields?.priority,
+      dueDate: task.jiraFields?.dueDate,
+      updatedAt: task.updatedAt,
+    });
+  }
+  const detail = `created=${counts.created}, updated=${counts.updated}, unchanged=${counts.unchanged}.`;
+  return updateJiraSyncRun(runId, {
+    status: 'completed',
+    ticketCount: run.ticketCount || items.length,
+    taskCount: tasks.length,
+    items,
+    changes,
+    issueKeys: changes.map(change => change.jiraKey).filter((key): key is string => !!key),
+    analysisSummary: `Applied ${tasks.length} Jira sync item${tasks.length === 1 ? '' : 's'}: ${detail}`,
+    event: { label: `Applied ${tasks.length} Jira sync item${tasks.length === 1 ? '' : 's'}`, detail },
+  } as any);
 }
 
 export function listKnowledgeEntries(): KnowledgeEntry[] {

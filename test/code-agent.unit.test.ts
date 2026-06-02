@@ -470,7 +470,56 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(s.workspacePath).toBe('/tmp/pikiclaw/workspace');
   });
 
-  it('only lists managed codex sessions even when native sessions exist in the workdir', async () => {
+  it('keeps a cleared completed managed session from reactivating from native state', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-cleared-1',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'o3',
+        createdAt: '2026-03-20T10:00:00.000Z',
+        title: 'managed title',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-20T10:05:00.000Z',
+        lastQuestion: 'managed question',
+        lastAnswer: 'managed answer',
+        lastMessageText: 'managed answer',
+        userStatus: 'done',
+      },
+    ], [
+      {
+        sessionId: 'sess-cleared-1',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'o3',
+        createdAt: '2026-03-20T10:00:00.000Z',
+        title: 'native title',
+        running: true,
+        runState: 'running',
+        runDetail: 'native still running',
+        runUpdatedAt: '2026-03-20T10:08:00.000Z',
+        lastQuestion: 'native question',
+        lastAnswer: 'native answer',
+        lastMessageText: 'native answer',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      sessionId: 'sess-cleared-1',
+      running: false,
+      runState: 'completed',
+      runDetail: null,
+      runUpdatedAt: '2026-03-20T10:08:00.000Z',
+      userStatus: 'done',
+    });
+  });
+
+  it('lists native-only codex sessions alongside managed sessions in the workdir', async () => {
     await withTempHome(async (homeDir) => {
       const workdir = makeTmpDir('pikiclaw-workdir-');
       const otherWorkdir = makeTmpDir('pikiclaw-other-workdir-');
@@ -529,7 +578,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
       const result = await getSessions({ agent: 'codex', workdir });
 
       expect(result.ok).toBe(true);
-      expect(result.sessions.map(session => session.sessionId)).toEqual(['sess-parent']);
+      expect(result.sessions.map(session => session.sessionId)).toEqual(['sess-native-only', 'sess-parent']);
     });
   });
 });

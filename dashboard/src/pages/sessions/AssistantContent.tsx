@@ -9,7 +9,42 @@ import { stripOaiMemoryCitations } from './messageSanitizers';
 import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
 import { CompletedWorkDisclosure, WorkingActivityDetails, WorkingActivitySummary, WorkingDiagnostics, WorkingNarrativeBlock, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock } from './WorkingCard';
+import { GeneratedOutputCards, buildGeneratedOutputInsights } from './GeneratedOutputCards';
 import type { RichMessage, MessageBlock } from '../../types';
+
+function normalizePreviewPath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function isAbsolutePreviewPath(value: string): boolean {
+  return value.startsWith('/') || /^[A-Za-z]:\//.test(value.replace(/\\/g, '/'));
+}
+
+function joinPreviewPath(root: string, child: string): string {
+  if (!root) return child;
+  return `${root.replace(/\/+$/, '')}/${child.replace(/^\/+/, '')}`;
+}
+
+function displayRelativePreviewPath(filePath: string, relativePath: string, workdir: string): string {
+  const candidate = relativePath || filePath;
+  if (!candidate) return '';
+  if (!isAbsolutePreviewPath(candidate)) return candidate;
+  const normalized = normalizePreviewPath(candidate);
+  const normalizedWorkdir = normalizePreviewPath(workdir);
+  if (normalizedWorkdir && (normalized === normalizedWorkdir || normalized.startsWith(`${normalizedWorkdir}/`))) {
+    return normalized.slice(normalizedWorkdir.length).replace(/^\/+/, '') || normalized.split('/').pop() || normalized;
+  }
+  const obsidianMarker = '/Documents/Obsidian Vault/';
+  const obsidianIndex = normalized.indexOf(obsidianMarker);
+  if (obsidianIndex >= 0) return normalized.slice(obsidianIndex + obsidianMarker.length);
+  return normalized.replace(/^\/+/, '');
+}
+
+function absolutePreviewPath(filePath: string, resolvedPath: string, workdir: string): string {
+  if (resolvedPath && isAbsolutePreviewPath(resolvedPath)) return resolvedPath;
+  if (filePath && isAbsolutePreviewPath(filePath)) return filePath;
+  return joinPreviewPath(workdir, resolvedPath || filePath);
+}
 
 /* ═══════════════════════════════════════════════════════════════
    Assistant message — separated activity, thinking, output
@@ -298,19 +333,73 @@ function ImageFigure({
   );
 }
 
+export function ensureRichMessageBlocks(message: RichMessage): RichMessage {
+  if (message.blocks?.some(block => block.type !== 'text' || block.content.trim())) return message;
+  const text = message.text?.trim();
+  if (!text) return message;
+  return { ...message, blocks: [{ type: 'text', content: text }] };
+}
+
 export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: MessageBlock[]; t: (k: string) => string; onOpenFileLink?: OpenFileLinkHandler; workdir?: string }) {
   const textBlocks = blocks.filter(b => b.type === 'text');
   const imageBlocks = blocks.filter(b => b.type === 'image');
   const text = textBlocks.map(b => b.content).filter(Boolean).join('\n\n');
-  const proposedPlan = splitProposedPlan(text);
-  const markdownTargets = useMemo(() => extractMarkdownFileTargets(text), [text]);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
   if (!text.trim() && imageBlocks.length === 0) return null;
   return (
     <>
+      {text.trim() && (
+        <GeneratedChatTextOutput
+          text={text}
+          t={t}
+          onOpenFileLink={onOpenFileLink}
+          workdir={workdir}
+        />
+      )}
+      {imageBlocks.length > 0 && (
+        <div className="flex min-w-0 max-w-full flex-wrap gap-3 mt-2">
+          {imageBlocks.map((img, i) => (
+            <ImageFigure key={i} block={img} onLightbox={setLightboxSrc} t={t} />
+          ))}
+        </div>
+      )}
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
+    </>
+  );
+}
+
+export function GeneratedChatTextOutput({
+  text,
+  t,
+  onOpenFileLink,
+  workdir,
+  cardsClassName,
+  markdownClassName = 'session-md text-[13.5px] leading-[1.75] text-fg-2',
+}: {
+  text: string;
+  t: (k: string) => string;
+  onOpenFileLink?: OpenFileLinkHandler;
+  workdir?: string;
+  cardsClassName?: string;
+  markdownClassName?: string;
+}) {
+  const proposedPlan = splitProposedPlan(text);
+  const insightText = proposedPlan ? [proposedPlan.before, proposedPlan.after].filter(Boolean).join('\n\n') : text;
+  const markdownTargets = useMemo(() => collectMarkdownPreviewTargets(text), [text]);
+  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
+  if (!text.trim()) return null;
+  return (
+    <>
+      {insightText.trim() && (
+        <GeneratedOutputCards
+          text={insightText}
+          t={t}
+          onOpenFileLink={onOpenFileLink}
+          className={cardsClassName || 'mb-3'}
+        />
+      )}
       {text.trim() && !proposedPlan && (
-        <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
+        <div className={markdownClassName}>
           <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
             {text}
           </ReactMarkdown>
@@ -319,7 +408,7 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
       {proposedPlan && (
         <div className="space-y-3">
           {proposedPlan.before.trim() && (
-            <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
+            <div className={markdownClassName}>
               <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
                 {proposedPlan.before}
               </ReactMarkdown>
@@ -327,19 +416,12 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
           )}
           <ProposedPlanCard plan={proposedPlan.plan} mdComponents={mdComponents} />
           {proposedPlan.after.trim() && (
-            <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
+            <div className={markdownClassName}>
               <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
                 {proposedPlan.after}
               </ReactMarkdown>
             </div>
           )}
-        </div>
-      )}
-      {imageBlocks.length > 0 && (
-        <div className="flex min-w-0 max-w-full flex-wrap gap-3 mt-2">
-          {imageBlocks.map((img, i) => (
-            <ImageFigure key={i} block={img} onLightbox={setLightboxSrc} t={t} />
-          ))}
         </div>
       )}
       {workdir && markdownTargets.length > 0 && (
@@ -355,7 +437,6 @@ export function OutputBlock({ blocks, t, onOpenFileLink, workdir }: { blocks: Me
           ))}
         </div>
       )}
-      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </>
   );
 }
@@ -403,7 +484,21 @@ function extractMarkdownFileTargets(text: string): FileLinkTarget[] {
   );
 }
 
-function MarkdownFilePreviewCard({
+function collectMarkdownPreviewTargets(text: string): FileLinkTarget[] {
+  const out = [...extractMarkdownFileTargets(text)];
+  const seen = new Set(out.map(target => `${target.path}:${target.line || ''}`));
+  for (const file of buildGeneratedOutputInsights(text).files) {
+    if (!isMarkdownPath(file.target.path)) continue;
+    const key = `${file.target.path}:${file.target.line || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(file.target);
+    if (out.length >= MARKDOWN_LINK_PREVIEW_LIMIT) break;
+  }
+  return out;
+}
+
+export function MarkdownFilePreviewCard({
   target,
   workdir,
   onOpenFileLink,
@@ -417,22 +512,25 @@ function MarkdownFilePreviewCard({
   const [view, setView] = useState<'render' | 'source'>('render');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [htmlError, setHtmlError] = useState<string | null>(null);
-  const [renderingHtml, setRenderingHtml] = useState(false);
   const [content, setContent] = useState('');
   const [relativePath, setRelativePath] = useState('');
+  const [absolutePath, setAbsolutePath] = useState(() => absolutePreviewPath(target.path, target.path, workdir));
+  const [copiedPath, setCopiedPath] = useState(false);
   const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setHtmlError(null);
     setContent('');
     setRelativePath('');
+    setAbsolutePath(absolutePreviewPath(target.path, target.path, workdir));
+    setCopiedPath(false);
     void api.fileContent(workdir, target.path)
       .then(result => {
         if (cancelled) return;
+        const nextAbsolutePath = absolutePreviewPath(target.path, result.path || target.path, workdir);
+        setAbsolutePath(nextAbsolutePath);
         if (!result.ok) {
           setError(result.error || t('hub.previewUnavailable'));
           setRelativePath(result.relativePath || target.path);
@@ -454,27 +552,22 @@ function MarkdownFilePreviewCard({
     ? content.slice(0, MARKDOWN_RENDER_MAX_CHARS)
     : content;
   const truncated = content.length > MARKDOWN_RENDER_MAX_CHARS;
-  const handleRenderHtml = async () => {
-    setRenderingHtml(true);
-    setHtmlError(null);
-    try {
-      const result = await api.renderMarkdownHtml(workdir, target.path);
-      if (!result.ok) throw new Error(result.error || t('hub.renderHtmlFailed'));
-    } catch (err) {
-      setHtmlError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRenderingHtml(false);
-    }
+  const displayPath = displayRelativePreviewPath(target.path, relativePath, workdir);
+  const handleCopyPath = () => {
+    void navigator.clipboard.writeText(absolutePath).then(() => {
+      setCopiedPath(true);
+      setTimeout(() => setCopiedPath(false), 1500);
+    }).catch(() => {});
   };
 
   return (
     <div className="overflow-hidden rounded-md border border-edge/50 bg-panel/56">
       <div className="flex min-w-0 items-center gap-2 border-b border-edge/45 bg-panel/72 px-3 py-2">
         <span className="shrink-0 rounded border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-          {t('hub.markdownPreview')}
+          {t('hub.preview')}
         </span>
-        <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-4" title={target.path}>
-          {relativePath || target.path}
+        <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-4" title={absolutePath}>
+          {displayPath}
         </div>
         {truncated && <span className="shrink-0 text-[10px] text-warn">{t('hub.truncated')}</span>}
         <div className="shrink-0 rounded-md border border-edge/45 bg-inset/50 p-0.5">
@@ -494,11 +587,10 @@ function MarkdownFilePreviewCard({
         </div>
         <button
           type="button"
-          onClick={() => void handleRenderHtml()}
-          disabled={loading || !!error || renderingHtml}
+          onClick={handleCopyPath}
           className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 transition-colors hover:bg-panel-h hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {renderingHtml ? t('hub.renderingHtml') : t('hub.renderToHtml')}
+          {copiedPath ? t('hub.copied') : t('hub.copy')}
         </button>
         {onOpenFileLink && (
           <button
@@ -511,9 +603,6 @@ function MarkdownFilePreviewCard({
         )}
       </div>
       <div className="max-h-[420px] overflow-auto bg-inset/20 px-3 py-3">
-        {htmlError && (
-          <div className="mb-2 rounded border border-err/25 bg-err/[0.06] px-2 py-1.5 text-[12px] text-err">{htmlError}</div>
-        )}
         {loading ? (
           <div className="py-8 text-center text-[12px] text-fg-5">{t('sessions.loading')}</div>
         ) : error ? (

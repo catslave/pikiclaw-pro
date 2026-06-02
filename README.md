@@ -317,16 +317,27 @@ The shape that truly matters: **You never have to leave your preferred environme
 
 ## Development
 
+**Run from source (local dev):**
+
 ```bash
 git clone https://github.com/xiaotonng/pikiclaw.git
 cd pikiclaw
 npm install
-npm run build
-npm test
+npm run dev
 ```
 
+`npm run dev` rebuilds the dashboard and starts the orchestrator with `--no-daemon`. Open **http://localhost:3939** when the log shows `dashboard: http://127.0.0.1:3939`.
+
+| Path / command | Purpose |
+|---|---|
+| `npm run dev` | Start (or restart) local dev from the checked-out repo |
+| `~/.pikiclaw/dev/dev.log` | Dev runtime log (`tail -f` to follow) |
+| `~/.pikiclaw/dev/setting.json` | Isolated dev config (does not touch production settings) |
+| `pkill -f 'tsx src/cli/main.ts --no-daemon'` | Stop the dev server |
+
+Other useful commands:
+
 ```bash
-npm run dev                       # Start local dev server (--no-daemon, logs to ~/.pikiclaw/dev/dev.log)
 npm run build                     # Production build (Dashboard + tsc)
 npm test                          # Run Vitest suite
 npx pikiclaw@latest --doctor      # Environment health check

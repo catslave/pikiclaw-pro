@@ -249,4 +249,114 @@ describe('Codex session history', () => {
       expect(imageBlock?.content.startsWith('data:image/png;base64,')).toBe(true);
     });
   });
+
+  it('renders Codex subagent thread spawns as sub-agent blocks in parent history', async () => {
+    await withTempHome(async homeDir => {
+      const parentSessionId = 'sess-parent-subagents';
+      const childSessionId = 'sess-child-reviewer';
+      const workdir = path.join(homeDir, 'project');
+      const rolloutDir = path.join(homeDir, '.codex', 'sessions', '2026', '05', '31');
+      fs.mkdirSync(workdir, { recursive: true });
+      fs.mkdirSync(rolloutDir, { recursive: true });
+
+      fs.writeFileSync(path.join(rolloutDir, `rollout-parent-${parentSessionId}.jsonl`), [
+        JSON.stringify({ timestamp: '2026-05-31T15:00:00Z', type: 'session_meta', payload: { id: parentSessionId, cwd: workdir } }),
+        JSON.stringify({ timestamp: '2026-05-31T15:00:01Z', type: 'event_msg', payload: { type: 'user_message', message: 'Audit the refactor with a subagent.' } }),
+        JSON.stringify({
+          timestamp: '2026-05-31T15:00:02Z',
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            phase: 'commentary',
+            content: [{
+              type: 'output_text',
+              text: JSON.stringify({
+                author: '/root',
+                recipient: '/root/review_agent',
+                other_recipients: [],
+                content: 'Review the runtime changes and report risks.',
+                trigger_turn: true,
+              }),
+            }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-31T15:00:10Z',
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            phase: 'final_answer',
+            content: [{ type: 'output_text', text: 'The subagent review is complete.' }],
+          },
+        }),
+      ].join('\n'));
+
+      fs.writeFileSync(path.join(rolloutDir, `rollout-child-${childSessionId}.jsonl`), [
+        JSON.stringify({
+          timestamp: '2026-05-31T15:00:03Z',
+          type: 'session_meta',
+          payload: {
+            id: childSessionId,
+            cwd: workdir,
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: parentSessionId,
+                  depth: 1,
+                  agent_path: '/root/review_agent',
+                  agent_nickname: 'Ada',
+                  agent_role: 'reviewer',
+                },
+              },
+            },
+            thread_source: 'subagent',
+            agent_nickname: 'Ada',
+            agent_role: 'reviewer',
+            agent_path: '/root/review_agent',
+            model: 'gpt-5.4',
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-31T15:00:04Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            name: 'exec_command',
+            call_id: 'call_child_rg',
+            arguments: JSON.stringify({ cmd: 'rg -n "RuntimeSession" src/main/kotlin' }),
+          },
+        }),
+        JSON.stringify({
+          timestamp: '2026-05-31T15:00:09Z',
+          type: 'response_item',
+          payload: {
+            type: 'message',
+            role: 'assistant',
+            phase: 'final_answer',
+            content: [{ type: 'output_text', text: 'RuntimeSession risk is low.' }],
+          },
+        }),
+      ].join('\n'));
+
+      const result = await getSessionMessages({ agent: 'codex', sessionId: parentSessionId, workdir, rich: true });
+      expect(result.ok).toBe(true);
+      const assistant = result.richMessages?.find(message => message.role === 'assistant');
+      expect(assistant?.blocks.map(block => block.type)).toEqual(['sub_agent', 'text']);
+      expect(assistant?.blocks[0].content).toBe('');
+      expect(assistant?.blocks[0].subAgent).toMatchObject({
+        id: '/root/review_agent',
+        kind: 'reviewer',
+        description: 'Ada',
+        model: 'gpt-5.4',
+        status: 'done',
+      });
+      expect(assistant?.blocks[0].subAgent?.tools[0]).toMatchObject({
+        name: 'exec_command',
+        summary: 'Bash: rg -n "RuntimeSession" src/main/kotlin',
+      });
+      expect(assistant?.blocks.some(block => block.content.includes('"recipient"'))).toBe(false);
+    });
+  });
 });

@@ -1364,6 +1364,11 @@ function shouldRecoverOrphanedRunFromNative(managed: SessionInfo, native: Sessio
     && !!native.lastAnswer?.trim();
 }
 
+function hasClearedManagedRunState(managed: SessionInfo): boolean {
+  return managed.runState === 'completed'
+    && (managed.userStatus === 'done' || managed.userStatus === 'parked');
+}
+
 export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], nativeSessions: SessionInfo[]): SessionInfo[] {
   const managedById = new Map<string, SessionInfo>();
   const merged: SessionInfo[] = [];
@@ -1382,8 +1387,9 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       merged.push(native);
       continue;
     }
-    const recoverOrphanedRun = shouldRecoverOrphanedRunFromNative(managed, native);
-    const useNativeTimeline = recoverOrphanedRun || preferNativeSessionTimeline(managed, native);
+    const clearedManagedRunState = hasClearedManagedRunState(managed);
+    const recoverOrphanedRun = !clearedManagedRunState && shouldRecoverOrphanedRunFromNative(managed, native);
+    const useNativeTimeline = !clearedManagedRunState && (recoverOrphanedRun || preferNativeSessionTimeline(managed, native));
     const adoptedTitle = canAdoptAgentTitle(managed) ? nativeAgentTitle(native) : null;
     merged.push({
       ...managed,
@@ -1391,14 +1397,18 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       workdir: native.workdir || managed.workdir,
       workspacePath: managed.workspacePath || native.workspacePath,
       threadId: managed.threadId ?? native.threadId ?? null,
-      running: recoverOrphanedRun ? native.running : (managed.running || native.running),
-      runState: recoverOrphanedRun
+      running: clearedManagedRunState ? false : recoverOrphanedRun ? native.running : (managed.running || native.running),
+      runState: clearedManagedRunState
+        ? managed.runState
+        : recoverOrphanedRun
         ? native.runState
         : managed.runState === 'running'
         ? managed.runState
         : (useNativeTimeline ? native.runState : managed.runState),
-      runDetail: useNativeTimeline ? native.runDetail : (managed.runDetail ?? native.runDetail),
-      runUpdatedAt: useNativeTimeline ? (native.runUpdatedAt ?? managed.runUpdatedAt) : (managed.runUpdatedAt ?? native.runUpdatedAt),
+      runDetail: clearedManagedRunState ? (managed.runDetail ?? null) : useNativeTimeline ? native.runDetail : (managed.runDetail ?? native.runDetail),
+      runUpdatedAt: useNativeTimeline || clearedManagedRunState
+        ? (native.runUpdatedAt ?? managed.runUpdatedAt)
+        : (managed.runUpdatedAt ?? native.runUpdatedAt),
       // User renames are explicit and stable. Prompt-derived placeholders may
       // be replaced once by an agent-native title generated after the first turn.
       title: adoptedTitle || managed.title || native.title,

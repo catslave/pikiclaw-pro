@@ -3,6 +3,7 @@ import { api } from '../../api';
 import { Badge, Button, Input } from '../../components/ui';
 import type { BrowserPanelSnapshot, ProOutput, ProTaskWorkbench } from '../../types';
 import { cn, fmtRelative } from '../../utils';
+import { GeneratedOutputCards } from './GeneratedOutputCards';
 
 export type ContextShelfTab = 'outputs' | 'side-chats' | 'files' | 'browser' | 'status' | 'ticket';
 
@@ -78,6 +79,7 @@ function OutputPreview({
         <div className="space-y-2">
           {outputs.map(output => {
             const active = selected?.id === output.id;
+            const updatedAt = output.createdAt ? fmtRelative(output.createdAt) : '';
             return (
               <button
                 key={output.id}
@@ -88,12 +90,14 @@ function OutputPreview({
                   active ? 'border-primary/32 bg-primary/[0.075]' : 'border-edge/55 bg-panel/45 hover:border-edge-h hover:bg-panel-h/55',
                 )}
               >
-                <div className="flex min-w-0 items-center gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                   <Badge variant={output.kind === 'diff' ? 'warn' : output.kind === 'estimate' ? 'accent' : 'muted'}>
                     {OUTPUT_KIND_LABEL[output.kind]}
                   </Badge>
-                  <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg">{output.title}</span>
-                  <span className="shrink-0 text-[10px] text-fg-5">{fmtRelative(output.createdAt)}</span>
+                  {updatedAt && <span className="shrink-0 text-[10px] font-medium text-fg-5">{updatedAt}</span>}
+                </div>
+                <div className="mt-1 truncate text-[12px] font-semibold text-fg" title={output.title}>
+                  {output.title}
                 </div>
                 {output.summary && (
                   <div className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-fg-4">
@@ -129,6 +133,14 @@ function OutputPreview({
             <div className="mb-2 rounded-md border border-edge/45 bg-panel/65 px-2 py-1.5 font-mono text-[10px] text-fg-5">
               {selected.path || selected.url}
             </div>
+          )}
+          {selected.summary && (
+            <GeneratedOutputCards
+              text={selected.summary}
+              compact
+              onOpenFileLink={onOpenPath ? target => onOpenPath(target.path, selected.session?.workdir) : undefined}
+              className="mb-2"
+            />
           )}
           <pre className="max-h-[260px] overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-edge/40 bg-panel/50 px-3 py-2 text-[11.5px] leading-relaxed text-fg-3">
             {selected.summary || 'No preview text.'}
@@ -344,6 +356,8 @@ export function ContextShelf({
   onTabChange,
   onClose,
   onResizeStart,
+  onToggleMaxWidth,
+  isMaxWidth = false,
   sideChatContent,
   sideCardContent,
   filesContent,
@@ -373,6 +387,8 @@ export function ContextShelf({
   onTabChange: (tab: ContextShelfTab) => void;
   onClose: () => void;
   onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onToggleMaxWidth?: () => void;
+  isMaxWidth?: boolean;
   sideChatContent: ReactNode;
   sideCardContent?: ReactNode;
   filesContent?: ReactNode;
@@ -409,6 +425,18 @@ export function ContextShelf({
   const cardSurface = surface === 'card';
   const sideCardSurface = cardSurface && visibleTab === 'side-chats';
   const docked = cardSurface && cardPlacement?.mode === 'docked';
+  const [resizeActive, setResizeActive] = useState(false);
+  const handleResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    setResizeActive(true);
+    const cleanup = () => {
+      setResizeActive(false);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+    };
+    window.addEventListener('pointerup', cleanup, { once: true });
+    window.addEventListener('pointercancel', cleanup, { once: true });
+    onResizeStart?.(event);
+  };
   const cardStyle = cardSurface
     ? docked
       ? {
@@ -441,7 +469,7 @@ export function ContextShelf({
       )}
       style={cardSurface ? cardStyle : {
         width,
-        minWidth: 340,
+        minWidth: 420,
         maxWidth: 'min(760px, 46vw)',
       }}
       onClick={event => event.stopPropagation()}
@@ -453,10 +481,34 @@ export function ContextShelf({
           aria-orientation="vertical"
           title="Resize shelf"
           aria-label="Resize shelf"
-          onPointerDown={onResizeStart}
-          className="group absolute left-0 top-0 z-20 h-full w-4 -translate-x-1/2 cursor-col-resize touch-none max-md:hidden"
+          onPointerDown={handleResizePointerDown}
+          className={cn(
+            'group absolute left-0 top-0 z-20 h-full w-5 -translate-x-1/2 cursor-col-resize touch-none max-md:hidden',
+            resizeActive && 'cursor-col-resize',
+          )}
         >
-          <div className="mx-auto h-full w-px bg-edge-h/60 transition-colors group-hover:w-[2px] group-hover:bg-fg-5/70" />
+          <div className={cn(
+            'absolute inset-y-2 left-0 w-1/2 rounded-l-md bg-primary/[0.10] opacity-0 transition-opacity duration-150',
+            'group-hover:opacity-100',
+            resizeActive && 'opacity-100',
+          )} />
+          <div className={cn(
+            'absolute inset-y-2 right-0 w-1/2 rounded-r-md bg-panel-h/90 opacity-0 transition-opacity duration-150',
+            'group-hover:opacity-100',
+            resizeActive && 'opacity-100',
+          )} />
+          <div className={cn(
+            'absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-edge-h/70 transition-[background,width,box-shadow] duration-150',
+            'group-hover:w-[2px] group-hover:bg-primary/75 group-hover:shadow-[0_0_0_3px_rgba(59,130,246,0.10)]',
+            resizeActive && 'w-[2px] bg-primary shadow-[0_0_0_4px_rgba(59,130,246,0.14)]',
+          )} />
+          <div className={cn(
+            'absolute left-1/2 top-1/2 h-9 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-edge/60 bg-panel opacity-0 shadow-sm transition-opacity duration-150',
+            'group-hover:opacity-100',
+            resizeActive && 'opacity-100',
+          )}>
+            <div className="mx-auto mt-2 h-5 w-px bg-fg-5/70" />
+          </div>
         </div>
       )}
       {cardSurface && (
@@ -563,6 +615,39 @@ export function ContextShelf({
             })}
             {afterTabButtons}
           </div>
+          {!cardSurface && onToggleMaxWidth && (
+            <button
+              type="button"
+              data-context-shelf-toggle-width
+              onClick={event => {
+                event.stopPropagation();
+                onToggleMaxWidth();
+              }}
+              className={cn(
+                'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg active:translate-y-px',
+                isMaxWidth && 'bg-panel-h text-fg-3',
+              )}
+              title={isMaxWidth ? 'Restore default width' : 'Expand shelf width'}
+              aria-label={isMaxWidth ? 'Restore default width' : 'Expand shelf width'}
+              aria-pressed={isMaxWidth}
+            >
+              {isMaxWidth ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 3v5H3" />
+                  <path d="M3 8 9 2" />
+                  <path d="M16 21v-5h5" />
+                  <path d="m21 16-6 6" />
+                </svg>
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 9V3h6" />
+                  <path d="M3 3l7 7" />
+                  <path d="M21 15v6h-6" />
+                  <path d="m14 14 7 7" />
+                </svg>
+              )}
+            </button>
+          )}
           {onCreateSideCard && (
             <button
               type="button"

@@ -11,6 +11,7 @@ import type {
   BrowserStatusResponse,
   CliCatalogItem,
   CliStatus,
+  DailyItem,
   FileContentResult,
   InteractionSnapshot,
   OpenTarget,
@@ -732,10 +733,13 @@ export const api = {
       `/api/pro/task-spaces/${encodeURIComponent(spaceId)}`,
       { method: 'DELETE', ...opts },
     ),
-  getProTasks: (optsOrSpaceId?: ApiRequestOptions | string) => {
+  getProTasks: (optsOrSpaceId?: ApiRequestOptions | string, filters?: { plannedDate?: string }) => {
     const spaceId = typeof optsOrSpaceId === 'string' ? optsOrSpaceId : '';
     const opts = typeof optsOrSpaceId === 'string' ? undefined : optsOrSpaceId;
-    const query = spaceId && spaceId !== 'all' ? `?spaceId=${encodeURIComponent(spaceId)}` : '';
+    const params = new URLSearchParams();
+    if (spaceId && spaceId !== 'all') params.set('spaceId', spaceId);
+    if (filters?.plannedDate) params.set('plannedDate', filters.plannedDate);
+    const query = params.toString() ? `?${params.toString()}` : '';
     return json<{ ok: boolean; tasks: ProTask[]; error?: string }>(`/api/pro/tasks${query}`, opts);
   },
   getProTaskWorkbench: (taskId: string, opts?: ApiRequestOptions) =>
@@ -756,6 +760,77 @@ export const api = {
     ),
   getProTodos: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; items: TodoItem[]; error?: string }>('/api/pro/todos', opts),
+  getDailyItems: (date: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; items: DailyItem[]; error?: string }>(
+      `/api/pro/daily-items?date=${encodeURIComponent(date)}`,
+      opts,
+    ),
+  createDailyItems: (
+    body: { date: string; titles: string[]; relatedTaskId?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; items?: DailyItem[]; error?: string }>('/api/pro/daily-items', body, opts),
+  addTodoToDaily: (
+    body: { date: string; todoId: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; item?: DailyItem; taskId?: string; error?: string }>(
+      '/api/pro/daily-items/from-todo',
+      body,
+      opts,
+    ),
+  addTaskToDaily: (
+    body: { date: string; taskId: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; item?: DailyItem; error?: string }>(
+      '/api/pro/daily-items/from-task',
+      body,
+      opts,
+    ),
+  promoteDailyItems: (
+    body: { date: string; itemIds: string[]; workdir?: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; items?: DailyItem[]; taskIds?: string[]; error?: string }>(
+      '/api/pro/daily-items/promote',
+      body,
+      opts,
+    ),
+  reorderDailyItems: (
+    body: { date: string; itemIds: string[] },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; items?: DailyItem[]; error?: string }>(
+      '/api/pro/daily-items/reorder',
+      body,
+      opts,
+    ),
+  updateDailyItem: (
+    itemId: string,
+    body: { title?: string; status?: DailyItem['status']; relatedTaskId?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; item?: DailyItem; error?: string }>(
+      `/api/pro/daily-items/${encodeURIComponent(itemId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        ...opts,
+      },
+    ),
+  revertDailyItemTask: (itemId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; item?: DailyItem; error?: string }>(
+      `/api/pro/daily-items/${encodeURIComponent(itemId)}/revert-task`,
+      {},
+      opts,
+    ),
+  deleteDailyItem: (itemId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; item?: DailyItem; error?: string }>(
+      `/api/pro/daily-items/${encodeURIComponent(itemId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   createProTodo: (
     item: {
       kind?: TodoItemKind;
@@ -772,6 +847,7 @@ export const api = {
     item: {
       title?: string;
       body?: string;
+      status?: TodoItem['status'];
       images?: TodoItem['images'];
     },
     opts?: ApiRequestOptions,
@@ -925,6 +1001,18 @@ export const api = {
       `/api/pro/jira/mcp-sync/runs/${encodeURIComponent(runId)}`,
       opts,
     ),
+  stopJiraMcpSyncRun: (runId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; run?: JiraSyncRun; error?: string }>(
+      `/api/pro/jira/mcp-sync/runs/${encodeURIComponent(runId)}/stop`,
+      {},
+      opts,
+    ),
+  applyJiraMcpSyncRun: (runId: string, itemIds: string[], opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; run?: JiraSyncRun; error?: string }>(
+      `/api/pro/jira/mcp-sync/runs/${encodeURIComponent(runId)}/apply`,
+      { itemIds },
+      opts,
+    ),
   analyzeJiraTicket: (
     body: { query: string; workdir?: string; agent?: string | null },
     opts?: ApiRequestOptions,
@@ -974,6 +1062,8 @@ export const api = {
       description?: string;
       kind?: ProTaskKind;
       status?: ProTaskStatus;
+      plannedDate?: string;
+      linkedTaskId?: string;
       spaceId?: string;
       workdir?: string;
       prUrl?: string;
@@ -999,6 +1089,8 @@ export const api = {
       prUrl?: string;
       reporter?: string;
       assignee?: string;
+      fixVersion?: string;
+      fixVersions?: unknown[];
       ticketStatus?: string;
       status?: string;
       dueDate?: string;
@@ -1080,7 +1172,7 @@ export const api = {
         ...opts,
       },
     ),
-  updateProTaskMeta: (taskId: string, meta: { workdir?: string | null; prUrl?: string | null }, opts?: ApiRequestOptions) =>
+  updateProTaskMeta: (taskId: string, meta: { workdir?: string | null; prUrl?: string | null; plannedDate?: string | null; linkedTaskId?: string | null }, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
       `/api/pro/tasks/${encodeURIComponent(taskId)}/meta`,
       {

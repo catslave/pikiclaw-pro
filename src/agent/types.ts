@@ -102,9 +102,10 @@ export interface StreamPreviewMeta {
   contextUsedTokens?: number | null;
   contextPercent: number | null;
   /**
-   * Active sub-agent invocations (Claude `Task` tool). Drivers without sub-agent
-   * support omit this field. Each sub-agent renders as its own UI block so its
-   * tool stream and model/effort don't bleed into the parent agent's view.
+   * Active sub-agent invocations (Claude `Task` / Codex subagent threads).
+   * Drivers without sub-agent support omit this field. Each sub-agent renders
+   * as its own UI block so its tool stream and model/effort don't bleed into
+   * the parent agent's view.
    */
   subAgents?: StreamSubAgent[];
   /**
@@ -141,23 +142,23 @@ export interface StreamPreviewPlan {
 }
 
 /**
- * Snapshot of a sub-agent invocation (Claude `Task` tool). Sub-agents run in
- * an isolated context with their own model and tool stream; surfacing them as
- * a discrete unit prevents their activity from polluting the parent agent's
- * tool list or model/effort header.
+ * Snapshot of a sub-agent invocation. Sub-agents run in an isolated context
+ * with their own model and tool stream; surfacing them as a discrete unit
+ * prevents their activity from polluting the parent agent's tool list or
+ * model/effort header.
  */
 export interface StreamSubAgent {
-  /** The parent's tool_use id for the Task invocation — stable identifier. */
+  /** Stable identifier from the parent Task/tool call or Codex child path. */
   id: string;
-  /** Sub-agent type (e.g. "Explore", "general-purpose") from Task input. */
+  /** Sub-agent type or role (e.g. "Explore", "general-purpose", "explorer"). */
   kind: string | null;
-  /** Description from Task input — short one-liner that names the work. */
+  /** Short one-liner that names the delegated work or child agent. */
   description: string | null;
   /** Model the sub-agent is running on (often differs from the parent). */
   model: string | null;
   /** Ordered list of tools the sub-agent has invoked, deduplicated by id. */
   tools: Array<{ id: string; name: string; summary: string }>;
-  /** Lifecycle status — flips to 'done' / 'failed' when the parent receives the Task tool_result. */
+  /** Lifecycle status for the delegated child work. */
   status: 'running' | 'done' | 'failed';
 }
 

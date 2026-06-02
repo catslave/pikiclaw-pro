@@ -34,6 +34,7 @@ import {
 } from './stream-ui';
 
 export type SessionPanelChange = { agent: string; sessionId: string; workdir: string; openInNewSlot?: boolean };
+export type SessionPanelScrollRequest = { turnIndex: number; totalTurns?: number; nonce: number };
 
 const SESSION_PAGE_TURNS = 12;
 const TOP_LOAD_THRESHOLD_PX = 160;
@@ -153,7 +154,7 @@ function GoalStatusBar({
   const canResume = actions.has('resume');
   const canClear = actions.has('clear');
   return (
-    <div className={cn('mx-auto flex items-center gap-2 px-3 py-1.5', compact ? 'max-w-[520px]' : 'max-w-[860px]')}>
+    <div className={cn('mx-auto flex items-center gap-2 px-3 py-1.5', compact ? 'w-[calc(100%_-_32px)] max-w-[640px]' : 'max-w-[860px]')}>
       <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-edge/45 bg-panel-alt/70 px-2.5 py-1.5 text-[11px] text-fg-4">
         <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-emerald-400/80' : 'bg-fg-5/50')} />
         <span className="shrink-0 font-semibold uppercase tracking-wider text-fg-5">Goal</span>
@@ -173,7 +174,7 @@ function GoalStatusBar({
 
 function PlanDecisionBar({ compact }: { compact: boolean }) {
   return (
-    <div className={cn('mx-auto w-full', compact ? 'max-w-[560px] px-2.5 pt-1.5' : 'max-w-[860px] px-4 pt-2 sm:px-3')}>
+    <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] px-2.5 pt-1.5' : 'w-full max-w-[860px] px-4 pt-2 sm:px-3')}>
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-sky-500/25 bg-sky-500/[0.07] px-3 py-2 shadow-[0_8px_22px_rgba(15,23,42,0.08)] backdrop-blur-md">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-300" />
@@ -205,7 +206,7 @@ function PlanDecisionBar({ compact }: { compact: boolean }) {
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, initialDraftPrompt = null, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, scrollToTurnRequest = null, initialDraftPrompt = null, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
@@ -223,6 +224,7 @@ export const SessionPanel = memo(function SessionPanel({
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  scrollToTurnRequest?: SessionPanelScrollRequest | null;
   initialDraftPrompt?: string | null;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
@@ -334,6 +336,8 @@ export const SessionPanel = memo(function SessionPanel({
   queuedTaskIdsRef.current = queuedTaskIds;
   const scrollRef = useRef<HTMLDivElement>(null);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const pendingRecallScrollTurnRef = useRef<number | null>(null);
+  const lastRecallScrollNonceRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
   const scrollToBottomRef = useRef(false);
   const forceScrollToBottomRef = useRef(false);
@@ -1231,6 +1235,73 @@ export const SessionPanel = memo(function SessionPanel({
   const historyScrollKey = history ? `${history.startTurn}:${history.endTurn}:${history.turns.length}` : 'none';
   const liveScrollKey = liveStream ? `${liveStream.taskId || ''}:${liveStream.phase}:${(liveStream.text || '').length}` : 'none';
 
+  const scrollLoadedTurnIntoView = useCallback((turnIndex: number): boolean => {
+    const el = scrollRef.current;
+    if (!el) return false;
+    const target = el.querySelector<HTMLElement>(`[data-session-turn-index="${turnIndex}"]`);
+    if (!target) return false;
+    programmaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+    target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    return true;
+  }, []);
+
+  const scheduleRecallTurnScroll = useCallback((turnIndex: number) => {
+    pendingRecallScrollTurnRef.current = turnIndex;
+    const run = () => {
+      if (pendingRecallScrollTurnRef.current !== turnIndex) return;
+      if (scrollLoadedTurnIntoView(turnIndex)) pendingRecallScrollTurnRef.current = null;
+    };
+    if (typeof window === 'undefined') {
+      run();
+      return;
+    }
+    window.requestAnimationFrame(() => window.requestAnimationFrame(run));
+  }, [scrollLoadedTurnIntoView]);
+
+  useLayoutEffect(() => {
+    const pendingTurn = pendingRecallScrollTurnRef.current;
+    if (pendingTurn == null) return;
+    if (scrollLoadedTurnIntoView(pendingTurn)) pendingRecallScrollTurnRef.current = null;
+  }, [historyScrollKey, scrollLoadedTurnIntoView]);
+
+  useEffect(() => {
+    if (!scrollToTurnRequest) return;
+    if (lastRecallScrollNonceRef.current === scrollToTurnRequest.nonce) return;
+    lastRecallScrollNonceRef.current = scrollToTurnRequest.nonce;
+    const turnIndex = Math.max(0, Math.floor(scrollToTurnRequest.turnIndex));
+    if (history && turnIndex >= history.startTurn && turnIndex < history.endTurn) {
+      scheduleRecallTurnScroll(turnIndex);
+      return;
+    }
+    const totalTurns = Math.max(
+      turnIndex + 1,
+      scrollToTurnRequest.totalTurns || 0,
+      history?.totalTurns || 0,
+      session.numTurns || 0,
+    );
+    const desiredStart = Math.max(
+      0,
+      Math.min(
+        Math.max(0, turnIndex - Math.floor(SESSION_PAGE_TURNS / 2)),
+        Math.max(0, totalTurns - SESSION_PAGE_TURNS),
+      ),
+    );
+    const desiredEnd = Math.min(totalTurns, desiredStart + SESSION_PAGE_TURNS);
+    const turnLimit = Math.max(1, desiredEnd - desiredStart);
+    const turnOffset = Math.max(0, totalTurns - desiredEnd);
+    pendingRecallScrollTurnRef.current = turnIndex;
+    void fetchTurnWindow({ turnOffset, turnLimit }, { force: true }).then(next => {
+      if (!next) return;
+      setHistory(current => {
+        if (!current) return next;
+        if (next.endTurn <= current.startTurn) return mergeOlderHistory(current, next);
+        if (next.startTurn >= current.endTurn) return mergeLatestHistory(current, next);
+        return next;
+      });
+      scheduleRecallTurnScroll(turnIndex);
+    });
+  }, [fetchTurnWindow, history, scheduleRecallTurnScroll, scrollToTurnRequest, session.numTurns]);
+
   useEffect(() => {
     if (!scrollToBottomRef.current) return;
     const force = forceScrollToBottomRef.current;
@@ -1569,7 +1640,7 @@ export const SessionPanel = memo(function SessionPanel({
     forceScrollToBottomRef.current = false;
   }, [transcriptTailKey, scheduleBottomScroll]);
   const transcriptClass = compact
-    ? 'max-w-[520px] mx-auto px-3 pt-3 pb-6 space-y-0'
+    ? 'w-[calc(100%_-_32px)] max-w-[640px] mx-auto px-3 pt-3 pb-6 space-y-0'
     : 'max-w-[860px] mx-auto px-6 pt-6 pb-12 space-y-0';
 
   return (
@@ -1644,23 +1715,25 @@ export const SessionPanel = memo(function SessionPanel({
                 ? (session.runDetail || t('dashboard.incompleteHint'))
                 : null;
               return (
-                <TurnView key={`${history?.startTurn || 0}:${sourceIndex}`}
-                  turn={turn}
-                  turnIndex={absoluteTurnIndex}
-                  agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
-                  previewMeta={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? effectiveLiveStream.previewMeta ?? null : undefined}
-                  liveAssistant={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} /> : undefined}
-                  onResend={handleResendText}
-                  onEdit={(txt) => setEditRequest({ atTurn: absoluteTurnIndex, text: txt, draftPending: true })}
-                  onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
-                  onOpenFileLink={onOpenFileLink}
-                  onCreateSideChatFromSelection={onCreateSideChatFromSelection}
-                  onCreateTodoFromSelection={onCreateTodoFromSelection}
-                  onCreateReviewCommentFromSelection={handleAppendReviewCommentFromSelection}
-                  workdir={workdir}
-                  retryProminent={retryProminent}
-                  assistantRunError={assistantRunError}
-                />
+                <div key={`${history?.startTurn || 0}:${sourceIndex}`} data-session-turn-index={absoluteTurnIndex}>
+                  <TurnView
+                    turn={turn}
+                    turnIndex={absoluteTurnIndex}
+                    agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
+                    previewMeta={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? effectiveLiveStream.previewMeta ?? null : undefined}
+                    liveAssistant={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} /> : undefined}
+                    onResend={handleResendText}
+                    onEdit={(txt) => setEditRequest({ atTurn: absoluteTurnIndex, text: txt, draftPending: true })}
+                    onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
+                    onOpenFileLink={onOpenFileLink}
+                    onCreateSideChatFromSelection={onCreateSideChatFromSelection}
+                    onCreateTodoFromSelection={onCreateTodoFromSelection}
+                    onCreateReviewCommentFromSelection={handleAppendReviewCommentFromSelection}
+                    workdir={workdir}
+                    retryProminent={retryProminent}
+                    assistantRunError={assistantRunError}
+                  />
+                </div>
               );
             })}
             {/* Optimistic pending message — represents the RUNNING task's user
@@ -1715,7 +1788,7 @@ export const SessionPanel = memo(function SessionPanel({
       {/* ── Input ── */}
       {readOnly ? (
         <div className={cn('shrink-0 border-t border-edge/40 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]', compact ? 'px-3 py-2' : 'px-4 py-3')}>
-          <div className={cn('mx-auto flex items-center justify-center rounded-md border border-edge bg-panel-alt px-3 py-2 text-fg-5', compact ? 'max-w-[520px] text-[11px]' : 'max-w-[860px] text-[12px]')}>
+          <div className={cn('mx-auto flex items-center justify-center rounded-md border border-edge bg-panel-alt px-3 py-2 text-fg-5', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] text-[11px]' : 'max-w-[860px] text-[12px]')}>
             Archived assistant history. This chat is read-only.
           </div>
         </div>

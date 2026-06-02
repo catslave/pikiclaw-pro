@@ -50,8 +50,10 @@ type HoveredLinkState = {
 function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
+    '/chat-workspace': 'sessions',
     '/dashboard': 'dashboard',
     '/tasks': 'dashboard',
+    '/daily': 'dashboard',
     '/jira': 'dashboard',
     '/usage': 'usage',
     '/archive': 'system',
@@ -67,12 +69,13 @@ function locationToTab(pathname: string): DashboardTab {
 
 function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/') return '/';
+  if (pathname === '/chat-workspace') return '/chat-workspace';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
   if (pathname === '/dashboard') return '/tasks';
   if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/tasks', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/chat-workspace', '/tasks', '/daily', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -268,8 +271,12 @@ export function App() {
   const navigate = useNavigate();
   const tab = locationToTab(location.pathname);
   const sessionShellActive = normalizeDashboardPath(location.pathname) !== null;
+  const configReady = state !== null;
+  const chatWorkspaceBetaEnabled = state?.config?.chatWorkspaceBetaEnabled === true;
   const sessionWorkspaceMode = tab === 'dashboard'
     ? 'dashboard'
+    : location.pathname === '/chat-workspace' && chatWorkspaceBetaEnabled
+      ? 'chat-workspace'
     : tab === 'sessions'
       ? 'workspace'
       : 'settings';
@@ -349,6 +356,12 @@ export function App() {
 
   useEffect(() => {
     const navState = location.state as { forceWorkspace?: boolean } | null;
+    if (location.pathname === '/chat-workspace' && configReady && !chatWorkspaceBetaEnabled) {
+      initialPathRestoreCheckedRef.current = true;
+      writeLastDashboardPath('/');
+      navigate('/', { replace: true, state: { forceWorkspace: true } });
+      return;
+    }
     if (location.pathname === '/jira' || location.pathname === '/dashboard') {
       navigate('/tasks', { replace: true });
       return;
@@ -374,7 +387,7 @@ export function App() {
     }
     initialPathRestoreCheckedRef.current = true;
     writeLastDashboardPath(normalized);
-  }, [location.pathname, location.state, navigate]);
+  }, [chatWorkspaceBetaEnabled, configReady, location.pathname, location.state, navigate]);
 
   // Restart: phase-based overlay
   const [restartPhase, setRestartPhase] = useState<RestartPhase>(null);

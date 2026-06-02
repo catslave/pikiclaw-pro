@@ -50,6 +50,18 @@ import {
   updateTaskSpace,
   type VerificationResult,
 } from '../../pro/tasks.js';
+import {
+  addTaskToDaily,
+  addTodoToDaily,
+  createDailyItems,
+  deleteDailyItem,
+  listDailyItems,
+  promoteDailyItemsToTasks,
+  revertDailyItemTask,
+  revertDailyItemTaskForTask,
+  reorderDailyItems,
+  updateDailyItem,
+} from '../../pro/daily-items.js';
 import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems, updateTodoItem, type TodoImageAttachment, type TodoItem } from '../../pro/todos.js';
 import { closeActiveJiraCycle, deleteJiraCycle, kickOffJiraCycle, listJiraCycles } from '../../pro/jira-cycles.js';
 import { buildProUsageSummary } from '../../pro/usage-summary.js';
@@ -59,6 +71,7 @@ import {
   createJiraSyncRun,
   createKnowledgeEntry,
   deleteAgentAssistant,
+  applyJiraSyncRunItems,
   getAssistantPrompt,
   getJiraWorkflowConfig,
   getJiraSyncRun,
@@ -67,6 +80,7 @@ import {
   listJiraSyncRuns,
   listKnowledgeEntries,
   markAutomationRun,
+  stopJiraSyncRun,
   updateAgentAssistant,
   resetAgentAssistantPrompt,
   updateAgentAssistantPrompt,
@@ -162,6 +176,17 @@ function buildAssistantPrompt(prompt: string, assistant?: AgentAssistant): strin
   ].join('\n');
 }
 
+function mergeJiraRawFields(input: any): Record<string, unknown> | undefined {
+  const raw = input?.rawFields && typeof input.rawFields === 'object'
+    ? { ...input.rawFields }
+    : input?.fields && typeof input.fields === 'object'
+      ? { ...input.fields }
+      : {};
+  const fixVersion = input?.fixVersions ?? input?.fixVersion;
+  if (fixVersion != null) raw.fixVersions = fixVersion;
+  return Object.keys(raw).length ? raw : undefined;
+}
+
 function buildJiraMcpSyncPrompt(runId?: string): string {
   return [
     'Sync Jira through the configured Jira/Atlassian MCP server.',
@@ -171,12 +196,14 @@ function buildJiraMcpSyncPrompt(runId?: string): string {
     runId ? '- Immediately call `pikiclaw_pro_report_jira_sync_progress` with this runId before each visible step.' : '',
     runId ? '- Report which Jira MCP tool/query you are using, how many tickets you found, and when task writing starts.' : '',
     '- Only sync Jira issues assigned to me / the current Jira user. Do not sync issues assigned to other people, unassigned issues, watched issues, reporter-only issues, or team-wide results unless they are also assigned to me.',
-    '- When using Jira search, use an assignee-scoped query such as `assignee = currentUser() ORDER BY updated DESC`; if you add filters for sprint, project, status, or updated date, keep `assignee = currentUser()` in the JQL.',
-    '- Before calling `pikiclaw_pro_sync_jira_issues`, discard any issue whose assignee is not me / the current Jira user.',
-    '- After pulling Jira issues, call the `pikiclaw_pro_sync_jira_issues` MCP tool with an `issues` array so Pikiclaw creates or updates task cards.',
-    runId ? '- Include the same runId when calling `pikiclaw_pro_sync_jira_issues`.' : '',
-    '- When using Jira search/get issue, request summary, description, issuetype, status, assignee, reporter, duedate, priority, labels, and updated.',
-    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, reporter, assignee, ticketStatus/status, dueDate, priority, labels, and updatedAt when available.',
+    '- Default sync scope is current sprint active work only: use an assignee-scoped query such as `assignee = currentUser() AND sprint in openSprints() AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC`.',
+    '- If Jira does not support `sprint in openSprints()` in this instance, keep `assignee = currentUser()` and exclude Closed/Cancelled before writing candidates.',
+    '- Before recording candidates, discard any issue whose assignee is not me / the current Jira user.',
+    '- Do not record or sync Closed or Cancelled Jira issues.',
+    '- After pulling Jira issues, call `pikiclaw_pro_record_jira_sync_candidates` with an `issues` array. Do not call `pikiclaw_pro_sync_jira_issues` during the pull step; the user will apply selected candidates from the dashboard.',
+    runId ? '- Include the same runId when calling `pikiclaw_pro_record_jira_sync_candidates`.' : '',
+    '- When using Jira search/get issue, request summary, description, issuetype, status, assignee, reporter, fixVersions, duedate, priority, labels, updated, and the sprint custom field `customfield_10652` when available.',
+    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, fixVersion/fixVersions, reporter, assignee, ticketStatus/status, dueDate, priority, labels, and updatedAt when available.',
     '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint, native Jira fields, and changed remote notes.',
     '- Append remote updates as new notes instead of overwriting existing local task context.',
     '- Mark newly assigned tickets and changed tickets clearly.',
@@ -331,7 +358,14 @@ app.delete('/api/pro/task-spaces/:spaceId', (c) => {
 
 app.get('/api/pro/tasks', (c) => {
   const spaceId = readString(c.req.query('spaceId'));
-  return c.json({ ok: true, tasks: listProTasks(spaceId && spaceId !== 'all' ? { spaceId } : {}) });
+  const plannedDate = readString(c.req.query('plannedDate'));
+  return c.json({
+    ok: true,
+    tasks: listProTasks({
+      ...(spaceId && spaceId !== 'all' ? { spaceId } : {}),
+      ...(plannedDate ? { plannedDate } : {}),
+    }),
+  });
 });
 
 app.get('/api/pro/jira/cycles', (c) => {
@@ -378,6 +412,107 @@ app.get('/api/pro/todos', (c) => {
   return c.json({ ok: true, items: listTodoItems() });
 });
 
+app.get('/api/pro/daily-items', (c) => {
+  const date = readString(c.req.query('date'));
+  return c.json({ ok: true, items: listDailyItems(date || undefined) });
+});
+
+app.post('/api/pro/daily-items', async (c) => {
+  try {
+    const body = await c.req.json();
+    const items = createDailyItems({
+      date: body?.date,
+      titles: Array.isArray(body?.titles) ? body.titles : [],
+      relatedTaskId: body?.relatedTaskId,
+    });
+    return c.json({ ok: true, items });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/daily-items/from-todo', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = addTodoToDaily(body?.date, body?.todoId);
+    return c.json({ ok: true, item: result.item, taskId: result.taskId });
+  } catch (e: any) {
+    const status = e?.message === 'todo not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/daily-items/from-task', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = addTaskToDaily(body?.date, body?.taskId);
+    return c.json({ ok: true, item: result.item });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/daily-items/promote', async (c) => {
+  try {
+    const body = await c.req.json();
+    const config = loadUserConfig();
+    const result = promoteDailyItemsToTasks(
+      body?.date,
+      Array.isArray(body?.itemIds) ? body.itemIds : [],
+      { workdir: readString(body?.workdir) || runtime.getRequestWorkdir(config) },
+    );
+    return c.json({ ok: true, items: result.items, taskIds: result.taskIds });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/daily-items/reorder', async (c) => {
+  try {
+    const body = await c.req.json();
+    const items = reorderDailyItems(body?.date, Array.isArray(body?.itemIds) ? body.itemIds : []);
+    return c.json({ ok: true, items });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/daily-items/:itemId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const item = updateDailyItem(c.req.param('itemId'), {
+      title: body?.title,
+      status: body?.status,
+      relatedTaskId: Object.prototype.hasOwnProperty.call(body || {}, 'relatedTaskId') ? body.relatedTaskId : undefined,
+    });
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    const status = e?.message === 'daily item not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/daily-items/:itemId/revert-task', async (c) => {
+  try {
+    const item = revertDailyItemTask(c.req.param('itemId'));
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    const status = e?.message === 'daily item not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/daily-items/:itemId', (c) => {
+  try {
+    const item = deleteDailyItem(c.req.param('itemId'));
+    return c.json({ ok: true, item });
+  } catch (e: any) {
+    const status = e?.message === 'daily item not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.post('/api/pro/todos', async (c) => {
   try {
     const body = await c.req.json();
@@ -397,9 +532,10 @@ app.post('/api/pro/todos', async (c) => {
 app.patch('/api/pro/todos/:todoId', async (c) => {
   try {
     const body = await c.req.json();
-    const update: { title?: string; body?: string; images?: unknown } = {};
+    const update: { title?: string; body?: string; status?: TodoItem['status']; images?: unknown } = {};
     if (body && Object.prototype.hasOwnProperty.call(body, 'title')) update.title = body.title;
     if (body && Object.prototype.hasOwnProperty.call(body, 'body')) update.body = body.body;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'status')) update.status = body.status;
     if (body && Object.prototype.hasOwnProperty.call(body, 'images')) update.images = body.images;
     const item = updateTodoItem(c.req.param('todoId'), update);
     return c.json({ ok: true, item });
@@ -837,6 +973,30 @@ app.get('/api/pro/jira/mcp-sync/runs/:runId', (c) => {
   return c.json({ ok: true, run });
 });
 
+app.post('/api/pro/jira/mcp-sync/runs/:runId/stop', (c) => {
+  try {
+    const run = getJiraSyncRun(c.req.param('runId'));
+    if (!run) return c.json({ ok: false, error: 'jira sync run not found' }, 404);
+    const stopped = stopJiraSyncRun(run.id, 'Stopped from Jira sync panel.');
+    const sessionKey = stopped.sessionKey || run.sessionKey;
+    if (sessionKey) runtime.getBotRef()?.stopAllSessionTasks(sessionKey);
+    return c.json({ ok: true, run: stopped });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/jira/mcp-sync/runs/:runId/apply', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const run = applyJiraSyncRunItems(c.req.param('runId'), Array.isArray(body?.itemIds) ? body.itemIds : []);
+    return c.json({ ok: true, run });
+  } catch (e: any) {
+    const status = e?.message === 'jira sync run not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.post('/api/pro/jira/mcp-sync/schedule', async (c) => {
   try {
     const body = await c.req.json();
@@ -991,6 +1151,8 @@ app.post('/api/pro/tasks', async (c) => {
       description: body?.description,
       kind: body?.kind,
       status: body?.status,
+      plannedDate: body?.plannedDate,
+      linkedTaskId: body?.linkedTaskId,
       spaceId: body?.spaceId,
       workdir: body?.workdir || runtime.getRequestWorkdir(config),
       defaultAgent: body?.defaultAgent,
@@ -1038,7 +1200,7 @@ app.post('/api/pro/jira/sync', async (c) => {
         priority: body?.priority,
         labels: body?.labels,
         updatedAt: body?.updatedAt || body?.updated,
-        rawFields: body?.rawFields || body?.fields,
+        rawFields: mergeJiraRawFields(body),
       }];
     const tasks = issues.map((issue: any) => syncJiraTask({
       title: issue?.title,
@@ -1057,7 +1219,7 @@ app.post('/api/pro/jira/sync', async (c) => {
       priority: issue?.priority,
       labels: Array.isArray(issue?.labels) ? issue.labels : undefined,
       updatedAt: issue?.updatedAt || issue?.updated,
-      rawFields: issue?.rawFields || issue?.fields,
+      rawFields: mergeJiraRawFields(issue),
     }));
     return c.json({ ok: true, tasks });
   } catch (e: any) {
@@ -1134,7 +1296,14 @@ app.patch('/api/pro/tasks/:taskId/meta', async (c) => {
     const patch: Record<string, unknown> = {};
     if (body && Object.prototype.hasOwnProperty.call(body, 'workdir')) patch.workdir = body.workdir;
     if (body && Object.prototype.hasOwnProperty.call(body, 'prUrl')) patch.prUrl = body.prUrl;
-    const task = updateProTaskMeta(c.req.param('taskId'), patch);
+    if (body && Object.prototype.hasOwnProperty.call(body, 'plannedDate')) patch.plannedDate = body.plannedDate;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'linkedTaskId')) patch.linkedTaskId = body.linkedTaskId;
+    let task = updateProTaskMeta(c.req.param('taskId'), patch);
+    if (Object.prototype.hasOwnProperty.call(patch, 'plannedDate') && !patch.plannedDate) {
+      const reverted = revertDailyItemTaskForTask(c.req.param('taskId'));
+      task = getProTask(c.req.param('taskId')) || task;
+      return c.json({ ok: true, task, dailyItem: reverted });
+    }
     return c.json({ ok: true, task });
   } catch (e: any) {
     const status = e?.message === 'task not found' ? 404 : 400;

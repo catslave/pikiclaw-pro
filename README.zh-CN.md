@@ -316,16 +316,27 @@ docker run -d --name pikiclaw -p 3939:3939 \
 
 ## 本地开发
 
+**从源码启动（本地开发）：**
+
 ```bash
 git clone https://github.com/xiaotonng/pikiclaw.git
 cd pikiclaw
 npm install
-npm run build
-npm test
+npm run dev
 ```
 
+`npm run dev` 会重新构建 Dashboard，并以 `--no-daemon` 模式启动 orchestrator。日志出现 `dashboard: http://127.0.0.1:3939` 后，在浏览器打开 **http://localhost:3939** 即可。
+
+| 路径 / 命令 | 说明 |
+|---|---|
+| `npm run dev` | 从当前源码目录启动（或重启）本地开发服务 |
+| `~/.pikiclaw/dev/dev.log` | 开发模式运行日志（可用 `tail -f` 实时查看） |
+| `~/.pikiclaw/dev/setting.json` | 独立的开发配置（不会覆盖正式环境的 setting） |
+| `pkill -f 'tsx src/cli/main.ts --no-daemon'` | 停止本地开发服务 |
+
+其他常用命令：
+
 ```bash
-npm run dev                       # 启动本地开发服务（--no-daemon，实时日志输出到 ~/.pikiclaw/dev/dev.log）
 npm run build                     # 生产环境编译（Dashboard 构建 + tsc）
 npm test                          # 运行 Vitest 测试套件
 npx pikiclaw@latest --doctor      # 检测本机环境健康度

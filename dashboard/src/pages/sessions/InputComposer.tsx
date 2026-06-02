@@ -1497,7 +1497,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   return (
     <div className={cn('composer-shell shrink-0', compact && 'composer-shell-compact')} ref={composerRef} data-session-composer>
       {/* Floating centered input area */}
-      <div className={cn('w-full mx-auto', compact ? 'max-w-[560px] px-2.5 pb-2 pt-1.5' : 'max-w-[860px] px-4 pb-4 pt-2 sm:px-3')}>
+      <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] px-2.5 pb-2 pt-1.5' : 'w-full max-w-[860px] px-4 pb-4 pt-2 sm:px-3')}>
         {/* Task control bar — queued follow-ups only. Active streams use the inline stop button near Send. */}
         {showTaskBar && (
           <div className="mb-2 space-y-1.5">

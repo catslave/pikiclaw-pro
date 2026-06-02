@@ -1,11 +1,11 @@
 import { useState, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
+import { type OpenFileLinkHandler } from './markdown';
 import { stripOaiMemoryCitations } from './messageSanitizers';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
+import { GeneratedChatTextOutput } from './AssistantContent';
 import { CompletedWorkDisclosure, WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, formatActivityForDisplay, summarizeWorkingActivity } from './WorkingCard';
 import type { StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 
@@ -94,7 +94,6 @@ export function LivePreview({
     (stream.activity || '').split('\n').filter(Boolean),
     [stream.activity],
   );
-  const mdComponents = useMemo(() => createMdComponents({ onOpenFileLink, workdir }), [onOpenFileLink, workdir]);
   const lastActivity = activityLines[activityLines.length - 1] || '';
   const subAgents = stream.subAgents ?? null;
   const currentPlanStep = showPlan
@@ -189,16 +188,19 @@ export function LivePreview({
 
       {/* Response text with thinking dots */}
       {visibleText && (
-        <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
-          {stream.phase === 'streaming' ? (
+        stream.phase === 'streaming' ? (
+          <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
             <div className="whitespace-pre-wrap break-words">{visibleText}</div>
-          ) : (
-            <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
-              {visibleText}
-            </ReactMarkdown>
-          )}
-          {stream.phase === 'streaming' && <ThinkingDots className="ml-1 inline-flex align-text-bottom text-fg-4" />}
-        </div>
+            <ThinkingDots className="ml-1 inline-flex align-text-bottom text-fg-4" />
+          </div>
+        ) : (
+          <GeneratedChatTextOutput
+            text={visibleText}
+            t={t}
+            onOpenFileLink={onOpenFileLink}
+            workdir={workdir}
+          />
+        )
       )}
 
       {/* Loading dots — shown whenever the stream is live but no text body is

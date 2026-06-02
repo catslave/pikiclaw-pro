@@ -10,8 +10,12 @@ const IconSun = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stro
 const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
 const IconRestart = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>;
 const IconAgents = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.8-3 2.8-4.5 5.5-4.5s4.7 1.5 5.5 4.5" /><circle cx="17" cy="10" r="2.3" /><path d="M14.8 15.2c2.9.2 4.8 1.4 5.7 3.8" /></svg>;
+const IconIM = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 4v-4A2.5 2.5 0 0 1 4 12.5z" /><path d="M8 8h8" /><path d="M8 11.5h5" /></svg>;
 const IconExtensions = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 3h6v4h2.5a2.5 2.5 0 0 1 0 5H15v3h3.5a2.5 2.5 0 0 1 0 5H9v-5H5.5a2.5 2.5 0 0 1 0-5H9V7H6.5a2.5 2.5 0 0 1 0-5H9z" /></svg>;
 const IconSystem = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z" /></svg>;
+const IconTasks = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>;
+const IconDaily = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M8 2v4" /><path d="M16 2v4" /><path d="M3 10h18" /><path d="m9 15 2 2 4-4" /></svg>;
+const IconChatWorkspace = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="11" height="8" rx="2" /><path d="M7 16h10a3 3 0 0 0 3-3V9" /><path d="M8 8h1.5" /><path d="M16 16l3 3v-3" /></svg>;
 
 function PikiclawLogo() {
   return (
@@ -41,9 +45,22 @@ function PikiclawLogo() {
   );
 }
 
+function MenuTooltip({ label }: { label: string }) {
+  return (
+    <span
+      data-main-menu-tooltip
+      className="pointer-events-none absolute left-full top-1/2 z-[90] ml-2 -translate-y-1/2 whitespace-nowrap rounded-md border border-edge/70 bg-panel/95 px-2 py-1 text-[11px] font-semibold text-fg-2 opacity-0 shadow-lg backdrop-blur transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100"
+    >
+      {label}
+    </span>
+  );
+}
+
 const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
+  chatWorkspace: '/chat-workspace',
   dashboard: '/tasks',
+  daily: '/daily',
   usage: '/usage',
   im: '/im',
   agents: '/agents',
@@ -71,16 +88,23 @@ export function Sidebar({
   const setLocale = useStore(s => s.setLocale);
   const t = useMemo(() => createT(locale), [locale]);
   const location = useLocation();
+  const chatWorkspaceBetaEnabled = state?.config?.chatWorkspaceBetaEnabled === true;
   const primaryNavItems = useMemo(() => [
     { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, state: { forceWorkspace: true } },
+    ...(chatWorkspaceBetaEnabled
+      ? [{ key: 'chatWorkspace', to: TAB_ROUTES.chatWorkspace, label: t('nav.chatWorkspace'), state: undefined }]
+      : []),
     { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('nav.dashboard'), state: undefined },
-  ], [t]);
+    { key: 'daily', to: TAB_ROUTES.daily, label: t('nav.daily'), state: undefined },
+  ], [chatWorkspaceBetaEnabled, t]);
   const configNavItems = useMemo(() => [
+    { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), state: undefined },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), state: undefined },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), state: undefined },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), state: undefined },
   ], [t]);
   const immersiveConfigNavItems = useMemo(() => [
+    { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), icon: IconIM },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), icon: IconAgents },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), icon: IconExtensions },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), icon: IconSystem },
@@ -104,7 +128,7 @@ export function Sidebar({
               aria-label={t('nav.workspace')}
               end
               className={({ isActive }) => cn(
-                'absolute inset-1 inline-flex items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+                'group absolute inset-1 inline-flex items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
                 isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
               )}
             >
@@ -112,6 +136,7 @@ export function Sidebar({
                 <rect x="3" y="4" width="18" height="16" rx="2" />
                 <path d="M9 4v16" />
               </svg>
+              <MenuTooltip label={t('nav.workspace')} />
             </NavLink>
             <div id="workspace-sidebar-toggle-host" className="absolute inset-1 flex shrink-0 items-center justify-center empty:hidden" />
           </div>
@@ -120,17 +145,39 @@ export function Sidebar({
             title={t('nav.dashboard')}
             aria-label={t('nav.dashboard')}
             className={({ isActive }) => cn(
-              'mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
               isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
             )}
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="3" width="7" height="7" rx="1.5" />
-              <rect x="14" y="3" width="7" height="7" rx="1.5" />
-              <rect x="3" y="14" width="7" height="7" rx="1.5" />
-              <rect x="14" y="14" width="7" height="7" rx="1.5" />
-            </svg>
+            {IconTasks}
+            <MenuTooltip label={t('nav.dashboard')} />
           </NavLink>
+          <NavLink
+            to="/daily"
+            title={t('nav.daily')}
+            aria-label={t('nav.daily')}
+            className={({ isActive }) => cn(
+              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+            )}
+          >
+            {IconDaily}
+            <MenuTooltip label={t('nav.daily')} />
+          </NavLink>
+          {chatWorkspaceBetaEnabled && (
+            <NavLink
+              to="/chat-workspace"
+              title={t('nav.chatWorkspace')}
+              aria-label={t('nav.chatWorkspace')}
+              className={({ isActive }) => cn(
+                'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+                isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+              )}
+            >
+              {IconChatWorkspace}
+              <MenuTooltip label={t('nav.chatWorkspace')} />
+            </NavLink>
+          )}
           <div className="mt-3 h-px w-6 bg-edge/70" />
           <nav className="mt-3 flex shrink-0 flex-col items-center gap-1" aria-label="Settings navigation">
             {immersiveConfigNavItems.map(item => (
@@ -142,20 +189,22 @@ export function Sidebar({
                 className={({ isActive }) => {
                   const active = item.key === 'system' ? location.pathname === '/system' : isActive;
                   return cn(
-                    'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+                    'group relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
                     active && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
                   );
                 }}
               >
                 {item.icon}
+                <MenuTooltip label={item.label} />
               </NavLink>
             ))}
           </nav>
           <div id="global-inbox-host" className="mt-3 flex shrink-0 flex-col items-center gap-1 empty:hidden" />
           <div className="mt-3 h-px w-6 bg-edge/70" />
           <div className="mt-auto flex shrink-0 flex-col items-center gap-1 py-1">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center" title={appStatus.badgeContent} aria-label={appStatus.badgeContent}>
+            <div className="group relative flex h-8 w-8 shrink-0 items-center justify-center" title={appStatus.badgeContent} aria-label={appStatus.badgeContent}>
               <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
+              <MenuTooltip label={appStatus.badgeContent} />
             </div>
             <Button
               variant={confirming ? 'secondary' : 'ghost'}
@@ -164,7 +213,7 @@ export function Sidebar({
               disabled={busy}
               title={busy ? t('modal.restarting') : confirming ? t('modal.confirmRestart') : t('sidebar.restart')}
               className={cn(
-                '!h-8 !w-8',
+                'group relative !h-8 !w-8 overflow-visible',
                 busy ? 'pointer-events-none opacity-70' : '',
                 confirming ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : '',
               )}
@@ -172,6 +221,7 @@ export function Sidebar({
               <span className={busy ? 'animate-spin' : ''} style={busy ? { animationDuration: '1s' } : undefined} aria-hidden="true">
                 {IconRestart}
               </span>
+              <MenuTooltip label={busy ? t('modal.restarting') : confirming ? t('modal.confirmRestart') : t('sidebar.restart')} />
             </Button>
             <Button
               variant="ghost"
@@ -179,9 +229,10 @@ export function Sidebar({
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
               title={themeToggleLabel}
               aria-label={themeToggleLabel}
-              className="!h-8 !w-8"
+              className="group relative !h-8 !w-8 overflow-visible"
             >
               {theme === 'dark' ? IconSun : IconMoon}
+              <MenuTooltip label={themeToggleLabel} />
             </Button>
             <Button
               variant="ghost"
@@ -189,9 +240,10 @@ export function Sidebar({
               onClick={() => setLocale(locale === 'zh-CN' ? 'en' : 'zh-CN')}
               title={languageToggleLabel}
               aria-label={languageToggleLabel}
-              className="!h-8 !w-8 font-mono !text-[11px] font-semibold tracking-wider"
+              className="group relative !h-8 !w-8 overflow-visible font-mono !text-[11px] font-semibold tracking-wider"
             >
               {locale === 'zh-CN' ? 'EN' : '\u4e2d'}
+              <MenuTooltip label={languageToggleLabel} />
             </Button>
           </div>
         </div>

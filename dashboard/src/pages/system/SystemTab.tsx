@@ -1,9 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
+import { api } from '../../api';
 import { buildHostMetricItems, formatHostSummary, SystemInfoList } from '../../components/SystemInfoPanel';
-import { Button } from '../../components/ui';
+import { Button, Spinner } from '../../components/ui';
 import { SectionCard } from '../shared';
 import { PermissionsTab } from '../permissions/PermissionsTab';
 import { ArchiveTab } from '../archive/ArchiveTab';
@@ -18,13 +19,45 @@ export function SystemTab({
   const state = useStore(s => s.state);
   const host = useStore(s => s.host);
   const locale = useStore(s => s.locale);
+  const reload = useStore(s => s.reload);
+  const toast = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [savingRecallIndex, setSavingRecallIndex] = useState(false);
+  const [savingChatWorkspaceBeta, setSavingChatWorkspaceBeta] = useState(false);
   const activeView: SystemView = searchParams.get('view') === 'archive' ? 'archive' : 'overview';
   const currentWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || state?.config.workdir || '';
+  const chatRecallIndexEnabled = state?.config.chatRecallIndexEnabled === true;
+  const chatWorkspaceBetaEnabled = state?.config.chatWorkspaceBetaEnabled === true;
   const hostSummary = formatHostSummary(host);
   const switchView = (view: SystemView) => {
     setSearchParams(view === 'archive' ? { view: 'archive' } : {}, { replace: true });
+  };
+  const toggleChatRecallIndex = async () => {
+    const nextEnabled = !chatRecallIndexEnabled;
+    setSavingRecallIndex(true);
+    try {
+      await api.saveConfig({ chatRecallIndexEnabled: nextEnabled });
+      await reload();
+      toast(nextEnabled ? t('system.chatRecallEnabled') : t('system.chatRecallDisabled'));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t('system.chatRecallSaveFailed'), false);
+    } finally {
+      setSavingRecallIndex(false);
+    }
+  };
+  const toggleChatWorkspaceBeta = async () => {
+    const nextEnabled = !chatWorkspaceBetaEnabled;
+    setSavingChatWorkspaceBeta(true);
+    try {
+      await api.saveConfig({ chatWorkspaceBetaEnabled: nextEnabled });
+      await reload();
+      toast(nextEnabled ? t('system.chatWorkspaceBetaEnabled') : t('system.chatWorkspaceBetaDisabled'));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t('system.chatWorkspaceBetaSaveFailed'), false);
+    } finally {
+      setSavingChatWorkspaceBeta(false);
+    }
   };
 
   return (
@@ -84,6 +117,49 @@ export function SystemTab({
             </div>
 
             <SystemInfoList items={buildHostMetricItems(host, t)} loading={!host} />
+          </SectionCard>
+
+          <SectionCard className="space-y-3 !p-3.5">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold tracking-tight text-fg">{t('system.experimentalFeatures')}</div>
+                <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">{t('system.experimentalFeaturesHint')}</div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-edge/60 bg-panel-alt/70 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12px] font-semibold text-fg-2">{t('system.chatRecallTitle')}</div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">{t('system.chatRecallDesc')}</div>
+                </div>
+                <Button
+                  variant={chatRecallIndexEnabled ? 'secondary' : 'outline'}
+                  size="sm"
+                  onClick={() => void toggleChatRecallIndex()}
+                  disabled={savingRecallIndex}
+                  aria-pressed={chatRecallIndexEnabled}
+                >
+                  {savingRecallIndex && <Spinner className="h-3 w-3" />}
+                  <span>{chatRecallIndexEnabled ? t('system.featureOn') : t('system.featureOff')}</span>
+                </Button>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-edge/60 bg-panel-alt/70 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12px] font-semibold text-fg-2">{t('system.chatWorkspaceBetaTitle')}</div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">{t('system.chatWorkspaceBetaDesc')}</div>
+                </div>
+                <Button
+                  variant={chatWorkspaceBetaEnabled ? 'secondary' : 'outline'}
+                  size="sm"
+                  onClick={() => void toggleChatWorkspaceBeta()}
+                  disabled={savingChatWorkspaceBeta}
+                  aria-pressed={chatWorkspaceBetaEnabled}
+                >
+                  {savingChatWorkspaceBeta && <Spinner className="h-3 w-3" />}
+                  <span>{chatWorkspaceBetaEnabled ? t('system.featureOn') : t('system.featureOff')}</span>
+                </Button>
+              </div>
+            </div>
           </SectionCard>
 
           <SectionCard className="space-y-2 !p-3.5">

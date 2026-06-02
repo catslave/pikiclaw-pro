@@ -5,7 +5,7 @@
 import type { McpToolModule, ToolResult } from './types.js';
 import { toolResult, toolLog } from './types.js';
 import { syncJiraTask } from '../../../pro/tasks.js';
-import { updateJiraSyncRun } from '../../../pro/workflow.js';
+import { getJiraSyncRun, recordJiraSyncCandidates, updateJiraSyncRun } from '../../../pro/workflow.js';
 
 const tools: McpToolModule['tools'] = [
   {
@@ -32,7 +32,7 @@ const tools: McpToolModule['tools'] = [
       properties: {
         issues: {
           type: 'array',
-          description: 'Jira issues to sync. Each item should include key/jiraKey, title/summary, description, issueType, url/jiraUrl, sprint, reporter, assignee, status, dueDate, priority, labels, and updatedAt when available.',
+          description: 'Jira issues to sync. Each item should include key/jiraKey, title/summary, description, issueType, url/jiraUrl, sprint, fixVersion/fixVersions, reporter, assignee, status, dueDate, priority, labels, and updatedAt when available.',
           items: {
             type: 'object',
             properties: {
@@ -57,6 +57,8 @@ const tools: McpToolModule['tools'] = [
               mergeRequestUrl: { type: 'string' },
               url: { type: 'string' },
               sprint: { type: 'string' },
+              fixVersion: { type: 'string' },
+              fixVersions: { type: 'array', items: { type: 'string' } },
               workdir: { type: 'string' },
             },
           },
@@ -67,6 +69,25 @@ const tools: McpToolModule['tools'] = [
         },
       },
       required: ['issues'],
+    },
+  },
+  {
+    name: 'pikiclaw_pro_record_jira_sync_candidates',
+    description: 'Record Jira issues as reviewable sync candidates without creating or updating Pikiclaw tasks. Use this after fetching assigned current-sprint Jira tickets.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        issues: {
+          type: 'array',
+          description: 'Jira issues to stage for user review. Closed and Cancelled issues are excluded.',
+          items: { type: 'object' },
+        },
+        runId: {
+          type: 'string',
+          description: 'Jira sync run id. Required so Pikiclaw can show the review list.',
+        },
+      },
+      required: ['runId', 'issues'],
     },
   },
 ];
@@ -119,6 +140,16 @@ function namedValue(value: unknown): string {
   return '';
 }
 
+function jiraRawFields(issue: Record<string, unknown>): Record<string, unknown> | undefined {
+  const fields = issue.fields && typeof issue.fields === 'object' ? issue.fields as Record<string, unknown> : {};
+  const fixVersion = issueField(issue, 'fixVersion', 'fixVersions', 'fixversion', 'fixversions');
+  const raw = {
+    ...fields,
+    ...(fixVersion != null ? { fixVersions: fixVersion } : {}),
+  };
+  return Object.keys(raw).length ? raw : undefined;
+}
+
 function buildSyncAnalysis(tasks: Array<{ title: string; status: string; kind: string; jiraKey?: string; sprint?: string; syncAction: string }>, counts: { created: number; updated: number; unchanged: number }): string {
   if (!tasks.length) return 'No Jira tickets were converted into Pikiclaw tasks.';
   const byKind = new Map<string, number>();
@@ -147,6 +178,9 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
   const issues = Array.isArray(args.issues) ? args.issues : [];
   if (!issues.length) return toolResult('Error: issues array is required', true);
   const runId = text(args.runId, 160);
+  if (runId && getJiraSyncRun(runId)?.status === 'stopped') {
+    return toolResult('Jira sync run stopped; task writing skipped.');
+  }
   if (runId) {
     try {
       updateJiraSyncRun(runId, {
@@ -185,7 +219,7 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
         priority: namedValue(issueField(issue, 'priority')),
         labels: Array.isArray(issueField(issue, 'labels')) ? (issueField(issue, 'labels') as unknown[]).map(label => text(label, 120)).filter(Boolean) : undefined,
         updatedAt: text(issueField(issue, 'updatedAt', 'updated'), 80),
-        rawFields: issue.fields && typeof issue.fields === 'object' ? issue.fields as Record<string, unknown> : undefined,
+        rawFields: jiraRawFields(issue),
       });
       const latestEvent = task.events?.[0];
       const action = latestEvent?.type === 'jira-updated'
@@ -251,11 +285,32 @@ function handleSyncJiraIssues(args: Record<string, unknown>, workdir?: string): 
   return toolResult(JSON.stringify({ ok: errors.length === 0, synced: tasks.length, counts, analysisSummary, tasks, errors }, null, 2), errors.length > 0 && tasks.length === 0);
 }
 
+function handleRecordJiraSyncCandidates(args: Record<string, unknown>): ToolResult {
+  const runId = text(args.runId, 160);
+  const issues = Array.isArray(args.issues) ? args.issues : [];
+  if (!runId) return toolResult('Error: runId is required', true);
+  try {
+    const run = recordJiraSyncCandidates(runId, issues);
+    return toolResult(JSON.stringify({
+      ok: true,
+      runId: run.id,
+      candidates: run.items?.length || 0,
+      ticketCount: run.ticketCount || 0,
+      analysisSummary: run.analysisSummary,
+    }, null, 2));
+  } catch (e: any) {
+    return toolResult(`Error recording Jira sync candidates: ${e?.message || e}`, true);
+  }
+}
+
 function handleReportProgress(args: Record<string, unknown>): ToolResult {
   const runId = text(args.runId, 160);
   const label = text(args.label, 240);
   if (!runId) return toolResult('Error: runId is required', true);
   if (!label) return toolResult('Error: label is required', true);
+  if (getJiraSyncRun(runId)?.status === 'stopped') {
+    return toolResult(JSON.stringify({ ok: true, runId, status: 'stopped' }, null, 2));
+  }
   try {
     const run = updateJiraSyncRun(runId, {
       status: args.status === 'completed' || args.status === 'failed' ? args.status : 'syncing',
@@ -275,6 +330,7 @@ export const proTools: McpToolModule = {
     switch (name) {
       case 'pikiclaw_pro_report_jira_sync_progress': return handleReportProgress(args);
       case 'pikiclaw_pro_sync_jira_issues': return handleSyncJiraIssues(args, ctx.workdir);
+      case 'pikiclaw_pro_record_jira_sync_candidates': return handleRecordJiraSyncCandidates(args);
       default: return toolResult(`Unknown pro tool: ${name}`, true);
     }
   },

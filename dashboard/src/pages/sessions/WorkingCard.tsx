@@ -706,19 +706,35 @@ export function WorkingSubAgentList({ subAgents, t }: { subAgents?: StreamSubAge
   if (!subAgents?.length) return null;
   return (
     <WorkingSection label={t('hub.subAgent')}>
-      <div className="space-y-1">
+      <div className="space-y-2">
         {subAgents.map(sub => {
           const dot = sub.status === 'failed' ? 'bg-rose-400/70'
             : sub.status === 'done' ? 'bg-emerald-400/70'
               : 'bg-amber-400/70';
           const model = sub.model ? shortenModel(sub.model) : null;
-          const title = sub.kind ? `${sub.kind}${sub.description ? ` · ${sub.description}` : ''}` : (sub.description || t('hub.subAgent'));
+          const statusLabel = sub.status === 'failed'
+            ? t('hub.subAgentFailed')
+            : sub.status === 'done'
+              ? t('hub.subAgentDone')
+              : t('hub.subAgentRunning');
+          const title = sub.description || sub.kind || t('hub.subAgent');
+          const meta = [
+            sub.kind && sub.kind !== sub.description ? sub.kind : '',
+            model || '',
+            sub.tools.length > 0 ? replaceVars(t('hub.subAgentToolCount'), { n: String(sub.tools.length) }) : '',
+          ].filter(Boolean);
+          const latestTool = sub.tools.length > 0 ? sub.tools[sub.tools.length - 1].summary : t('hub.subAgentWaiting');
           return (
-            <div key={sub.id} className="flex min-w-0 items-center gap-2 py-[2px]">
-              <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', dot, sub.status === 'running' && 'animate-pulse')} />
-              <span className="min-w-0 flex-1 truncate text-[12px] text-fg-4">{title}</span>
-              {model && <span className="shrink-0 text-[10px] font-mono text-fg-5/55">{model}</span>}
-              {sub.tools.length > 0 && <span className="shrink-0 text-[10px] font-mono text-fg-5/55">{sub.tools.length}</span>}
+            <div key={sub.id} className="min-w-0 border-l-2 border-edge/70 pl-2.5 py-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', dot, sub.status === 'running' && 'animate-pulse')} />
+                <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-3">{title}</span>
+                <span className="shrink-0 text-[10px] font-medium text-fg-5/70">{statusLabel}</span>
+              </div>
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pl-3.5 text-[10.5px] leading-[1.45] text-fg-5/75">
+                {meta.map(part => <span key={part} className="font-mono">{part}</span>)}
+                <span className="min-w-0 break-words">{latestTool}</span>
+              </div>
             </div>
           );
         })}

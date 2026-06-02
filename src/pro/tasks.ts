@@ -195,10 +195,13 @@ export interface ProSubtask {
 
 export interface ProTask {
   id: string;
+  localKey?: string;
   title: string;
   description?: string;
   kind: ProTaskKind;
   status: ProTaskStatus;
+  plannedDate?: string;
+  linkedTaskId?: string;
   spaceId?: string;
   origin?: TaskOrigin;
   workdir?: string;
@@ -239,6 +242,7 @@ export interface ProTask {
 
 interface ProTaskFile {
   version: 1;
+  nextLocalKey?: number;
   taskSpaces?: TaskSpace[];
   tasks: ProTask[];
 }
@@ -264,6 +268,8 @@ export interface CreateProTaskInput {
   description?: string;
   kind?: ProTaskKind;
   status?: ProTaskStatus;
+  plannedDate?: string;
+  linkedTaskId?: string;
   spaceId?: string;
   workdir?: string;
   prUrl?: string;
@@ -331,6 +337,8 @@ export interface UpdateTaskCycleInput {
 export interface UpdateTaskMetaInput {
   workdir?: unknown;
   prUrl?: unknown;
+  plannedDate?: unknown;
+  linkedTaskId?: unknown;
 }
 
 export interface UpdateStageRunInput {
@@ -441,6 +449,11 @@ function normalizeText(value: unknown, max = 16_000): string {
   return text.length > max ? text.slice(0, max).trimEnd() : text;
 }
 
+function normalizePlannedDate(value: unknown): string | undefined {
+  const text = normalizeText(value, 32);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : undefined;
+}
+
 function isJiraTaskKind(kind: ProTaskKind | undefined): boolean {
   return kind === 'jira-ticket' || kind === 'jira-bug' || kind === 'jira-epic';
 }
@@ -457,6 +470,10 @@ function defaultOriginForTask(task: Pick<ProTask, 'kind' | 'jiraKey' | 'jiraUrl'
 }
 
 function normalizeTaskSpaceId(value: unknown): string | undefined {
+  return normalizeText(value, 160) || undefined;
+}
+
+function normalizeLinkedTaskId(value: unknown): string | undefined {
   return normalizeText(value, 160) || undefined;
 }
 
@@ -502,46 +519,100 @@ function normalizeTaskSpace(value: unknown): TaskSpace | null {
   };
 }
 
+function isJiraLikeTask(task: Pick<ProTask, 'kind' | 'jiraKey'>): boolean {
+  return isJiraTaskKind(task.kind) || !!task.jiraKey;
+}
+
+function normalizeLocalKey(value: unknown): string | undefined {
+  const text = normalizeText(value, 32).toUpperCase();
+  return /^MY-\d{4,}$/.test(text) ? text : undefined;
+}
+
+function localKeyNumber(localKey: string | undefined): number {
+  const match = localKey?.match(/^MY-(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+function formatLocalKey(value: number): string {
+  return `MY-${String(Math.max(1, value)).padStart(4, '0')}`;
+}
+
+function normalizeNextLocalKey(value: unknown, tasks: ProTask[]): number {
+  const explicit = Number(value);
+  const maxExisting = tasks.reduce((max, task) => Math.max(max, localKeyNumber(task.localKey)), 0);
+  return Math.max(Number.isFinite(explicit) ? Math.floor(explicit) : 1, maxExisting + 1, 1);
+}
+
+function allocateLocalKey(file: ProTaskFile): string {
+  const next = normalizeNextLocalKey(file.nextLocalKey, file.tasks);
+  file.nextLocalKey = next + 1;
+  return formatLocalKey(next);
+}
+
+function ensureLocalKeys(file: ProTaskFile): ProTaskFile {
+  file.nextLocalKey = normalizeNextLocalKey(file.nextLocalKey, file.tasks);
+  for (const task of file.tasks) {
+    if (isJiraLikeTask(task)) {
+      delete task.localKey;
+      continue;
+    }
+    task.localKey = normalizeLocalKey(task.localKey) || allocateLocalKey(file);
+  }
+  file.nextLocalKey = normalizeNextLocalKey(file.nextLocalKey, file.tasks);
+  return file;
+}
+
 function readFile(): ProTaskFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(taskFilePath(), 'utf-8')) as ProTaskFile;
-    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.tasks)) return { version: 1, tasks: [] };
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.tasks)) return { version: 1, nextLocalKey: 1, tasks: [] };
     const taskSpaces = Array.isArray((parsed as any).taskSpaces)
       ? (parsed as any).taskSpaces.map(normalizeTaskSpace).filter((space: TaskSpace | null): space is TaskSpace => !!space && !BUILTIN_TASK_SPACES.some(item => item.id === space.id))
       : [];
-    return {
+    const tasks = parsed.tasks
+      .filter(task => task && typeof task.id === 'string' && typeof task.title === 'string')
+      .map(task => {
+        const kind = VALID_KINDS.includes((task as any).kind) ? (task as any).kind as ProTaskKind : taskKindFromIssueType((task as any).jiraFields?.issueType);
+        const normalized: ProTask = {
+        ...(task as any),
+        localKey: normalizeLocalKey((task as any).localKey),
+        kind,
+        plannedDate: normalizePlannedDate((task as any).plannedDate),
+        linkedTaskId: normalizeLinkedTaskId((task as any).linkedTaskId),
+        spaceId: normalizeTaskSpaceId((task as any).spaceId) || defaultSpaceIdForTask({ kind, jiraKey: (task as any).jiraKey }),
+        origin: normalizeTaskOrigin((task as any).origin, { kind, jiraKey: (task as any).jiraKey, jiraUrl: (task as any).jiraUrl }),
+        workdir: normalizeText((task as any).workdir, 2048) || undefined,
+        prUrl: normalizeText((task as any).prUrl ?? (task as any).mergeRequestUrl, 2048) || undefined,
+        subTasks: Array.isArray((task as any).subTasks) ? (task as any).subTasks : [],
+        stageRuns: Array.isArray(task.stageRuns)
+          ? task.stageRuns.map((run: any) => ({
+              ...run,
+              outputIds: Array.isArray(run.outputIds) ? run.outputIds.filter((id: unknown) => typeof id === 'string' && id.trim()) : [],
+            }))
+          : [],
+        outputs: Array.isArray((task as any).outputs) ? normalizeOutputs((task as any).outputs, task.id) : [],
+        verificationRuns: Array.isArray(task.verificationRuns) ? task.verificationRuns : [],
+        focusSessions: Array.isArray((task as any).focusSessions) ? (task as any).focusSessions : [],
+        cycleId: normalizeText((task as any).cycleId, 120) || undefined,
+        jiraFields: (task as any).jiraFields && typeof (task as any).jiraFields === 'object' ? (task as any).jiraFields : undefined,
+        events: Array.isArray(task.events) ? task.events : [],
+        };
+        return normalized;
+      });
+    const taskIds = new Set(tasks.map(task => task.id));
+    for (const task of tasks) {
+      if (!task.linkedTaskId || task.linkedTaskId === task.id || !taskIds.has(task.linkedTaskId)) {
+        delete task.linkedTaskId;
+      }
+    }
+    return ensureLocalKeys({
       version: 1,
+      nextLocalKey: normalizeNextLocalKey((parsed as any).nextLocalKey, tasks),
       taskSpaces,
-      tasks: parsed.tasks
-        .filter(task => task && typeof task.id === 'string' && typeof task.title === 'string')
-        .map(task => {
-          const kind = VALID_KINDS.includes((task as any).kind) ? (task as any).kind as ProTaskKind : taskKindFromIssueType((task as any).jiraFields?.issueType);
-          const normalized: ProTask = {
-          ...(task as any),
-          kind,
-          spaceId: normalizeTaskSpaceId((task as any).spaceId) || defaultSpaceIdForTask({ kind, jiraKey: (task as any).jiraKey }),
-          origin: normalizeTaskOrigin((task as any).origin, { kind, jiraKey: (task as any).jiraKey, jiraUrl: (task as any).jiraUrl }),
-          workdir: normalizeText((task as any).workdir, 2048) || undefined,
-          prUrl: normalizeText((task as any).prUrl ?? (task as any).mergeRequestUrl, 2048) || undefined,
-          subTasks: Array.isArray((task as any).subTasks) ? (task as any).subTasks : [],
-          stageRuns: Array.isArray(task.stageRuns)
-            ? task.stageRuns.map((run: any) => ({
-                ...run,
-                outputIds: Array.isArray(run.outputIds) ? run.outputIds.filter((id: unknown) => typeof id === 'string' && id.trim()) : [],
-              }))
-            : [],
-          outputs: Array.isArray((task as any).outputs) ? normalizeOutputs((task as any).outputs, task.id) : [],
-          verificationRuns: Array.isArray(task.verificationRuns) ? task.verificationRuns : [],
-          focusSessions: Array.isArray((task as any).focusSessions) ? (task as any).focusSessions : [],
-          cycleId: normalizeText((task as any).cycleId, 120) || undefined,
-          jiraFields: (task as any).jiraFields && typeof (task as any).jiraFields === 'object' ? (task as any).jiraFields : undefined,
-          events: Array.isArray(task.events) ? task.events : [],
-          };
-          return normalized;
-        }),
-    };
+      tasks,
+    });
   } catch {
-    return { version: 1, tasks: [] };
+    return { version: 1, nextLocalKey: 1, tasks: [] };
   }
 }
 
@@ -651,7 +722,20 @@ function deriveOutputKind(run: StageRun, output: NonNullable<StageRun['output']>
   return run.stage === 'demo' ? 'final' : 'stage-summary';
 }
 
-function outputTitleForRun(run: StageRun, kind: ProOutputKind): string {
+function outputTitleForRun(task: ProTask, run: StageRun, kind: ProOutputKind): string {
+  if (task.plannedDate) {
+    if (run.stage === 'refinement') return kind === 'document' ? 'Goal notes' : 'Goal';
+    if (run.stage === 'coding') {
+      if (kind === 'diff') return 'Working diff';
+      if (kind === 'document') return 'Working notes';
+      if (kind === 'final') return 'Working result';
+      return 'Working output';
+    }
+    if (run.stage === 'verification' || run.stage === 'demo') {
+      if (kind === 'document') return 'Review notes';
+      return 'Review result';
+    }
+  }
   const stageLabel = `${run.stage.slice(0, 1).toUpperCase()}${run.stage.slice(1)}`;
   if (kind === 'diff') return `${stageLabel} diff`;
   if (kind === 'estimate') return `${stageLabel} estimate`;
@@ -673,7 +757,7 @@ function createOutputFromStageRun(task: ProTask, run: StageRun): ProOutput | nul
   return {
     id: newId('output'),
     kind,
-    title: outputTitleForRun(run, kind),
+    title: outputTitleForRun(task, run, kind),
     summary,
     taskId: task.id,
     stageRunId: run.id,
@@ -696,7 +780,7 @@ function deriveStoredOutput(task: ProTask, run: StageRun): ProOutput | null {
   return {
     id: `derived-${run.id}`,
     kind,
-    title: outputTitleForRun(run, kind),
+    title: outputTitleForRun(task, run, kind),
     summary,
     taskId: task.id,
     stageRunId: run.id,
@@ -854,9 +938,11 @@ export function archiveTaskSpace(spaceId: string): TaskSpace {
   return updateTaskSpace(spaceId, { archived: true });
 }
 
-export function listProTasks(options: { spaceId?: string } = {}): ProTask[] {
+export function listProTasks(options: { spaceId?: string; plannedDate?: string } = {}): ProTask[] {
   const spaceId = normalizeTaskSpaceId(options.spaceId);
+  const plannedDate = normalizePlannedDate(options.plannedDate);
   return readFile().tasks
+    .filter(task => !plannedDate || task.plannedDate === plannedDate)
     .filter(task => !spaceId || task.spaceId === spaceId)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
@@ -899,12 +985,16 @@ export function createProTask(input: CreateProTaskInput): ProTask {
   const spaceId = resolveTaskSpaceId(input.spaceId, { kind: requestedKind || 'manual', jiraKey: input.jiraKey }, file);
   const kind = requestedKind || (spaceId === JIRA_TASK_SPACE_ID ? 'jira-ticket' : 'manual');
   const status = input.status && VALID_STATUSES.includes(input.status) ? input.status : 'backlog';
+  const jiraLike = isJiraLikeTask({ kind, jiraKey: normalizeText(input.jiraKey, 80) || undefined });
   const task: ProTask = {
     id: newId('task'),
+    localKey: jiraLike ? undefined : allocateLocalKey(file),
     title,
     description: normalizeText(input.description),
     kind,
     status,
+    plannedDate: normalizePlannedDate(input.plannedDate),
+    linkedTaskId: undefined,
     spaceId,
     origin: defaultOriginForTask({ kind, jiraKey: input.jiraKey, jiraUrl: input.jiraUrl }),
     workdir: normalizeText(input.workdir, 2048) || undefined,
@@ -926,6 +1016,12 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     exclusiveMode: false,
     events: [],
   };
+  const linkedTaskId = normalizeLinkedTaskId(input.linkedTaskId);
+  if (linkedTaskId) {
+    if (linkedTaskId === task.id) throw new Error('task cannot link to itself');
+    if (!file.tasks.some(candidate => candidate.id === linkedTaskId)) throw new Error('linked task not found');
+    task.linkedTaskId = linkedTaskId;
+  }
   appendEvent(task, { type: 'task-created', actor: 'user', summary: 'Task created in Pikiclaw.' });
   file.tasks.unshift(task);
   writeFile(file);
@@ -965,6 +1061,7 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
       if (((existing.jiraFields as any)?.[key] || '') !== (nextValue || '')) changes.push(`jira.${key}`);
     }
     existing.kind = issueType ? taskKindFromIssueType(issueType) : existing.kind;
+    delete existing.localKey;
     existing.spaceId = spaceId;
     existing.origin = { type: 'jira', key: jiraKey, url: normalizeText(input.jiraUrl, 2048) || existing.jiraUrl };
     existing.jiraUrl = normalizeText(input.jiraUrl, 2048) || existing.jiraUrl;
@@ -986,6 +1083,7 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
 
   const task: ProTask = {
     id: newId('task'),
+    localKey: undefined,
     title,
     description: normalizeText(input.description),
     kind: taskKindFromIssueType(input.issueType),
@@ -1071,6 +1169,31 @@ export function updateProTaskStatus(taskId: string, status: ProTaskStatus): ProT
       actor: 'user',
       summary: `Status changed from ${previous} to ${status}.`,
     });
+    if (status === 'done' && task.linkedTaskId) {
+      const linkedTask = file.tasks.find(candidate => candidate.id === task.linkedTaskId);
+      if (linkedTask && linkedTask.id !== task.id && linkedTask.status !== 'done') {
+        const linkedPrevious = linkedTask.status;
+        linkedTask.status = 'done';
+        linkedTask.updatedAt = task.updatedAt;
+        if (linkedTask.jiraFields) {
+          linkedTask.jiraFields = {
+            ...linkedTask.jiraFields,
+            status: 'Done',
+            updatedAt: task.updatedAt,
+          };
+        }
+        appendEvent(linkedTask, {
+          type: 'status-changed',
+          actor: 'user',
+          summary: `Status changed from ${linkedPrevious} to done because linked Daily task ${task.title} was completed.`,
+        });
+        appendEvent(task, {
+          type: 'jira-updated',
+          actor: 'user',
+          summary: `Linked task ${linkedTask.jiraKey || linkedTask.title} was also marked done.`,
+        });
+      }
+    }
     writeFile(file);
   }
   return task;
@@ -1125,6 +1248,22 @@ export function updateProTaskMeta(taskId: string, input: UpdateTaskMetaInput): P
   const task = file.tasks.find(candidate => candidate.id === taskId);
   if (!task) throw new Error('task not found');
   const changed: string[] = [];
+  if (Object.prototype.hasOwnProperty.call(input, 'plannedDate')) {
+    const plannedDate = normalizePlannedDate(input.plannedDate);
+    if ((task.plannedDate || '') !== (plannedDate || '')) {
+      task.plannedDate = plannedDate;
+      changed.push(plannedDate ? 'planned day' : 'unscheduled');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(input, 'linkedTaskId')) {
+    const linkedTaskId = normalizeLinkedTaskId(input.linkedTaskId);
+    if (linkedTaskId === task.id) throw new Error('task cannot link to itself');
+    if (linkedTaskId && !file.tasks.some(candidate => candidate.id === linkedTaskId)) throw new Error('linked task not found');
+    if ((task.linkedTaskId || '') !== (linkedTaskId || '')) {
+      task.linkedTaskId = linkedTaskId;
+      changed.push(linkedTaskId ? 'linked task' : 'unlinked task');
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(input, 'workdir')) {
     const workdir = normalizeText(input.workdir, 2048) || undefined;
     if ((task.workdir || '') !== (workdir || '')) {

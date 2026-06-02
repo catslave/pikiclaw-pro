@@ -11,7 +11,7 @@ import { terminateProcessTree } from '../../core/process-control.js';
 import {
   type StreamOpts, type StreamResult,
   type StreamPreviewMeta, type StreamPreviewPlan, type StreamPreviewPlanStep,
-  type CodexCumulativeUsage, type AgentInteraction, type AgentInteractionQuestion,
+  type StreamSubAgent, type CodexCumulativeUsage, type AgentInteraction, type AgentInteractionQuestion,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage, type RichMessage, type MessageBlock,
@@ -691,6 +691,110 @@ interface PendingCodexAssistantMessage {
   createdAt: string | null;
 }
 
+interface CodexSubAgentMeta {
+  sessionId: string;
+  cwd: string;
+  parentThreadId: string;
+  agentPath: string | null;
+  agentNickname: string | null;
+  agentRole: string | null;
+  model: string | null;
+  timestamp: string | null;
+  filePath: string;
+}
+
+function codexString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function codexAgentPathLabel(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+  const parts = normalized.split('/').filter(Boolean);
+  return parts[parts.length - 1] || normalized || value;
+}
+
+function codexSubAgentDescriptionFromPrompt(prompt: string): string | null {
+  const firstLine = firstNonEmptyLine(prompt);
+  if (!firstLine) return null;
+  return shortValue(firstLine, 120);
+}
+
+function parseCodexSubAgentEnvelope(text: string): StreamSubAgent | null {
+  const raw = text.trim();
+  if (!raw || raw[0] !== '{' || !raw.includes('"recipient"')) return null;
+  let payload: any;
+  try { payload = JSON.parse(raw); } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+
+  const recipient = codexString(payload.recipient);
+  const author = codexString(payload.author);
+  const content = codexString(payload.content);
+  const triggerTurn = payload.trigger_turn === true || payload.triggerTurn === true;
+  if (!recipient || recipient === author || !content) return null;
+  if (!triggerTurn && !recipient.includes('/')) return null;
+
+  const label = codexAgentPathLabel(recipient);
+  return {
+    id: recipient,
+    kind: 'codex',
+    description: label || codexSubAgentDescriptionFromPrompt(content) || 'sub-agent',
+    model: null,
+    tools: [],
+    status: 'running',
+  };
+}
+
+function isCodexSubAgentEnvelopeDraft(text: string): boolean {
+  const raw = text.trim();
+  if (!raw.startsWith('{"author"') && !raw.startsWith('{"recipient"')) return false;
+  return raw.includes('"recipient"') && (raw.includes('"content"') || raw.includes('"trigger_turn"') || raw.includes('"triggerTurn"'));
+}
+
+function isCodexVisibleCommentary(text: string): boolean {
+  if (parseCodexSubAgentEnvelope(text)) return false;
+  return !isCodexSubAgentEnvelopeDraft(text);
+}
+
+function mergeCodexSubAgent(base: StreamSubAgent, overlay?: StreamSubAgent | null): StreamSubAgent {
+  if (!overlay) return base;
+  const toolIds = new Set<string>();
+  const tools = [...base.tools, ...overlay.tools].filter(tool => {
+    const key = tool.id || `${tool.name}:${tool.summary}`;
+    if (toolIds.has(key)) return false;
+    toolIds.add(key);
+    return true;
+  });
+  return {
+    ...base,
+    kind: overlay.kind || base.kind,
+    description: overlay.description || base.description,
+    model: overlay.model || base.model,
+    tools,
+    status: overlay.status || base.status,
+  };
+}
+
+function upsertCodexSubAgentFromEnvelope(
+  text: string,
+  subAgents: Map<string, StreamSubAgent>,
+  overlays?: Map<string, StreamSubAgent>,
+): StreamSubAgent | null {
+  const parsed = parseCodexSubAgentEnvelope(text);
+  if (!parsed) return null;
+  const overlay = overlays?.get(parsed.id) || overlays?.get(codexAgentPathLabel(parsed.id));
+  const current = subAgents.get(parsed.id);
+  const next = mergeCodexSubAgent(current ? mergeCodexSubAgent(current, parsed) : parsed, overlay);
+  subAgents.set(parsed.id, next);
+  return next;
+}
+
+function buildCodexSubAgentBlockFromEnvelope(text: string, overlays?: Map<string, StreamSubAgent>): MessageBlock | null {
+  const subAgents = new Map<string, StreamSubAgent>();
+  const subAgent = upsertCodexSubAgentFromEnvelope(text, subAgents, overlays);
+  if (!subAgent) return null;
+  return { type: 'sub_agent', content: '', toolId: subAgent.id, subAgent };
+}
+
 function codexMessageCreatedAt(message: any, container?: any): string | null {
   for (const value of [
     message?.createdAt,
@@ -1033,6 +1137,12 @@ function buildCodexAssistantText(blocks: MessageBlock[]): string {
     .filter(Boolean);
   if (toolNames.length) return toolNames.join(', ');
 
+  const subAgentNames = blocks
+    .filter(block => block.type === 'sub_agent' && block.subAgent)
+    .map(block => block.subAgent?.description || block.subAgent?.kind || block.subAgent?.id || '')
+    .filter(Boolean);
+  if (subAgentNames.length) return `Sub-agent: ${subAgentNames.join(', ')}`;
+
   return blocks.find(block => block.type === 'tool_result' && block.content.trim())?.content.trim() || '';
 }
 
@@ -1151,6 +1261,7 @@ function buildCodexActivityPreview(s: {
     : [...s.recentNarrative];
   if (opts.includeCommentary !== false) {
     for (const text of s.commentaryByItem.values()) {
+      if (!isCodexVisibleCommentary(text)) continue;
       const cleaned = normalizeActivityLine(text);
       if (cleaned && lines[lines.length - 1] !== cleaned) lines.push(cleaned);
     }
@@ -1180,6 +1291,7 @@ function buildCodexPreviewText(s: {
     ...s.commentaryByItem.values(),
   ]
     .map(text => text.trim())
+    .filter(isCodexVisibleCommentary)
     .filter(Boolean)
     .join('\n\n')
     .trim();
@@ -1376,6 +1488,7 @@ interface CodexStreamState {
   commentaryParts: string[];
   activeCommands: Map<string, string>;
   activeToolCalls: Map<string, CodexActiveToolCall>;
+  subAgents: Map<string, StreamSubAgent>;
   recentNarrative: string[];
   recentFailures: string[];
   diagnostics: string[];
@@ -1430,6 +1543,7 @@ function createCodexStreamState(opts: StreamOpts): CodexStreamState {
     commentaryParts: [],
     activeCommands: new Map(),
     activeToolCalls: new Map(),
+    subAgents: new Map(),
     recentNarrative: [], recentFailures: [],
     diagnostics: [], lastEvent: null,
     phaseTimings: {
@@ -1581,7 +1695,10 @@ function handleAgentMessageDelta(params: any, s: CodexStreamState, emit: () => v
     if (params.itemId) s.deltaSeenForItem.add(params.itemId);
   } else if (params.itemId) {
     const prev = s.commentaryByItem.get(params.itemId) || '';
-    s.commentaryByItem.set(params.itemId, prev + delta);
+    const next = prev + delta;
+    s.commentaryByItem.set(params.itemId, next);
+    const subAgent = upsertCodexSubAgentFromEnvelope(next, s.subAgents);
+    if (subAgent) pushRecentActivity(s.recentNarrative, `Started sub-agent: ${subAgent.description || subAgent.kind || subAgent.id}`);
   }
   emit();
 }
@@ -1673,8 +1790,13 @@ function handleCompletedAgentMessage(item: any, s: CodexStreamState, emit: () =>
   } else {
     const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
     if (commentary) {
-      s.commentaryParts.push(commentary);
-      pushRecentActivity(s.recentNarrative, commentary);
+      const subAgent = upsertCodexSubAgentFromEnvelope(commentary, s.subAgents);
+      if (subAgent) {
+        pushRecentActivity(s.recentNarrative, `Started sub-agent: ${subAgent.description || subAgent.kind || subAgent.id}`);
+      } else if (isCodexVisibleCommentary(commentary)) {
+        s.commentaryParts.push(commentary);
+        pushRecentActivity(s.recentNarrative, commentary);
+      }
     }
     s.commentaryByItem.delete(item.id);
     emit();
@@ -2152,7 +2274,7 @@ function extractCodexTailQA(filePath: string): { lastQuestion: string | null; la
         }
       } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
         const text = stripOaiMemoryCitations(ev.payload.message).trim();
-        if (text) {
+        if (text && isCodexVisibleCommentary(text)) {
           lastAnswer = shortValue(text, 500);
           lastMessageText = shortValue(text, 500);
         }
@@ -2185,6 +2307,142 @@ function readCodexSessionHead(filePath: string): { sessionId: string; cwd: strin
   } catch {
     return null;
   }
+}
+
+function matchCodexHeadField(head: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = head.match(new RegExp(`"${escaped}"\\s*:\\s*"([^"]+)"`));
+  return match?.[1] || null;
+}
+
+function readCodexSubAgentMeta(filePath: string): CodexSubAgentMeta | null {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(16 * 1024);
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const head = buf.toString('utf8', 0, bytesRead);
+    if (!head.includes('"thread_spawn"')) return null;
+
+    const sessionId = matchCodexHeadField(head, 'id');
+    const cwd = matchCodexHeadField(head, 'cwd');
+    const parentThreadId = matchCodexHeadField(head, 'parent_thread_id');
+    if (!sessionId || !cwd || !parentThreadId) return null;
+    return {
+      sessionId,
+      cwd,
+      parentThreadId,
+      agentPath: matchCodexHeadField(head, 'agent_path'),
+      agentNickname: matchCodexHeadField(head, 'agent_nickname'),
+      agentRole: matchCodexHeadField(head, 'agent_role'),
+      model: matchCodexHeadField(head, 'model'),
+      timestamp: matchCodexHeadField(head, 'timestamp'),
+      filePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function codexSubAgentFromMeta(meta: CodexSubAgentMeta): StreamSubAgent {
+  const id = meta.agentPath || meta.sessionId;
+  const label = meta.agentNickname || (meta.agentPath ? codexAgentPathLabel(meta.agentPath) : meta.sessionId);
+  const role = meta.agentRole || 'codex';
+  return {
+    id,
+    kind: role,
+    description: label,
+    model: meta.model,
+    tools: readCodexSubAgentTools(meta.filePath),
+    status: codexSubAgentStatusFromRollout(meta.filePath),
+  };
+}
+
+function readCodexSubAgentTools(filePath: string): StreamSubAgent['tools'] {
+  const tools: StreamSubAgent['tools'] = [];
+  const seen = new Set<string>();
+  let lines: string[] = [];
+  try { lines = readTailLines(filePath, 768 * 1024); } catch { return tools; }
+  for (const raw of lines) {
+    if (!raw || raw[0] !== '{' || !raw.includes('"response_item"')) continue;
+    let ev: any;
+    try { ev = JSON.parse(raw); } catch { continue; }
+    if (ev?.type !== 'response_item') continue;
+    const payload = ev.payload;
+    if (!payload || typeof payload !== 'object') continue;
+    let id = '';
+    let name = '';
+    let summary = '';
+    if (payload.type === 'function_call') {
+      name = codexString(payload.name);
+      id = codexString(payload.call_id) || codexString(payload.id) || name;
+      const tool = summarizeCodexToolCall({ name, arguments: payload.arguments });
+      summary = tool?.summary || shortValue(name, 120);
+    } else {
+      summary = summarizeCodexRawResponseItem(payload) || '';
+      name = codexString(payload.name) || codexString(payload.type) || summary;
+      id = codexString(payload.call_id) || codexString(payload.id) || `${name}:${summary}`;
+    }
+    if (!summary || !name) continue;
+    const key = id || `${name}:${summary}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tools.push({ id: key, name, summary });
+  }
+  return tools.slice(-12);
+}
+
+function codexSubAgentStatusFromRollout(filePath: string): StreamSubAgent['status'] {
+  try {
+    const lines = readTailLines(filePath, 512 * 1024);
+    for (const raw of [...lines].reverse()) {
+      if (!raw || raw[0] !== '{') continue;
+      let ev: any;
+      try { ev = JSON.parse(raw); } catch { continue; }
+      if (ev?.type !== 'response_item') continue;
+      const payload = ev.payload;
+      if (payload?.type === 'message' && payload.role === 'assistant') return 'done';
+      if (payload?.status === 'failed' || payload?.status === 'error' || payload?.error) return 'failed';
+    }
+    const stat = fs.statSync(filePath);
+    return Date.now() - stat.mtimeMs < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'done';
+  } catch {
+    return 'done';
+  }
+}
+
+function loadCodexSubAgentOverlays(parentSessionId: string, workdir: string): Map<string, StreamSubAgent> {
+  const overlays = new Map<string, StreamSubAgent>();
+  const home = getHome();
+  if (!home) return overlays;
+  const sessionsDir = path.join(home, '.codex', 'sessions');
+  if (!fs.existsSync(sessionsDir)) return overlays;
+  const resolvedWorkdir = path.resolve(workdir);
+
+  const addOverlay = (meta: CodexSubAgentMeta) => {
+    const sub = codexSubAgentFromMeta(meta);
+    overlays.set(sub.id, sub);
+    overlays.set(codexAgentPathLabel(sub.id), sub);
+    overlays.set(meta.sessionId, { ...sub, id: meta.sessionId });
+  };
+
+  const walkDir = (dir: string) => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walkDir(fullPath); continue; }
+      if (!entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) continue;
+      const meta = readCodexSubAgentMeta(fullPath);
+      if (!meta) continue;
+      if (meta.parentThreadId !== parentSessionId) continue;
+      if (path.resolve(meta.cwd) !== resolvedWorkdir) continue;
+      addOverlay(meta);
+    }
+  };
+
+  walkDir(sessionsDir);
+  return overlays;
 }
 
 function getNativeCodexSessions(workdir: string): SessionInfo[] {
@@ -2310,7 +2568,11 @@ function getCodexSessionTailFromRollout(opts: SessionTailOpts): SessionTailResul
         if (text) allMsgs.push({ role: 'user', text });
       } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
         const text = stripOaiMemoryCitations(ev.payload.message).trim();
-        if (text) allMsgs.push({ role: 'assistant', text });
+        if (text) {
+          const subAgent = parseCodexSubAgentEnvelope(text);
+          if (subAgent) allMsgs.push({ role: 'assistant', text: `Sub-agent: ${subAgent.description || subAgent.kind || subAgent.id}` });
+          else allMsgs.push({ role: 'assistant', text });
+        }
       }
     }
     return { ok: true, messages: allMsgs.slice(-limit), error: null };
@@ -2355,11 +2617,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
   const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'codex', pikiclawSessions, nativeSessions);
-  const nativeById = new Map(nativeSessions.map(session => [session.sessionId, session]));
-  const mergedSessions = managedSessions.map((managed) => {
-    const native = managed.sessionId ? nativeById.get(managed.sessionId) : null;
-    return native ? mergeManagedAndNativeSessions([managed], [native])[0] || managed : managed;
-  });
+  const mergedSessions = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? mergedSessions.slice(0, limit) : mergedSessions;
   const sessionsDir = path.join(getHome(), '.codex', 'sessions');
   agentLog(
@@ -2565,6 +2823,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
     const fallbackRichMsgs: RichMessage[] = [];
     let pendingAssistant: PendingCodexAssistantMessage | null = null;
     let sawAssistantResponseItems = false;
+    const subAgentOverlays = loadCodexSubAgentOverlays(opts.sessionId, opts.workdir);
 
     const ensureAssistant = (createdAt?: string | null): PendingCodexAssistantMessage => {
       if (!pendingAssistant) pendingAssistant = { blocks: [], toolNamesByCallId: new Map(), createdAt: createdAt || null };
@@ -2579,6 +2838,7 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
         || block.type === 'image'
         || block.type === 'tool_use'
         || block.type === 'tool_result'
+        || block.type === 'sub_agent'
         || !!block.content.trim(),
       );
       const createdAt = pendingAssistant.createdAt;
@@ -2616,6 +2876,18 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
         } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
           const text = stripOaiMemoryCitations(ev.payload.message).trim();
           if (text) {
+            const subAgentBlock = buildCodexSubAgentBlockFromEnvelope(text, subAgentOverlays);
+            if (subAgentBlock) {
+              const assistantText = buildCodexAssistantText([subAgentBlock]);
+              fallbackMsgs.push({ role: 'assistant', text: assistantText });
+              fallbackRichMsgs.push({
+                role: 'assistant',
+                text: assistantText,
+                blocks: [subAgentBlock],
+                createdAt,
+              });
+              continue;
+            }
             fallbackMsgs.push({ role: 'assistant', text });
             fallbackRichMsgs.push({
               role: 'assistant',
@@ -2635,6 +2907,12 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
         if (payload.role !== 'assistant') continue;
         const text = extractCodexMessageText(payload.content);
         if (!text) continue;
+        const subAgentBlock = buildCodexSubAgentBlockFromEnvelope(text, subAgentOverlays);
+        if (subAgentBlock) {
+          ensureAssistant(createdAt).blocks.push(subAgentBlock);
+          sawAssistantResponseItems = true;
+          continue;
+        }
         ensureAssistant(createdAt).blocks.push({
           type: 'text',
           content: text,

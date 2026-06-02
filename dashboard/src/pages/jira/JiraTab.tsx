@@ -1,22 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import { BrowserPanelModal } from '../../components/BrowserPanelModal';
 import { DirBrowser } from '../../components/DirBrowser';
 import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, JiraCycle, JiraSyncRun, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, SessionInfo, StageRun, StageSessionRef, TaskSpace, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, DailyItem, JiraCycle, JiraSyncRun, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, SessionInfo, StageRun, StageSessionRef, TaskSpace, TodoItem, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
+import { AssistantMsg, ensureRichMessageBlocks, MarkdownFilePreviewCard } from '../sessions/AssistantContent';
+import { GeneratedOutputCards } from '../sessions/GeneratedOutputCards';
 import { SessionPanel, type SessionPanelChange } from '../sessions/SessionPanel';
-import { createMdComponents, mdPlugins } from '../sessions/markdown';
-import type { SelectionActionRequest, SelectionSideChatRequest } from '../sessions/TurnView';
+import { createMdComponents, mdPlugins, type FileLinkTarget, type OpenFileLinkHandler } from '../sessions/markdown';
+import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from '../sessions/TurnView';
+import { buildJiraFilterOptions, jiraTaskMatchesFilters } from './task-filters';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const VISIBLE_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'done'];
 const STAGES: ProTaskStage[] = ['focus', 'refinement', 'coding', 'verification', 'demo', 'bugfix'];
 type JiraColumnKey = 'backlog' | 'refinement' | 'working' | 'done';
 
+const DAILY_VIEW_ID = 'daily';
 const ALL_TASKS_SPACE_ID = 'all';
 const JIRA_TASK_SPACE_ID = 'jira';
 const PERSONAL_TASK_SPACE_ID = 'personal';
@@ -39,14 +44,17 @@ type JiraColumnSortDirection = 'desc' | 'asc';
 type JiraColumnSortMode = JiraColumnSortDirection | 'manual';
 type JiraColumnSortModes = Record<JiraColumnKey, JiraColumnSortMode>;
 type JiraColumnManualOrder = Partial<Record<JiraColumnKey, string[]>>;
-type TaskMetaPatch = { workdir?: string | null; prUrl?: string | null };
+type TaskMetaPatch = { workdir?: string | null; prUrl?: string | null; linkedTaskId?: string | null };
 type TaskDetailLayout = 'side' | 'modal';
 type TaskSelectionSessionHandler<T extends SelectionActionRequest = SelectionActionRequest> = (session: StageSessionRef, request: T) => void | Promise<void>;
 const JIRA_COLUMN_ORDER_STORAGE_KEY = 'pikiclaw:jira-dashboard:column-order:v1';
 const TASK_SPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:tasks:space-sidebar-collapsed:v1';
 const TASK_DETAIL_LAYOUT_STORAGE_KEY = 'pikiclaw:tasks:detail-layout:v1';
+const TASK_SELECTED_SPACE_STORAGE_KEY = 'pikiclaw:tasks:selected-space:v1';
+const JIRA_ACTIVE_SPRINT_STORAGE_KEY = 'pikiclaw:jira-dashboard:active-sprint:v1';
+const SHOW_JIRA_CYCLE_FEATURE = false;
 const DEFAULT_JIRA_COLUMN_SORT_MODES: JiraColumnSortModes = {
-  backlog: 'desc',
+  backlog: 'asc',
   refinement: 'desc',
   working: 'desc',
   done: 'desc',
@@ -120,10 +128,66 @@ function formatDateOnly(value: string | null | undefined): string {
   return new Date(time).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+function formatMonthDay(value: string | null | undefined): string {
+  if (!value) return '--';
+  const [year, month, day] = value.split('-').map(part => Number(part));
+  if (!year || !month || !day) return value;
+  return `${month}/${day}`;
+}
+
+function formatHourMinute(value: string | null | undefined): string {
+  if (!value) return '--';
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return '--';
+  return new Date(time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function normalizeDailyDateParam(value: string | null | undefined): string | null {
+  const text = (value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
+
+function orderTodoItems(items: TodoItem[]): TodoItem[] {
+  const rank = (item: TodoItem) => item.status === 'open' ? 0 : item.status === 'done' ? 1 : item.status === 'chat-created' ? 2 : 3;
+  return [...items].sort((a, b) => rank(a) - rank(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+function TodoGlyph({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="4" y="3.5" width="16" height="17" rx="3" />
+      <path d="M8 8h8" />
+      <path d="M8 12h8" />
+      <path d="M8 16h5" />
+    </svg>
+  );
+}
+
 function taskSyncSortTime(task: ProTask): number {
   const raw = task.jiraFields?.updatedAt || jiraRemoteSyncField(task.description, 'Updated') || task.updatedAt;
   const time = Date.parse(raw || '');
   return Number.isFinite(time) ? time : 0;
+}
+
+function taskDueSortTime(task: ProTask): number | null {
+  const raw = task.jiraFields?.dueDate || jiraRemoteSyncField(task.description, 'Due date');
+  const time = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(time) ? time : null;
+}
+
+function backlogTaskSortTime(task: ProTask): number {
+  const createdAt = Date.parse(task.createdAt || '');
+  return taskDueSortTime(task) ?? (Number.isFinite(createdAt) ? createdAt : 0);
+}
+
+function compareBacklogTasks(a: ProTask, b: ProTask, direction: JiraColumnSortDirection): number {
+  const ad = taskDueSortTime(a);
+  const bd = taskDueSortTime(b);
+  if (ad != null && bd == null) return -1;
+  if (ad == null && bd != null) return 1;
+  const diff = backlogTaskSortTime(a) - backlogTaskSortTime(b);
+  if (diff !== 0) return direction === 'asc' ? diff : -diff;
+  return taskSyncSortTime(b) - taskSyncSortTime(a);
 }
 
 function readStoredJiraColumnOrder(): { modes: JiraColumnSortModes; manualOrder: JiraColumnManualOrder } {
@@ -179,6 +243,40 @@ function writeStoredTaskDetailLayout(layout: TaskDetailLayout) {
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(TASK_DETAIL_LAYOUT_STORAGE_KEY, layout);
+  } catch {}
+}
+
+function readStoredTaskSelectedSpace(): string {
+  if (typeof window === 'undefined') return JIRA_TASK_SPACE_ID;
+  try {
+    const value = window.localStorage.getItem(TASK_SELECTED_SPACE_STORAGE_KEY)?.trim();
+    return value && value !== DAILY_VIEW_ID ? value : JIRA_TASK_SPACE_ID;
+  } catch {
+    return JIRA_TASK_SPACE_ID;
+  }
+}
+
+function writeStoredTaskSelectedSpace(spaceId: string) {
+  if (typeof window === 'undefined' || !spaceId || spaceId === DAILY_VIEW_ID) return;
+  try {
+    window.localStorage.setItem(TASK_SELECTED_SPACE_STORAGE_KEY, spaceId);
+  } catch {}
+}
+
+function readStoredJiraActiveSprint(): string {
+  if (typeof window === 'undefined') return 'all';
+  try {
+    return window.localStorage.getItem(JIRA_ACTIVE_SPRINT_STORAGE_KEY)?.trim() || 'all';
+  } catch {
+    return 'all';
+  }
+}
+
+function writeStoredJiraActiveSprint(sprint: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!sprint || sprint === 'all') window.localStorage.removeItem(JIRA_ACTIVE_SPRINT_STORAGE_KEY);
+    else window.localStorage.setItem(JIRA_ACTIVE_SPRINT_STORAGE_KEY, sprint);
   } catch {}
 }
 
@@ -241,6 +339,7 @@ function workspaceShortLabel(path: string): string {
 }
 
 function taskSpaceIcon(spaceId: string, kind?: TaskSpace['kind']): string {
+  if (spaceId === DAILY_VIEW_ID) return 'D';
   if (spaceId === ALL_TASKS_SPACE_ID) return 'A';
   if (kind === 'jira' || spaceId === JIRA_TASK_SPACE_ID) return 'J';
   if (kind === 'personal' || spaceId === PERSONAL_TASK_SPACE_ID) return 'P';
@@ -248,6 +347,7 @@ function taskSpaceIcon(spaceId: string, kind?: TaskSpace['kind']): string {
 }
 
 function taskSpaceSummary(spaceId: string, count: number): string {
+  if (spaceId === DAILY_VIEW_ID) return `${count} tasks planned for the day`;
   if (spaceId === ALL_TASKS_SPACE_ID) return `${count} tasks across spaces`;
   if (spaceId === JIRA_TASK_SPACE_ID) return `${count} Jira-backed tasks`;
   if (spaceId === PERSONAL_TASK_SPACE_ID) return `${count} personal tasks`;
@@ -255,11 +355,15 @@ function taskSpaceSummary(spaceId: string, count: number): string {
 }
 
 function defaultSpaceForCreate(selectedSpaceId: string): string {
-  return selectedSpaceId && selectedSpaceId !== ALL_TASKS_SPACE_ID ? selectedSpaceId : PERSONAL_TASK_SPACE_ID;
+  return selectedSpaceId && selectedSpaceId !== ALL_TASKS_SPACE_ID && selectedSpaceId !== DAILY_VIEW_ID ? selectedSpaceId : PERSONAL_TASK_SPACE_ID;
 }
 
 function defaultKindForSpace(spaceId: string): ProTask['kind'] {
   return spaceId === JIRA_TASK_SPACE_ID ? 'jira-ticket' : 'manual';
+}
+
+function taskDisplayKey(task: Pick<ProTask, 'jiraKey' | 'localKey'> | null | undefined): string {
+  return task?.jiraKey || task?.localKey || '';
 }
 
 function assistantHasLabel(assistant: AgentAssistant, label: string): boolean {
@@ -342,6 +446,7 @@ function stageTone(stage: ProTaskStage): 'ok' | 'warn' | 'muted' | 'accent' {
 function syncRunTone(status: JiraSyncRun['status']): 'ok' | 'warn' | 'muted' | 'accent' {
   if (status === 'completed') return 'ok';
   if (status === 'failed') return 'warn';
+  if (status === 'stopped') return 'muted';
   if (status === 'syncing' || status === 'queued' || status === 'starting') return 'accent';
   return 'muted';
 }
@@ -355,6 +460,7 @@ function syncRunStatusLabel(status: JiraSyncRun['status']): string {
   if (status === 'queued') return 'Queued';
   if (status === 'syncing') return 'Syncing';
   if (status === 'completed') return 'Completed';
+  if (status === 'stopped') return 'Stopped';
   return 'Failed';
 }
 
@@ -369,6 +475,7 @@ function syncChangeCounts(run: JiraSyncRun | null | undefined): { created: numbe
 function jiraSyncCompactLabel(run: JiraSyncRun | null | undefined): string {
   if (!run) return 'No sync yet';
   if (run.status === 'failed') return 'Sync failed';
+  if (run.status === 'stopped') return 'Sync stopped';
   if (run.status === 'completed') return `Last sync ${formatTime(run.updatedAt)}`;
   if (run.status === 'queued') return 'Sync queued';
   if (run.status === 'starting') return 'Sync starting';
@@ -389,6 +496,23 @@ function cleanTaskDescription(task: ProTask): string {
   const text = task.description?.trim() || '';
   const markerIndex = text.indexOf('[Jira remote sync]');
   return (markerIndex >= 0 ? text.slice(0, markerIndex) : text).trim();
+}
+
+function plannedDateLabel(plannedDate: string | undefined, selectedDate: string): string {
+  if (!plannedDate) return 'Unscheduled';
+  if (plannedDate === selectedDate) return 'Today';
+  return formatDateOnly(`${plannedDate}T00:00:00`);
+}
+
+function linkedTaskContextLines(task: ProTask | null | undefined): string[] {
+  if (!task) return [];
+  return [
+    'Linked task context:',
+    `- Title: ${task.title}`,
+    task.jiraKey ? `- Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
+    task.description ? `- Description: ${taskBriefSummary(task) || task.description}` : '',
+    `- Status: ${STATUS_LABEL[task.status]}`,
+  ].filter(Boolean);
 }
 
 function taskBriefSummary(task: ProTask): string {
@@ -554,8 +678,12 @@ function TaskCard({
   assistants,
   draggable,
   isDragging,
+  scheduleLabel,
+  primaryActionLabel,
   onSelect,
   onAssignAssistant,
+  onPrimaryAction,
+  onSchedule,
   onDragStart,
   onDragEnd,
 }: {
@@ -565,14 +693,20 @@ function TaskCard({
   assistants: AgentAssistant[];
   draggable?: boolean;
   isDragging?: boolean;
+  scheduleLabel?: string;
+  primaryActionLabel?: string;
   onSelect: (task: ProTask) => void;
   onAssignAssistant: (task: ProTask, assistantId: string) => void;
+  onPrimaryAction?: (task: ProTask) => void;
+  onSchedule?: (task: ProTask) => void;
   onDragStart?: (task: ProTask, event: ReactDragEvent<HTMLDivElement>) => void;
   onDragEnd?: () => void;
 }) {
   const cardDescription = cleanTaskDescription(task);
   const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
   const assistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
+  const dueDate = task.jiraFields?.dueDate || jiraRemoteSyncField(task.description, 'Due date');
+  const displayKey = taskDisplayKey(task);
   return (
     <div
       role="button"
@@ -603,7 +737,10 @@ function TaskCard({
       <div className="flex min-w-0 items-start gap-2">
         <TicketTypeIcon task={task} />
         <div className="min-w-0 flex-1">
-          <div className="line-clamp-2 text-[13px] font-semibold leading-snug text-fg">{task.title}</div>
+          <div className="line-clamp-2 text-[13px] font-semibold leading-snug text-fg">
+            {displayKey && <span className="font-mono text-[12px] text-primary">{displayKey} </span>}
+            {task.title}
+          </div>
           <div className="mt-1 text-[11px] text-fg-5">Created {formatTime(task.createdAt)}</div>
         </div>
       </div>
@@ -613,16 +750,72 @@ function TaskCard({
         onClick={event => event.stopPropagation()}
         onPointerDown={event => event.stopPropagation()}
       >
-        <span className="shrink-0">Assignee</span>
-        <AssistantInlinePicker
-          value={assignedAssistantId}
-          options={assistantOptions}
-          onChange={(assistantId) => onAssignAssistant(task, assistantId)}
-          compact
-        />
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="shrink-0">Assignee</span>
+          <AssistantInlinePicker
+            value={assignedAssistantId}
+            options={assistantOptions}
+            onChange={(assistantId) => onAssignAssistant(task, assistantId)}
+            compact
+          />
+        </div>
+        {dueDate && (
+          <span className="shrink-0 rounded-md border border-edge/45 bg-panel-alt/45 px-1.5 py-0.5 text-[10.5px] font-medium text-fg-4" title={`Due ${dueDate}`}>
+            Due {formatDateOnly(dueDate)}
+          </span>
+        )}
       </div>
+      {onSchedule && (
+        <div
+          className="mt-2 flex min-w-0 items-center justify-between gap-2"
+          onClick={event => event.stopPropagation()}
+          onPointerDown={event => event.stopPropagation()}
+        >
+          <span className="truncate text-[10.5px] text-fg-5">{task.plannedDate ? `Planned ${plannedDateLabel(task.plannedDate, localDateInputValue())}` : 'Not planned for a day'}</span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {onPrimaryAction && (
+              <Button variant="secondary" size="sm" className="h-6 px-2 text-[10.5px]" onClick={() => onPrimaryAction(task)}>
+                {primaryActionLabel || 'Open'}
+              </Button>
+            )}
+            <Button variant={task.plannedDate ? 'outline' : 'outline'} size="sm" className="h-6 shrink-0 px-2 text-[10.5px]" onClick={() => onSchedule(task)}>
+              {scheduleLabel || 'Add to today'}
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function dailyTaskSourceLabel(task: ProTask, spaces: TaskSpace[]): string {
+  const direct = task.spaceId ? spaces.find(space => space.id === task.spaceId) : null;
+  if (direct?.name) return direct.name;
+  if (task.spaceId === JIRA_TASK_SPACE_ID || task.kind.startsWith('jira')) return 'Jira';
+  if (task.spaceId === PERSONAL_TASK_SPACE_ID || task.origin?.type === 'manual') return 'Personal';
+  return 'Task';
+}
+
+function dailyItemStatusTone(status: DailyItem['status']): 'ok' | 'warn' | 'muted' | 'accent' {
+  if (status === 'task-created') return 'accent';
+  if (status === 'done') return 'ok';
+  if (status === 'archived') return 'muted';
+  return 'warn';
+}
+
+function dailyItemStatusLabel(status: DailyItem['status']): string {
+  if (status === 'task-created') return 'Task ready';
+  if (status === 'done') return 'Done';
+  if (status === 'archived') return 'Archived';
+  return 'Action';
+}
+
+function dailyPrimaryLabel(task: ProTask): string {
+  if (task.status === 'backlog') return 'Clarify';
+  if (task.status === 'refinement') return 'Goal';
+  if (task.status === 'coding') return 'Resume';
+  if (task.status === 'resolved') return 'Mark done';
+  return 'Open';
 }
 
 function jiraColumnForTask(task: ProTask): JiraColumnKey {
@@ -632,6 +825,259 @@ function jiraColumnForTask(task: ProTask): JiraColumnKey {
   if (task.status === 'coding') return 'working';
   if (task.status === 'refinement') return 'refinement';
   return 'backlog';
+}
+
+function DailyDateControls({
+  selectedDate,
+  onChange,
+  compact = false,
+}: {
+  selectedDate: string;
+  onChange: (date: string) => void;
+  compact?: boolean;
+}) {
+  const baseDate = useMemo(() => {
+    const parsed = new Date(`${selectedDate}T12:00:00`);
+    return Number.isFinite(parsed.getTime()) ? parsed : new Date();
+  }, [selectedDate]);
+  const shift = (days: number) => {
+    const next = new Date(baseDate);
+    next.setDate(next.getDate() + days);
+    onChange(localDateInputValue(next));
+  };
+  return (
+    <div className={cn('flex flex-nowrap items-center gap-2', compact && 'gap-1.5')}>
+      <Button variant="ghost" size="icon" className={cn('h-8 w-8 shrink-0', compact && 'h-7 w-7')} onClick={() => shift(-1)} title="Previous day" aria-label="Previous day">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="m15 18-6-6 6-6" />
+        </svg>
+      </Button>
+      <Button variant="secondary" size="sm" className={cn('h-8 shrink-0 px-2.5 text-[11px]', compact && 'h-7 px-2 text-[10.5px]')} onClick={() => onChange(localDateInputValue())}>Today</Button>
+      <label
+        className={cn(
+          'relative inline-flex h-8 min-w-[58px] shrink-0 cursor-pointer items-center justify-center rounded-md border border-control-border bg-control px-2.5 text-[12px] font-medium text-fg transition-colors hover:border-control-border-h focus-within:border-primary/50',
+          compact && 'h-7 min-w-[50px] px-2 text-[11px]',
+        )}
+        title={selectedDate.replace(/-/g, '/')}
+      >
+        <span aria-hidden="true">{formatMonthDay(selectedDate)}</span>
+        <input
+          type="date"
+          value={selectedDate}
+          onChange={event => onChange(event.target.value || localDateInputValue())}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          aria-label="Select date"
+        />
+      </label>
+      <Button variant="ghost" size="icon" className={cn('h-8 w-8 shrink-0', compact && 'h-7 w-7')} onClick={() => shift(1)} title="Next day" aria-label="Next day">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
+      </Button>
+    </div>
+  );
+}
+
+function DailyPlannerSidebar({
+  selectedDate,
+  items,
+  tasks,
+  onDateChange,
+  onOpenManager,
+  onPromoteItem,
+  onOpenTask,
+  onUpdateItem,
+  onDeleteItem,
+  onReorderItems,
+}: {
+  selectedDate: string;
+  items: DailyItem[];
+  tasks: ProTask[];
+  onDateChange: (date: string) => void;
+  onOpenManager: () => void;
+  onPromoteItem: (item: DailyItem) => void;
+  onOpenTask: (item: DailyItem) => void;
+  onUpdateItem: (itemId: string, title: string) => void;
+  onDeleteItem: (itemId: string) => void;
+  onReorderItems: (itemIds: string[]) => void;
+}) {
+  const [editingTitles, setEditingTitles] = useState<Record<string, string>>({});
+  const [menuItemId, setMenuItemId] = useState<string | null>(null);
+  const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
+  const itemInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const commitTitle = (item: DailyItem) => {
+    const nextTitle = (editingTitles[item.id] ?? item.title).trim();
+    if (!nextTitle || nextTitle === item.title) return;
+    onUpdateItem(item.id, nextTitle);
+  };
+  const focusItemTitle = (item: DailyItem) => {
+    setEditingTitles(prev => ({ ...prev, [item.id]: prev[item.id] ?? item.title }));
+    window.setTimeout(() => {
+      itemInputRefs.current[item.id]?.focus();
+      itemInputRefs.current[item.id]?.select();
+    }, 0);
+  };
+
+  return (
+    <aside className="panel-isolated hidden h-full w-[320px] max-w-[calc(100vw-16px)] shrink-0 overflow-hidden rounded-xl border border-edge/70 bg-panel/96 shadow-[var(--th-card-shadow)] backdrop-blur-md md:flex md:min-h-0 md:flex-col">
+      <div className="shrink-0 border-b border-edge/40 px-3 py-3">
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <DailyDateControls selectedDate={selectedDate} onChange={onDateChange} compact />
+          </div>
+          <Button variant="primary" size="icon" className="h-8 w-8 shrink-0" onClick={onOpenManager} title="Create daily actions" aria-label="Create daily actions">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </Button>
+          <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{items.length}</Badge>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+        {items.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-edge/45 bg-inset/25 px-3 py-5 text-[11px] text-fg-5">
+            No actions for this day yet.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {items.map((item, index) => {
+              const task = item.taskId ? tasks.find(candidate => candidate.id === item.taskId) : null;
+              const taskKey = item.taskKey || taskDisplayKey(task);
+              const editable = !item.taskId;
+              return (
+                <div
+                  key={item.id}
+                  draggable
+                  onDragStart={() => setDraggingItemId(item.id)}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                  }}
+                  onDrop={() => {
+                    if (!draggingItemId || draggingItemId === item.id) return;
+                    const order = items.map(entry => entry.id);
+                    const from = order.indexOf(draggingItemId);
+                    const to = order.indexOf(item.id);
+                    if (from < 0 || to < 0) return;
+                    const next = order.slice();
+                    const [moved] = next.splice(from, 1);
+                    next.splice(to, 0, moved);
+                    onReorderItems(next);
+                    setDraggingItemId(null);
+                  }}
+                  onDragEnd={() => setDraggingItemId(null)}
+                  className={cn(
+                    'rounded-lg border px-2.5 py-2.5 transition',
+                    item.taskId ? 'border-primary/30 bg-primary/[0.06]' : 'border-edge/55 bg-panel-alt/35 hover:border-edge-h hover:bg-panel-h',
+                    draggingItemId === item.id && 'opacity-60',
+                  )}
+                >
+                  <div className="flex items-start gap-2">
+                    <button
+                      type="button"
+                      className="mt-0.5 inline-flex h-6 w-6 shrink-0 cursor-grab items-center justify-center rounded-md border border-edge/60 bg-inset text-[11px] font-semibold tabular-nums text-fg-4 transition hover:border-primary/35 hover:text-primary active:cursor-grabbing"
+                      title="Drag to reorder priority"
+                      aria-label="Drag to reorder priority"
+                    >
+                      {index + 1}
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <input
+                        value={editingTitles[item.id] ?? item.title}
+                        onChange={event => {
+                          if (!editable) return;
+                          setEditingTitles(prev => ({ ...prev, [item.id]: event.target.value }));
+                        }}
+                        onBlur={() => editable && commitTitle(item)}
+                        onKeyDown={event => {
+                          if (editable && event.key === 'Enter') {
+                            event.preventDefault();
+                            commitTitle(item);
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        ref={node => {
+                          itemInputRefs.current[item.id] = node;
+                        }}
+                        disabled={!editable}
+                        className={cn(
+                          'w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-[12px] font-semibold leading-snug text-fg-2 outline-none transition focus:border-control-border focus:bg-control',
+                          !editable && 'cursor-default text-fg-3 disabled:opacity-100',
+                        )}
+                        aria-label={editable ? 'Edit daily action' : 'Daily action title'}
+                      />
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-fg-5">
+                      <Badge variant={dailyItemStatusTone(item.status)}>{dailyItemStatusLabel(item.status)}</Badge>
+                      <span>{formatHourMinute(item.createdAt || item.updatedAt)}</span>
+                      {taskKey && <span className="font-mono font-semibold text-primary">{taskKey}</span>}
+                      {item.sourceTodoId && <span>Todo</span>}
+                      {item.sourceTaskId && <span>Task</span>}
+                      {item.relatedTaskId && <span>Linked</span>}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => item.taskId ? onOpenTask(item) : onPromoteItem(item)}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-primary"
+                        title={item.taskId ? 'Open task' : 'Move to backlog'}
+                        aria-label={item.taskId ? 'Open task' : 'Move to backlog'}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          {item.taskId ? <path d="M15 3h6v6" /> : <path d="M5 12h14M12 5l7 7-7 7" />}
+                          {item.taskId ? <path d="M10 14 21 3" /> : null}
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMenuItemId(current => current === item.id ? null : item.id)}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg-3"
+                        title="More actions"
+                        aria-label="More actions"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" />
+                        </svg>
+                      </button>
+                      <div className="relative">
+                        {menuItemId === item.id && (
+                          <div className="absolute right-0 top-8 z-40 w-40 overflow-hidden rounded-lg border border-edge bg-panel py-1 text-[11px] shadow-[0_12px_34px_rgba(0,0,0,0.16)]">
+                            {editable && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setMenuItemId(null);
+                                  focusItemTitle(item);
+                                }}
+                                className="flex w-full items-center px-3 py-2 text-left text-fg-3 transition hover:bg-panel-h"
+                              >
+                                Edit
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMenuItemId(null);
+                                onDeleteItem(item.id);
+                              }}
+                              className="flex w-full items-center px-3 py-2 text-left text-err transition hover:bg-err/[0.08]"
+                            >
+                              Delete action
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </aside>
+  );
 }
 
 function jiraStatusForColumn(column: JiraColumnKey): ProTaskStatus {
@@ -659,6 +1105,7 @@ function statusForChatStage(stage: ProTaskStage): ProTaskStatus | null {
 function jiraStageForStatus(status: ProTaskStatus): ProTaskStage | null {
   if (status === 'refinement') return 'refinement';
   if (status === 'coding') return 'coding';
+  if (status === 'resolved') return 'verification';
   return null;
 }
 
@@ -831,6 +1278,391 @@ function CreateJiraTaskModal({
           {creating ? <Spinner /> : null}
           Create
         </Button>
+      </div>
+    </Modal>
+  );
+}
+
+function DailyIntakeModal({
+  open,
+  creating,
+  selectedDate,
+  value,
+  items,
+  onChange,
+  onCreateOne,
+  onUpdateItem,
+  onDeleteItem,
+  onReorderItems,
+  onClose,
+}: {
+  open: boolean;
+  creating: boolean;
+  selectedDate: string;
+  value: string;
+  items: DailyItem[];
+  onChange: (value: string) => void;
+  onCreateOne: () => void;
+  onUpdateItem: (itemId: string, title: string) => void;
+  onDeleteItem: (itemId: string) => void;
+  onReorderItems: (itemIds: string[]) => void;
+  onClose: () => void;
+}) {
+  const [editingTitles, setEditingTitles] = useState<Record<string, string>>({});
+  const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
+  const itemInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  useEffect(() => {
+    if (!open) {
+      setEditingTitles({});
+      setDraggingItemId(null);
+    }
+  }, [open]);
+
+  const commitTitle = (item: DailyItem) => {
+    const nextTitle = (editingTitles[item.id] ?? item.title).trim();
+    if (!nextTitle || nextTitle === item.title) return;
+    onUpdateItem(item.id, nextTitle);
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader
+        title={selectedDate.replace(/-/g, '/')}
+        description="Add actions for this day, adjust their order, and move them into backlog when you are ready."
+        onClose={onClose}
+      />
+      <div className="space-y-4">
+        <div className="flex items-center gap-2">
+          <Input
+          autoFocus
+          value={value}
+          onChange={event => onChange(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                onCreateOne();
+              }
+            }}
+            placeholder="Add one action"
+            className="flex-1"
+          />
+          <Button variant="primary" disabled={creating || !value.trim()} onClick={onCreateOne}>
+            {creating ? <Spinner /> : null}
+            Create
+          </Button>
+        </div>
+        <div className="rounded-xl border border-edge/55 bg-panel-alt/35">
+          <div className="border-b border-edge/40 px-3 py-2 text-[11px] font-medium text-fg-5">
+            Actions
+          </div>
+          <div className="max-h-[420px] overflow-y-auto p-2">
+            {items.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-edge/45 bg-inset/25 px-3 py-5 text-[11px] text-fg-5">
+                No actions for this day yet.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {items.map((item, index) => {
+                  const editable = !item.taskId;
+                  return (
+                    <div
+                      key={item.id}
+                      draggable
+                      onDragStart={() => setDraggingItemId(item.id)}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = 'move';
+                      }}
+                      onDrop={() => {
+                        if (!draggingItemId || draggingItemId === item.id) return;
+                        const order = items.map(entry => entry.id);
+                        const from = order.indexOf(draggingItemId);
+                        const to = order.indexOf(item.id);
+                        if (from < 0 || to < 0) return;
+                        const next = order.slice();
+                        const [moved] = next.splice(from, 1);
+                        next.splice(to, 0, moved);
+                        onReorderItems(next);
+                        setDraggingItemId(null);
+                      }}
+                      onDragEnd={() => setDraggingItemId(null)}
+                      className={cn(
+                        'rounded-lg border border-edge/50 bg-panel/80 px-2.5 py-2 transition',
+                        draggingItemId === item.id && 'opacity-60',
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="inline-flex h-6 w-6 shrink-0 cursor-grab items-center justify-center rounded-md border border-edge/60 bg-inset text-[11px] font-semibold tabular-nums text-fg-4 transition hover:border-primary/35 hover:text-primary active:cursor-grabbing"
+                          title="Drag to reorder priority"
+                          aria-label="Drag to reorder priority"
+                        >
+                          {index + 1}
+                        </button>
+                        <input
+                          value={editingTitles[item.id] ?? item.title}
+                          onChange={event => {
+                            if (!editable) return;
+                            setEditingTitles(prev => ({ ...prev, [item.id]: event.target.value }));
+                          }}
+                          onBlur={() => editable && commitTitle(item)}
+                          onKeyDown={event => {
+                            if (editable && event.key === 'Enter') {
+                              event.preventDefault();
+                              commitTitle(item);
+                              (event.currentTarget as HTMLInputElement).blur();
+                            }
+                          }}
+                          ref={node => {
+                            itemInputRefs.current[item.id] = node;
+                          }}
+                          disabled={!editable}
+                          className={cn(
+                            'min-w-0 flex-1 border-0 bg-transparent text-[12px] font-medium text-fg-2 outline-none',
+                            !editable && 'cursor-default text-fg-3 disabled:opacity-100',
+                          )}
+                        />
+                        <Badge variant={dailyItemStatusTone(item.status)}>{dailyItemStatusLabel(item.status)}</Badge>
+                        {item.taskKey && <span className="font-mono text-[10px] font-semibold text-primary">{item.taskKey}</span>}
+                        <span className="text-[10px] text-fg-5">{formatHourMinute(item.createdAt || item.updatedAt)}</span>
+                        {editable && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-[10.5px]"
+                            onClick={() => {
+                              setEditingTitles(prev => ({ ...prev, [item.id]: prev[item.id] ?? item.title }));
+                              window.setTimeout(() => {
+                                itemInputRefs.current[item.id]?.focus();
+                                itemInputRefs.current[item.id]?.select();
+                              }, 0);
+                            }}
+                            title="Edit action"
+                          >
+                            Edit
+                          </Button>
+                        )}
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-[var(--th-danger,#b91c1c)]" onClick={() => onDeleteItem(item.id)} title="Delete action">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" />
+                          </svg>
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={creating}>Done</Button>
+      </div>
+    </Modal>
+  );
+}
+
+function DailySourcePickerModal({
+  open,
+  todoItems,
+  tasks,
+  taskSpaces,
+  selectedDate,
+  onClose,
+  onAddTodo,
+  onAddTask,
+}: {
+  open: boolean;
+  todoItems: TodoItem[];
+  tasks: ProTask[];
+  taskSpaces: TaskSpace[];
+  selectedDate: string;
+  onClose: () => void;
+  onAddTodo: (item: TodoItem) => void;
+  onAddTask: (task: ProTask) => void;
+}) {
+  return (
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader
+        title="Add to daily"
+        description={`Pull in todo items or existing tasks for ${formatDateOnly(`${selectedDate}T00:00:00`)}`}
+        onClose={onClose}
+      />
+      <div className="space-y-4">
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[13px] font-semibold text-fg-2">Todo list</div>
+              <div className="text-[11px] text-fg-5">Adding a todo creates a new backlog task for this day and archives the original todo item.</div>
+            </div>
+            <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{todoItems.length}</Badge>
+          </div>
+          <div className="space-y-2">
+            {todoItems.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-edge/45 bg-inset/25 px-3 py-4 text-[11px] text-fg-5">No open todo items match the current filter.</div>
+            ) : (
+              todoItems.map(item => (
+                <div key={item.id} className="flex min-w-0 items-center gap-3 rounded-lg border border-edge/60 bg-panel-alt/45 px-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[12px] font-semibold text-fg-2">{item.title}</div>
+                    <div className="mt-1 line-clamp-2 text-[10.5px] text-fg-5">{item.body || item.source?.quote || 'Todo item'}</div>
+                  </div>
+                  <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => onAddTodo(item)}>
+                    Add to daily
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[13px] font-semibold text-fg-2">Existing tasks</div>
+              <div className="text-[11px] text-fg-5">Personal, Jira, and custom tasks keep their source space and are also scheduled into this Daily board.</div>
+            </div>
+            <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{tasks.length}</Badge>
+          </div>
+          <div className="space-y-2">
+            {tasks.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-edge/45 bg-inset/25 px-3 py-4 text-[11px] text-fg-5">No existing tasks match the current filter.</div>
+            ) : (
+              tasks.map(task => (
+                <div key={task.id} className="flex min-w-0 items-center gap-3 rounded-lg border border-edge/60 bg-panel-alt/45 px-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[12px] font-semibold text-fg-2">
+                      {taskDisplayKey(task) ? `${taskDisplayKey(task)} · ` : ''}{task.title}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[10.5px] text-fg-5">
+                      <span>{dailyTaskSourceLabel(task, taskSpaces)}</span>
+                      <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[displayTaskStatus(task.status)]}</Badge>
+                      {task.plannedDate && <span>{plannedDateLabel(task.plannedDate, selectedDate)}</span>}
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => onAddTask(task)}>
+                    Add to daily
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
+    </Modal>
+  );
+}
+
+function TodoQuickAddModal({
+  open,
+  saving,
+  value,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  saving: boolean;
+  value: string;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title="Add todo" description="Capture a quick item from the page you're on right now." onClose={onClose} />
+      <div className="space-y-3">
+        <textarea
+          autoFocus
+          value={value}
+          onChange={event => onChange(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              onSave();
+            }
+          }}
+          placeholder="Capture a quick follow-up, idea, or task..."
+          className="min-h-28 w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/60 focus:border-control-border-h focus:ring-2 focus:ring-[color:var(--th-selection-ring)]"
+        />
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+        <Button variant="primary" onClick={onSave} disabled={saving || !value.trim()}>
+          {saving ? <Spinner /> : null}
+          Save
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+function TodoListModal({
+  open,
+  items,
+  creating,
+  selectedDailyDate,
+  onClose,
+  onCreateTodo,
+  onCreateChat,
+  onCreateTask,
+  onCreateDaily,
+}: {
+  open: boolean;
+  items: TodoItem[];
+  creating: boolean;
+  selectedDailyDate: string;
+  onClose: () => void;
+  onCreateTodo: () => void;
+  onCreateChat: (item: TodoItem) => void;
+  onCreateTask: (item: TodoItem) => void;
+  onCreateDaily: (item: TodoItem) => void;
+}) {
+  const visibleItems = orderTodoItems(items.filter(item => item.status !== 'archived'));
+  return (
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader
+        title="Todo"
+        description={`Open items can turn into chat, task, or Daily for ${formatDateOnly(`${selectedDailyDate}T00:00:00`)}`}
+        onClose={onClose}
+      />
+      <div className="space-y-4">
+        <div className="flex justify-end">
+          <Button variant="secondary" size="sm" onClick={onCreateTodo}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add todo
+          </Button>
+        </div>
+        <div className="space-y-2">
+          {visibleItems.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-edge/45 px-4 py-12 text-center text-[13px] text-fg-5">No todo items yet.</div>
+          ) : visibleItems.map(item => {
+            const body = item.body && item.body !== item.title ? item.body : item.source?.quote || '';
+            const completed = item.status !== 'open';
+            return (
+              <div key={item.id} className={cn('rounded-lg border px-3 py-2.5', completed ? 'border-edge/35 bg-panel-alt/30 opacity-70' : 'border-edge/45 bg-panel-alt/55')}>
+                <div className="flex min-w-0 items-start gap-3">
+                  <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-edge/45 bg-panel-alt text-fg-4">
+                    <TodoGlyph className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className={cn('text-[13px] font-medium text-fg-3', completed && 'line-through text-fg-5')}>{item.title}</div>
+                    {body && <div className="mt-1 line-clamp-2 text-[11px] text-fg-5">{body}</div>}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={creating || completed} onClick={() => onCreateChat(item)}>Chat</Button>
+                    <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={creating || completed} onClick={() => onCreateTask(item)}>Task</Button>
+                    <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={creating || completed} onClick={() => onCreateDaily(item)}>Daily</Button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </Modal>
   );
@@ -1144,6 +1976,23 @@ const ANALYZE_TICKET_PROMPT = [
   'Do not start coding yet. End with a clear recommendation for the next step.',
 ].join(' ');
 
+const DAILY_CLARIFY_PROMPT = [
+  'This is a Daily work item that starts as a short sentence and needs clarification before execution.',
+  'First clarify with the user: what needs to be done, what outcome is expected, what constraints or acceptance points matter, and whether there is an existing Jira ticket or Pikiclaw task that should be linked.',
+  'Do not start implementation yet.',
+  'End with a concise Goal artifact that captures the clarified objective, scope, expected output, and any related ticket/task references.',
+].join(' ');
+
+const DAILY_WORKING_PROMPT = [
+  'Use the clarified Goal and any linked context as the execution contract for this Daily work item.',
+  'Complete the implementation work, then summarize the conclusion, changed files, and concrete output.',
+].join(' ');
+
+const DAILY_REVIEW_PROMPT = [
+  'Review this Daily work item against the clarified Goal and the implementation output.',
+  'Check whether the expected output is met, call out any remaining risk or follow-up, and conclude whether this item is ready to mark done.',
+].join(' ');
+
 const REVISE_PLAN_PROMPT = [
   'Revise the Goal & Plan using the latest chat context.',
   'Keep it concise and actionable, and call out anything still unclear before coding.',
@@ -1399,6 +2248,14 @@ function compactMessageText(message: RichMessage): string {
   const text = message.text || message.blocks?.filter(block => block.type === 'text').map(block => block.content).join('\n') || '';
   return text.trim();
 }
+
+function resolveTaskFilePath(workdir: string, target: FileLinkTarget): string {
+  const path = target.path.replace(/\\/g, '/');
+  if (path.startsWith('/') || /^[A-Za-z]:\//.test(path)) return path;
+  return `${workdir.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
+}
+
+import { isMarkdownOutputPath, outputMarkdownPath } from './task-output-preview';
 
 function TaskDescriptionMarkdown({ task }: { task: ProTask }) {
   const mdComponents = useMemo(() => createMdComponents({ workdir: task.workdir }), [task.workdir]);
@@ -1786,6 +2643,9 @@ function TaskChatWindow({
   artifactCount,
   onCreateSideChatFromSelection,
   onCreateTodoFromSelection,
+  onOpenFileLink,
+  onChatWorkdirChange,
+  t,
 }: {
   task: ProTask;
   actions?: ReactNode;
@@ -1798,6 +2658,9 @@ function TaskChatWindow({
   artifactCount: number;
   onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
   onCreateTodoFromSelection?: TaskSelectionSessionHandler;
+  onOpenFileLink?: OpenFileLinkHandler;
+  onChatWorkdirChange?: (workdir: string) => void;
+  t: (key: string) => string;
 }) {
   const currentDefaultAgent = taskAssignee(task, defaultAgent);
   const [loading, setLoading] = useState(false);
@@ -1861,10 +2724,11 @@ function TaskChatWindow({
   const meaningfulMessages = messages.filter(message => !!compactMessageText(message));
   const lastMeaningfulMessage = meaningfulMessages[meaningfulMessages.length - 1] || null;
   const showOutputActions = !!lastMeaningfulMessage && lastMeaningfulMessage.role !== 'user';
-  const mdComponents = useMemo(
-    () => createMdComponents({ workdir: runSession?.workdir || task.workdir }),
-    [runSession?.workdir, task.workdir],
-  );
+  const chatWorkdir = runSession?.workdir || task.workdir || '';
+
+  useEffect(() => {
+    onChatWorkdirChange?.(chatWorkdir);
+  }, [chatWorkdir, onChatWorkdirChange, task.id]);
 
   useEffect(() => {
     setMessages([]);
@@ -1979,11 +2843,13 @@ function TaskChatWindow({
     </div>
   );
   const taskTop = (
-    <div className={cn('relative w-full', showProgress && 'min-[1180px]:min-h-[178px]')}>
-      <div className="mx-auto w-full max-w-[920px] min-w-0">{taskHeader}</div>
-      {showProgress && <div className="mx-auto mt-4 w-full max-w-[920px] min-[1180px]:absolute min-[1180px]:right-0 min-[1180px]:top-0 min-[1180px]:mt-0 min-[1180px]:w-[360px]">
-        <TaskFlowMap task={task} busyStage={busyStage} />
-      </div>}
+    <div className="relative z-10 mx-auto w-full max-w-[920px] space-y-4">
+      <div className="min-w-0">{taskHeader}</div>
+      {showProgress && (
+        <div className="ml-auto w-full max-w-[360px]">
+          <TaskFlowMap task={task} busyStage={busyStage} />
+        </div>
+      )}
     </div>
   );
 
@@ -2028,6 +2894,7 @@ function TaskChatWindow({
             initialPendingPrompt={isPendingSession ? run.prompt : null}
             initialPendingCreatedAt={isPendingSession ? run.startedAt || null : null}
             onSessionChange={handleRunSessionChange}
+            onOpenFileLink={onOpenFileLink}
             onCreateSideChatFromSelection={(request) => onCreateSideChatFromSelection?.(runSession, request)}
             onCreateTodoFromSelection={(request) => onCreateTodoFromSelection?.(runSession, request)}
           />
@@ -2075,23 +2942,33 @@ function TaskChatWindow({
           ) : (
             <div className="space-y-3">
               {messages.map((message, index) => {
-                const text = compactMessageText(message);
-                if (!text) return null;
-                const user = message.role === 'user';
-                return (
-                  <div key={`${message.role}-${message.createdAt || index}`} className={cn('flex', user ? 'justify-end' : 'justify-start')}>
-                    <div className={cn(
-                      'max-w-[78%] rounded-md border px-3 py-2 text-[12px] leading-relaxed',
-                      user
-                        ? 'border-primary/25 bg-primary/[0.07] text-fg-2'
-                        : 'border-edge bg-panel text-fg-3',
-                    )}>
-                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{user ? 'User' : 'Agent'}</div>
-                      <div className="session-md text-[12px] leading-relaxed">
-                        <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
-                          {text}
-                        </ReactMarkdown>
+                const normalized = ensureRichMessageBlocks(message);
+                const text = compactMessageText(normalized);
+                if (!text && !normalized.blocks?.some(block => block.type === 'image')) return null;
+                const user = normalized.role === 'user';
+                if (user) {
+                  return (
+                    <div key={`${normalized.role}-${normalized.createdAt || index}`} className="flex justify-end">
+                      <div className="max-w-[78%] min-w-0">
+                        <UserBubble
+                          text={text}
+                          blocks={normalized.blocks}
+                          createdAt={normalized.createdAt}
+                          t={t}
+                        />
                       </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div key={`${normalized.role}-${normalized.createdAt || index}`} className="flex justify-start">
+                    <div className="max-w-[min(100%,860px)] min-w-0 rounded-md border border-edge bg-panel px-3 py-2">
+                      <AssistantMsg
+                        message={normalized}
+                        t={t}
+                        onOpenFileLink={onOpenFileLink}
+                        workdir={chatWorkdir || undefined}
+                      />
                     </div>
                   </div>
                 );
@@ -2170,9 +3047,6 @@ function TaskChatWindow({
                 </select>
               </label>
               <div className="min-w-0 flex-1" />
-              {!run && !draft.trim() && (
-                <span className="hidden text-[11px] text-fg-5 sm:inline">First message starts a task chat</span>
-              )}
               <button
                 type="button"
                 disabled={sending || busyStage === activeStage || (!draft.trim() && canSendToRun)}
@@ -2446,7 +3320,7 @@ function JiraMetadataPanel({ task }: { task: ProTask }) {
     <section className="rounded-md border border-edge bg-panel-alt px-3 py-3">
       <div className="mb-3 text-[13px] font-semibold text-fg-2">Jira metadata</div>
       <div className="space-y-3">
-        <TaskMetaItem label="Key" value={task.jiraKey} mono />
+        <TaskMetaItem label="Key" value={taskDisplayKey(task)} mono />
         <TaskMetaItem label="Ticket type" value={fields.issueType || ticketType.label} />
         <TaskMetaItem label="Sprint" value={task.sprint} />
         <TaskMetaItem label="Status" value={fields.status || fallback.status} />
@@ -2471,6 +3345,8 @@ function JiraMetadataPanel({ task }: { task: ProTask }) {
 
 function TaskDetail({
   task,
+  linkCandidates,
+  linkedTask,
   actions,
   defaultAgent,
   agents,
@@ -2488,10 +3364,13 @@ function TaskDetail({
   onUpdateSubtaskStatus,
   onStartSubtask,
   onReopen,
+  onOpenLinkedTask,
   onCreateSideChatFromSelection,
   onCreateTodoFromSelection,
 }: {
   task: ProTask | null;
+  linkCandidates: ProTask[];
+  linkedTask: ProTask | null;
   actions?: ReactNode;
   defaultAgent: string;
   agents: AgentRuntimeStatus[];
@@ -2509,6 +3388,7 @@ function TaskDetail({
   onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
   onReopen?: (task: ProTask) => void;
+  onOpenLinkedTask?: (task: ProTask) => void;
   onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
   onCreateTodoFromSelection?: TaskSelectionSessionHandler;
 }) {
@@ -2517,6 +3397,8 @@ function TaskDetail({
   const [shelfTab, setShelfTab] = useState<'outputs' | 'files' | 'status'>('outputs');
   const [contextOpen, setContextOpen] = useState(false);
   const [fileBrowserPath, setFileBrowserPath] = useState('');
+  const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
+  const [activeChatWorkdir, setActiveChatWorkdir] = useState('');
   const sortedRuns = useMemo(() => [...(task?.stageRuns || [])].sort((a, b) => {
     const bTime = Date.parse(b.startedAt || b.completedAt || '');
     const aTime = Date.parse(a.startedAt || a.completedAt || '');
@@ -2529,6 +3411,7 @@ function TaskDetail({
       kind: output.kind,
       title: output.title,
       summary: output.summary || output.path || output.url || '',
+      path: output.path,
       time: output.createdAt,
       stage: output.stageRunId ? sortedRuns.find(run => run.id === output.stageRunId)?.stage : undefined,
     }));
@@ -2538,11 +3421,11 @@ function TaskDetail({
         id: run.id,
         kind: 'stage' as const,
         title: run.stage === 'refinement'
-          ? 'Goal & Plan'
+          ? (task.plannedDate ? 'Goal' : 'Goal & Plan')
           : run.stage === 'coding'
-            ? 'Implementation notes'
+            ? (task.plannedDate ? 'Working output' : 'Implementation notes')
             : run.stage === 'verification'
-              ? 'Verification result'
+              ? (task.plannedDate ? 'Review result' : 'Verification result')
               : `${STAGE_LABEL[run.stage]} summary`,
         summary: run.output?.summary || run.output?.diffSummary || run.output?.branch || estimateSummary(run) || '',
         time: run.completedAt || run.startedAt || '',
@@ -2574,10 +3457,26 @@ function TaskDetail({
   }, [sortedRuns, task]);
   const latestRunWorkdir = sortedRuns.find(run => run.session?.workdir)?.session.workdir || '';
   const inferredWorkdir = latestRunWorkdir || task?.workdir || fallbackWorkdir || '';
+  const previewWorkdir = activeChatWorkdir || inferredWorkdir;
+  const selectedOutput = useMemo(() => {
+    if (!outputItems.length) return null;
+    return outputItems.find(output => output.id === selectedOutputId) || outputItems[0];
+  }, [outputItems, selectedOutputId]);
+  const selectedOutputMarkdownPath = selectedOutput ? outputMarkdownPath(selectedOutput) : null;
+  const handleOpenFileLink = useCallback((target: FileLinkTarget) => {
+    const workdir = previewWorkdir.trim();
+    const resolvedPath = workdir ? resolveTaskFilePath(workdir, target) : target.path;
+    setContextOpen(true);
+    setShelfTab('files');
+    if (workdir) setFileBrowserPath(resolvedPath);
+    void api.openInEditor(resolvedPath).catch(() => {});
+  }, [previewWorkdir]);
   useEffect(() => {
     setContextOpen(false);
     setShelfTab('outputs');
     setFileBrowserPath(inferredWorkdir);
+    setSelectedOutputId(null);
+    setActiveChatWorkdir('');
   }, [inferredWorkdir, task?.id]);
   if (!task) {
     return (
@@ -2596,6 +3495,7 @@ function TaskDetail({
   const createdAt = task.createdAt || jiraRemoteSyncField(task.description, 'Created');
   const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
   const assignAssistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
+  const displayKey = taskDisplayKey(task);
   const workspaceOptions = new Map<string, string>();
   const addWorkspace = (path?: string | null, label?: string | null) => {
     const cleanPath = path?.trim();
@@ -2618,7 +3518,7 @@ function TaskDetail({
       <div className="relative z-50 flex h-[48px] shrink-0 items-center gap-3 border-b border-edge/55 bg-panel/72 px-4 backdrop-blur-md">
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <TicketTypeIcon task={task} />
-          {task.jiraKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
+          {displayKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{displayKey}</span>}
           <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg" title={task.title}>{task.title}</span>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -2658,6 +3558,9 @@ function TaskDetail({
               artifactCount={outputItems.length}
               onCreateSideChatFromSelection={onCreateSideChatFromSelection}
               onCreateTodoFromSelection={onCreateTodoFromSelection}
+              onOpenFileLink={handleOpenFileLink}
+              onChatWorkdirChange={setActiveChatWorkdir}
+              t={t}
             />
           </div>
         </main>
@@ -2718,6 +3621,37 @@ function TaskDetail({
                       </dd>
                       <dt className="text-fg-5">Ticket owner</dt>
                       <dd className="min-w-0 truncate text-fg-3">{assignee || '--'}</dd>
+                      {task.plannedDate && (
+                        <>
+                          <dt className="text-fg-5">Planned day</dt>
+                          <dd className="min-w-0 truncate text-fg-3">{plannedDateLabel(task.plannedDate, task.plannedDate)}</dd>
+                          <dt className="text-fg-5">Linked task</dt>
+                          <dd className="min-w-0 space-y-1.5">
+                            <select
+                              value={task.linkedTaskId || ''}
+                              onChange={event => onMetaChange(task, { linkedTaskId: event.target.value || null })}
+                              className="h-7 w-full rounded-md border border-transparent bg-transparent px-0 text-[12px] text-fg-3 outline-none transition hover:border-edge hover:bg-panel focus:border-primary/40"
+                            >
+                              <option value="">None</option>
+                              {linkCandidates.map(candidate => (
+                                <option key={candidate.id} value={candidate.id}>
+                                  {taskDisplayKey(candidate) ? `${taskDisplayKey(candidate)} · ` : ''}{candidate.title}
+                                </option>
+                              ))}
+                            </select>
+                            {linkedTask && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenLinkedTask?.(linkedTask)}
+                                className="truncate text-[11px] text-primary hover:text-primary/80"
+                                title={linkedTask.title}
+                              >
+                                {taskDisplayKey(linkedTask) ? `${taskDisplayKey(linkedTask)} · ` : ''}{linkedTask.title}
+                              </button>
+                            )}
+                          </dd>
+                        </>
+                      )}
                       <dt className="text-fg-5">Workspace</dt>
                       <dd className="min-w-0">
                         <select
@@ -2801,21 +3735,64 @@ function TaskDetail({
               )}
 
               {shelfTab === 'outputs' && (
-                <div className="space-y-2">
+                <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-3">
                   {outputItems.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center text-[12px] text-fg-5">
-                      Goal & Plan, implementation notes, diffs, links, and verification results will appear here.
+                      {task.plannedDate
+                        ? 'Goal, working output, review results, diffs, and linked artifacts will appear here.'
+                        : 'Goal & Plan, implementation notes, diffs, links, and verification results will appear here.'}
                     </div>
-                  ) : outputItems.map(output => (
-                    <div key={output.id} className="rounded-lg border border-edge/65 bg-panel-alt/58 px-3 py-2.5">
-                      <div className="flex min-w-0 items-center gap-2">
-                        {output.stage && <Badge variant={stageTone(output.stage)}>{STAGE_LABEL[output.stage]}</Badge>}
-                        <div className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2">{output.title}</div>
+                  ) : (
+                    <>
+                      <div className="min-h-0 space-y-2 overflow-y-auto">
+                        {outputItems.map(output => {
+                          const active = selectedOutput?.id === output.id;
+                          return (
+                            <button
+                              key={output.id}
+                              type="button"
+                              onClick={() => setSelectedOutputId(output.id)}
+                              className={cn(
+                                'w-full rounded-lg border px-3 py-2.5 text-left transition-[border-color,background,transform] duration-150 active:translate-y-px',
+                                active ? 'border-primary/32 bg-primary/[0.075]' : 'border-edge/65 bg-panel-alt/58 hover:border-edge-h hover:bg-panel-h/55',
+                              )}
+                            >
+                              <div className="flex min-w-0 items-center gap-2">
+                                {output.stage && <Badge variant={stageTone(output.stage)}>{STAGE_LABEL[output.stage]}</Badge>}
+                                <div className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2">{output.title}</div>
+                              </div>
+                              {output.summary && <div className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-fg-4">{output.summary}</div>}
+                              {output.time && <div className="mt-2 text-[10px] text-fg-5">{formatTime(output.time)}</div>}
+                            </button>
+                          );
+                        })}
                       </div>
-                      {output.summary && <div className="mt-1 line-clamp-3 text-[11.5px] leading-relaxed text-fg-4">{output.summary}</div>}
-                      {output.time && <div className="mt-2 text-[10px] text-fg-5">{formatTime(output.time)}</div>}
-                    </div>
-                  ))}
+                      {selectedOutput && (
+                        <div className="min-h-[190px] border-t border-edge/55 pt-3">
+                          {selectedOutput.summary && (
+                            <GeneratedOutputCards
+                              text={selectedOutput.summary}
+                              compact
+                              onOpenFileLink={handleOpenFileLink}
+                              className="mb-2"
+                            />
+                          )}
+                          {selectedOutputMarkdownPath && previewWorkdir ? (
+                            <MarkdownFilePreviewCard
+                              target={{ path: selectedOutputMarkdownPath }}
+                              workdir={previewWorkdir}
+                              onOpenFileLink={handleOpenFileLink}
+                              t={t}
+                            />
+                          ) : selectedOutput.summary ? (
+                            <pre className="max-h-[260px] overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-edge/40 bg-panel/50 px-3 py-2 text-[11.5px] leading-relaxed text-fg-3">
+                              {selectedOutput.summary}
+                            </pre>
+                          ) : null}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
 
@@ -2829,6 +3806,8 @@ function TaskDetail({
 
 function TaskInlineWorkbench({
   task,
+  linkCandidates,
+  linkedTask,
   defaultAgent,
   agents,
   assistants,
@@ -2846,10 +3825,15 @@ function TaskInlineWorkbench({
   onStartSubtask,
   onReopen,
   onOpenFull,
+  dailyItem,
+  onBackToAction,
+  onOpenLinkedTask,
   onCreateSideChatFromSelection,
   onCreateTodoFromSelection,
 }: {
   task: ProTask | null;
+  linkCandidates: ProTask[];
+  linkedTask: ProTask | null;
   defaultAgent: string;
   agents: AgentRuntimeStatus[];
   assistants: AgentAssistant[];
@@ -2867,6 +3851,9 @@ function TaskInlineWorkbench({
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
   onReopen?: (task: ProTask) => void;
   onOpenFull: () => void;
+  dailyItem?: DailyItem | null;
+  onBackToAction?: (item: DailyItem) => void;
+  onOpenLinkedTask?: (task: ProTask) => void;
   onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
   onCreateTodoFromSelection?: TaskSelectionSessionHandler;
 }) {
@@ -2888,6 +3875,8 @@ function TaskInlineWorkbench({
     <aside className="hidden min-h-0 border-l border-edge/55 bg-[var(--th-session-bg)] 2xl:flex 2xl:flex-col">
       <TaskDetail
         task={task}
+        linkCandidates={linkCandidates}
+        linkedTask={linkedTask}
         defaultAgent={defaultAgent}
         agents={agents}
         assistants={assistants}
@@ -2904,12 +3893,20 @@ function TaskInlineWorkbench({
         onUpdateSubtaskStatus={onUpdateSubtaskStatus}
         onStartSubtask={onStartSubtask}
         onReopen={onReopen}
+        onOpenLinkedTask={onOpenLinkedTask}
         onCreateSideChatFromSelection={onCreateSideChatFromSelection}
         onCreateTodoFromSelection={onCreateTodoFromSelection}
         actions={(
-          <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={onOpenFull}>
-            Open
-          </Button>
+          <>
+            {dailyItem && onBackToAction && (
+              <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={() => onBackToAction(dailyItem)}>
+                Back to action
+              </Button>
+            )}
+            <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={onOpenFull}>
+              Open
+            </Button>
+          </>
         )}
       />
     </aside>
@@ -2922,17 +3919,26 @@ function JiraSyncMonitor({
   detailsOpen,
   syncing,
   onSync,
+  onStop,
+  stopping,
   onSelectRun,
   onCloseDetails,
+  onApplyItems,
+  applying,
 }: {
   runs: JiraSyncRun[];
   selectedRun: JiraSyncRun | null;
   detailsOpen: boolean;
   syncing: boolean;
   onSync: () => void;
+  onStop: (runId: string) => void;
+  stopping: boolean;
   onSelectRun: (runId: string) => void;
   onCloseDetails: () => void;
+  onApplyItems: (runId: string, itemIds: string[]) => void;
+  applying: boolean;
 }) {
+  const activeRun = syncRunActive(selectedRun) ? selectedRun : null;
   return (
     <>
       <div className="flex min-w-0 flex-1 items-center gap-2 border-l border-edge/60 pl-3">
@@ -2962,6 +3968,17 @@ function JiraSyncMonitor({
             <path d="M6 22v-4H2" />
           </svg>
         </button>
+        {activeRun && (
+          <button
+            type="button"
+            onClick={() => onStop(activeRun.id)}
+            disabled={stopping}
+            className="inline-flex h-6 shrink-0 items-center rounded-md border border-warn/35 bg-warn/10 px-2 text-[11px] font-medium text-warn transition-colors hover:border-warn/60 hover:bg-warn/15 disabled:pointer-events-none disabled:opacity-55"
+            title="Stop Jira sync"
+          >
+            Stop
+          </button>
+        )}
         <span className={cn('min-w-0 truncate text-[12px]', selectedRun?.status === 'failed' ? 'text-warn' : 'text-fg-5')}>
           {jiraSyncCompactLabel(selectedRun)}
         </span>
@@ -3006,7 +4023,7 @@ function JiraSyncMonitor({
             </div>
           </div>
           {selectedRun ? (
-            <JiraSyncDetailsContent run={selectedRun} />
+            <JiraSyncDetailsContent run={selectedRun} onApplyItems={onApplyItems} applying={applying} />
           ) : (
             <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-dashed border-edge/60 bg-panel text-[13px] text-fg-5">
               Select a sync run to view details.
@@ -3018,9 +4035,32 @@ function JiraSyncMonitor({
   );
 }
 
-function JiraSyncDetailsContent({ run }: { run: JiraSyncRun }) {
+function JiraSyncDetailsContent({
+  run,
+  onApplyItems,
+  applying,
+}: {
+  run: JiraSyncRun;
+  onApplyItems: (runId: string, itemIds: string[]) => void;
+  applying: boolean;
+}) {
   const counts = syncChangeCounts(run);
   const hasChanges = (run.changes || []).length > 0;
+  const candidateItems = (run.items || []).filter(item => item.status !== 'applied');
+  const appliedItems = (run.items || []).filter(item => item.status === 'applied');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(candidateItems.filter(item => item.selected !== false).map(item => item.id)));
+  useEffect(() => {
+    setSelectedIds(new Set(candidateItems.filter(item => item.selected !== false).map(item => item.id)));
+  }, [run.id, run.updatedAt]);
+  const toggleItem = (itemId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  };
+  const selectedCount = selectedIds.size;
   return (
         <div className="grid gap-3 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <div className="rounded-lg border border-edge/60 bg-panel px-3 py-3">
@@ -3042,6 +4082,66 @@ function JiraSyncDetailsContent({ run }: { run: JiraSyncRun }) {
           </div>
 
           <div className="rounded-lg border border-edge/60 bg-panel px-3 py-3">
+            {candidateItems.length > 0 && (
+              <div className="mb-3 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[12px] font-semibold text-fg-3">Sync candidates</div>
+                    <div className="mt-0.5 text-[11px] text-fg-5">{selectedCount} of {candidateItems.length} selected{appliedItems.length ? ` · ${appliedItems.length} already applied` : ''}</div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      className="rounded-md border border-edge bg-panel-alt px-2 py-1 text-[11px] text-fg-4 hover:border-edge-h hover:bg-panel-h"
+                      onClick={() => setSelectedIds(new Set(candidateItems.map(item => item.id)))}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-edge bg-panel-alt px-2 py-1 text-[11px] text-fg-4 hover:border-edge-h hover:bg-panel-h"
+                      onClick={() => setSelectedIds(new Set())}
+                    >
+                      Clear
+                    </button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      disabled={!selectedCount || applying}
+                      onClick={() => onApplyItems(run.id, [...selectedIds])}
+                    >
+                      {applying ? 'Applying' : 'Apply selected'}
+                    </Button>
+                  </div>
+                </div>
+                <div className="max-h-[260px] space-y-1.5 overflow-y-auto pr-1">
+                  {candidateItems.map(item => (
+                    <label key={item.id} className="flex min-w-0 cursor-pointer items-start gap-2 rounded-md border border-edge/45 bg-panel/75 px-2.5 py-2 hover:border-edge-h hover:bg-panel-h">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-4 w-4 accent-primary"
+                        checked={selectedIds.has(item.id)}
+                        onChange={() => toggleItem(item.id)}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex min-w-0 items-center gap-2">
+                          {item.jiraKey && <span className="font-mono text-[11px] text-primary">{item.jiraKey}</span>}
+                          <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-3">{item.title}</span>
+                          {item.ticketStatus && <Badge variant="muted">{item.ticketStatus}</Badge>}
+                        </span>
+                        <span className="mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-[10px] text-fg-5">
+                          {item.sprint && <span>sprint {item.sprint}</span>}
+                          {item.assignee && <span>assignee {item.assignee}</span>}
+                          {item.priority && <span>priority {item.priority}</span>}
+                          {item.updatedAt && <span>updated {formatTime(item.updatedAt)}</span>}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
               <div className="text-[12px] font-semibold text-fg-3">Ticket changes</div>
               <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-fg-5">
@@ -3089,14 +4189,20 @@ function JiraSyncDetailsContent({ run }: { run: JiraSyncRun }) {
 
 function JiraDashboardSettingsMenu({
   canOpenSyncDetails,
+  fixVersion,
+  fixVersionOptions,
   onOpenSyncDetails,
   onRefreshSync,
   onOpenWorkflowSettings,
+  onFixVersionChange,
 }: {
   canOpenSyncDetails: boolean;
+  fixVersion: string;
+  fixVersionOptions: string[];
   onOpenSyncDetails: () => void;
   onRefreshSync: () => void;
   onOpenWorkflowSettings: () => void;
+  onFixVersionChange: (fixVersion: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -3130,7 +4236,7 @@ function JiraDashboardSettingsMenu({
         </svg>
       </Button>
       {open && (
-        <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-44 overflow-hidden rounded-lg border border-edge bg-panel py-1 text-[12px] shadow-[0_18px_45px_rgba(0,0,0,0.18)]">
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-56 overflow-hidden rounded-lg border border-edge bg-panel py-1 text-[12px] shadow-[0_18px_45px_rgba(0,0,0,0.18)]">
           <button
             type="button"
             disabled={!canOpenSyncDetails}
@@ -3146,6 +4252,20 @@ function JiraDashboardSettingsMenu({
           >
             Refresh sync
           </button>
+          <div className="my-1 border-t border-edge/60" />
+          <label className="block px-3 py-2">
+            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Fix version</span>
+            <select
+              value={fixVersion}
+              onChange={event => onFixVersionChange(event.target.value || 'all')}
+              className="h-8 w-full rounded-md border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
+            >
+              <option value="all">All fix versions</option>
+              {fixVersionOptions.map(option => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </label>
           <div className="my-1 border-t border-edge/60" />
           <button
             type="button"
@@ -3272,7 +4392,7 @@ function JiraCyclePanel({
                         <div className="space-y-1.5">
                           {assignedTasks.length > 0 ? assignedTasks.map(task => (
                             <div key={`${cycle.id}:${task.id}`} className="flex min-w-0 items-center gap-2 rounded-md bg-inset/30 px-2 py-1.5">
-                              {task.jiraKey && <span className="shrink-0 font-mono text-[11px] text-primary">{task.jiraKey}</span>}
+                              {taskDisplayKey(task) && <span className="shrink-0 font-mono text-[11px] text-primary">{taskDisplayKey(task)}</span>}
                               <span className="min-w-0 flex-1 truncate text-[12px] text-fg-3">{task.title}</span>
                               {task.jiraFields?.assignee && <span className="max-w-[140px] truncate text-[10px] text-fg-5">{task.jiraFields.assignee}</span>}
                               <Badge variant={taskStatusTone(task.status)}>{STATUS_LABEL[task.status]}</Badge>
@@ -3300,6 +4420,9 @@ function JiraCyclePanel({
 }
 
 export function TasksTab() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const standaloneDailyRoute = location.pathname === '/daily';
   const locale = useStore(s => s.locale);
   const state = useStore(s => s.state);
   const agentStatus = useStore(s => s.agentStatus);
@@ -3307,8 +4430,18 @@ export function TasksTab() {
   const t = useMemo(() => createT(locale), [locale]);
 
   const [tasks, setTasks] = useState<ProTask[]>([]);
+  const [dailyItems, setDailyItems] = useState<DailyItem[]>([]);
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
+  const [todoModalOpen, setTodoModalOpen] = useState(false);
+  const [quickTodoOpen, setQuickTodoOpen] = useState(false);
+  const [quickTodoText, setQuickTodoText] = useState('');
   const [taskSpaces, setTaskSpaces] = useState<TaskSpace[]>([]);
-  const [selectedSpaceId, setSelectedSpaceId] = useState<string>(ALL_TASKS_SPACE_ID);
+  const [selectedSpaceId, setSelectedSpaceId] = useState<string>(standaloneDailyRoute ? DAILY_VIEW_ID : readStoredTaskSelectedSpace());
+  const [dailyDateAuto, setDailyDateAuto] = useState<boolean>(() => !normalizeDailyDateParam(new URLSearchParams(location.search).get('date')));
+  const [selectedDailyDate, setSelectedDailyDate] = useState<string>(() => (
+    normalizeDailyDateParam(new URLSearchParams(location.search).get('date')) || localDateInputValue()
+  ));
+  const [dailyQuickAdd, setDailyQuickAdd] = useState('');
   const [spaceSidebarCollapsed, setSpaceSidebarCollapsed] = useState<boolean>(() => readStoredTaskSpaceSidebarCollapsed());
   const [spaceSearchFocusTick, setSpaceSearchFocusTick] = useState(0);
   const [taskDetailLayout, setTaskDetailLayout] = useState<TaskDetailLayout>(() => readStoredTaskDetailLayout());
@@ -3317,7 +4450,10 @@ export function TasksTab() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [todoCreating, setTodoCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [dailyCreateOpen, setDailyCreateOpen] = useState(false);
+  const [dailySourceOpen, setDailySourceOpen] = useState(false);
   const [spaceCreateOpen, setSpaceCreateOpen] = useState(false);
   const [spaceCreateBusy, setSpaceCreateBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -3332,12 +4468,17 @@ export function TasksTab() {
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<JiraColumnKey | null>(null);
   const [jiraConfig, setJiraConfig] = useState<JiraWorkflowConfig>(DEFAULT_JIRA_ASSISTANT_CONFIG);
-  const [selectedSprint, setSelectedSprint] = useState<string>('all');
+  const [selectedTicketType, setSelectedTicketType] = useState<string>('all');
+  const [activeSprint, setActiveSprint] = useState<string>(() => readStoredJiraActiveSprint());
+  const [selectedSprint, setSelectedSprint] = useState<string>(() => readStoredJiraActiveSprint());
+  const [selectedFixVersion, setSelectedFixVersion] = useState<string>('all');
   const [ticketQuery, setTicketQuery] = useState('');
   const [syncRuns, setSyncRuns] = useState<JiraSyncRun[]>([]);
   const [selectedSyncRunId, setSelectedSyncRunId] = useState<string | null>(null);
   const [syncDetailsOpen, setSyncDetailsOpen] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [syncStopBusy, setSyncStopBusy] = useState(false);
+  const [syncApplyBusy, setSyncApplyBusy] = useState(false);
   const [analyzeBusy, setAnalyzeBusy] = useState(false);
   const [cycles, setCycles] = useState<JiraCycle[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
@@ -3362,30 +4503,94 @@ export function TasksTab() {
   const syncRunsLoadedRef = useRef(false);
   const terminalSyncRunIdsRef = useRef<Set<string>>(new Set());
 
+  useEffect(() => {
+    if (standaloneDailyRoute) {
+      setSelectedSpaceId(current => current === DAILY_VIEW_ID ? current : DAILY_VIEW_ID);
+      return;
+    }
+    if (location.pathname === '/tasks') {
+      setSelectedSpaceId(current => current === DAILY_VIEW_ID ? readStoredTaskSelectedSpace() : current);
+    }
+  }, [location.pathname, standaloneDailyRoute]);
+
+  useEffect(() => {
+    if (standaloneDailyRoute || selectedSpaceId === DAILY_VIEW_ID) return;
+    writeStoredTaskSelectedSpace(selectedSpaceId);
+  }, [selectedSpaceId, standaloneDailyRoute]);
+
+  useEffect(() => {
+    if (loading || standaloneDailyRoute || selectedSpaceId === DAILY_VIEW_ID) return;
+    const builtIn = selectedSpaceId === ALL_TASKS_SPACE_ID || selectedSpaceId === JIRA_TASK_SPACE_ID || selectedSpaceId === PERSONAL_TASK_SPACE_ID;
+    if (!builtIn && !taskSpaces.some(space => space.id === selectedSpaceId)) {
+      setSelectedSpaceId(JIRA_TASK_SPACE_ID);
+    }
+  }, [loading, selectedSpaceId, standaloneDailyRoute, taskSpaces]);
+
+  useEffect(() => {
+    if (!standaloneDailyRoute) return;
+    const dateParam = normalizeDailyDateParam(new URLSearchParams(location.search).get('date'));
+    const date = dateParam || localDateInputValue();
+    setDailyDateAuto(!dateParam);
+    setSelectedDailyDate(current => current === date ? current : date);
+  }, [location.search, standaloneDailyRoute]);
+
+  useEffect(() => {
+    if (!dailyDateAuto) return;
+    const syncToday = () => {
+      const today = localDateInputValue();
+      setSelectedDailyDate(current => current === today ? current : today);
+    };
+    syncToday();
+    const timer = window.setInterval(syncToday, 60_000);
+    return () => window.clearInterval(timer);
+  }, [dailyDateAuto]);
+
+  const updateSelectedDailyDate = useCallback((date: string) => {
+    const nextDate = normalizeDailyDateParam(date) || localDateInputValue();
+    const today = localDateInputValue();
+    setDailyDateAuto(nextDate === today);
+    setSelectedDailyDate(nextDate);
+    if (!standaloneDailyRoute) return;
+    const params = new URLSearchParams(location.search);
+    if (nextDate === today) params.delete('date');
+    else params.set('date', nextDate);
+    const query = params.toString();
+    navigate(query ? `/daily?${query}` : '/daily', { replace: true });
+  }, [location.search, navigate, standaloneDailyRoute]);
+
   const taskSpaceCounts = useMemo(() => {
-    const counts: Record<string, number> = { [ALL_TASKS_SPACE_ID]: tasks.length };
+    const counts: Record<string, number> = {
+      [ALL_TASKS_SPACE_ID]: tasks.length,
+    };
     for (const task of tasks) {
       const spaceId = task.spaceId || (task.kind.startsWith('jira') ? JIRA_TASK_SPACE_ID : PERSONAL_TASK_SPACE_ID);
       counts[spaceId] = (counts[spaceId] || 0) + 1;
     }
     return counts;
-  }, [tasks]);
+  }, [selectedDailyDate, tasks]);
+  const dailyView = selectedSpaceId === DAILY_VIEW_ID;
   const activeTaskSpace = useMemo(() => taskSpaces.find(space => space.id === selectedSpaceId) || null, [selectedSpaceId, taskSpaces]);
   const activeSpaceIsJira = selectedSpaceId === JIRA_TASK_SPACE_ID || activeTaskSpace?.kind === 'jira';
   const activeSpaceTasks = useMemo(() => {
+    if (selectedSpaceId === DAILY_VIEW_ID) {
+      return tasks.filter(task => task.plannedDate === selectedDailyDate);
+    }
     if (selectedSpaceId === ALL_TASKS_SPACE_ID) return tasks;
     return tasks.filter(task => (task.spaceId || (task.kind.startsWith('jira') ? JIRA_TASK_SPACE_ID : PERSONAL_TASK_SPACE_ID)) === selectedSpaceId);
-  }, [selectedSpaceId, tasks]);
-  const sprintOptions = useMemo(() => {
-    return Array.from(new Set(activeSpaceTasks.map(task => task.sprint).filter((sprint): sprint is string => !!sprint))).sort();
-  }, [activeSpaceTasks]);
+  }, [selectedDailyDate, selectedSpaceId, tasks]);
+  const jiraFilterOptions = useMemo(() => buildJiraFilterOptions(activeSpaceTasks), [activeSpaceTasks]);
   const visibleTasks = useMemo(() => {
     const normalizedQuery = ticketQuery.trim().toLowerCase();
-    const sprintTasks = !activeSpaceIsJira || selectedSprint === 'all'
-      ? activeSpaceTasks
-      : activeSpaceTasks.filter(task => task.sprint === selectedSprint);
-    if (!normalizedQuery) return sprintTasks;
-    return sprintTasks.filter(task => [
+    if (!dailyView && activeSpaceIsJira) {
+      return activeSpaceTasks.filter(task => jiraTaskMatchesFilters(task, {
+        ticketType: selectedTicketType === 'all' ? '' : selectedTicketType,
+        ticketName: ticketQuery,
+        sprint: selectedSprint === 'all' ? '' : selectedSprint,
+        fixVersion: selectedFixVersion === 'all' ? '' : selectedFixVersion,
+      }));
+    }
+    if (!normalizedQuery) return activeSpaceTasks;
+    return activeSpaceTasks.filter(task => [
       task.jiraKey,
       task.title,
       task.description,
@@ -3394,7 +4599,36 @@ export function TasksTab() {
       task.jiraFields?.reporter,
       task.sprint,
     ].filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery));
-  }, [activeSpaceIsJira, activeSpaceTasks, selectedSprint, ticketQuery]);
+  }, [activeSpaceIsJira, activeSpaceTasks, dailyView, selectedFixVersion, selectedSprint, selectedTicketType, ticketQuery]);
+  const dailySourceTasks = useMemo(() => {
+    const normalizedQuery = ticketQuery.trim().toLowerCase();
+    return tasks
+      .filter(task => task.plannedDate !== selectedDailyDate && displayTaskStatus(task.status) !== 'done')
+      .filter(task => {
+        if (!normalizedQuery) return true;
+        return [
+          task.jiraKey,
+          task.title,
+          task.description,
+          task.jiraFields?.status,
+          task.jiraFields?.assignee,
+          task.jiraFields?.reporter,
+          task.sprint,
+        ].filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
+      })
+      .slice(0, 12);
+  }, [selectedDailyDate, tasks, ticketQuery]);
+  const dailyTodoItems = useMemo(() => {
+    const normalizedQuery = ticketQuery.trim().toLowerCase();
+    return todoItems
+      .filter(item => item.status === 'open')
+      .filter(item => {
+        if (!normalizedQuery) return true;
+        return [item.title, item.body, item.source?.quote].filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery);
+      })
+      .slice(0, 12);
+  }, [ticketQuery, todoItems]);
+  const tasksById = useMemo(() => new Map(tasks.map(task => [task.id, task])), [tasks]);
   const boardTasks = useMemo(() => visibleTasks.filter(task => !isClosedRemoteTask(task)), [visibleTasks]);
   const closedTasks = useMemo(() => visibleTasks.filter(isClosedRemoteTask), [visibleTasks]);
   const byStatus = useMemo(() => {
@@ -3416,14 +4650,34 @@ export function TasksTab() {
           return taskSyncSortTime(b) - taskSyncSortTime(a);
         });
       } else {
-        tasksInColumn.sort((a, b) => mode === 'asc'
-          ? taskSyncSortTime(a) - taskSyncSortTime(b)
-          : taskSyncSortTime(b) - taskSyncSortTime(a));
+        tasksInColumn.sort((a, b) => column.key === 'backlog'
+          ? compareBacklogTasks(a, b, mode)
+          : mode === 'asc'
+            ? taskSyncSortTime(a) - taskSyncSortTime(b)
+            : taskSyncSortTime(b) - taskSyncSortTime(a));
       }
     }
     return grouped;
   }, [boardTasks, columnManualOrder, columnSortModes]);
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedId) || null, [selectedId, tasks]);
+  const selectedTaskDailyItem = useMemo(
+    () => (selectedTask ? dailyItems.find(item => item.taskId === selectedTask.id) || null : null),
+    [dailyItems, selectedTask],
+  );
+  const selectedLinkedTask = useMemo(
+    () => (selectedTask?.linkedTaskId ? tasksById.get(selectedTask.linkedTaskId) || null : null),
+    [tasksById, selectedTask],
+  );
+  const selectedTaskLinkCandidates = useMemo(
+    () => tasks
+      .filter(task => task.id !== selectedTask?.id)
+      .sort((a, b) => {
+        const jiraDelta = Number(!!b.jiraKey) - Number(!!a.jiraKey);
+        if (jiraDelta) return jiraDelta;
+        return a.title.localeCompare(b.title);
+      }),
+    [selectedTask?.id, tasks],
+  );
   const draggingTask = useMemo(() => tasks.find(task => task.id === draggingTaskId) || null, [draggingTaskId, tasks]);
   const activeCycle = useMemo(() => cycles.find(cycle => cycle.status === 'active') || null, [cycles]);
   const cycleTaskCounts = useMemo(() => {
@@ -3447,6 +4701,7 @@ export function TasksTab() {
   }, [tasks]);
   const latestSyncRun = syncRuns[0] || null;
   const selectedSyncRun = useMemo(() => syncRuns.find(run => run.id === selectedSyncRunId) || latestSyncRun, [latestSyncRun, selectedSyncRunId, syncRuns]);
+  const linkedTaskContext = useCallback((task: ProTask) => linkedTaskContextLines(task.linkedTaskId ? tasksById.get(task.linkedTaskId) || null : null).join('\n'), [tasksById]);
 
   const toggleTaskSpaceSidebar = useCallback(() => {
     setSpaceSidebarCollapsed(prev => {
@@ -3477,7 +4732,7 @@ export function TasksTab() {
     const hasNewCompletedRun = runs.some(run => run.status === 'completed' && !terminalSyncRunIdsRef.current.has(run.id));
     syncRunsLoadedRef.current = true;
     for (const run of runs) {
-      if (run.status === 'completed' || run.status === 'failed') terminalSyncRunIdsRef.current.add(run.id);
+      if (run.status === 'completed' || run.status === 'failed' || run.status === 'stopped') terminalSyncRunIdsRef.current.add(run.id);
     }
     setSyncRuns(runs);
     setSelectedSyncRunId(current => current || runs[0]?.id || null);
@@ -3488,19 +4743,33 @@ export function TasksTab() {
   }, []);
 
   useEffect(() => {
-    if (selectedSprint !== 'all' && !sprintOptions.includes(selectedSprint)) setSelectedSprint('all');
-  }, [selectedSprint, sprintOptions]);
+    if (selectedTicketType !== 'all' && !jiraFilterOptions.ticketTypes.includes(selectedTicketType)) setSelectedTicketType('all');
+    if (selectedSprint !== 'all' && jiraFilterOptions.sprints.length > 0 && !jiraFilterOptions.sprints.includes(selectedSprint)) setSelectedSprint('all');
+    if (activeSprint !== 'all' && jiraFilterOptions.sprints.length > 0 && !jiraFilterOptions.sprints.includes(activeSprint)) {
+      setActiveSprint('all');
+      writeStoredJiraActiveSprint('all');
+    }
+    if (selectedFixVersion !== 'all' && !jiraFilterOptions.fixVersions.includes(selectedFixVersion)) setSelectedFixVersion('all');
+  }, [activeSprint, jiraFilterOptions, selectedFixVersion, selectedSprint, selectedTicketType]);
 
   useEffect(() => {
     if (selectedId && visibleTasks.some(task => task.id === selectedId)) return;
     setSelectedId(visibleTasks[0]?.id || null);
   }, [selectedId, visibleTasks]);
 
+  const loadDailyItems = useCallback(async (date: string) => {
+    const result = await api.getDailyItems(date);
+    if (!result.ok) throw new Error(result.error || 'Failed to load daily items');
+    setDailyItems(result.items || []);
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [result, spacesResult, assistantsResult, workspacesResult, jiraConfigResult, cyclesResult] = await Promise.all([
+      const [result, dailyItemsResult, todosResult, spacesResult, assistantsResult, workspacesResult, jiraConfigResult, cyclesResult] = await Promise.all([
         api.getProTasks(),
+        api.getDailyItems(selectedDailyDate),
+        api.getProTodos(),
         api.getTaskSpaces(),
         api.getProAssistants(),
         api.getWorkspaces(),
@@ -3509,6 +4778,8 @@ export function TasksTab() {
       ]);
       if (!result.ok) throw new Error(result.error || 'Failed to load tasks');
       setTasks(result.tasks);
+      if (dailyItemsResult.ok) setDailyItems(dailyItemsResult.items || []);
+      if (todosResult.ok) setTodoItems(orderTodoItems(todosResult.items || []));
       if (spacesResult.ok) setTaskSpaces(spacesResult.spaces || []);
       if (assistantsResult.ok) setAssistants(assistantsResult.assistants || []);
       if (workspacesResult.ok) setWorkspaces(workspacesResult.workspaces || []);
@@ -3521,9 +4792,15 @@ export function TasksTab() {
     } finally {
       setLoading(false);
     }
-  }, [loadSyncRuns, toast]);
+  }, [loadSyncRuns, selectedDailyDate, toast]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    void loadDailyItems(selectedDailyDate).catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to load daily items', false);
+    });
+  }, [loadDailyItems, selectedDailyDate, toast]);
 
   useEffect(() => {
     const pollSyncRuns = () => {
@@ -3729,6 +5006,224 @@ export function TasksTab() {
     }
   }, [activeSpaceIsJira, selectedSpaceId, selectedSprint, state?.runtimeWorkdir, toast, upsertTask]);
 
+  const updateTaskPlannedDate = useCallback(async (task: ProTask, plannedDate: string | null) => {
+    try {
+      const result = await api.updateProTaskMeta(task.id, { plannedDate });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to update task day');
+      upsertTask(result.task);
+      if (plannedDate) setDailySourceOpen(false);
+      else {
+        await loadDailyItems(selectedDailyDate).catch(() => {});
+        toast('Daily action marked incomplete');
+      }
+      return result.task;
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to update task day', false);
+      return null;
+    }
+  }, [loadDailyItems, selectedDailyDate, toast, upsertTask]);
+
+  const createDailyTask = useCallback(async () => {
+    const title = dailyQuickAdd.trim();
+    if (!title) return;
+    setCreating(true);
+    try {
+      const result = await api.createDailyItems({ date: selectedDailyDate, titles: [title] });
+      if (!result.ok || !result.items) throw new Error(result.error || 'Failed to create daily actions');
+      setDailyItems(prev => [...prev, ...result.items!].sort((a, b) => a.sortOrder - b.sortOrder));
+      setDailyQuickAdd('');
+      toast('Daily action saved');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create daily action', false);
+    } finally {
+      setCreating(false);
+    }
+  }, [dailyQuickAdd, selectedDailyDate, toast]);
+
+  const createTaskFromTodoItem = useCallback(async (item: TodoItem) => {
+    try {
+      const result = await api.addTodoToDaily({ date: selectedDailyDate, todoId: item.id });
+      if (!result.ok || !result.item || !result.taskId) throw new Error(result.error || 'Failed to add todo to daily');
+      await Promise.all([loadDailyItems(selectedDailyDate), refresh()]);
+      setDailySourceOpen(false);
+      setTodoModalOpen(false);
+      toast('Todo added to daily');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to add todo to daily', false);
+    }
+  }, [loadDailyItems, refresh, selectedDailyDate, toast]);
+
+  const openCreateQuickTodo = useCallback(() => {
+    setTodoModalOpen(false);
+    setQuickTodoText('');
+    setQuickTodoOpen(true);
+  }, []);
+
+  const closeQuickTodo = useCallback(() => {
+    setQuickTodoOpen(false);
+    setQuickTodoText('');
+  }, []);
+
+  const saveQuickTodo = useCallback(async () => {
+    const body = quickTodoText.trim();
+    if (!body || todoCreating) return;
+    setTodoCreating(true);
+    try {
+      const result = await api.createProTodo({ title: body, body, source: { type: 'quick-capture', workdir: state?.runtimeWorkdir || undefined } });
+      if (!result.ok || !result.item) throw new Error(result.error || 'Failed to save todo');
+      setTodoItems(prev => orderTodoItems([result.item!, ...prev.filter(item => item.id !== result.item!.id)]));
+      closeQuickTodo();
+      toast('Todo saved');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to save todo', false);
+    } finally {
+      setTodoCreating(false);
+    }
+  }, [closeQuickTodo, quickTodoText, state?.runtimeWorkdir, toast, todoCreating]);
+
+  const createChatFromTodoItem = useCallback(async (item: TodoItem) => {
+    if (todoCreating) return;
+    setTodoCreating(true);
+    try {
+      const result = await api.createProTodoChat({
+        todoIds: [item.id],
+        workdir: item.source?.workdir || state?.runtimeWorkdir,
+      });
+      if (!result.ok) throw new Error(result.error || 'Failed to create todo chat');
+      setTodoItems(prev => prev.filter(current => current.id !== item.id));
+      toast('Todo chat created');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create todo chat', false);
+    } finally {
+      setTodoCreating(false);
+    }
+  }, [state?.runtimeWorkdir, toast, todoCreating]);
+
+  const createTaskFromTodoListItem = useCallback(async (item: TodoItem) => {
+    if (todoCreating) return;
+    setTodoCreating(true);
+    try {
+      const description = item.body || item.source?.quote || item.title;
+      const result = await api.createProTask({
+        title: item.title,
+        description,
+        spaceId: PERSONAL_TASK_SPACE_ID,
+        kind: 'manual',
+        workdir: item.source?.workdir || state?.runtimeWorkdir,
+      });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to create task from todo');
+      const archive = await api.updateProTodo(item.id, { status: 'archived' });
+      if (!archive.ok) throw new Error(archive.error || 'Failed to archive todo');
+      setTodoItems(prev => prev.filter(current => current.id !== item.id));
+      upsertTask(result.task);
+      toast('Task created from todo');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create task from todo', false);
+    } finally {
+      setTodoCreating(false);
+    }
+  }, [state?.runtimeWorkdir, toast, todoCreating, upsertTask]);
+
+  const addExistingTaskToDaily = useCallback(async (task: ProTask) => {
+    try {
+      const result = await api.addTaskToDaily({ date: selectedDailyDate, taskId: task.id });
+      if (!result.ok || !result.item) throw new Error(result.error || 'Failed to add task to daily');
+      await Promise.all([loadDailyItems(selectedDailyDate), refresh()]);
+      toast(task.plannedDate === selectedDailyDate ? 'Task already planned for this day' : 'Task added to daily');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to add task to daily', false);
+    }
+  }, [loadDailyItems, refresh, selectedDailyDate, toast]);
+
+  const activateSelectedSprint = useCallback(() => {
+    if (!selectedSprint || selectedSprint === 'all') return;
+    setActiveSprint(selectedSprint);
+    writeStoredJiraActiveSprint(selectedSprint);
+    toast(`Active sprint set to ${selectedSprint}`);
+  }, [selectedSprint, toast]);
+
+  const promoteDailyItem = useCallback(async (item: DailyItem) => {
+    if (item.taskId) {
+      const task = tasks.find(candidate => candidate.id === item.taskId);
+      if (task) openTaskDetail(task);
+      return;
+    }
+    if (item.status !== 'open') return;
+    setCreating(true);
+    try {
+      const result = await api.promoteDailyItems({
+        date: selectedDailyDate,
+        itemIds: [item.id],
+        workdir: state?.runtimeWorkdir,
+      });
+      if (!result.ok) throw new Error(result.error || 'Failed to create tasks from daily actions');
+      await Promise.all([loadDailyItems(selectedDailyDate), refresh()]);
+      toast('Task created from daily action');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create tasks from daily actions', false);
+    } finally {
+      setCreating(false);
+    }
+  }, [loadDailyItems, openTaskDetail, refresh, selectedDailyDate, state?.runtimeWorkdir, tasks, toast]);
+
+  const revertDailyItemTask = useCallback(async (item: DailyItem) => {
+    if (!item.taskId) return;
+    try {
+      const result = await api.revertDailyItemTask(item.id);
+      if (!result.ok || !result.item) throw new Error(result.error || 'Failed to mark daily action incomplete');
+      setDailyItems(prev => prev.map(current => current.id === item.id ? result.item! : current));
+      await refresh();
+      toast('Daily action marked incomplete');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to mark daily action incomplete', false);
+      await loadDailyItems(selectedDailyDate).catch(() => {});
+    }
+  }, [loadDailyItems, refresh, selectedDailyDate, toast]);
+
+  const reorderDailyItemsForDate = useCallback(async (orderedIds: string[]) => {
+    if (!orderedIds.length) return;
+    const reordered = orderedIds
+      .map(id => dailyItems.find(item => item.id === id))
+      .filter((item): item is DailyItem => !!item);
+    setDailyItems(reordered.map((entry, index) => ({ ...entry, sortOrder: index })));
+    try {
+      const result = await api.reorderDailyItems({ date: selectedDailyDate, itemIds: orderedIds });
+      if (!result.ok || !result.items) throw new Error(result.error || 'Failed to reorder daily actions');
+      setDailyItems(result.items);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to reorder daily actions', false);
+      await loadDailyItems(selectedDailyDate).catch(() => {});
+    }
+  }, [dailyItems, loadDailyItems, selectedDailyDate, toast]);
+
+  const openDailyItemTask = useCallback((item: DailyItem) => {
+    if (!item.taskId) return;
+    const task = tasks.find(candidate => candidate.id === item.taskId);
+    if (task) openTaskDetail(task);
+  }, [openTaskDetail, tasks]);
+
+  const renameDailyItem = useCallback(async (itemId: string, title: string) => {
+    try {
+      const result = await api.updateDailyItem(itemId, { title });
+      if (!result.ok || !result.item) throw new Error(result.error || 'Failed to update daily action');
+      setDailyItems(prev => prev.map(item => item.id === itemId ? result.item! : item));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to update daily action', false);
+      await loadDailyItems(selectedDailyDate).catch(() => {});
+    }
+  }, [loadDailyItems, selectedDailyDate, toast]);
+
+  const removeDailyItem = useCallback(async (itemId: string) => {
+    try {
+      const result = await api.deleteDailyItem(itemId);
+      if (!result.ok) throw new Error(result.error || 'Failed to delete daily action');
+      setDailyItems(prev => prev.filter(item => item.id !== itemId));
+      toast('Daily action deleted');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to delete daily action', false);
+    }
+  }, [toast]);
+
   const createTaskSpace = useCallback(async (draft: { name: string; defaultWorkdir: string; defaultAgent: string; defaultAssistantId: string }) => {
     const name = draft.name.trim();
     if (!name) return;
@@ -3767,6 +5262,39 @@ export function TasksTab() {
       setSyncBusy(false);
     }
   }, [state?.runtimeWorkdir, toast]);
+
+  const stopJiraSync = useCallback(async (runId: string) => {
+    setSyncStopBusy(true);
+    try {
+      const result = await api.stopJiraMcpSyncRun(runId);
+      if (!result.ok || !result.run) throw new Error(result.error || 'Failed to stop Jira sync');
+      setSyncRuns(prev => [result.run!, ...prev.filter(run => run.id !== result.run!.id)]);
+      setSelectedSyncRunId(result.run.id);
+      toast('Jira sync stopped');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to stop Jira sync', false);
+    } finally {
+      setSyncStopBusy(false);
+    }
+  }, [toast]);
+
+  const applyJiraSyncItems = useCallback(async (runId: string, itemIds: string[]) => {
+    if (!itemIds.length) return;
+    setSyncApplyBusy(true);
+    try {
+      const result = await api.applyJiraMcpSyncRun(runId, itemIds);
+      if (!result.ok || !result.run) throw new Error(result.error || 'Failed to apply Jira sync items');
+      setSyncRuns(prev => [result.run!, ...prev.filter(run => run.id !== result.run!.id)]);
+      setSelectedSyncRunId(result.run.id);
+      const tasksResult = await api.getProTasks();
+      if (tasksResult.ok) setTasks(tasksResult.tasks || []);
+      toast(`Applied ${itemIds.length} Jira item${itemIds.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to apply Jira sync items', false);
+    } finally {
+      setSyncApplyBusy(false);
+    }
+  }, [toast]);
 
   const analyzeTicket = useCallback(async () => {
     const query = ticketQuery.trim() || selectedTask?.jiraKey || selectedTask?.title || '';
@@ -3983,14 +5511,16 @@ export function TasksTab() {
       ? execution.agent
       : task.defaultAgent || state?.bot?.defaultAgent || state?.config?.defaultAgent || undefined;
     const agent = agentOverride || configuredAgent;
+    const promptWithLink = [prompt, linkedTaskContext(task)].filter(Boolean).join('\n\n');
+    const workflowInstruction = [workflow.instruction, linkedTaskContext(task)].filter(Boolean).join('\n\n');
     await startStage(task, stage, {
       assistantId,
       agent,
-      prompt: buildStatusChatPrompt(task, status, prompt, workflow.instruction, execution.mode),
+      prompt: buildStatusChatPrompt(task, status, promptWithLink || undefined, workflowInstruction || undefined, execution.mode),
       model: pickRandomModel(workflow.modelPool),
       executionMode: execution.mode,
     });
-  }, [jiraConfig, startStage, state?.bot?.defaultAgent, state?.config?.defaultAgent]);
+  }, [jiraConfig, linkedTaskContext, startStage, state?.bot?.defaultAgent, state?.config?.defaultAgent]);
 
   const saveJiraConfig = useCallback(async (nextConfig: JiraWorkflowConfig) => {
     setSavingConfig(true);
@@ -4019,10 +5549,22 @@ export function TasksTab() {
         ? undefined
         : workflow.assistantId || (stage === 'refinement' ? jiraConfig.refinementAssistantId : jiraConfig.codingAssistantId);
     const stageAgent = ownerMode === 'agent' ? execution.agent : undefined;
+    const linkedContext = linkedTaskContext(task);
+    const dailyPrompt = task.plannedDate
+      ? (
+          status === 'refinement'
+            ? DAILY_CLARIFY_PROMPT
+            : status === 'coding'
+              ? DAILY_WORKING_PROMPT
+              : status === 'resolved'
+                ? DAILY_REVIEW_PROMPT
+                : undefined
+        )
+      : undefined;
     const stagedTask = await startStage(task, stage, {
       assistantId: stageAssistantId,
       agent: stageAgent,
-      prompt: buildStatusWorkflowPrompt(task, status, workflow.instruction, execution.mode),
+      prompt: [dailyPrompt || buildStatusWorkflowPrompt(task, status, workflow.instruction, execution.mode), linkedContext].filter(Boolean).join('\n\n') || undefined,
       model: pickRandomModel(workflow.modelPool),
       executionMode: execution.mode,
     });
@@ -4034,7 +5576,7 @@ export function TasksTab() {
       return await startStage(taskAfterStage, 'knowledge', { assistantId: jiraConfig.knowledgeAssistantId }) || taskAfterStage;
     }
     return taskAfterStage;
-  }, [jiraConfig, startStage]);
+  }, [jiraConfig, linkedTaskContext, startStage]);
 
   const moveTaskToStatus = useCallback(async (task: ProTask, status: ProTaskStatus) => {
     const updatedTask = task.status === status ? task : await updateStatus(task, status);
@@ -4048,8 +5590,11 @@ export function TasksTab() {
     setDraggingTaskId(null);
     const task = tasks.find(item => item.id === taskId);
     if (!task) return;
-    await moveTaskToStatus(task, jiraStatusForColumn(column));
-  }, [moveTaskToStatus, tasks]);
+    const targetStatus = dailyView && column === 'done'
+      ? (task.status === 'resolved' ? 'done' : 'resolved')
+      : jiraStatusForColumn(column);
+    await moveTaskToStatus(task, targetStatus);
+  }, [dailyView, moveTaskToStatus, tasks]);
 
   const completeStage = useCallback(async (task: ProTask, run: StageRun) => {
     try {
@@ -4226,18 +5771,25 @@ export function TasksTab() {
     }
   }, [toast, upsertTask, verifyDraft.notes]);
 
-  const activeSpaceName = selectedSpaceId === ALL_TASKS_SPACE_ID ? 'All Tasks' : activeTaskSpace?.name || 'Tasks';
-  const taskSpaceSelectItems = [{ id: ALL_TASKS_SPACE_ID, name: 'All Tasks', kind: 'custom' as const }, ...taskSpaces];
+  const activeSpaceName = selectedSpaceId === DAILY_VIEW_ID
+    ? 'Daily'
+    : selectedSpaceId === ALL_TASKS_SPACE_ID
+      ? 'All Tasks'
+      : activeTaskSpace?.name || 'Tasks';
+  const taskSpaceSelectItems = standaloneDailyRoute
+    ? [{ id: DAILY_VIEW_ID, name: 'Daily', kind: 'custom' as const }, { id: ALL_TASKS_SPACE_ID, name: 'All Tasks', kind: 'custom' as const }, ...taskSpaces]
+    : [{ id: ALL_TASKS_SPACE_ID, name: 'All Tasks', kind: 'custom' as const }, ...taskSpaces];
   const activeSpaceCount = activeSpaceTasks.length;
   const visibleSpaceCount = visibleTasks.length;
-  const activeSpaceSubtitle = selectedSpaceId === ALL_TASKS_SPACE_ID
-    ? 'Across task spaces'
-    : activeSpaceIsJira
-      ? 'Jira task space'
-      : activeTaskSpace?.kind === 'personal'
-        ? 'Personal task space'
-        : 'Custom task space';
-
+  const activeSpaceSubtitle = selectedSpaceId === DAILY_VIEW_ID
+    ? `Tasks planned for ${formatDateOnly(`${selectedDailyDate}T00:00:00`)}`
+    : selectedSpaceId === ALL_TASKS_SPACE_ID
+      ? 'Across task spaces'
+      : activeSpaceIsJira
+        ? 'Jira task space'
+        : activeTaskSpace?.kind === 'personal'
+          ? 'Personal task space'
+          : 'Custom task space';
   return (
     <div className="h-full min-h-[640px] overflow-hidden">
       {loading ? (
@@ -4246,23 +5798,38 @@ export function TasksTab() {
         </div>
       ) : (
         <div className="flex h-full min-h-0 gap-3">
-          <TaskSpaceSidebar
-            spaces={taskSpaces}
-            selectedId={selectedSpaceId}
-            counts={taskSpaceCounts}
-            collapsed={spaceSidebarCollapsed}
-            search={ticketQuery}
-            searchFocusTick={spaceSearchFocusTick}
-            detailLayout={taskDetailLayout}
-            onSelect={setSelectedSpaceId}
-            onCreateSpace={() => setSpaceCreateOpen(true)}
-            onSearchChange={setTicketQuery}
-            onDetailLayoutChange={updateTaskDetailLayout}
-            onToggleCollapsed={toggleTaskSpaceSidebar}
-          />
+          {standaloneDailyRoute ? (
+            <DailyPlannerSidebar
+              selectedDate={selectedDailyDate}
+              items={dailyItems}
+              tasks={tasks}
+              onDateChange={updateSelectedDailyDate}
+              onOpenManager={() => setDailyCreateOpen(true)}
+              onPromoteItem={(item) => { void promoteDailyItem(item); }}
+              onOpenTask={openDailyItemTask}
+              onUpdateItem={(itemId, title) => { void renameDailyItem(itemId, title); }}
+              onDeleteItem={(itemId) => { void removeDailyItem(itemId); }}
+              onReorderItems={(itemIds) => { void reorderDailyItemsForDate(itemIds); }}
+            />
+          ) : (
+            <TaskSpaceSidebar
+              spaces={taskSpaces}
+              selectedId={selectedSpaceId}
+              counts={taskSpaceCounts}
+              collapsed={spaceSidebarCollapsed}
+              search={ticketQuery}
+              searchFocusTick={spaceSearchFocusTick}
+              detailLayout={taskDetailLayout}
+              onSelect={setSelectedSpaceId}
+              onCreateSpace={() => setSpaceCreateOpen(true)}
+              onSearchChange={setTicketQuery}
+              onDetailLayoutChange={updateTaskDetailLayout}
+              onToggleCollapsed={toggleTaskSpaceSidebar}
+            />
+          )}
           <div className="panel-isolated flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[var(--th-card-shadow)] backdrop-blur-md">
             <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-edge/45 bg-panel/45 px-3 py-2">
-              {spaceSidebarCollapsed && (
+              {spaceSidebarCollapsed && !standaloneDailyRoute && (
                 <Button
                   variant="ghost"
                   size="icon"
@@ -4277,23 +5844,28 @@ export function TasksTab() {
                   </svg>
                 </Button>
               )}
-              <select
-                value={selectedSpaceId}
-                onChange={event => setSelectedSpaceId(event.target.value || ALL_TASKS_SPACE_ID)}
-                className="h-8 min-w-[132px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50 md:hidden"
-              >
-                {taskSpaceSelectItems.map(space => <option key={space.id} value={space.id}>{space.name}</option>)}
-              </select>
+              {!standaloneDailyRoute && (
+                <select
+                  value={selectedSpaceId}
+                  onChange={event => setSelectedSpaceId(event.target.value || ALL_TASKS_SPACE_ID)}
+                  className="h-8 min-w-[132px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50 md:hidden"
+                >
+                  {taskSpaceSelectItems.map(space => <option key={space.id} value={space.id}>{space.name}</option>)}
+                </select>
+              )}
               <div className="min-w-[150px] flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate text-[13px] font-semibold text-fg" title={activeSpaceName}>{activeSpaceName}</span>
                   <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{visibleSpaceCount}</Badge>
-                  {closedTasks.length > 0 && <span className="hidden text-[10.5px] text-fg-5 sm:inline">{closedTasks.length} closed</span>}
+                  {!dailyView && closedTasks.length > 0 && <span className="hidden text-[10.5px] text-fg-5 sm:inline">{closedTasks.length} closed</span>}
                 </div>
                 <div className="truncate text-[10.5px] text-fg-5">
                   {activeSpaceSubtitle}{activeSpaceCount !== visibleSpaceCount ? ` · ${activeSpaceCount} total` : ''}
                 </div>
               </div>
+              {dailyView && !standaloneDailyRoute && (
+                <DailyDateControls selectedDate={selectedDailyDate} onChange={updateSelectedDailyDate} />
+              )}
               <Button
                 variant="ghost"
                 size="icon"
@@ -4301,17 +5873,37 @@ export function TasksTab() {
                 title="Search tasks"
                 aria-label="Search tasks"
                 className={cn('h-8 w-8 shrink-0', !spaceSidebarCollapsed && 'md:hidden')}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-                </svg>
-              </Button>
-              <Button variant="primary" size="sm" className="shrink-0" onClick={() => setCreateOpen(true)}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                Create task
-              </Button>
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                    <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                </Button>
+              {!dailyView && (
+                <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={openCreateQuickTodo} title="Add todo" aria-label="Add todo">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                </Button>
+              )}
+              {dailyView ? (
+                <>
+                  {!standaloneDailyRoute && (
+                    <Button variant="primary" size="sm" className="shrink-0" onClick={() => setDailyCreateOpen(true)}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                      </svg>
+                      Create task
+                    </Button>
+                  )}
+                </>
+              ) : (
+                <Button variant="primary" size="sm" className="shrink-0" onClick={() => setCreateOpen(true)}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  Create task
+                </Button>
+              )}
               {activeSpaceIsJira && (
                 <>
                   <div className="hidden h-5 w-px bg-edge/60 lg:block" />
@@ -4321,30 +5913,63 @@ export function TasksTab() {
                     detailsOpen={syncDetailsOpen}
                     syncing={syncBusy || syncRunActive(latestSyncRun)}
                     onSync={() => { void runJiraSync(); }}
+                    onStop={(runId) => { void stopJiraSync(runId); }}
+                    stopping={syncStopBusy}
                     onSelectRun={setSelectedSyncRunId}
                     onCloseDetails={() => setSyncDetailsOpen(false)}
+                    onApplyItems={(runId, itemIds) => { void applyJiraSyncItems(runId, itemIds); }}
+                    applying={syncApplyBusy}
                   />
                   <Button variant="outline" size="sm" disabled={analyzeBusy || !(ticketQuery.trim() || selectedTask)} onClick={() => { void analyzeTicket(); }}>
                     {analyzeBusy ? <Spinner /> : null}
                     Analyze ticket
                   </Button>
+                  <input
+                    value={ticketQuery}
+                    onChange={event => setTicketQuery(event.target.value)}
+                    placeholder="Ticket name"
+                    className="h-8 min-w-[170px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors placeholder:text-fg-5/55 hover:border-control-border-h focus:border-primary/50"
+                  />
+                  <select
+                    value={selectedTicketType}
+                    onChange={event => setSelectedTicketType(event.target.value || 'all')}
+                    className="h-8 min-w-[140px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
+                  >
+                    <option value="all">All ticket types</option>
+                    {jiraFilterOptions.ticketTypes.map(ticketType => (
+                      <option key={ticketType} value={ticketType}>{ticketType}</option>
+                    ))}
+                  </select>
                   <select
                     value={selectedSprint}
                     onChange={event => setSelectedSprint(event.target.value || 'all')}
                     className="h-8 min-w-[150px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
                   >
                     <option value="all">All sprints</option>
-                    {sprintOptions.map(sprint => (
-                      <option key={sprint} value={sprint}>{sprint}</option>
+                    {jiraFilterOptions.sprintGroups.map(({ sprint, tasks: sprintTasks }) => (
+                      <option key={sprint} value={sprint}>{sprint} ({sprintTasks.length})</option>
                     ))}
                   </select>
-                  {activeCycle && (
+                  <Button
+                    variant={selectedSprint !== 'all' && selectedSprint === activeSprint ? 'secondary' : 'outline'}
+                    size="sm"
+                    disabled={selectedSprint === 'all'}
+                    className={cn(
+                      'shrink-0',
+                      selectedSprint !== 'all' && selectedSprint === activeSprint && 'border-ok/35 bg-ok/10 text-ok',
+                    )}
+                    onClick={activateSelectedSprint}
+                    title={selectedSprint === 'all' ? 'Select a sprint before setting it active' : `Use ${selectedSprint} as the default sprint view`}
+                  >
+                    Active
+                  </Button>
+                  {SHOW_JIRA_CYCLE_FEATURE && activeCycle && (
                     <span className="inline-flex h-8 min-w-0 max-w-[220px] items-center gap-1.5 rounded-md border border-edge bg-panel-alt px-2 text-[11px] text-fg-4">
                       <span className="truncate">{activeCycle.name}</span>
                       <Badge variant="ok">{activeCycle.tasks.length}</Badge>
                     </span>
                   )}
-                  {activeCycle ? (
+                  {SHOW_JIRA_CYCLE_FEATURE && (activeCycle ? (
                     <Button variant="outline" size="sm" disabled={cycleBusy} onClick={() => { void closeActiveCycle(); }}>
                       {cycleBusy ? <Spinner /> : null}
                       Close cycle
@@ -4363,205 +5988,257 @@ export function TasksTab() {
                       {cycleBusy ? <Spinner /> : null}
                       Kick off
                     </Button>
-                  )}
+                  ))}
                   <JiraDashboardSettingsMenu
                     canOpenSyncDetails={syncRuns.length > 0}
+                    fixVersion={selectedFixVersion}
+                    fixVersionOptions={jiraFilterOptions.fixVersions}
                     onOpenSyncDetails={() => setSyncDetailsOpen(true)}
                     onRefreshSync={() => { void loadSyncRuns({ refreshTasksOnCompletion: true }); }}
                     onOpenWorkflowSettings={() => setSettingsOpen(true)}
+                    onFixVersionChange={setSelectedFixVersion}
                   />
                 </>
               )}
             </div>
-            <div className={cn(
-              'grid min-h-0 flex-1 grid-cols-1 overflow-hidden',
-              taskDetailLayout === 'side' && '2xl:grid-cols-[minmax(0,1fr)_minmax(560px,42vw)]',
-            )}>
-              <div className="min-h-0 overflow-y-auto p-3">
-                <div className="space-y-3">
-          <div className="dashboard-board-grid grid min-h-[calc(100vh-220px)] gap-3">
-            {JIRA_COLUMNS.map(column => (
-              <section
-                key={column.key}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = 'move';
-                  setDragOverColumn(column.key);
-                }}
-                onDragLeave={() => setDragOverColumn(current => current === column.key ? null : current)}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  const taskId = event.dataTransfer.getData('text/plain');
-                  if (taskId) void handleDropTask(taskId, column.key);
-                }}
+              <div
                 className={cn(
-                  'group/column min-h-[280px] rounded-xl border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,box-shadow] duration-200 hover:border-edge/75 hover:bg-panel-alt/45 md:min-h-0',
-                  dragOverColumn === column.key ? 'border-primary/45 bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]' : '',
+                  'grid min-h-0 flex-1 grid-cols-1 overflow-hidden',
+                  taskDetailLayout === 'side' && '2xl:grid-cols-[minmax(0,1fr)_minmax(560px,42vw)]',
                 )}
               >
-                <div className="shrink-0 border-b border-edge/25 bg-panel/30 px-3 py-2.5">
-                  <button
-                    type="button"
-                    onClick={() => toggleColumnSort(column.key)}
-                    className="flex w-full items-center gap-2 text-left"
-                    title="Toggle time sort"
-                  >
-                    <Badge variant={JIRA_COLUMN_BADGE[column.key]} className="h-5 px-2 text-[10px] tabular-nums">{byStatus.get(column.key)?.length || 0}</Badge>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <span className="truncate text-[12px] font-semibold text-fg-2">{column.label}</span>
+              <div className="min-h-0 overflow-y-auto p-3">
+                <div className="dashboard-board-grid grid min-h-[calc(100vh-220px)] gap-3">
+                  {JIRA_COLUMNS.map(column => (
+                    <section
+                      key={column.key}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = 'move';
+                        setDragOverColumn(column.key);
+                      }}
+                      onDragLeave={() => setDragOverColumn(current => current === column.key ? null : current)}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const taskId = event.dataTransfer.getData('text/plain');
+                        if (taskId) void handleDropTask(taskId, column.key);
+                      }}
+                      className={cn(
+                        'group/column min-h-[280px] rounded-xl border border-edge/50 bg-panel-alt/35 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] transition-[border-color,background,box-shadow] duration-200 hover:border-edge/75 hover:bg-panel-alt/45 md:min-h-0',
+                        dragOverColumn === column.key ? 'border-primary/45 bg-[var(--th-selection-bg)] ring-2 ring-inset ring-[color:var(--th-selection-ring)]' : '',
+                      )}
+                    >
+                      <div className="shrink-0 border-b border-edge/25 bg-panel/30 px-3 py-2.5">
+                        <button
+                          type="button"
+                          onClick={() => toggleColumnSort(column.key)}
+                          className="flex w-full items-center gap-2 text-left"
+                          title="Toggle time sort"
+                        >
+                          <Badge variant={JIRA_COLUMN_BADGE[column.key]} className="h-5 px-2 text-[10px] tabular-nums">
+                            {byStatus.get(column.key)?.length || 0}
+                          </Badge>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              <span className="truncate text-[12px] font-semibold text-fg-2">{column.label}</span>
+                            </div>
+                            <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
+                          </div>
+                          <JiraColumnSortIcon mode={columnSortModes[column.key] || 'desc'} />
+                        </button>
                       </div>
-                      <div className="truncate text-[10px] text-fg-5">{column.hint}</div>
-                    </div>
-                    <JiraColumnSortIcon mode={columnSortModes[column.key] || 'desc'} />
-                  </button>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-                  {dragOverColumn === column.key && draggingTask && jiraColumnForTask(draggingTask) !== column.key && (
-                    <div className="mb-2 flex h-[76px] items-center justify-center rounded-lg border border-dashed border-primary/45 bg-primary/[0.055] text-[11px] font-medium text-primary shadow-[inset_0_0_0_1px_rgba(255,255,255,0.035)]">
-                      Drop to move to {column.label}
-                    </div>
-                  )}
-                  {(byStatus.get(column.key) || []).length === 0 ? (
-                    column.key === 'backlog' ? (
-                      <button
-                        type="button"
-                        onClick={() => setCreateOpen(true)}
-                        className={cn(
-                          'flex h-24 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-inset/30 text-center transition hover:border-primary/45 hover:bg-primary/[0.04] hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/25',
-                          dragOverColumn === column.key
-                            ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
-                            : 'border-edge/40 text-fg-5/70',
+                      <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                        {dragOverColumn === column.key && draggingTask && jiraColumnForTask(draggingTask) !== column.key && (
+                          <div className="mb-2 flex h-[76px] items-center justify-center rounded-lg border border-dashed border-primary/45 bg-primary/[0.055] text-[11px] font-medium text-primary shadow-[inset_0_0_0_1px_rgba(255,255,255,0.035)]">
+                            Drop to move to {column.label}
+                          </div>
                         )}
-                        title="Create task"
-                        aria-label="Create task"
-                      >
-                        <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-edge/55 bg-panel/80 text-fg-4 shadow-sm transition group-hover/column:border-primary/35 group-hover/column:text-primary">
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
-                            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                          </svg>
-                        </span>
-                        <span className="text-[12px] font-semibold text-fg-3">Create task</span>
-                      </button>
-                    ) : (
-                      <div className={cn(
-                        'flex h-24 items-center justify-center rounded-lg border border-dashed bg-inset/30 text-[11px]',
-                        dragOverColumn === column.key
-                          ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
-                          : 'border-edge/40 text-fg-5/60',
-                      )}>No tasks</div>
-                    )
-                  ) : (
-                    <div className="space-y-2">
-                      {(byStatus.get(column.key) || []).map(task => (
+                        {(byStatus.get(column.key) || []).length === 0 ? (
+                          column.key === 'backlog' ? (
+                            standaloneDailyRoute && dailyView ? (
+                              <div
+                                className={cn(
+                                  'flex h-24 items-center justify-center rounded-lg border border-dashed bg-inset/30 text-[11px]',
+                                  dragOverColumn === column.key
+                                    ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
+                                    : 'border-edge/40 text-fg-5/60',
+                                )}
+                              >
+                                Click an action on the left to create a task in Backlog
+                              </div>
+                            ) : (
+                            <button
+                              type="button"
+                              onClick={() => (dailyView ? setDailyCreateOpen(true) : setCreateOpen(true))}
+                              className={cn(
+                                'flex h-24 w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-inset/30 text-center transition hover:border-primary/45 hover:bg-primary/[0.04] hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/25',
+                                dragOverColumn === column.key
+                                  ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
+                                  : 'border-edge/40 text-fg-5/70',
+                              )}
+                              title={dailyView ? 'Create daily work' : 'Create task'}
+                              aria-label={dailyView ? 'Create daily work' : 'Create task'}
+                            >
+                              <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-edge/55 bg-panel/80 text-fg-4 shadow-sm transition group-hover/column:border-primary/35 group-hover/column:text-primary">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+                                  <line x1="12" y1="5" x2="12" y2="19" />
+                                  <line x1="5" y1="12" x2="19" y2="12" />
+                                </svg>
+                              </span>
+                              <span className="text-[12px] font-semibold text-fg-3">{dailyView ? 'Create daily work' : 'Create task'}</span>
+                            </button>
+                            )
+                          ) : (
+                            <div
+                              className={cn(
+                                'flex h-24 items-center justify-center rounded-lg border border-dashed bg-inset/30 text-[11px]',
+                                dragOverColumn === column.key
+                                  ? 'border-primary/35 bg-primary/[0.035] text-primary/80'
+                                  : 'border-edge/40 text-fg-5/60',
+                              )}
+                            >
+                              No tasks
+                            </div>
+                          )
+                        ) : (
+                          <div className="space-y-2">
+                            {(byStatus.get(column.key) || []).map(task => (
+                              <div
+                                key={task.id}
+                                onDragOver={(event) => {
+                                  if (!draggingTaskId || draggingTaskId === task.id) return;
+                                  event.preventDefault();
+                                  event.dataTransfer.dropEffect = 'move';
+                                  setDragOverColumn(column.key);
+                                  setDragOverTaskId(task.id);
+                                }}
+                                onDragLeave={() => setDragOverTaskId(current => current === task.id ? null : current)}
+                                onDrop={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  const draggedTaskId = event.dataTransfer.getData('text/plain') || draggingTaskId;
+                                  const draggedTask = tasks.find(item => item.id === draggedTaskId);
+                                  setDragOverTaskId(null);
+                                  setDragOverColumn(null);
+                                  setDraggingTaskId(null);
+                                  if (!draggedTaskId || !draggedTask) return;
+                                  if (jiraColumnForTask(draggedTask) === column.key) reorderTaskWithinColumn(draggedTaskId, task.id, column.key);
+                                  else void handleDropTask(draggedTaskId, column.key);
+                                }}
+                                className={cn(
+                                  'rounded-lg transition-[box-shadow,transform]',
+                                  dragOverTaskId === task.id && draggingTaskId !== task.id && 'shadow-[0_-3px_0_rgba(59,130,246,0.75)]',
+                                )}
+                              >
+                                <TaskCard
+                                  task={task}
+                                  selected={selectedTask?.id === task.id}
+                                  busyStage={busy?.taskId === task.id ? busy.stage : null}
+                                  assistants={assistants}
+                                  draggable
+                                  isDragging={draggingTaskId === task.id}
+                                  scheduleLabel={dailyView ? 'Remove from daily' : task.plannedDate === localDateInputValue() ? 'Planned' : 'Add to today'}
+                                  primaryActionLabel={dailyView ? dailyPrimaryLabel(task) : undefined}
+                                  onSelect={openTaskDetail}
+                                  onAssignAssistant={(nextTask, assistantId) => { void assignTaskAssistant(nextTask, assistantId); }}
+                                  onPrimaryAction={dailyView ? (nextTask) => {
+                                    if (nextTask.status === 'backlog') {
+                                      void moveTaskToStatus(nextTask, 'refinement');
+                                      return;
+                                    }
+                                    if (nextTask.status === 'refinement') {
+                                      void startStatusChat(nextTask, 'refinement', DAILY_CLARIFY_PROMPT);
+                                      return;
+                                    }
+                                    if (nextTask.status === 'coding') {
+                                      void startStatusChat(nextTask, 'coding', DAILY_WORKING_PROMPT);
+                                      return;
+                                    }
+                                    if (nextTask.status === 'resolved') {
+                                      void moveTaskToStatus(nextTask, 'done');
+                                      return;
+                                    }
+                                    openTaskDetail(nextTask);
+                                  } : undefined}
+                                  onSchedule={dailyView ? (nextTask) => { void updateTaskPlannedDate(nextTask, null); } : undefined}
+                                  onDragStart={(next) => setDraggingTaskId(next.id)}
+                                  onDragEnd={() => {
+                                    setDraggingTaskId(null);
+                                    setDragOverColumn(null);
+                                    setDragOverTaskId(null);
+                                  }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+
+                {closedTasks.length > 0 && (
+                  <section className="mt-3 rounded-xl border border-edge/50 bg-panel-alt/35 px-3 py-3">
+                    <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-[12px] font-semibold text-fg-2">Closed</div>
+                        <div className="truncate text-[10px] text-fg-5">Remote status is closed</div>
+                      </div>
+                      <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{closedTasks.length}</Badge>
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                      {closedTasks.slice(0, 12).map(task => (
                         <div
                           key={task.id}
-                          onDragOver={(event) => {
-                            if (!draggingTaskId || draggingTaskId === task.id) return;
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = 'move';
-                            setDragOverColumn(column.key);
-                            setDragOverTaskId(task.id);
-                          }}
-                          onDragLeave={() => setDragOverTaskId(current => current === task.id ? null : current)}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            const draggedTaskId = event.dataTransfer.getData('text/plain') || draggingTaskId;
-                            const draggedTask = tasks.find(item => item.id === draggedTaskId);
-                            setDragOverTaskId(null);
-                            setDragOverColumn(null);
-                            setDraggingTaskId(null);
-                            if (!draggedTaskId || !draggedTask) return;
-                            if (jiraColumnForTask(draggedTask) === column.key) reorderTaskWithinColumn(draggedTaskId, task.id, column.key);
-                            else void handleDropTask(draggedTaskId, column.key);
-                          }}
                           className={cn(
-                            'rounded-lg transition-[box-shadow,transform]',
-                            dragOverTaskId === task.id && draggingTaskId !== task.id && 'shadow-[0_-3px_0_rgba(59,130,246,0.75)]',
+                            'min-w-0 rounded-lg border border-edge/55 bg-panel/62 px-3 py-2 text-left transition hover:border-edge-h hover:bg-panel-h',
+                            selectedTask?.id === task.id && 'border-primary/35 bg-primary/[0.055]',
                           )}
                         >
-                          <TaskCard
-                            task={task}
-                            selected={selectedTask?.id === task.id}
-                            busyStage={busy?.taskId === task.id ? busy.stage : null}
-                            assistants={assistants}
-                            draggable
-                            isDragging={draggingTaskId === task.id}
-                            onSelect={openTaskDetail}
-                            onAssignAssistant={(nextTask, assistantId) => { void assignTaskAssistant(nextTask, assistantId); }}
-                            onDragStart={(next) => setDraggingTaskId(next.id)}
-                            onDragEnd={() => {
-                              setDraggingTaskId(null);
-                              setDragOverColumn(null);
-                              setDragOverTaskId(null);
-                            }}
-                          />
+                          <button type="button" onClick={() => openTaskDetail(task)} className="block w-full min-w-0 text-left">
+                            <div className="mb-1 flex min-w-0 items-center gap-2">
+                              {taskDisplayKey(task) && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{taskDisplayKey(task)}</span>}
+                              <Badge variant="muted">{taskRemoteStatus(task) || 'Closed'}</Badge>
+                            </div>
+                            <div className="truncate text-[12px] font-semibold text-fg-2">{task.title}</div>
+                          </button>
+                          <div className="mt-2 flex justify-end">
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              className="h-6 px-2 text-[10.5px]"
+                              disabled={reopeningTaskId === task.id}
+                              onClick={() => { void reopenClosedTask(task); }}
+                            >
+                              {reopeningTaskId === task.id ? <Spinner /> : null}
+                              Reopen
+                            </Button>
+                          </div>
                         </div>
                       ))}
                     </div>
-                  )}
-                </div>
-              </section>
-            ))}
-          </div>
-          {closedTasks.length > 0 && (
-            <section className="rounded-xl border border-edge/50 bg-panel-alt/35 px-3 py-3">
-              <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-[12px] font-semibold text-fg-2">Closed</div>
-                  <div className="truncate text-[10px] text-fg-5">Remote status is closed</div>
-                </div>
-                <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{closedTasks.length}</Badge>
-              </div>
-              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {closedTasks.slice(0, 12).map(task => (
-                  <div
-                    key={task.id}
-                    className={cn(
-                      'min-w-0 rounded-lg border border-edge/55 bg-panel/62 px-3 py-2 text-left transition hover:border-edge-h hover:bg-panel-h',
-                      selectedTask?.id === task.id && 'border-primary/35 bg-primary/[0.055]',
-                    )}
-                  >
-                    <button type="button" onClick={() => openTaskDetail(task)} className="block w-full min-w-0 text-left">
-                      <div className="mb-1 flex min-w-0 items-center gap-2">
-                        {task.jiraKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{task.jiraKey}</span>}
-                        <Badge variant="muted">{taskRemoteStatus(task) || 'Closed'}</Badge>
-                      </div>
-                      <div className="truncate text-[12px] font-semibold text-fg-2">{task.title}</div>
-                    </button>
-                    <div className="mt-2 flex justify-end">
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        className="h-6 px-2 text-[10.5px]"
-                        disabled={reopeningTaskId === task.id}
-                        onClick={() => { void reopenClosedTask(task); }}
-                      >
-                        {reopeningTaskId === task.id ? <Spinner /> : null}
-                        Reopen
-                      </Button>
-                    </div>
+                  </section>
+                )}
+
+                {SHOW_JIRA_CYCLE_FEATURE && activeSpaceIsJira && (
+                  <div className="mt-3">
+                    <JiraCyclePanel
+                      cycles={cycles}
+                      taskCounts={cycleTaskCounts}
+                      tasksByCycle={tasksByCycle}
+                      expandedIds={expandedCycleIds}
+                      onToggleExpanded={toggleCycleExpanded}
+                      onDeleteCycle={setCycleDeleteTarget}
+                    />
                   </div>
-                ))}
+                )}
               </div>
-            </section>
-          )}
-          {activeSpaceIsJira && (
-            <JiraCyclePanel
-              cycles={cycles}
-              taskCounts={cycleTaskCounts}
-              tasksByCycle={tasksByCycle}
-              expandedIds={expandedCycleIds}
-              onToggleExpanded={toggleCycleExpanded}
-              onDeleteCycle={setCycleDeleteTarget}
-            />
-          )}
-          </div>
-              </div>
+
               {taskDetailLayout === 'side' && (
                 <TaskInlineWorkbench
                   task={selectedTask}
+                  linkCandidates={selectedTaskLinkCandidates}
+                  linkedTask={selectedLinkedTask}
                   defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
                   agents={agentStatus?.agents || []}
                   assistants={assistants}
@@ -4578,15 +6255,18 @@ export function TasksTab() {
                   onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
                   onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
                   onReopen={(task) => { void reopenClosedTask(task); }}
+                  dailyItem={selectedTaskDailyItem}
+                  onBackToAction={(item) => { void revertDailyItemTask(item); }}
+                  onOpenLinkedTask={openTaskDetail}
                   onCreateSideChatFromSelection={createSideChatFromTaskSelection}
                   onCreateTodoFromSelection={createTodoFromTaskSelection}
                   onOpenFull={() => setDetailOpen(true)}
-                />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+	                />
+	              )}
+	            </div>
+	          </div>
+	        </div>
+	      )}
       <CreateJiraTaskModal
         open={createOpen}
         creating={creating}
@@ -4599,6 +6279,48 @@ export function TasksTab() {
         onClose={() => setCreateOpen(false)}
         onCreate={createTask}
       />
+      <TodoListModal
+        open={todoModalOpen}
+        items={todoItems}
+        creating={todoCreating}
+        selectedDailyDate={selectedDailyDate}
+        onClose={() => setTodoModalOpen(false)}
+        onCreateTodo={openCreateQuickTodo}
+        onCreateChat={(item) => { void createChatFromTodoItem(item); }}
+        onCreateTask={(item) => { void createTaskFromTodoListItem(item); }}
+        onCreateDaily={(item) => { void createTaskFromTodoItem(item); }}
+      />
+      <TodoQuickAddModal
+        open={quickTodoOpen}
+        saving={todoCreating}
+        value={quickTodoText}
+        onChange={setQuickTodoText}
+        onClose={closeQuickTodo}
+        onSave={() => { void saveQuickTodo(); }}
+      />
+      <DailyIntakeModal
+        open={dailyCreateOpen}
+        creating={creating}
+        selectedDate={selectedDailyDate}
+        value={dailyQuickAdd}
+        items={dailyItems}
+        onChange={setDailyQuickAdd}
+        onCreateOne={() => { void createDailyTask(); }}
+        onUpdateItem={(itemId, title) => { void renameDailyItem(itemId, title); }}
+        onDeleteItem={(itemId) => { void removeDailyItem(itemId); }}
+        onReorderItems={(itemIds) => { void reorderDailyItemsForDate(itemIds); }}
+        onClose={() => setDailyCreateOpen(false)}
+      />
+      <DailySourcePickerModal
+        open={dailySourceOpen}
+        todoItems={dailyTodoItems}
+        tasks={dailySourceTasks}
+        taskSpaces={taskSpaces}
+        selectedDate={selectedDailyDate}
+        onClose={() => setDailySourceOpen(false)}
+        onAddTodo={(item) => { void createTaskFromTodoItem(item); }}
+        onAddTask={(task) => { void addExistingTaskToDaily(task); }}
+      />
       <CreateTaskSpaceModal
         open={spaceCreateOpen}
         busy={spaceCreateBusy}
@@ -4608,31 +6330,35 @@ export function TasksTab() {
         onClose={() => setSpaceCreateOpen(false)}
         onCreate={createTaskSpace}
       />
-      <JiraCycleKickoffModal
-        open={cycleKickoffOpen}
-        busy={cycleBusy}
-        draft={cycleDraft}
-        onChange={setCycleDraft}
-        onClose={() => setCycleKickoffOpen(false)}
-        onSubmit={() => { void kickOffCycle(); }}
-      />
-      <Modal open={!!cycleDeleteTarget} onClose={() => setCycleDeleteTarget(null)}>
-        <ModalHeader title="Delete cycle" onClose={() => setCycleDeleteTarget(null)} />
-        <div className="space-y-4">
-          <div className="text-[13px] leading-relaxed text-fg-3">
-            Delete <span className="font-semibold text-fg">{cycleDeleteTarget?.name}</span>? This removes the cycle archive only. Tasks stay in Pikiclaw.
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" disabled={cycleDeleteBusy} onClick={() => setCycleDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" size="sm" disabled={cycleDeleteBusy} onClick={() => { void deleteCycle(); }}>
-              {cycleDeleteBusy ? <Spinner /> : null}
-              Delete
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      {SHOW_JIRA_CYCLE_FEATURE && (
+        <>
+          <JiraCycleKickoffModal
+            open={cycleKickoffOpen}
+            busy={cycleBusy}
+            draft={cycleDraft}
+            onChange={setCycleDraft}
+            onClose={() => setCycleKickoffOpen(false)}
+            onSubmit={() => { void kickOffCycle(); }}
+          />
+          <Modal open={!!cycleDeleteTarget} onClose={() => setCycleDeleteTarget(null)}>
+            <ModalHeader title="Delete cycle" onClose={() => setCycleDeleteTarget(null)} />
+            <div className="space-y-4">
+              <div className="text-[13px] leading-relaxed text-fg-3">
+                Delete <span className="font-semibold text-fg">{cycleDeleteTarget?.name}</span>? This removes the cycle archive only. Tasks stay in Pikiclaw.
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" size="sm" disabled={cycleDeleteBusy} onClick={() => setCycleDeleteTarget(null)}>
+                  Cancel
+                </Button>
+                <Button variant="primary" size="sm" disabled={cycleDeleteBusy} onClick={() => { void deleteCycle(); }}>
+                  {cycleDeleteBusy ? <Spinner /> : null}
+                  Delete
+                </Button>
+              </div>
+            </div>
+          </Modal>
+        </>
+      )}
       <JiraAssistantConfigModal
         open={settingsOpen}
         saving={savingConfig}
@@ -4664,6 +6390,8 @@ export function TasksTab() {
         <div data-task-detail-modal className="h-full min-h-0">
           <TaskDetail
             task={selectedTask}
+            linkCandidates={selectedTaskLinkCandidates}
+            linkedTask={selectedLinkedTask}
             defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
             agents={agentStatus?.agents || []}
             assistants={assistants}
@@ -4680,10 +6408,21 @@ export function TasksTab() {
             onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
             onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
             onReopen={(task) => { void reopenClosedTask(task); }}
+            onOpenLinkedTask={openTaskDetail}
             onCreateSideChatFromSelection={createSideChatFromTaskSelection}
             onCreateTodoFromSelection={createTodoFromTaskSelection}
             actions={selectedTask ? (
               <>
+                {selectedTaskDailyItem && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 px-2 text-[11px]"
+                    onClick={() => { void revertDailyItemTask(selectedTaskDailyItem); }}
+                  >
+                    Back to action
+                  </Button>
+                )}
                 <div className="relative z-[60]">
                   <Button
                     variant="ghost"
@@ -4700,6 +6439,22 @@ export function TasksTab() {
                       className="absolute right-0 top-[calc(100%+8px)] z-[120] w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
                       role="menu"
                     >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setDetailMenuOpen(false);
+                          void addExistingTaskToDaily(selectedTask);
+                        }}
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-fg-3 transition-colors hover:bg-panel-h hover:text-fg"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M8 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-2" />
+                          <path d="m9 11 8-8" />
+                          <path d="M15 3h6v6" />
+                        </svg>
+                        <span>Add to daily</span>
+                      </button>
                       <button
                         type="button"
                         role="menuitem"
@@ -4765,7 +6520,7 @@ export function TasksTab() {
         <ModalHeader title="Delete task" onClose={() => setTaskDeleteTarget(null)} />
         <div className="space-y-4">
           <div className="text-[13px] leading-relaxed text-fg-3">
-            Delete <span className="font-semibold text-fg">{taskDeleteTarget?.jiraKey || taskDeleteTarget?.title}</span> from Pikiclaw? External tickets are not deleted.
+            Delete <span className="font-semibold text-fg">{taskDisplayKey(taskDeleteTarget) || taskDeleteTarget?.title}</span> from Pikiclaw? External tickets are not deleted.
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" disabled={!!deletingTaskId} onClick={() => setTaskDeleteTarget(null)}>

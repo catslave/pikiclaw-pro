@@ -58,6 +58,16 @@ describe('Pro todo store', () => {
     expect(listTodoItems()).toHaveLength(0);
   });
 
+  it('moves completed todo items behind open items', () => {
+    const first = createTodoItem({ body: 'First follow-up.' });
+    const second = createTodoItem({ body: 'Second follow-up.' });
+
+    const done = updateTodoItem(first.id, { status: 'done' });
+
+    expect(done.status).toBe('done');
+    expect(listTodoItems().map(item => item.id)).toEqual([second.id, first.id]);
+  });
+
   it('persists image attachments and updates todo content', () => {
     const todo = createTodoItem({
       body: 'Check this screenshot.',

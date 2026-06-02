@@ -125,6 +125,10 @@ export interface UserConfig {
   computerUseEnabled?: boolean;
   /** Legacy config key for the Peekaboo-backed Computer Use MCP. */
   peekabooEnabled?: boolean;
+  /** Experimental chat recall index in the dashboard; disabled by default. */
+  chatRecallIndexEnabled?: boolean;
+  /** Experimental Chat Workspace beta entry; disabled by default. */
+  chatWorkspaceBetaEnabled?: boolean;
   /** Extension configuration — global MCP servers, OAuth tokens, and skills. */
   extensions?: {
     mcp?: Record<string, McpServerConfig>;

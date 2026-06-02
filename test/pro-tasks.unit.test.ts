@@ -17,6 +17,7 @@ import {
   syncJiraTask,
   updateJiraFields,
   updateProTaskExecution,
+  updateProTaskMeta,
   updateProTaskStatus,
   updateStageRun,
   updateSubtask,
@@ -70,6 +71,57 @@ describe('Pro task spaces', () => {
     expect(listProTasks({ spaceId: 'personal' }).map(task => task.id)).toEqual([manual.id]);
   });
 
+  it('assigns global MY local keys to non-Jira tasks without consuming keys for Jira sync', () => {
+    const first = createProTask({ title: 'Write roadmap note', kind: 'manual' });
+    const jira = syncJiraTask({ title: 'Fix production bug', jiraKey: 'PRO-1', issueType: 'Bug' });
+    const second = createProTask({ title: 'Review launch checklist', kind: 'manual' });
+
+    expect(first.localKey).toBe('MY-0001');
+    expect(jira.localKey).toBeUndefined();
+    expect(second.localKey).toBe('MY-0002');
+  });
+
+  it('backfills MY local keys for existing non-Jira tasks when loading old task files', () => {
+    const filePath = process.env.PIKICLAW_PRO_TASK_FILE!;
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      tasks: [
+        {
+          id: 'task_manual_old',
+          title: 'Old manual task',
+          kind: 'manual',
+          status: 'backlog',
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-01T00:00:00.000Z',
+          stageRuns: [],
+          verificationRuns: [],
+          subTasks: [],
+          events: [],
+        },
+        {
+          id: 'task_jira_old',
+          title: 'Old Jira task',
+          kind: 'jira-ticket',
+          status: 'backlog',
+          jiraKey: 'PRO-9',
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-01T00:00:00.000Z',
+          stageRuns: [],
+          verificationRuns: [],
+          subTasks: [],
+          events: [],
+        },
+      ],
+    }));
+
+    expect(listProTasks().map(task => ({ title: task.title, localKey: task.localKey }))).toEqual([
+      { title: 'Old manual task', localKey: 'MY-0001' },
+      { title: 'Old Jira task', localKey: undefined },
+    ]);
+    expect(createProTask({ title: 'New manual task' }).localKey).toBe('MY-0002');
+  });
+
   it('creates tasks in a selected custom space', () => {
     const space = createTaskSpace({ name: 'Writing' });
     const task = createProTask({ title: 'Draft launch post', spaceId: space.id });
@@ -77,6 +129,46 @@ describe('Pro task spaces', () => {
     expect(task.kind).toBe('manual');
     expect(task.spaceId).toBe(space.id);
     expect(listProTasks({ spaceId: space.id })).toHaveLength(1);
+  });
+
+  it('stores planned dates and filters tasks by day without changing space ownership', () => {
+    const custom = createTaskSpace({ name: 'Ops' });
+    const todayPersonal = createProTask({ title: 'Write standup note', plannedDate: '2026-06-01' });
+    const todayCustom = createProTask({ title: 'Review deploy checklist', spaceId: custom.id, plannedDate: '2026-06-01' });
+    const tomorrow = createProTask({ title: 'Prepare retro', plannedDate: '2026-06-02' });
+    const unscheduled = createProTask({ title: 'Someday follow-up' });
+
+    expect(todayPersonal.plannedDate).toBe('2026-06-01');
+    expect(todayCustom.spaceId).toBe(custom.id);
+    expect(listProTasks({ plannedDate: '2026-06-01' }).map(task => task.id)).toEqual([todayCustom.id, todayPersonal.id]);
+    expect(listProTasks({ plannedDate: '2026-06-02' }).map(task => task.id)).toEqual([tomorrow.id]);
+    expect(listProTasks({ spaceId: custom.id, plannedDate: '2026-06-01' }).map(task => task.id)).toEqual([todayCustom.id]);
+    expect(listProTasks({ plannedDate: '2026-06-03' })).toEqual([]);
+    expect(getProTask(unscheduled.id)?.plannedDate).toBeUndefined();
+  });
+
+  it('updates and clears planned dates through task metadata changes', () => {
+    const task = createProTask({ title: 'Plan today', plannedDate: '2026-06-01' });
+
+    const moved = updateProTaskMeta(task.id, { plannedDate: '2026-06-03' });
+    expect(moved.plannedDate).toBe('2026-06-03');
+    expect(listProTasks({ plannedDate: '2026-06-03' }).map(item => item.id)).toEqual([task.id]);
+
+    const cleared = updateProTaskMeta(task.id, { plannedDate: null });
+    expect(cleared.plannedDate).toBeUndefined();
+    expect(listProTasks({ plannedDate: '2026-06-03' })).toEqual([]);
+    expect(getProTask(task.id)?.plannedDate).toBeUndefined();
+  });
+
+  it('links a daily task to an existing Jira task through task metadata', () => {
+    const jira = syncJiraTask({ title: 'Fix linked bug', jiraKey: 'PRO-77', issueType: 'Bug' });
+    const daily = createProTask({ title: 'Investigate the bug today', plannedDate: '2026-06-01' });
+
+    const linked = updateProTaskMeta(daily.id, { linkedTaskId: jira.id });
+    expect(linked.linkedTaskId).toBe(jira.id);
+
+    const unlinked = updateProTaskMeta(daily.id, { linkedTaskId: null });
+    expect(unlinked.linkedTaskId).toBeUndefined();
   });
 
   it('updates task assistant ownership without assigning an agent as owner', () => {
@@ -258,5 +350,87 @@ describe('Pro task store', () => {
     expect(reopened.status).toBe('backlog');
     expect(reopened.jiraFields?.status).toBe('Reopened');
     expect(reopened.events.some(event => event.summary.includes('Status changed from done to backlog'))).toBe(true);
+  });
+
+  it('marks a linked Jira task done when a daily task is completed', () => {
+    const jira = syncJiraTask({
+      title: 'Ship the linked fix',
+      issueType: 'Task',
+      jiraKey: 'PRO-901',
+      ticketStatus: 'In Progress',
+      workdir: '/repo/app',
+    });
+    const daily = createProTask({
+      title: 'Finish today work item',
+      plannedDate: '2026-06-01',
+      linkedTaskId: jira.id,
+    });
+
+    const done = updateProTaskStatus(daily.id, 'done');
+    const linked = getProTask(jira.id);
+
+    expect(done.status).toBe('done');
+    expect(linked?.status).toBe('done');
+    expect(linked?.jiraFields?.status).toBe('Done');
+    expect(linked?.events.some(event => event.summary.includes('linked Daily task'))).toBe(true);
+  });
+
+  it('creates Daily-specific outputs for clarify, working, and review stages', () => {
+    const daily = createProTask({
+      title: 'Tighten the Daily flow',
+      plannedDate: '2026-06-01',
+      workdir: '/repo/app',
+    });
+
+    const refinement = addStageRun({
+      taskId: daily.id,
+      stage: 'refinement',
+      prompt: 'Clarify the goal.',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-refinement' },
+    });
+    const refinementRun = refinement.stageRuns[0];
+    const afterRefinement = updateStageRun(daily.id, refinementRun.id, {
+      status: 'completed',
+      summary: 'Clarified the objective and linked acceptance criteria.',
+    });
+
+    expect(afterRefinement.outputs?.[0]).toMatchObject({
+      title: 'Goal',
+      summary: 'Clarified the objective and linked acceptance criteria.',
+    });
+
+    const coding = addStageRun({
+      taskId: daily.id,
+      stage: 'coding',
+      prompt: 'Do the work.',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-coding' },
+    });
+    const codingRun = coding.stageRuns[0];
+    const afterCoding = updateStageRun(daily.id, codingRun.id, {
+      status: 'completed',
+      summary: 'Implemented the changes and captured the result.',
+    });
+
+    expect(afterCoding.outputs?.[0]).toMatchObject({
+      title: 'Working output',
+      summary: 'Implemented the changes and captured the result.',
+    });
+
+    const review = addStageRun({
+      taskId: daily.id,
+      stage: 'verification',
+      prompt: 'Review the result.',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-review' },
+    });
+    const reviewRun = review.stageRuns[0];
+    const afterReview = updateStageRun(daily.id, reviewRun.id, {
+      status: 'completed',
+      summary: 'Reviewed the implementation against the goal.',
+    });
+
+    expect(afterReview.outputs?.[0]).toMatchObject({
+      title: 'Review result',
+      summary: 'Reviewed the implementation against the goal.',
+    });
   });
 });

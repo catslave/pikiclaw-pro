@@ -907,15 +907,15 @@ function buildRowSummary(
 }
 
 function capabilityTone(mode: string | undefined): string {
-  if (mode === 'native') return 'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-300';
-  if (mode === 'portable') return 'border-sky-500/25 bg-sky-500/[0.08] text-sky-300';
-  return 'border-edge/35 bg-control/60 text-fg-5';
+  if (mode === 'native') return 'border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-300';
+  if (mode === 'portable') return 'border-sky-500/20 bg-sky-500/[0.07] text-sky-300';
+  return 'border-edge/45 bg-control/45 text-fg-5';
 }
 
 function capabilityLabel(mode: string | undefined): string {
-  if (mode === 'native') return 'Native';
-  if (mode === 'portable') return 'Portable';
-  return 'Unsupported';
+  if (mode === 'native') return 'native';
+  if (mode === 'portable') return 'portable';
+  return 'unsupported';
 }
 
 function CapabilityMatrixChips({ agent }: { agent: AgentRuntimeStatus }) {
@@ -927,17 +927,17 @@ function CapabilityMatrixChips({ agent }: { agent: AgentRuntimeStatus }) {
     { label: 'Resume', cap: caps.resume },
   ];
   return (
-    <div className="mt-1.5 flex flex-wrap gap-1">
+    <div className="flex flex-wrap gap-1">
       {rows.map(item => {
         const mode = item.cap?.mode || 'unsupported';
         return (
           <span
             key={item.label}
             title={item.cap?.source || item.cap?.note || capabilityLabel(mode)}
-            className={`inline-flex items-center gap-1 rounded border px-1.5 py-[2px] text-[9px] font-semibold uppercase tracking-wider ${capabilityTone(mode)}`}
+            className={`inline-flex h-5 items-center gap-1 rounded-md border px-1.5 text-[10px] font-medium ${capabilityTone(mode)}`}
           >
-            <span>{item.label}</span>
-            <span className="font-mono opacity-80">{capabilityLabel(mode)}</span>
+            <span className="text-fg-3">{item.label}</span>
+            <span className="font-mono text-[9px] opacity-75">{capabilityLabel(mode)}</span>
           </span>
         );
       })}
@@ -992,111 +992,111 @@ function AgentRow({
 
   return (
     <div
-      className="glass rounded-md border border-edge px-3.5 py-2.5 shadow-[0_1px_0_rgba(255,255,255,0.02),0_4px_12px_rgba(15,23,42,0.05)]"
+      className="glass rounded-md border border-edge px-3.5 py-3 shadow-[0_1px_0_rgba(255,255,255,0.02),0_4px_12px_rgba(15,23,42,0.05)]"
       title={tagline || undefined}
     >
-      <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt">
           <BrandIcon brand={agent.agent} size={20} />
         </div>
 
-        {/* Identity + summary (two tight lines) */}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[14px] font-semibold tracking-tight text-fg">{meta.label}</span>
-            {agent.isDefault && <Badge variant="accent">{copy.defaultBadge}</Badge>}
-            {loading
-              ? <Badge variant="muted"><Spinner className="h-3 w-3" /> {t('status.loading')}</Badge>
-              : agent.installed
-                ? <Badge variant="ok">{copy.installed}</Badge>
-                : <Badge variant="muted">{copy.notInstalled}</Badge>}
-            {agent.installed && agent.updateAvailable && (
-              <Badge variant="warn">{copy.updateAvailable}</Badge>
+        <div className="grid min-w-0 flex-1 gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="truncate text-[14px] font-semibold tracking-tight text-fg">{meta.label}</span>
+              {agent.isDefault && <Badge variant="accent" className="h-5 shrink-0">{copy.defaultBadge}</Badge>}
+              {loading
+                ? <Badge variant="muted" className="h-5 shrink-0"><Spinner className="h-3 w-3" /> {t('status.loading')}</Badge>
+                : agent.installed
+                  ? <Badge variant="ok" className="h-5 shrink-0">{copy.installed}</Badge>
+                  : <Badge variant="muted" className="h-5 shrink-0">{copy.notInstalled}</Badge>}
+              {agent.installed && agent.updateAvailable && (
+                <Badge variant="warn" className="h-5 shrink-0">{copy.updateAvailable}</Badge>
+              )}
+              {agent.installed && agent.version && (
+                <span className="min-w-0 truncate text-[11px] font-mono text-fg-5">v{agent.version}</span>
+              )}
+              {agent.latestVersion && agent.updateAvailable && (
+                <span className="text-[11px] text-amber-400">→ {agent.latestVersion}</span>
+              )}
+            </div>
+            {summary ? (
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-4">
+                <span className="inline-flex min-w-0 items-center gap-1">
+                  <BrandIcon brand={summary.providerBrand} size={11} />
+                  <span className="truncate text-fg-3">{summary.providerLabel}</span>
+                </span>
+                <span className="text-fg-6" aria-hidden="true">·</span>
+                <span className="min-w-0 max-w-[18rem] truncate font-mono text-fg-3">{summary.modelText}</span>
+                <span className="text-fg-6" aria-hidden="true">·</span>
+                <span className="shrink-0">{summary.effortText}</span>
+              </div>
+            ) : tagline ? (
+              <div className="line-clamp-2 text-[11px] leading-relaxed text-fg-5">{tagline}</div>
+            ) : null}
+            {agent.installed && <CapabilityMatrixChips agent={agent} />}
+          </div>
+
+          {/* Right-side actions: install / update / check-update / configure */}
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5 md:justify-end">
+            {loading && (
+              <div className="inline-flex h-7 items-center gap-2 px-2 text-[11px] text-fg-5">
+                <Spinner className="h-3 w-3" />
+              </div>
             )}
-            {agent.installed && agent.version && (
-              <span className="text-[11px] font-mono text-fg-5">v{agent.version}</span>
+            {!loading && !agent.installed && (
+              <Button variant="primary" size="sm" disabled={installing} onClick={() => onInstall(agent)}>
+                {installing ? copy.installing : copy.install}
+              </Button>
             )}
-            {agent.latestVersion && agent.updateAvailable && (
-              <span className="text-[11px] text-amber-400">→ {agent.latestVersion}</span>
+            {!loading && agent.installed && agent.updateAvailable && (
+              <Button variant="outline" size="sm" disabled={updatingAgent} onClick={() => onUpdate(agent)}>
+                {updatingAgent ? copy.updating : copy.update}
+              </Button>
+            )}
+            {!loading && agent.installed && !agent.updateAvailable && (
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={checkingAgent}
+                onClick={() => onCheckUpdate(agent)}
+                title={copy.checkUpdate}
+                aria-label={copy.checkUpdate}
+                className="h-7 w-7"
+              >
+                {checkingAgent ? <Spinner className="h-3 w-3" /> : <span aria-hidden="true">↻</span>}
+              </Button>
+            )}
+            {!loading && agent.installed && agent.agent === 'openclaw' && (
+              <Button
+                variant={health?.ok ? 'ghost' : 'outline'}
+                size="sm"
+                disabled={serviceStarting}
+                onClick={() => onStartService(agent)}
+                title={copy.startService}
+              >
+                {serviceStarting && <Spinner className="h-3 w-3" />}
+                {serviceStarting ? copy.startingService : copy.startService}
+              </Button>
+            )}
+            {!loading && agent.installed && (
+              <Button
+                variant={health?.ok ? 'ghost' : 'outline'}
+                size="sm"
+                disabled={healthChecking}
+                onClick={() => onCheckHealth(agent)}
+                title={health?.detail || copy.testAgent}
+              >
+                {healthChecking && <Spinner className="h-3 w-3" />}
+                {healthChecking ? copy.testingAgent : health?.ok ? copy.testPassed : copy.testAgent}
+              </Button>
+            )}
+            {!loading && agent.installed && (
+              <Button variant="outline" size="sm" onClick={() => onEdit(agent)}>
+                {copy.configure}
+              </Button>
             )}
           </div>
-          {/* Line 2: config summary for installed agents, tagline for missing ones. */}
-          {summary ? (
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-4">
-              <span className="inline-flex items-center gap-1">
-                <BrandIcon brand={summary.providerBrand} size={11} />
-                <span className="text-fg-3">{summary.providerLabel}</span>
-              </span>
-              <span className="text-fg-6" aria-hidden="true">·</span>
-              <span className="font-mono text-fg-3">{summary.modelText}</span>
-              <span className="text-fg-6" aria-hidden="true">·</span>
-              <span>{summary.effortText}</span>
-            </div>
-          ) : tagline ? (
-            <div className="mt-0.5 truncate text-[11px] text-fg-5">{tagline}</div>
-          ) : null}
-          {agent.installed && <CapabilityMatrixChips agent={agent} />}
-        </div>
-
-        {/* Right-side actions: install / update / check-update / configure */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          {loading && (
-            <div className="inline-flex h-7 items-center gap-2 px-2 text-[11px] text-fg-5">
-              <Spinner className="h-3 w-3" />
-            </div>
-          )}
-          {!loading && !agent.installed && (
-            <Button variant="primary" size="sm" disabled={installing} onClick={() => onInstall(agent)}>
-              {installing ? copy.installing : copy.install}
-            </Button>
-          )}
-          {!loading && agent.installed && agent.updateAvailable && (
-            <Button variant="outline" size="sm" disabled={updatingAgent} onClick={() => onUpdate(agent)}>
-              {updatingAgent ? copy.updating : copy.update}
-            </Button>
-          )}
-          {!loading && agent.installed && !agent.updateAvailable && (
-            <Button
-              variant="ghost"
-              size="icon"
-              disabled={checkingAgent}
-              onClick={() => onCheckUpdate(agent)}
-              title={copy.checkUpdate}
-              aria-label={copy.checkUpdate}
-              className="h-7 w-7"
-            >
-              {checkingAgent ? <Spinner className="h-3 w-3" /> : <span aria-hidden="true">↻</span>}
-            </Button>
-          )}
-          {!loading && agent.installed && agent.agent === 'openclaw' && (
-            <Button
-              variant={health?.ok ? 'ghost' : 'outline'}
-              size="sm"
-              disabled={serviceStarting}
-              onClick={() => onStartService(agent)}
-              title={copy.startService}
-            >
-              {serviceStarting && <Spinner className="h-3 w-3" />}
-              {serviceStarting ? copy.startingService : copy.startService}
-            </Button>
-          )}
-          {!loading && agent.installed && (
-            <Button
-              variant={health?.ok ? 'ghost' : 'outline'}
-              size="sm"
-              disabled={healthChecking}
-              onClick={() => onCheckHealth(agent)}
-              title={health?.detail || copy.testAgent}
-            >
-              {healthChecking && <Spinner className="h-3 w-3" />}
-              {healthChecking ? copy.testingAgent : health?.ok ? copy.testPassed : copy.testAgent}
-            </Button>
-          )}
-          {!loading && agent.installed && (
-            <Button variant="outline" size="sm" onClick={() => onEdit(agent)}>
-              {copy.configure}
-            </Button>
-          )}
         </div>
       </div>
 

@@ -57,6 +57,7 @@ export interface CreateTodoInput {
 export interface UpdateTodoInput {
   title?: string;
   body?: string;
+  status?: TodoItemStatus;
   images?: unknown;
 }
 
@@ -95,6 +96,12 @@ function normalizeTodoImages(value: unknown): TodoImageAttachment[] {
   return images;
 }
 
+function normalizeTodoStatus(value: unknown): TodoItemStatus | null {
+  return value === 'open' || value === 'chat-created' || value === 'done' || value === 'archived'
+    ? value
+    : null;
+}
+
 function deriveTodoTitle(kind: TodoItemKind, body: string, source?: TodoItemSource, hasImages = false): string {
   const quoteTitle = source?.quote ? source.quote.split(/\s+/).slice(0, 12).join(' ') : '';
   return body.split(/\s+/).slice(0, 14).join(' ')
@@ -111,9 +118,7 @@ function normalizeTodoItem(raw: TodoItem): TodoItem | null {
   const images = normalizeTodoImages(raw.images);
   const title = normalizeText(raw.title, 240) || deriveTodoTitle(kind, body, source, images.length > 0);
   if (!id || !title) return null;
-  const status: TodoItemStatus = raw.status === 'chat-created' || raw.status === 'done' || raw.status === 'archived'
-    ? raw.status
-    : 'open';
+  const status = normalizeTodoStatus(raw.status) || 'open';
   return {
     id,
     kind,
@@ -173,7 +178,11 @@ function normalizeSource(source: TodoItemSource | undefined): TodoItemSource | u
 }
 
 export function listTodoItems(): TodoItem[] {
-  return readFile().items.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const statusRank = (status: TodoItemStatus) => status === 'open' ? 0 : status === 'done' ? 1 : status === 'chat-created' ? 2 : 3;
+  return readFile().items.sort((a, b) => (
+    statusRank(a.status) - statusRank(b.status)
+    || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+  ));
 }
 
 export function getTodoItems(todoIds: string[]): TodoItem[] {
@@ -217,15 +226,19 @@ export function updateTodoItem(todoId: string, input: UpdateTodoInput): TodoItem
   const hasBody = Object.prototype.hasOwnProperty.call(input, 'body');
   const hasTitle = Object.prototype.hasOwnProperty.call(input, 'title');
   const hasImages = Object.prototype.hasOwnProperty.call(input, 'images');
+  const hasStatus = Object.prototype.hasOwnProperty.call(input, 'status');
   const nextBody = hasBody ? normalizeText(input.body) : normalizeText(item.body);
   const nextImages = hasImages ? normalizeTodoImages(input.images) : (item.images || []);
   const nextTitle = hasTitle
     ? normalizeText(input.title, 240)
     : normalizeText(item.title, 240);
+  const nextStatus = hasStatus ? normalizeTodoStatus(input.status) : item.status;
+  if (hasStatus && !nextStatus) throw new Error('invalid todo status');
 
   item.body = nextBody || undefined;
   item.images = nextImages.length ? nextImages : undefined;
   item.title = nextTitle || deriveTodoTitle(item.kind, nextBody, item.source, nextImages.length > 0);
+  item.status = nextStatus || item.status;
   item.updatedAt = new Date().toISOString();
   writeFile(file);
   return item;

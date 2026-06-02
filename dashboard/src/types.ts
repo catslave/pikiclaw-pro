@@ -284,6 +284,8 @@ export interface UserConfig {
   browserHeadless?: boolean;
   computerUseEnabled?: boolean;
   peekabooEnabled?: boolean;
+  chatRecallIndexEnabled?: boolean;
+  chatWorkspaceBetaEnabled?: boolean;
 }
 
 export interface WeixinValidationResult {
@@ -1226,10 +1228,13 @@ export interface ProSubtask {
 
 export interface ProTask {
   id: string;
+  localKey?: string;
   title: string;
   description?: string;
   kind: ProTaskKind;
   status: ProTaskStatus;
+  plannedDate?: string;
+  linkedTaskId?: string;
   spaceId?: string;
   origin?: TaskOrigin;
   workdir?: string;
@@ -1354,6 +1359,23 @@ export interface TodoItem {
   };
 }
 
+export type DailyItemStatus = 'open' | 'task-created' | 'done' | 'archived';
+
+export interface DailyItem {
+  id: string;
+  date: string;
+  title: string;
+  status: DailyItemStatus;
+  sortOrder: number;
+  taskId?: string;
+  taskKey?: string;
+  relatedTaskId?: string;
+  sourceTodoId?: string;
+  sourceTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentAssistant {
   id: string;
   name: string;
@@ -1462,9 +1484,36 @@ export interface JiraSyncRunChange {
   updatedAt?: string;
 }
 
+export interface JiraSyncRunItem {
+  id: string;
+  jiraKey?: string;
+  key?: string;
+  title: string;
+  summary?: string;
+  description?: string;
+  issueType?: string;
+  jiraUrl?: string;
+  url?: string;
+  sprint?: string;
+  fixVersion?: string;
+  fixVersions?: string[];
+  reporter?: string;
+  assignee?: string;
+  ticketStatus?: string;
+  status?: 'candidate' | 'applied';
+  jiraStatus?: string;
+  dueDate?: string;
+  priority?: string;
+  labels?: string[];
+  updatedAt?: string;
+  selected?: boolean;
+  taskId?: string;
+  syncAction?: 'created' | 'updated' | 'unchanged';
+}
+
 export interface JiraSyncRun {
   id: string;
-  status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed';
+  status: 'starting' | 'queued' | 'syncing' | 'completed' | 'failed' | 'stopped';
   assistantId?: string;
   assistantName?: string;
   agent?: string;
@@ -1475,6 +1524,7 @@ export interface JiraSyncRun {
   analysisSummary?: string;
   issueKeys?: string[];
   changes?: JiraSyncRunChange[];
+  items?: JiraSyncRunItem[];
   error?: string;
   startedAt: string;
   updatedAt: string;

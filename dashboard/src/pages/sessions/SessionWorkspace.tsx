@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useLayoutEffect, useCallback, useRef, memo, useMemo, type ChangeEvent as ReactChangeEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { Fragment, Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useLayoutEffect, useCallback, useRef, memo, useMemo, type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -30,8 +30,9 @@ import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest 
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
-import type { SessionPanelChange } from './SessionPanel';
+import type { SessionPanelChange, SessionPanelScrollRequest } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
+import { ChatRecallRail } from './RecallIndex';
 import { formatFileSize, isImageFile } from './utils';
 
 // Kick off SessionPanel import the moment this module loads so the lazy boundary
@@ -57,6 +58,7 @@ const AUTO_PREFETCH_DELAY_MS = 240;
 const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
 const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
+const SESSION_COMPLETION_CELEBRATION_MS = 1800;
 const STATUS_SUMMARY_RECENT_MS = 24 * 60 * 60 * 1000;
 const VISIBLE_WORKSPACE_REFRESH_MIN_INTERVAL_MS = 15_000;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
@@ -75,6 +77,13 @@ const workspaceBaseName = (workspacePath: string) => {
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1] || workspacePath;
 };
+
+function localDateInputValue(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 function fmtSidebarSessionTime(iso?: string): string {
   if (!iso) return '—';
@@ -106,6 +115,17 @@ function TodoGlyph({ className }: { className?: string }) {
   );
 }
 
+function MainMenuTooltip({ label }: { label: string }) {
+  return (
+    <span
+      data-main-menu-tooltip
+      className="pointer-events-none absolute left-full top-1/2 z-[90] ml-2 -translate-y-1/2 whitespace-nowrap rounded-md border border-edge/70 bg-panel/95 px-2 py-1 text-[11px] font-semibold text-fg-2 opacity-0 shadow-lg backdrop-blur transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100"
+    >
+      {label}
+    </span>
+  );
+}
+
 const TODO_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 function readTodoImageDataUrl(file: File): Promise<string> {
@@ -130,6 +150,11 @@ async function makeTodoImageAttachment(file: File): Promise<TodoImageAttachment>
     size: file.size,
     dataUrl,
   };
+}
+
+function orderTodoItems(items: TodoItem[]): TodoItem[] {
+  const rank = (item: TodoItem) => item.status === 'open' ? 0 : item.status === 'done' ? 1 : item.status === 'chat-created' ? 2 : 3;
+  return [...items].sort((a, b) => rank(a) - rank(b) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 function sideChatDisplayTitle(fallbackIndex: number, sideChatLabel: string): string {
@@ -370,6 +395,12 @@ function SideChatCollapseIcon({ className }: { className?: string }) {
 
 type SessionWithDepth = SessionInfo & { __forkDepth: number };
 type SessionSlot = { agent: string; sessionId: string; workdir: string; mountKey: string; archiveOnly?: boolean };
+type ChatWorkspaceBetaItem = {
+  key: string;
+  session: SessionInfo;
+  workdir: string;
+  workspaceName: string;
+};
 type FocusFloatingSession = {
   id: string;
   workdir: string;
@@ -453,6 +484,99 @@ type ParentReferenceContext = {
   sourceKey: string;
   createdAt: string;
 };
+
+function chatWorkspaceStateLabel(session: SessionInfo, t: (key: string) => string): string {
+  const state = sessionDisplayState(session);
+  if (state === 'running') return t('chat.columnLabel.running');
+  if (state === 'incomplete') return t('chat.columnLabel.incomplete');
+  if (shouldMarkSessionReadOnOpen(session)) return t('chat.columnLabel.review');
+  return t('chat.columnLabel.done');
+}
+
+function chatWorkspaceStateClass(session: SessionInfo): string {
+  const state = sessionDisplayState(session);
+  if (state === 'running') return 'border-ok/35 bg-ok/[0.10] text-ok';
+  if (state === 'incomplete') return 'border-err/35 bg-err/[0.10] text-err';
+  if (shouldMarkSessionReadOnOpen(session)) return 'border-primary/35 bg-primary/[0.10] text-primary';
+  return 'border-edge/55 bg-panel-alt text-fg-5';
+}
+
+function ChatWorkspaceBetaSessionCard({
+  item,
+  active,
+  dense = false,
+  onSelect,
+  t,
+}: {
+  item: ChatWorkspaceBetaItem;
+  active?: boolean;
+  dense?: boolean;
+  onSelect: () => void;
+  t: (key: string) => string;
+}) {
+  const session = item.session;
+  const title = sessionListDisplayText(session).slice(0, 150) || session.sessionId.slice(0, 12);
+  const detail = sessionListContextText(session, title)
+    || session.classification?.summary
+    || session.lastMessageText
+    || session.lastAnswer
+    || session.lastQuestion
+    || '';
+  const updated = session.runUpdatedAt || session.createdAt;
+  const attention = sessionDisplayState(session) === 'running' || shouldMarkSessionReadOnOpen(session) || sessionDisplayState(session) === 'incomplete';
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      onMouseEnter={() => {
+        if (session.agent && session.sessionId) {
+          prefetchSessionMessages({
+            workdir: item.workdir,
+            agent: session.agent,
+            sessionId: session.sessionId,
+            rich: true,
+            turnOffset: 0,
+            turnLimit: SESSION_PREFETCH_TURNS,
+          });
+        }
+      }}
+      className={cn(
+        'group w-full rounded-xl border bg-panel/72 text-left shadow-sm transition-[border-color,background,transform,box-shadow] hover:-translate-y-0.5 hover:border-edge-h hover:bg-panel-h focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] active:translate-y-0',
+        active ? 'border-primary/45 shadow-[0_12px_34px_rgba(59,130,246,0.12)]' : 'border-edge/60',
+        dense ? 'p-2.5' : 'p-3',
+      )}
+    >
+      <div className="flex min-w-0 items-start gap-2.5">
+        <span className="relative grid h-8 w-8 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
+          <BrandIcon brand={session.agent || ''} size={16} />
+          {attention && (
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-panel bg-primary" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2">{title}</span>
+            <span className={cn('shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold', chatWorkspaceStateClass(session))}>
+              {chatWorkspaceStateLabel(session, t)}
+            </span>
+          </span>
+          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
+            <span className="truncate">{item.workspaceName}</span>
+            {updated && <span className="shrink-0">{fmtRelative(updated)}</span>}
+          </span>
+        </span>
+      </div>
+      {detail && (
+        <div className={cn(
+          'mt-2 overflow-hidden text-[11px] leading-relaxed text-fg-4',
+          dense ? 'line-clamp-2' : 'line-clamp-3',
+        )}>
+          {detail}
+        </div>
+      )}
+    </button>
+  );
+}
 type WorkspaceRenameTarget = { path: string; name: string; originalName: string };
 type FilePanelRequest = { workdir: string; path: string; line?: number; nonce: number };
 
@@ -524,13 +648,14 @@ const NEW_SESSION_STORAGE_KEY = 'pikiclaw:session-workspace:new-session-workdir:
 const WORKSPACE_EXPANDED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-expanded:v1';
 const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = 'pikiclaw:session-workspace:workspace-sidebar-collapsed:v2';
 const CHAT_LAYOUT_STORAGE_KEY = 'pikiclaw:session-workspace:chat-layout:v1';
+const CHAT_RECALL_COLLAPSED_STORAGE_KEY = 'pikiclaw:session-workspace:chat-recall-collapsed:v2';
 const MULTI_ROW_HEIGHT_STORAGE_KEY = 'pikiclaw:session-workspace:multi-row-height:v1';
 const CONTEXT_SHELF_TAB_STORAGE_KEY = 'pikiclaw:session-workspace:context-shelf-tabs:v1';
 const LOCAL_READ_SESSIONS_STORAGE_KEY = 'pikiclaw:session-workspace:local-read-sessions:v1';
 const LEGACY_OPEN_SESSIONS_STORAGE_KEY = 'pikiclaw-open-sessions';
 const LEGACY_ACTIVE_SLOT_STORAGE_KEY = 'pikiclaw-active-slot';
 const SIDE_CHAT_DEFAULT_WIDTH = 440;
-const SIDE_CHAT_MIN_WIDTH = 340;
+const SIDE_CHAT_MIN_WIDTH = 420;
 const SIDE_CHAT_MAX_WIDTH = 760;
 const FOCUS_FLOATING_DEFAULT_WIDTH = 430;
 const FOCUS_FLOATING_DEFAULT_HEIGHT = 620;
@@ -1023,8 +1148,13 @@ function readStoredWorkspaceSidebarCollapsed(): boolean {
   return raw === 'true';
 }
 
+function readStoredChatRecallCollapsed(): boolean {
+  const raw = readBrowserStorage(CHAT_RECALL_COLLAPSED_STORAGE_KEY);
+  return raw !== 'false';
+}
+
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
-type SessionWorkspaceMode = 'workspace' | 'dashboard' | 'settings';
+type SessionWorkspaceMode = 'workspace' | 'chat-workspace' | 'dashboard' | 'settings';
 
 type OpenAgentTestChatState = {
   forceWorkspace?: boolean;
@@ -1762,6 +1892,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const location = useLocation();
   const t = useMemo(() => createT(locale), [locale]);
   const appStatus = resolveAppStatusBadge(appState, t);
+  const chatRecallIndexEnabled = appState?.config?.chatRecallIndexEnabled === true;
   const [workspaceSidebarToggleHost, setWorkspaceSidebarToggleHost] = useState<HTMLElement | null>(null);
   const [globalInboxHost, setGlobalInboxHost] = useState<HTMLElement | null>(null);
 
@@ -1812,6 +1943,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   sessionsMapRef.current = sessionsMap;
   const liveSessionStatesRef = useRef(liveSessionStates);
   liveSessionStatesRef.current = liveSessionStates;
+  const completedSessionToastKeysRef = useRef(new Set<string>());
+  const completionCelebrationTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const [completionCelebrationKeys, setCompletionCelebrationKeys] = useState<Record<string, number>>({});
   const visibleWorkspaceRefreshRef = useRef<Record<string, number>>({});
   const sessionGridScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingSessionGridScrollRef = useRef<{ gridTop: number | null; windowX: number; windowY: number } | null>(null);
@@ -2029,6 +2163,28 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
     setFocusedSlotIndex(null);
   }, []);
+  const [chatRecallCollapsed, setChatRecallCollapsedRaw] = useState(readStoredChatRecallCollapsed);
+  const setChatRecallCollapsed = useCallback((updater: boolean | ((prev: boolean) => boolean)) => {
+    setChatRecallCollapsedRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      writeBrowserStorage(CHAT_RECALL_COLLAPSED_STORAGE_KEY, next ? 'true' : 'false');
+      return next;
+    });
+  }, []);
+  const [recallScrollRequestBySlotKey, setRecallScrollRequestBySlotKey] = useState<Record<string, SessionPanelScrollRequest>>({});
+  const recallScrollNonceRef = useRef(0);
+  const requestRecallTurnScroll = useCallback((slot: SessionSlot, turnIndex: number, totalTurns?: number) => {
+    const parentKey = sessionSlotStorageKey(slot);
+    recallScrollNonceRef.current += 1;
+    setRecallScrollRequestBySlotKey(prev => ({
+      ...prev,
+      [parentKey]: {
+        turnIndex,
+        totalTurns,
+        nonce: recallScrollNonceRef.current,
+      },
+    }));
+  }, []);
   const [multiRowHeightPx, setMultiRowHeightPxRaw] = useState<number | null>(readStoredMultiRowHeight);
   const setMultiRowHeightPx = useCallback((updater: number | null | ((prev: number | null) => number | null)) => {
     setMultiRowHeightPxRaw(prev => {
@@ -2042,6 +2198,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [inboxFocusedSlot, setInboxFocusedSlot] = useState<SessionSlot | null>(null);
   const [checkedInboxItemKeys, setCheckedInboxItemKeys] = useState<Set<string>>(() => new Set());
   const [inboxAttentionPulse, setInboxAttentionPulse] = useState(false);
+  const [chatWorkspaceOverviewOpen, setChatWorkspaceOverviewOpen] = useState(true);
   const previousInboxAlertCountRef = useRef(-1);
   const openInboxFromTrigger = useCallback(() => {
     setInboxOpen(true);
@@ -2308,11 +2465,107 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       : hydrated;
   }, [liveSessionStates, locallyReadSessionMarkers]);
 
+  const triggerSessionCompletionCelebration = useCallback((keys: Iterable<string>) => {
+    const uniqueKeys = Array.from(new Set(Array.from(keys).filter(Boolean)));
+    if (!uniqueKeys.length) return;
+    const nonce = Date.now();
+    setCompletionCelebrationKeys(prev => {
+      const next = { ...prev };
+      for (const key of uniqueKeys) next[key] = nonce;
+      return next;
+    });
+    for (const key of uniqueKeys) {
+      const existing = completionCelebrationTimersRef.current[key];
+      if (existing) clearTimeout(existing);
+      completionCelebrationTimersRef.current[key] = setTimeout(() => {
+        delete completionCelebrationTimersRef.current[key];
+        setCompletionCelebrationKeys(prev => {
+          if (!prev[key]) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }, SESSION_COMPLETION_CELEBRATION_MS);
+    }
+  }, []);
+
+  useEffect(() => () => {
+    for (const timer of Object.values(completionCelebrationTimersRef.current)) clearTimeout(timer);
+    completionCelebrationTimersRef.current = {};
+  }, []);
+
+  const sessionCompletionToastMessage = useCallback((
+    agent: string,
+    sessionId: string,
+    opts: { incomplete: boolean; error: string | null },
+  ): string => {
+    const session = Object.values(sessionsMapRef.current)
+      .flat()
+      .find(item => item.agent === agent && item.sessionId === sessionId);
+    const title = session ? sessionListDisplayText(session).trim() : '';
+    const shortId = sessionId.length > 10 ? sessionId.slice(0, 10) : sessionId;
+    const label = title ? `${agent} · ${title}` : `${agent}:${shortId}`;
+    if (locale === 'zh-CN') {
+      return opts.incomplete
+        ? `Session 未完成：${label}${opts.error ? ` · ${opts.error}` : ''}`
+        : `Session 已完成：${label}`;
+    }
+    return opts.incomplete
+      ? `Session unfinished: ${label}${opts.error ? ` · ${opts.error}` : ''}`
+      : `Session completed: ${label}`;
+  }, [locale]);
+
   useDashboardEvent(
     'stream-update',
     useCallback((event) => {
       const key = event.key;
       if (!key) return;
+      const currentLiveStates = liveSessionStatesRef.current;
+      let completionToast: { message: string; ok: boolean } | null = null;
+      const celebrationKeys = new Set<string>();
+      const live = normalizeLiveSessionState(key, event.snapshot ?? null);
+      const previous = live
+        ? (currentLiveStates[key] || currentLiveStates[live.resolvedKey] || null)
+        : (currentLiveStates[key] || null);
+
+      if (live?.phase === 'done' && previous && previous.phase !== 'done') {
+        const parsed = parseSessionKeyValue(live.resolvedKey || key);
+        if (parsed) {
+          const toastKey = `${live.resolvedKey || key}:${live.updatedAt}:${live.incomplete ? 'incomplete' : 'completed'}`;
+          if (!completedSessionToastKeysRef.current.has(toastKey)) {
+            completedSessionToastKeysRef.current.add(toastKey);
+            completionToast = {
+              message: sessionCompletionToastMessage(parsed.agent, parsed.sessionId, {
+                incomplete: live.incomplete,
+                error: live.error,
+              }),
+              ok: !live.incomplete,
+            };
+            if (!live.incomplete) {
+              celebrationKeys.add(sKey(parsed.agent, parsed.sessionId));
+              const originalParsed = parseSessionKeyValue(key);
+              if (originalParsed) celebrationKeys.add(sKey(originalParsed.agent, originalParsed.sessionId));
+            }
+          }
+        }
+      } else if (!live && previous && previous.phase !== 'done') {
+        const parsed = parseSessionKeyValue(previous.resolvedKey || key);
+        if (parsed) {
+          const updatedAt = Date.now();
+          const toastKey = `${previous.resolvedKey || key}:${updatedAt}:completed`;
+          if (!completedSessionToastKeysRef.current.has(toastKey)) {
+            completedSessionToastKeysRef.current.add(toastKey);
+            completionToast = {
+              message: sessionCompletionToastMessage(parsed.agent, parsed.sessionId, { incomplete: false, error: null }),
+              ok: true,
+            };
+            celebrationKeys.add(sKey(parsed.agent, parsed.sessionId));
+            const originalParsed = parseSessionKeyValue(key);
+            if (originalParsed) celebrationKeys.add(sKey(originalParsed.agent, originalParsed.sessionId));
+          }
+        }
+      }
+
       setLiveSessionStates(prev => {
         const next: Record<string, LiveSessionState> = {};
         const cutoff = Date.now() - LIVE_SESSION_STATE_MAX_AGE_MS;
@@ -2320,7 +2573,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           if (entry.updatedAt >= cutoff) next[entryKey] = entry;
         }
 
-        const live = normalizeLiveSessionState(key, event.snapshot ?? null);
         if (!live) {
           // Stream ended (null snapshot).  Don't delete the entry — keep it as
           // phase 'done' so the sidebar doesn't flash back to the stale
@@ -2339,7 +2591,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         }
         return next;
       });
-    }, []),
+      if (completionToast) toastSession(completionToast.message, completionToast.ok);
+      if (celebrationKeys.size) triggerSessionCompletionCelebration(celebrationKeys);
+    }, [sessionCompletionToastMessage, toastSession, triggerSessionCompletionCelebration]),
   );
 
   // Refresh all workspaces after WS reconnect (covers missed events)
@@ -3019,7 +3273,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     try {
       const res = await api.getProTodos();
       if (!res.ok) throw new Error(res.error || 'Failed to load todos');
-      setTodoItems(res.items || []);
+      setTodoItems(orderTodoItems(res.items || []));
     } catch (err: any) {
       toastSession(err?.message || 'Failed to load todos', false);
     } finally {
@@ -3422,7 +3676,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, []);
 
   const handleNewSessionRequest = useCallback((wsPath: string) => {
-    const shouldFloatDraft = chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
+    const shouldFloatDraft = mode === 'workspace' && chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
     const templateAgent = openSessionsRef.current[activeSlotRef.current]?.agent || '';
     setNewSessionInitialDraftPrompt(null);
     setNewSessionReferenceContext(null);
@@ -3435,7 +3689,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setNewSessionTemplateAgent(templateAgent);
     setShowNewSession(wsPath);
     if (!shouldFloatDraft) setActiveSlotIndex(openSessionsRef.current.length);
-  }, [chatLayout, isNarrowWorkbench, openFloatingSessionDraft, setActiveSlotIndex, setShowNewSession, taskFocusId]);
+  }, [chatLayout, isNarrowWorkbench, mode, openFloatingSessionDraft, setActiveSlotIndex, setShowNewSession, taskFocusId]);
 
   const handleNewSessionWithContext = useCallback((target: SessionActionTarget) => {
     const sourceSession = (sessionsMap[target.workdir] || []).find(
@@ -3596,6 +3850,60 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, [handleNewSessionCreated, refreshTodos, runtimeWorkdir, t, toastSession, todoCreating, todoItems]);
 
+  const handleCreateTasksFromTodos = useCallback(async (todoIds: string[]) => {
+    const ids = Array.from(new Set(todoIds.filter(Boolean)));
+    if (!ids.length || todoCreating) return;
+    const selectedTodos = todoItems.filter(item => ids.includes(item.id) && item.status === 'open');
+    if (!selectedTodos.length) return;
+    setTodoCreating(true);
+    try {
+      for (const item of selectedTodos) {
+        const description = item.body || item.source?.quote || item.title;
+        const result = await api.createProTask({
+          title: item.title,
+          description,
+          kind: 'manual',
+          status: 'backlog',
+          workdir: item.source?.workdir || runtimeWorkdir || undefined,
+        });
+        if (!result.ok || !result.task) throw new Error(result.error || 'Failed to create task from todo');
+        const archive = await api.updateProTodo(item.id, { status: 'archived' });
+        if (!archive.ok) throw new Error(archive.error || 'Failed to archive todo');
+      }
+      setTodoItems(prev => prev.filter(item => !ids.includes(item.id)));
+      setTodoModalOpen(false);
+      toastSession(selectedTodos.length === 1 ? 'Task created from todo' : `${selectedTodos.length} tasks created from todos`);
+      void refreshTodos();
+    } catch (err: any) {
+      toastSession(err?.message || 'Failed to create task from todo', false);
+    } finally {
+      setTodoCreating(false);
+    }
+  }, [refreshTodos, runtimeWorkdir, toastSession, todoCreating, todoItems]);
+
+  const handleAddTodosToDaily = useCallback(async (todoIds: string[]) => {
+    const ids = Array.from(new Set(todoIds.filter(Boolean)));
+    if (!ids.length || todoCreating) return;
+    const selectedTodos = todoItems.filter(item => ids.includes(item.id) && item.status === 'open');
+    if (!selectedTodos.length) return;
+    setTodoCreating(true);
+    try {
+      const date = localDateInputValue();
+      for (const item of selectedTodos) {
+        const result = await api.addTodoToDaily({ date, todoId: item.id });
+        if (!result.ok || !result.item || !result.taskId) throw new Error(result.error || 'Failed to add todo to daily');
+      }
+      setTodoItems(prev => prev.filter(item => !ids.includes(item.id)));
+      setTodoModalOpen(false);
+      toastSession(selectedTodos.length === 1 ? 'Todo added to daily' : `${selectedTodos.length} todos added to daily`);
+      void refreshTodos();
+    } catch (err: any) {
+      toastSession(err?.message || 'Failed to add todo to daily', false);
+    } finally {
+      setTodoCreating(false);
+    }
+  }, [refreshTodos, toastSession, todoCreating, todoItems]);
+
   const handleDeleteTodo = useCallback(async (todoId: string) => {
     if (!todoId) return;
     try {
@@ -3607,6 +3915,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       toastSession(err?.message || 'Failed to delete todo', false);
     }
   }, [t, toastSession]);
+
+  const handleToggleTodoDone = useCallback(async (item: TodoItem) => {
+    const nextStatus: TodoItem['status'] = item.status === 'open' ? 'done' : 'open';
+    setTodoItems(prev => orderTodoItems(prev.map(current => (
+      current.id === item.id
+        ? { ...current, status: nextStatus, updatedAt: new Date().toISOString() }
+        : current
+    ))));
+    try {
+      const res = await api.updateProTodo(item.id, { status: nextStatus });
+      if (!res.ok || !res.item) throw new Error(res.error || 'Failed to update todo');
+      setTodoItems(prev => orderTodoItems(prev.map(current => current.id === item.id ? res.item! : current)));
+    } catch (err: any) {
+      setTodoItems(prev => orderTodoItems(prev.map(current => current.id === item.id ? item : current)));
+      toastSession(err?.message || 'Failed to update todo', false);
+    }
+  }, [toastSession]);
 
   const markSessionReadOnOpen = useCallback((session: SessionInfo, workdir: string) => {
     const agent = session.agent || '';
@@ -3978,7 +4303,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       if (result.item) {
         setTodoItems(prev => {
           const without = prev.filter(item => item.id !== result.item?.id);
-          return [result.item!, ...without].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+          return orderTodoItems([result.item!, ...without]);
         });
       }
       closeQuickTodo();
@@ -4084,6 +4409,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', cleanup, { once: true });
     window.addEventListener('pointercancel', cleanup, { once: true });
+  }, [setSideChatWidthsByParent]);
+
+  const handleToggleSideChatMaxWidth = useCallback((parentKey: string) => {
+    setSideChatWidthsByParent(prev => {
+      const maxWidth = sideChatViewportMaxWidth();
+      const currentWidth = clampSideChatWidthForViewport(prev[parentKey] || SIDE_CHAT_DEFAULT_WIDTH);
+      const nextWidth = currentWidth >= maxWidth - 2
+        ? clampSideChatWidthForViewport(SIDE_CHAT_DEFAULT_WIDTH)
+        : maxWidth;
+      return prev[parentKey] === nextWidth ? prev : { ...prev, [parentKey]: nextWidth };
+    });
   }, [setSideChatWidthsByParent]);
 
   const setContextCardDockMode = useCallback((parentKey: string, mode: ContextCardMode) => {
@@ -4527,12 +4863,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         onClick={revealWorkspaceSidebar}
         title={t('rail.workspace')}
         aria-label={t('rail.workspace')}
-        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-edge/60 bg-panel-alt/80 text-fg-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[border-color,background,color,transform] hover:-translate-y-px hover:border-edge-h hover:bg-panel-h hover:text-fg-2 active:scale-95"
+        className="group relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-edge/60 bg-panel-alt/80 text-fg-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[border-color,background,color,transform] hover:-translate-y-px hover:border-edge-h hover:bg-panel-h hover:text-fg-2 active:scale-95"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <rect x="3" y="4" width="18" height="16" rx="2" />
           <path d="M9 4v16" />
         </svg>
+        <MainMenuTooltip label={t('rail.workspace')} />
       </button>
     ), workspaceSidebarToggleHost)
     : null;
@@ -4557,12 +4894,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           onClick={() => setTodoModalOpen(true)}
           title={t('todo.workspaceTitle')}
           aria-label={t('todo.workspaceTitle')}
-          className="relative !h-8 !w-8"
+          className="group relative !h-8 !w-8 overflow-visible"
         >
           <TodoGlyph className="h-3.5 w-3.5" />
           {todoItems.some(item => item.status === 'open') && (
             <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_0_2px_var(--th-panel)]" />
           )}
+          <MainMenuTooltip label={t('todo.workspaceTitle')} />
         </Button>
         <Button
           variant="ghost"
@@ -4570,11 +4908,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           onClick={openCreateQuickTodo}
           title={t('todo.quickAction')}
           aria-label={t('todo.quickAction')}
-          className="!h-8 !w-8"
+          className="group relative !h-8 !w-8 overflow-visible"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
             <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
           </svg>
+          <MainMenuTooltip label={t('todo.quickAction')} />
         </Button>
         <Button
           variant={inboxAlertCount > 0 ? 'secondary' : 'ghost'}
@@ -4583,7 +4922,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           title={t('rail.inbox')}
           aria-label={t('rail.inbox')}
           className={cn(
-            'relative !h-8 !w-8 !px-0',
+            'group relative !h-8 !w-8 !px-0 overflow-visible',
             inboxAlertCount > 0 && 'border-primary/45 text-primary',
             inboxAttentionPulse && 'animate-pulse ring-2 ring-primary/30',
           )}
@@ -4597,10 +4936,47 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               {Math.min(inboxAlertCount, 99)}
             </span>
           )}
+          <MainMenuTooltip label={t('rail.inbox')} />
         </Button>
       </>
     ), globalInboxHost)
     : null;
+
+  const todoPortals = (
+    <>
+      {todoModalOpen && createPortal((
+        <TodoCenterModal
+          items={todoItems}
+          loading={todoLoading}
+          creating={todoCreating}
+              onClose={() => setTodoModalOpen(false)}
+              onCreateTodo={openCreateQuickTodo}
+              onEdit={openEditTodo}
+              onCreateChat={(ids) => void handleCreateTodoChat(ids)}
+              onCreateTask={(ids) => void handleCreateTasksFromTodos(ids)}
+              onCreateDaily={(ids) => void handleAddTodosToDaily(ids)}
+              onToggleDone={(item) => void handleToggleTodoDone(item)}
+              onDelete={(id) => void handleDeleteTodo(id)}
+              t={t}
+        />
+      ), document.body)}
+      {quickTodoOpen && createPortal((
+        <TodoEditorModal
+          editing={!!editingTodoItem}
+          text={quickTodoText}
+          images={quickTodoImages}
+          saving={quickTodoSaving}
+          addingImages={quickTodoImageAdding}
+          onTextChange={setQuickTodoText}
+          onAddImages={(files) => void handleAddQuickTodoImages(files)}
+          onRemoveImage={handleRemoveQuickTodoImage}
+          onClose={closeQuickTodo}
+          onSave={() => void handleSaveQuickTodo()}
+          t={t}
+        />
+      ), document.body)}
+    </>
+  );
 
   const markDashboardItemChecked = useCallback(async (item: DashboardSessionItem) => {
     const agent = item.session.agent || '';
@@ -5117,7 +5493,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [slotPointerDrag?.from, slotPointerDrag?.over, slotPointerDrag?.visible, slotVisualOrder]);
 
-  const workspaceSidebarVisible = mode === 'workspace' && !workspaceSidebarCollapsed && !isNarrowWorkbench;
+  const workspaceSidebarVisible = (mode === 'workspace' || mode === 'chat-workspace') && !workspaceSidebarCollapsed && !isNarrowWorkbench;
   const multiWideWorkbench = mode === 'workspace'
     && multiWidgetGrid
     && !workspaceSidebarVisible
@@ -5138,8 +5514,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const multiItemHeight = effectiveMultiRowHeightPx != null
     ? compactMultiItemHeight
     : (multiItemTall ? 'calc(100dvh - 32px)' : compactMultiItemHeight);
-  const appRailVisible = mode === 'workspace' || mode === 'dashboard' || mode === 'settings';
-  const workspaceCenterClass = mode === 'workspace'
+  const appRailVisible = mode === 'workspace' || mode === 'chat-workspace' || mode === 'dashboard' || mode === 'settings';
+  const workspaceCenterClass = mode === 'workspace' || mode === 'chat-workspace'
     ? workspaceSidebarVisible
       ? 'py-2 pr-2 md:py-3 md:pr-3'
       : multiWideWorkbench
@@ -5153,6 +5529,322 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     && (effectiveChatLayout === 'single' || multiSingleChatPresentation)
     && focusedSlotIndex == null;
 
+  const chatWorkspaceFocusSlot = selectedSession;
+  const chatWorkspaceFocusInfo = chatWorkspaceFocusSlot ? resolveSlotInfo(chatWorkspaceFocusSlot) : null;
+  const chatWorkspaceFocusTitle = chatWorkspaceFocusInfo
+    ? sessionListDisplayText(chatWorkspaceFocusInfo).slice(0, 180) || chatWorkspaceFocusSlot?.sessionId.slice(0, 12)
+    : t('chatWorkspace.title');
+  const chatWorkspaceFocusWorkspaceName = chatWorkspaceFocusSlot
+    ? workspaces.find(ws => ws.path === chatWorkspaceFocusSlot.workdir)?.name || workspaceBaseName(chatWorkspaceFocusSlot.workdir)
+    : '';
+  const chatWorkspaceOpenWindowItems = openSessions.map((slot, slotIdx) => {
+    const session = resolveSlotInfo(slot);
+    return {
+      slot,
+      slotIdx,
+      item: {
+        key: `${slot.workdir}:${sKey(slot.agent, slot.sessionId)}`,
+        session,
+        workdir: slot.workdir,
+        workspaceName: workspaces.find(ws => ws.path === slot.workdir)?.name || workspaceBaseName(slot.workdir),
+      },
+    };
+  });
+  const chatWorkspacePreviewItems = chatWorkspaceOpenWindowItems.filter(entry => entry.slotIdx !== activeSlotIndex);
+  const chatWorkspaceNewSessionWorkdir = showNewSession || runtimeWorkdir || workspaces[0]?.path || '';
+
+  if (false && mode === 'chat-workspace') {
+    const betaItems: ChatWorkspaceBetaItem[] = [];
+    for (const ws of workspaces) {
+      const workspaceName = ws.name || workspaceBaseName(ws.path);
+      for (const session of filteredByWs[ws.path] || []) {
+        betaItems.push({
+          key: `${ws.path}:${sKey(session.agent || '', session.sessionId)}`,
+          session,
+          workdir: ws.path,
+          workspaceName,
+        });
+      }
+    }
+
+    const focusSlot = selectedSession;
+    const focusInfo = focusSlot ? resolveSlotInfo(focusSlot) : null;
+    const focusTitle = focusInfo ? sessionListDisplayText(focusInfo).slice(0, 180) || focusSlot?.sessionId.slice(0, 12) : t('chatWorkspace.focus');
+    const focusWorkspaceName = focusSlot
+      ? workspaces.find(ws => ws.path === focusSlot.workdir)?.name || workspaceBaseName(focusSlot.workdir)
+      : '';
+    const openWindowItems = openSessions.map((slot, slotIdx) => {
+      const session = resolveSlotInfo(slot);
+      return {
+        slot,
+        slotIdx,
+        item: {
+          key: `${slot.workdir}:${sKey(slot.agent, slot.sessionId)}`,
+          session,
+          workdir: slot.workdir,
+          workspaceName: workspaces.find(ws => ws.path === slot.workdir)?.name || workspaceBaseName(slot.workdir),
+        },
+      };
+    });
+    const pinnedWindowItems = openWindowItems.filter(entry => entry.slotIdx !== activeSlotIndex).slice(0, 2);
+    const attentionItems = betaItems.filter(item => {
+      const state = sessionDisplayState(item.session);
+      return state === 'running'
+        || state === 'incomplete'
+        || shouldMarkSessionReadOnOpen(item.session)
+        || item.session.userStatus === 'inbox'
+        || item.session.userStatus === 'review';
+    });
+    const overviewItems = (attentionItems.length ? attentionItems : betaItems).slice(0, 18);
+    const newSessionWorkdir = showNewSession || runtimeWorkdir || workspaces[0]?.path || '';
+
+    return (
+      <div className="relative flex h-full min-h-0 overflow-hidden pl-14">
+        {globalInboxAction}
+        {todoPortals}
+        <aside className="hidden h-full w-[292px] shrink-0 flex-col border-r border-edge/65 bg-panel/62 p-3 backdrop-blur-md lg:flex">
+          <div className="mb-3 flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <div className="truncate text-[13px] font-semibold text-fg">{t('chatWorkspace.title')}</div>
+                <span className="rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
+              </div>
+              <div className="mt-0.5 truncate text-[11px] text-fg-5">{t('chat.layoutHint')}</div>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => newSessionWorkdir && handleNewSessionRequest(newSessionWorkdir)}
+              disabled={!newSessionWorkdir}
+              title={t('chatWorkspace.newChat')}
+              aria-label={t('chatWorkspace.newChat')}
+              className="h-8 w-8 shrink-0"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                <path d="M12 5v14" />
+                <path d="M5 12h14" />
+              </svg>
+            </Button>
+          </div>
+          <div className="relative mb-3">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-5/45" aria-hidden="true">
+              <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={t('hub.search')}
+              className="h-8 w-full rounded-lg border border-control-border bg-control pl-8 pr-2 text-[12px] text-fg outline-none placeholder:text-fg-5/40 transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_3px_var(--th-glow-a)]"
+            />
+          </div>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            <section>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-[11px] font-semibold text-fg-5">{t('chatWorkspace.openWindows')}</div>
+                <span className="font-mono text-[10px] text-fg-5">{openWindowItems.length}</span>
+              </div>
+              <div className="space-y-2">
+                {openWindowItems.length ? openWindowItems.map(entry => (
+                  <ChatWorkspaceBetaSessionCard
+                    key={`${entry.item.key}:open`}
+                    item={entry.item}
+                    dense
+                    active={entry.slotIdx === activeSlotIndex}
+                    onSelect={() => setActiveSlotIndex(entry.slotIdx)}
+                    t={t}
+                  />
+                )) : (
+                  <div className="rounded-xl border border-dashed border-edge/60 bg-panel/40 px-3 py-4 text-[12px] text-fg-5">
+                    {t('chatWorkspace.emptyTitle')}
+                  </div>
+                )}
+              </div>
+            </section>
+            <section>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-[11px] font-semibold text-fg-5">{t('chatWorkspace.attention')}</div>
+                <span className="font-mono text-[10px] text-fg-5">{attentionItems.length}</span>
+              </div>
+              <div className="space-y-2">
+                {attentionItems.length ? attentionItems.slice(0, 8).map(item => (
+                  <ChatWorkspaceBetaSessionCard
+                    key={`${item.key}:attention`}
+                    item={item}
+                    dense
+                    active={!!focusSlot && focusSlot.workdir === item.workdir && focusSlot.agent === item.session.agent && focusSlot.sessionId === item.session.sessionId}
+                    onSelect={() => handleSelectSession(item.session, item.workdir)}
+                    t={t}
+                  />
+                )) : (
+                  <div className="rounded-xl border border-edge/55 bg-panel/42 px-3 py-4 text-[12px] text-fg-5">
+                    {t('chatWorkspace.noAttention')}
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        </aside>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-3 p-3">
+          <header className="flex h-12 shrink-0 items-center gap-3 rounded-xl border border-edge/65 bg-panel/72 px-3 shadow-sm backdrop-blur-md">
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="shrink-0 text-[11px] font-semibold text-fg-5">{t('chatWorkspace.focus')}</span>
+                <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{showNewSession ? t('chatWorkspace.newChat') : focusTitle}</span>
+              </div>
+              {focusWorkspaceName && <div className="mt-0.5 truncate text-[11px] text-fg-5">{focusWorkspaceName}</div>}
+            </div>
+            <Button
+              variant={chatWorkspaceOverviewOpen ? 'secondary' : 'ghost'}
+              size="sm"
+              onClick={() => setChatWorkspaceOverviewOpen(v => !v)}
+              title={chatWorkspaceOverviewOpen ? t('chatWorkspace.hideOverview') : t('chatWorkspace.showOverview')}
+              aria-label={chatWorkspaceOverviewOpen ? t('chatWorkspace.hideOverview') : t('chatWorkspace.showOverview')}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                <rect x="14" y="14" width="7" height="7" rx="1.5" />
+              </svg>
+              <span className="hidden sm:inline">{t('chatWorkspace.overview')}</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => newSessionWorkdir && handleNewSessionRequest(newSessionWorkdir)}
+              disabled={!newSessionWorkdir}
+            >
+              <span>{t('chatWorkspace.newChat')}</span>
+            </Button>
+          </header>
+
+          <div className="min-h-0 flex flex-1 gap-3">
+            <section className="min-w-0 flex-1 overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]">
+              {showNewSession && newSessionWorkdir ? (
+                <NewSessionView
+                  key={showNewSession}
+                  workdir={newSessionWorkdir}
+                  workspaceName={workspaces.find(ws => ws.path === newSessionWorkdir)?.name || workspaceBaseName(newSessionWorkdir)}
+                  workspaces={workspaces}
+                  initialAgent={newSessionTemplateAgent}
+                  initialDraftPrompt={newSessionInitialDraftPrompt}
+                  referenceContext={newSessionReferenceContext}
+                  suggestedReferenceContext={suggestedNewSessionReferenceContext}
+                  initialAutoSend={newSessionInitialAutoSend}
+                  onSessionCreated={handleNewSessionCreated}
+                  onMultiSessionCreated={handleMultiSessionCreated}
+                  onClose={() => {
+                    setNewSessionInitialDraftPrompt(null);
+                    setNewSessionReferenceContext(null);
+                    setNewSessionInitialAutoSend(false);
+                    setShowNewSession(null);
+                    setActiveSlotIndex(prev => (
+                      prev >= openSessionsRef.current.length
+                        ? Math.max(0, openSessionsRef.current.length - 1)
+                        : prev
+                    ));
+                  }}
+                  t={t}
+                />
+              ) : focusSlot && focusInfo ? (
+                <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
+                  <SessionPanel
+                    key={focusSlot.mountKey}
+                    session={focusInfo}
+                    workdir={focusSlot.workdir}
+                    active={active && !inboxOpen}
+                    readOnly={focusSlot.archiveOnly === true}
+                    onSessionChange={focusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
+                    onMultiSessionChange={focusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
+                    onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, focusSlot.workdir, target)}
+                    onCreateSideChatFromSelection={focusSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(activeSlotIndex, focusSlot, focusInfo, request)}
+                    onCreateTodoFromSelection={focusSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(focusSlot, request)}
+                    onCreateReviewCommentFromSelection={focusSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(focusSlot, request)}
+                    initialPendingPrompt={!focusSlot.archiveOnly ? newSessionPendingPrompt : null}
+                    initialPendingImageUrls={!focusSlot.archiveOnly ? newSessionPendingImageUrls : undefined}
+                    initialPendingCreatedAt={!focusSlot.archiveOnly ? newSessionPendingCreatedAt : null}
+                    onPendingPromptConsumed={!focusSlot.archiveOnly ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex h-full items-center justify-center px-8 text-center">
+                  <div className="max-w-[360px]">
+                    <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl border border-edge/65 bg-panel/70 text-fg-4">
+                      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <rect x="3" y="4" width="18" height="14" rx="2" />
+                        <path d="M8 21h8" />
+                        <path d="M12 18v3" />
+                      </svg>
+                    </div>
+                    <div className="text-[14px] font-semibold text-fg">{t('chatWorkspace.emptyTitle')}</div>
+                    <div className="mt-1 text-[12px] leading-relaxed text-fg-5">{t('chatWorkspace.emptyHint')}</div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => newSessionWorkdir && handleNewSessionRequest(newSessionWorkdir)}
+                      disabled={!newSessionWorkdir}
+                      className="mt-4"
+                    >
+                      {t('chatWorkspace.newChat')}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <aside className="hidden w-[330px] shrink-0 flex-col gap-3 xl:flex">
+              <div className="flex items-center justify-between px-1">
+                <div className="text-[11px] font-semibold text-fg-5">{t('chatWorkspace.references')}</div>
+                <span className="font-mono text-[10px] text-fg-5">{pinnedWindowItems.length}/2</span>
+              </div>
+              {pinnedWindowItems.length ? pinnedWindowItems.map(entry => (
+                <ChatWorkspaceBetaSessionCard
+                  key={`${entry.item.key}:pinned`}
+                  item={entry.item}
+                  active={false}
+                  onSelect={() => setActiveSlotIndex(entry.slotIdx)}
+                  t={t}
+                />
+              )) : (
+                <div className="rounded-[18px] border border-dashed border-edge/65 bg-panel/45 p-4 text-[12px] leading-relaxed text-fg-5">
+                  {t('chatWorkspace.noReferences')}
+                </div>
+              )}
+            </aside>
+          </div>
+
+          {chatWorkspaceOverviewOpen && (
+            <section className="h-[176px] shrink-0 overflow-hidden rounded-[18px] border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-[11px] font-semibold text-fg-5">{t('chatWorkspace.overview')}</div>
+                <span className="font-mono text-[10px] text-fg-5">{overviewItems.length}</span>
+              </div>
+              <div className="flex h-[126px] gap-2 overflow-x-auto pb-1">
+                {overviewItems.map(item => (
+                  <div key={`${item.key}:overview`} className="w-[260px] shrink-0">
+                    <ChatWorkspaceBetaSessionCard
+                      item={item}
+                      dense
+                      active={!!focusSlot && focusSlot.workdir === item.workdir && focusSlot.agent === item.session.agent && focusSlot.sessionId === item.session.sessionId}
+                      onSelect={() => handleSelectSession(item.session, item.workdir)}
+                      t={t}
+                    />
+                  </div>
+                ))}
+                {!overviewItems.length && (
+                  <div className="flex h-full w-full items-center justify-center text-[12px] text-fg-5">
+                    {t('sessions.noSessions')}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={cn(
       'relative h-full overflow-hidden flex flex-col mx-auto',
@@ -5160,8 +5852,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     )}>
       {workspaceSidebarToggleAction}
       {globalInboxAction}
+      {todoPortals}
       <div className="relative min-h-0 flex flex-1 gap-0">
-      {mode === 'workspace' && (
+      {(mode === 'workspace' || mode === 'chat-workspace') && (
       <>
       {/* ═══ Left Panel — Session Navigator ═══ */}
       <div
@@ -5321,34 +6014,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
         {/* Footer */}
         <div className="relative shrink-0 border-t border-edge/20 px-3 py-2">
-          {todoModalOpen && createPortal((
-            <TodoCenterModal
-              items={todoItems}
-              loading={todoLoading}
-              creating={todoCreating}
-              onClose={() => setTodoModalOpen(false)}
-              onCreateTodo={openCreateQuickTodo}
-              onEdit={openEditTodo}
-              onCreateChat={(ids) => void handleCreateTodoChat(ids)}
-              onDelete={(id) => void handleDeleteTodo(id)}
-              t={t}
-            />
-          ), document.body)}
-          {quickTodoOpen && createPortal((
-            <TodoEditorModal
-              editing={!!editingTodoItem}
-              text={quickTodoText}
-              images={quickTodoImages}
-              saving={quickTodoSaving}
-              addingImages={quickTodoImageAdding}
-              onTextChange={setQuickTodoText}
-              onAddImages={(files) => void handleAddQuickTodoImages(files)}
-              onRemoveImage={handleRemoveQuickTodoImage}
-              onClose={closeQuickTodo}
-              onSave={() => void handleSaveQuickTodo()}
-              t={t}
-            />
-          ), document.body)}
           <div className="flex items-center gap-2 rounded-lg border border-edge/45 bg-panel/55 px-2 py-1.5 text-[11px] text-fg-4">
             <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />
             <span className="min-w-0 flex-1 truncate font-medium text-fg-3">{appStatus.badgeContent}</span>
@@ -5366,7 +6031,121 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           workspaceCenterClass,
         )}
       >
-        {mode === 'dashboard' ? (
+        {mode === 'chat-workspace' ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-3">
+            <header className="flex h-12 shrink-0 items-center gap-3 rounded-xl border border-edge/65 bg-panel/72 px-3 shadow-sm backdrop-blur-md">
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-[11px] font-semibold text-fg-5">{t('chatWorkspace.focus')}</span>
+                  <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{showNewSession ? t('chatWorkspace.newChat') : chatWorkspaceFocusTitle}</span>
+                  <span className="shrink-0 rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
+                </div>
+                {chatWorkspaceFocusWorkspaceName && <div className="mt-0.5 truncate text-[11px] text-fg-5">{chatWorkspaceFocusWorkspaceName}</div>}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => chatWorkspaceNewSessionWorkdir && handleNewSessionRequest(chatWorkspaceNewSessionWorkdir)}
+                disabled={!chatWorkspaceNewSessionWorkdir}
+              >
+                <span>{t('chatWorkspace.newChat')}</span>
+              </Button>
+            </header>
+            <div className="min-h-0 flex flex-1 gap-3">
+              <section className="min-w-0 flex-1 overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]">
+                {showNewSession && chatWorkspaceNewSessionWorkdir ? (
+                  <NewSessionView
+                    key={showNewSession}
+                    workdir={chatWorkspaceNewSessionWorkdir}
+                    workspaceName={workspaces.find(ws => ws.path === chatWorkspaceNewSessionWorkdir)?.name || workspaceBaseName(chatWorkspaceNewSessionWorkdir)}
+                    workspaces={workspaces}
+                    initialAgent={newSessionTemplateAgent}
+                    initialDraftPrompt={newSessionInitialDraftPrompt}
+                    referenceContext={newSessionReferenceContext}
+                    suggestedReferenceContext={suggestedNewSessionReferenceContext}
+                    initialAutoSend={newSessionInitialAutoSend}
+                    onSessionCreated={handleNewSessionCreated}
+                    onMultiSessionCreated={handleMultiSessionCreated}
+                    onClose={() => {
+                      setNewSessionInitialDraftPrompt(null);
+                      setNewSessionReferenceContext(null);
+                      setNewSessionInitialAutoSend(false);
+                      setShowNewSession(null);
+                      setActiveSlotIndex(prev => (
+                        prev >= openSessionsRef.current.length
+                          ? Math.max(0, openSessionsRef.current.length - 1)
+                          : prev
+                      ));
+                    }}
+                    t={t}
+                  />
+                ) : chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (
+                  <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
+                    <SessionPanel
+                      key={chatWorkspaceFocusSlot.mountKey}
+                      session={chatWorkspaceFocusInfo}
+                      workdir={chatWorkspaceFocusSlot.workdir}
+                      active={active && !inboxOpen}
+                      readOnly={chatWorkspaceFocusSlot.archiveOnly === true}
+                      onSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
+                      onMultiSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
+                      onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, chatWorkspaceFocusSlot.workdir, target)}
+                      onCreateSideChatFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(activeSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, request)}
+                      onCreateTodoFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(chatWorkspaceFocusSlot, request)}
+                      onCreateReviewCommentFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(chatWorkspaceFocusSlot, request)}
+                      initialPendingPrompt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingPrompt : null}
+                      initialPendingImageUrls={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingImageUrls : undefined}
+                      initialPendingCreatedAt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingCreatedAt : null}
+                      onPendingPromptConsumed={!chatWorkspaceFocusSlot.archiveOnly ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
+                    />
+                  </Suspense>
+                ) : (
+                  <div className="flex h-full items-center justify-center px-8 text-center">
+                    <div className="max-w-[360px]">
+                      <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl border border-edge/65 bg-panel/70 text-fg-4">
+                        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <rect x="3" y="4" width="18" height="14" rx="2" />
+                          <path d="M8 21h8" />
+                          <path d="M12 18v3" />
+                        </svg>
+                      </div>
+                      <div className="text-[14px] font-semibold text-fg">{t('chatWorkspace.emptyTitle')}</div>
+                      <div className="mt-1 text-[12px] leading-relaxed text-fg-5">{t('chatWorkspace.emptyHint')}</div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => chatWorkspaceNewSessionWorkdir && handleNewSessionRequest(chatWorkspaceNewSessionWorkdir)}
+                        disabled={!chatWorkspaceNewSessionWorkdir}
+                        className="mt-4"
+                      >
+                        {t('chatWorkspace.newChat')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </section>
+              {chatWorkspacePreviewItems.length > 0 && (
+                <aside className="hidden min-h-0 w-[30%] min-w-[280px] max-w-[400px] shrink-0 flex-col overflow-hidden rounded-[18px] border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md xl:flex">
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="text-[11px] font-semibold text-fg-5">{t('chatWorkspace.references')}</div>
+                    <span className="font-mono text-[10px] text-fg-5">{chatWorkspacePreviewItems.length}</span>
+                  </div>
+                  <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                    {chatWorkspacePreviewItems.map(entry => (
+                      <ChatWorkspaceBetaSessionCard
+                        key={`${entry.item.key}:preview`}
+                        item={entry.item}
+                        dense
+                        onSelect={() => setActiveSlotIndex(entry.slotIdx)}
+                        t={t}
+                      />
+                    ))}
+                  </div>
+                </aside>
+              )}
+            </div>
+          </div>
+        ) : mode === 'dashboard' ? (
           <div className="min-h-0 flex-1 overflow-hidden">
             {dashboardJiraContent}
           </div>
@@ -5556,6 +6335,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const isSpotlighted = isActive && spotlightSlotIndex === slotIdx;
               const isFocused = focusedSlotIndex === slotIdx;
               const slotState = sessionDisplayState(info);
+              const slotCelebrating = !!completionCelebrationKeys[sKey(slot.agent, slot.sessionId)];
               const hasUnreadCompletedState = shouldMarkSessionReadOnOpen(info);
               const slotTitle = info.title || info.lastQuestion?.slice(0, 120) || slot.sessionId.slice(0, 12);
               const workspaceDisplayName = workspaces.find(ws => ws.path === slot.workdir)?.name || workspaceBaseName(slot.workdir);
@@ -5642,7 +6422,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 : hasSideChats
                   ? t('session.showSideChats')
                   : t('session.newSideChat');
-              const sideChatWidth = sideChatWidthsByParent[parentSlotKey] || SIDE_CHAT_DEFAULT_WIDTH;
+              const sideChatWidth = clampSideChatWidthForViewport(sideChatWidthsByParent[parentSlotKey] || SIDE_CHAT_DEFAULT_WIDTH);
+              const sideChatMaxWidth = sideChatViewportMaxWidth();
+              const sideChatAtMaxWidth = sideChatWidth >= sideChatMaxWidth - 2;
               const contextFileCount = taskWorkbenchForSlot?.files.length || 0;
               const quickContextTabs: ContextShelfTab[] = taskWorkbenchForSlot
                 ? ['outputs', 'files', 'status']
@@ -5725,6 +6507,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const useFocusToolbar = isFocused || isSingleFullscreen;
               const useFloatingSessionToolbar = isFocused
                 || (effectiveChatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && isSingleFullscreen);
+              const recallRailVisible = !isNarrowWorkbench
+                && !slot.archiveOnly
+                && chatRecallIndexEnabled
+                && (isFocused || effectiveChatLayout === 'single');
+              const recallScrollRequest = recallScrollRequestBySlotKey[parentSlotKey] || null;
               const slotFrameClass = isFocused
                 ? 'z-[70] border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] ring-1 ring-[color:var(--th-chat-window-ring)]'
                 : isMultiWidget
@@ -5846,13 +6633,27 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                      <SessionAttentionDot kind="running" compact />
 	                    ) : slotState === 'incomplete' ? (
 	                      <SessionAttentionDot kind="warn" compact />
-	                    ) : hasUnreadCompletedState ? (
-	                      <SessionAttentionDot kind="unread" />
-	                    ) : null)}
+		                    ) : hasUnreadCompletedState ? (
+		                      <SessionAttentionDot kind="unread" />
+		                    ) : null)}
+                    {!isMultiWidget && (
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          'relative grid h-6 w-6 shrink-0 place-items-center rounded-full border border-edge/45 bg-inset/80 shadow-sm',
+                          slotCelebrating && 'session-complete-celebrate',
+                        )}
+                      >
+                        <BrandIcon brand={slot.agent || ''} size={14} />
+                      </span>
+                    )}
                     {isMultiWidget && (
                       <span
                         aria-hidden="true"
-                        className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm"
+                        className={cn(
+                          'relative grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm',
+                          slotCelebrating && 'session-complete-celebrate',
+                        )}
                       >
                         <BrandIcon brand={slot.agent || ''} size={16} />
 	                        {(slotState === 'running' || slotState === 'incomplete' || hasUnreadCompletedState) && (
@@ -5916,7 +6717,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                           ) : (
                             <div
                               className={cn(
-                                'min-w-0 flex items-center gap-1 rounded-md font-semibold transition-colors',
+                                'min-w-0 flex cursor-default items-center gap-1 rounded-md font-semibold transition-colors',
                                 isMultiWidget ? 'px-0 py-0 text-[12px]' : 'px-1 py-0.5 text-[11px]',
                                 isActive && !isMultiWidget ? 'bg-[var(--th-selected-bg)] text-fg shadow-sm' : 'text-fg',
                               )}
@@ -6186,7 +6987,43 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     </div>
                   </div>
                   <div className={cn('flex-1 min-h-0 flex flex-col overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
-                    <div className={cn('flex-1 min-h-0 flex overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
+                    <div className={cn('relative flex-1 min-h-0 flex overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
+                      {recallRailVisible && (
+                        <ChatRecallRail
+                          session={info}
+                          workdir={slot.workdir}
+                          collapsed={chatRecallCollapsed}
+                          onCollapsedChange={setChatRecallCollapsed}
+                          onSelectTurn={(turnIndex, totalTurns) => {
+                            setActiveSlotIndex(slotIdx);
+                            requestRecallTurnScroll(slot, turnIndex, totalTurns);
+                          }}
+                          onOpenOutput={(output) => {
+                            setActiveSlotIndex(slotIdx);
+                            if (output.url) {
+                              void api.openExternalUrl(output.url).then(res => {
+                                if (!res.ok) toastSession(res.error || `Failed to open ${output.url}`, false);
+                              }).catch((error: any) => {
+                                toastSession(error?.message || String(error), false);
+                              });
+                              return;
+                            }
+                            if (output.path) {
+                              handleOpenFileLink(slotIdx, output.session?.workdir || slot.workdir, { path: output.path });
+                              return;
+                            }
+                            openContextShelf('outputs');
+                          }}
+                          onOpenSideChat={(sideKey) => {
+                            setActiveSlotIndex(slotIdx);
+                            const targetSideSlot = uniqueSideChatKnownSlots.find(sideSlot => sideChatSlotKey(sideSlot) === sideKey);
+                            if (targetSideSlot) {
+                              setActiveSideChatByParent(prev => ({ ...prev, [parentSlotKey]: sideChatSlotKey(targetSideSlot) }));
+                            }
+                            openContextShelf('side-chats');
+                          }}
+                        />
+                      )}
                       <div className={cn('min-h-0 min-w-0 flex flex-1 flex-col overflow-hidden', isFocused && 'bg-[var(--th-chat-window-bg)]')}>
                         <Suspense fallback={<div className="h-full" />}>
                           <SessionPanel
@@ -6214,6 +7051,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                             onCreateSideChatFromSelection={slot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(slotIdx, slot, info, request)}
                             onCreateTodoFromSelection={slot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(slot, request)}
                             onCreateReviewCommentFromSelection={slot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(slot, request)}
+                            scrollToTurnRequest={recallScrollRequest}
                             initialPendingPrompt={!slot.archiveOnly && isActive ? newSessionPendingPrompt : null}
                             initialPendingImageUrls={!slot.archiveOnly && isActive ? newSessionPendingImageUrls : undefined}
                             initialPendingCreatedAt={!slot.archiveOnly && isActive ? newSessionPendingCreatedAt : null}
@@ -6228,6 +7066,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 		                          onTabChange={(tab) => setContextShelfTabByParent(prev => ({ ...prev, [parentSlotKey]: tab }))}
 		                          onClose={() => setSideChatPanelOpenByParent(prev => ({ ...prev, [parentSlotKey]: false }))}
 		                          onResizeStart={(e) => handleSideChatResizeStart(parentSlotKey, e)}
+		                          onToggleMaxWidth={() => handleToggleSideChatMaxWidth(parentSlotKey)}
+		                          isMaxWidth={sideChatAtMaxWidth}
 		                          width={sideChatWidth}
 		                          surface={renderContextCard ? 'card' : 'inline'}
 		                          cardTitle={effectiveContextShelfTab === 'side-chats'
@@ -6526,8 +7366,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                    mountKey: item.mountKey,
 	                  }
 	                  : null;
-	                const floatingInfo = floatingSlot ? resolveSlotInfo(floatingSlot) : null;
-	                const floatingTitle = floatingInfo
+                const floatingInfo = floatingSlot ? resolveSlotInfo(floatingSlot) : null;
+                const floatingCelebrating = !!(floatingSlot && completionCelebrationKeys[sKey(floatingSlot.agent, floatingSlot.sessionId)]);
+                const floatingTitle = floatingInfo
 	                  ? floatingInfo.title || floatingInfo.lastQuestion?.slice(0, 120) || floatingInfo.sessionId.slice(0, 12)
 	                  : t('hub.newSession');
 	                return (
@@ -6557,9 +7398,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                            focusFloatingDraggingId === item.id ? 'cursor-grabbing' : 'cursor-grab',
 	                          )}
 	                        >
-	                          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
-	                            <BrandIcon brand={floatingSlot.agent || ''} size={16} />
-	                          </span>
+                          <span className={cn(
+                            'grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm',
+                            floatingCelebrating && 'session-complete-celebrate',
+                          )}>
+                            <BrandIcon brand={floatingSlot.agent || ''} size={16} />
+                          </span>
 	                          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2" title={floatingTitle}>
 	                            {floatingTitle}
 	                          </span>
@@ -7645,7 +8489,7 @@ function TodoEditorModal({
   saving: boolean;
   addingImages: boolean;
   onTextChange: (value: string) => void;
-  onAddImages: (files: FileList | null) => void;
+  onAddImages: (files: ArrayLike<File> | null | undefined) => void;
   onRemoveImage: (imageId: string) => void;
   onClose: () => void;
   onSave: () => void;
@@ -7653,6 +8497,21 @@ function TodoEditorModal({
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const canSave = !!text.trim() || images.length > 0;
+  const handlePaste = useCallback((event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedImages = Array.from(event.clipboardData.files || []).filter(isImageFile);
+    if (!pastedImages.length) {
+      const itemImages = Array.from(event.clipboardData.items || [])
+        .map(item => item.kind === 'file' ? item.getAsFile() : null)
+        .filter((file): file is File => !!file && isImageFile(file));
+      if (itemImages.length) {
+        event.preventDefault();
+        onAddImages(itemImages);
+      }
+      return;
+    }
+    event.preventDefault();
+    onAddImages(pastedImages);
+  }, [onAddImages]);
 
   return (
     <div
@@ -7681,6 +8540,7 @@ function TodoEditorModal({
             autoFocus
             value={text}
             onChange={event => onTextChange(event.target.value)}
+            onPaste={handlePaste}
             onKeyDown={event => {
               if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                 event.preventDefault();
@@ -7758,6 +8618,9 @@ function TodoCenterModal({
   onCreateTodo,
   onEdit,
   onCreateChat,
+  onCreateTask,
+  onCreateDaily,
+  onToggleDone,
   onDelete,
   t,
 }: {
@@ -7768,27 +8631,39 @@ function TodoCenterModal({
   onCreateTodo: () => void;
   onEdit: (item: TodoItem) => void;
   onCreateChat: (todoIds: string[]) => void;
+  onCreateTask: (todoIds: string[]) => void;
+  onCreateDaily: (todoIds: string[]) => void;
+  onToggleDone: (item: TodoItem) => void;
   onDelete: (todoId: string) => void;
   t: (key: string) => string;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [menu, setMenu] = useState<null | { itemId: string; anchor: DOMRect }>(null);
-  const activeItems = items.filter(item => item.status === 'open');
+  const visibleItems = orderTodoItems(items.filter(item => item.status !== 'archived'));
+  const openItems = visibleItems.filter(item => item.status === 'open');
+  const openItemIds = useMemo(() => new Set(openItems.map(item => item.id)), [openItems]);
   const closeMenu = useCallback(() => setMenu(null), []);
   const openMenu = useCallback((event: ReactMouseEvent<HTMLButtonElement>, itemId: string) => {
     event.stopPropagation();
-    setMenu({ itemId, anchor: event.currentTarget.getBoundingClientRect() });
+    const anchor = event.currentTarget.getBoundingClientRect();
+    setMenu(prev => prev?.itemId === itemId ? null : { itemId, anchor });
   }, []);
   const runMenuAction = useCallback((action: () => void) => {
     closeMenu();
     action();
   }, [closeMenu]);
+  useEffect(() => {
+    setSelectedIds(prev => prev.filter(id => openItemIds.has(id)));
+  }, [openItemIds]);
   const toggleSelected = useCallback((todoId: string) => {
     setSelectedIds(prev => prev.includes(todoId) ? prev.filter(id => id !== todoId) : [...prev, todoId]);
   }, []);
-  const selectedActiveIds = selectedIds.filter(id => activeItems.some(item => item.id === id));
-  const startChatIds = selectedActiveIds.length ? selectedActiveIds : activeItems.slice(0, 1).map(item => item.id);
-  const menuItem = menu ? activeItems.find(item => item.id === menu.itemId) : null;
+  const toggleDone = useCallback((item: TodoItem) => {
+    setSelectedIds(prev => prev.filter(id => id !== item.id));
+    onToggleDone(item);
+  }, [onToggleDone]);
+  const chatTodoIds = selectedIds.filter(id => openItemIds.has(id));
+  const menuItem = menu ? visibleItems.find(item => item.id === menu.itemId) : null;
 
   return (
     <div className="fixed inset-0 z-[230] flex items-center justify-center bg-black/24 px-4 py-8 backdrop-blur-[2px]" onMouseDown={onClose}>
@@ -7807,7 +8682,7 @@ function TodoCenterModal({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <div className="text-[15px] font-semibold text-fg">{t('todo.workspaceTitle')}</div>
-                <Badge variant="muted" className="h-5 px-1.5 text-[10px]">{activeItems.length}</Badge>
+                <Badge variant="muted" className="h-5 px-1.5 text-[10px]">{openItems.length}</Badge>
               </div>
               <div className="mt-0.5 text-[12px] text-fg-5">{t('todo.modalSubtitle')}</div>
             </div>
@@ -7824,61 +8699,95 @@ function TodoCenterModal({
               </svg>
               {t('todo.createTodo')}
             </Button>
-            <Button variant="primary" size="sm" disabled={!startChatIds.length || creating} onClick={() => onCreateChat(startChatIds)}>
+            <Button variant="primary" size="sm" disabled={!chatTodoIds.length || creating} onClick={() => onCreateChat(chatTodoIds)}>
               {creating ? <Spinner className="h-3 w-3" /> : (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                   <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
                 </svg>
               )}
-              {selectedActiveIds.length > 1 ? t('todo.startSelectedChat') : t('todo.createChat')}
+              {t('todo.createChat')}
+            </Button>
+            <Button variant="outline" size="sm" disabled={!chatTodoIds.length || creating} onClick={() => onCreateTask(chatTodoIds)}>
+              <TodoGlyph className="h-3.5 w-3.5" />
+              Create task
+            </Button>
+            <Button variant="outline" size="sm" disabled={!chatTodoIds.length || creating} onClick={() => onCreateDaily(chatTodoIds)}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                <rect x="3" y="4" width="18" height="17" rx="2" />
+                <path d="M8 2v4" /><path d="M16 2v4" /><path d="M3 10h18" />
+              </svg>
+              Add to daily
             </Button>
           </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="space-y-2">
-            {loading && !activeItems.length ? (
+            {loading && !visibleItems.length ? (
               <div className="flex h-32 items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>
-            ) : activeItems.length === 0 ? (
+            ) : visibleItems.length === 0 ? (
               <div className="rounded-xl border border-dashed border-edge/45 px-4 py-12 text-center text-[13px] text-fg-5">{t('todo.empty')}</div>
-            ) : activeItems.map(item => (
+            ) : visibleItems.map(item => {
+              const completed = item.status !== 'open';
+              const itemTimeSource = item.createdAt || item.updatedAt;
+              const itemTime = fmtTime(itemTimeSource);
+              const itemTitle = [
+                item.title,
+                item.body && item.body !== item.title ? item.body : '',
+                item.source?.quote || '',
+              ].filter(Boolean).join('\n\n');
+              return (
               <div key={item.id} className={cn(
-                'group rounded-lg border px-3 py-2.5 transition hover:border-edge/80 hover:bg-panel-alt',
-                selectedIds.includes(item.id) ? 'border-primary/45 bg-primary/5' : 'border-edge/45 bg-panel-alt/55',
+                'group rounded-lg border px-3 py-2 transition hover:border-edge/80 hover:bg-panel-alt',
+                selectedIds.includes(item.id) ? 'border-primary/45 bg-primary/5' : completed ? 'border-edge/35 bg-panel-alt/30 opacity-75' : 'border-edge/45 bg-panel-alt/55',
               )}>
-                <div className="flex items-start gap-3">
+                <div className="flex min-w-0 items-center gap-2">
                   <input
                     type="checkbox"
                     checked={selectedIds.includes(item.id)}
+                    disabled={completed}
                     onChange={() => toggleSelected(item.id)}
-                    className="mt-1 h-4 w-4 shrink-0 rounded border-edge"
-                    aria-label={item.title}
+                    className="h-4 w-4 shrink-0 rounded border-edge disabled:cursor-not-allowed disabled:opacity-35"
+                    aria-label={t('todo.selectForChat')}
                   />
                   <div className="min-w-0 flex-1 text-left">
-                    <div className="truncate text-[13px] font-medium text-fg-3 group-hover:text-fg">{item.title}</div>
-                    {item.body && item.body !== item.title && <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-fg-5">{item.body}</div>}
-                    {item.source?.quote && <div className="mt-1.5 line-clamp-3 rounded-md bg-inset px-2 py-1.5 text-[11px] leading-relaxed text-fg-5">{item.source.quote}</div>}
-                    {item.images?.length ? (
-                      <div className="mt-2 flex gap-1.5 overflow-hidden">
-                        {item.images.slice(0, 4).map(image => (
-                          <div key={image.id} className="h-12 w-12 shrink-0 overflow-hidden rounded-md border border-edge/45 bg-inset">
-                            <img src={image.dataUrl} alt={image.name} className="h-full w-full object-cover" />
-                          </div>
-                        ))}
-                        {item.images.length > 4 && (
-                          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-edge/45 bg-inset text-[11px] font-medium text-fg-5">
-                            +{item.images.length - 4}
-                          </div>
-                        )}
-                      </div>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-fg-5">
-                      <span>{item.kind}</span>
-                      <span>{item.status}</span>
-                      {item.images?.length ? <span>{item.images.length} image{item.images.length > 1 ? 's' : ''}</span> : null}
-                      <span>{fmtRelative(item.createdAt || item.updatedAt)}</span>
+                    <div
+                      className={cn('truncate text-[13px] font-medium text-fg-3 group-hover:text-fg', completed && 'text-fg-5 line-through decoration-fg-5/50 group-hover:text-fg-5')}
+                      title={itemTitle || item.title}
+                    >
+                      {item.title}
                     </div>
                   </div>
+                  {item.images?.length ? (
+                    <span className="shrink-0 rounded border border-edge/45 bg-inset px-1.5 py-0.5 text-[10px] font-medium text-fg-5" title={`${item.images.length} image${item.images.length > 1 ? 's' : ''}`}>
+                      {item.images.length} img
+                    </span>
+                  ) : null}
+                  <span className="shrink-0 text-[10px] text-fg-5" title={itemTimeSource ? new Date(itemTimeSource).toLocaleString() : undefined}>
+                    {itemTime}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => toggleDone(item)}
+                    className={cn(
+                      'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-5 opacity-80 transition hover:bg-panel-h hover:text-fg group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+                      completed && 'text-emerald-600 hover:text-emerald-600',
+                    )}
+                    aria-label={completed ? t('todo.reopen') : t('todo.markDone')}
+                    title={completed ? t('todo.reopen') : t('todo.markDone')}
+                  >
+                    {completed ? (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M3 12a9 9 0 1 0 3-6.7" />
+                        <path d="M3 4v6h6" />
+                      </svg>
+                    ) : (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="m8.5 12.2 2.2 2.2 4.8-5" />
+                      </svg>
+                    )}
+                  </button>
                   <button
                     type="button"
                     onClick={event => openMenu(event, item.id)}
@@ -7890,7 +8799,8 @@ function TodoCenterModal({
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -7901,14 +8811,6 @@ function TodoCenterModal({
         const top = Math.min(menu.anchor.bottom + 4, window.innerHeight - 96);
         return createPortal((
           <div className="fixed z-[250] min-w-[156px] rounded-md border border-edge bg-panel/95 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.18),0_2px_6px_rgba(0,0,0,0.10)] backdrop-blur-md" style={{ left, top }} onMouseDown={event => event.stopPropagation()} role="menu">
-            <button type="button" role="menuitem" disabled={creating} onClick={() => runMenuAction(() => onCreateChat([menu.itemId]))} className={cn(menuItemClass('primary'), 'disabled:cursor-not-allowed disabled:opacity-45')}>
-              {creating ? <Spinner className="h-3 w-3" /> : (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                  <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
-                </svg>
-              )}
-              {t('todo.createChat')}
-            </button>
             <button type="button" role="menuitem" disabled={!menuItem} onClick={() => menuItem && runMenuAction(() => onEdit(menuItem))} className={cn(menuItemClass(), 'disabled:cursor-not-allowed disabled:opacity-45')}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                 <path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
@@ -9829,13 +10731,10 @@ function CodePreviewPane({
   onOpenPath: (path: string) => void;
   t: (key: string) => string;
 }) {
-  const toast = useStore(s => s.toast);
   const [copied, setCopied] = useState(false);
   const [markdownView, setMarkdownView] = useState<'render' | 'source'>('render');
-  const [htmlError, setHtmlError] = useState<string | null>(null);
-  const [renderingHtml, setRenderingHtml] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const title = preview?.relativePath || (preview?.path ? preview.path.split('/').pop() : '') || t('hub.preview');
+  const title = preview?.path ? displayRelativePreviewPath(preview.path, preview.relativePath, workdir) : t('hub.preview');
   const targetLine = preview?.mode === 'file' && preview.line && preview.line > 0 ? preview.line : null;
   const previewLanguage = useMemo(
     () => inferCodeLanguage(preview?.relativePath || preview?.path),
@@ -9857,8 +10756,6 @@ function CodePreviewPane({
 
   useEffect(() => {
     setCopied(false);
-    setHtmlError(null);
-    setRenderingHtml(false);
     setMarkdownView(isMarkdownFile ? 'render' : 'source');
   }, [isMarkdownFile, preview?.path, preview?.mode]);
 
@@ -9878,22 +10775,6 @@ function CodePreviewPane({
       </div>
     );
   }
-
-  const handleRenderHtml = async () => {
-    if (!isMarkdownFile || !preview.path) return;
-    setRenderingHtml(true);
-    setHtmlError(null);
-    try {
-      const result = await api.renderMarkdownHtml(workdir, preview.path);
-      if (!result.ok) throw new Error(result.error || t('hub.renderHtmlFailed'));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setHtmlError(message);
-      toast(message, false);
-    } finally {
-      setRenderingHtml(false);
-    }
-  };
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
@@ -9925,25 +10806,15 @@ function CodePreviewPane({
           {title}{targetLine ? `:${targetLine}` : ''}
         </div>
         {preview.truncated && <span className="shrink-0 text-[10px] text-warn">{t('hub.truncated')}</span>}
-        {isMarkdownFile && (
-          <button
-            type="button"
-            onClick={() => void handleRenderHtml()}
-            disabled={preview.loading || !!preview.error || renderingHtml}
-            className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 hover:bg-panel-h hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {renderingHtml ? t('hub.renderingHtml') : t('hub.renderToHtml')}
-          </button>
-        )}
         <button
           onClick={() => onOpenPath(preview.path)}
           className="shrink-0 rounded px-1.5 py-1 text-[11px] text-fg-5 hover:bg-panel-h hover:text-fg-2"
         >
           {t('hub.open')}
         </button>
-        {!!preview.content && (
+        {!!preview.path && (
           <button
-            onClick={() => navigator.clipboard.writeText(preview.content || '').then(() => {
+            onClick={() => navigator.clipboard.writeText(preview.path).then(() => {
               setCopied(true);
               setTimeout(() => setCopied(false), 1500);
             }).catch(() => {})}
@@ -9955,9 +10826,6 @@ function CodePreviewPane({
       </div>
 
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto bg-inset/30">
-        {htmlError && (
-          <div className="m-3 rounded border border-err/25 bg-err/[0.06] px-2 py-1.5 text-[12px] text-err">{htmlError}</div>
-        )}
         {preview.loading ? (
           <div className="flex h-full items-center justify-center">
             <Spinner className="h-4 w-4 text-fg-5" />
@@ -10009,6 +10877,26 @@ function normalizeComparablePath(value: string): string {
 
 function pathsEqual(a: string, b: string): boolean {
   return !!a && !!b && normalizeComparablePath(a) === normalizeComparablePath(b);
+}
+
+function isAbsolutePreviewPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, '/');
+  return normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized);
+}
+
+function displayRelativePreviewPath(filePath: string, relativePath: string | undefined, workdir: string): string {
+  const candidate = relativePath || filePath;
+  if (!candidate) return '';
+  if (!isAbsolutePreviewPath(candidate)) return candidate;
+  const normalized = normalizeComparablePath(candidate);
+  const normalizedWorkdir = normalizeComparablePath(workdir);
+  if (normalizedWorkdir && (normalized === normalizedWorkdir || normalized.startsWith(`${normalizedWorkdir}/`))) {
+    return normalized.slice(normalizedWorkdir.length).replace(/^\/+/, '') || normalized.split('/').pop() || normalized;
+  }
+  const obsidianMarker = '/Documents/Obsidian Vault/';
+  const obsidianIndex = normalized.indexOf(obsidianMarker);
+  if (obsidianIndex >= 0) return normalized.slice(obsidianIndex + obsidianMarker.length);
+  return normalized.replace(/^\/+/, '');
 }
 
 /* ── Lazy-loading File Tree ── */
