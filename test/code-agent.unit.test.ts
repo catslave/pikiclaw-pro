@@ -1602,6 +1602,7 @@ const settingsPath = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH || '';
 fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({
   GEMINI_CLI_SYSTEM_SETTINGS_PATH: settingsPath,
+  GEMINI_CLI_TRUST_WORKSPACE: process.env.GEMINI_CLI_TRUST_WORKSPACE || null,
 }));
 if (settingsPath && fs.existsSync(settingsPath)) {
   fs.copyFileSync(settingsPath, ${JSON.stringify(copiedSettingsFile)});
@@ -1629,11 +1630,13 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
     expect(argv).toContain('yolo');
     expect(argv).toContain('--sandbox');
     expect(argv).toContain('false');
+    expect(argv).toContain('--skip-trust');
     expect(argv).not.toContain('--mcp-config');
 
     const env = JSON.parse(fs.readFileSync(envFile, 'utf-8'));
     expect(typeof env.GEMINI_CLI_SYSTEM_SETTINGS_PATH).toBe('string');
     expect(env.GEMINI_CLI_SYSTEM_SETTINGS_PATH).toContain('gemini-system-settings.json');
+    expect(env.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
 
     const settings = JSON.parse(fs.readFileSync(copiedSettingsFile, 'utf-8'));
     expect(settings.fileFiltering).toEqual({
@@ -1667,6 +1670,7 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
     const argv = JSON.parse(fs.readFileSync(argvFile, 'utf-8'));
     expect(argv.filter((arg: string) => arg === '--approval-mode')).toHaveLength(1);
     expect(argv.filter((arg: string) => arg === '--sandbox')).toHaveLength(1);
+    expect(argv.filter((arg: string) => arg === '--skip-trust')).toHaveLength(1);
     expect(argv).toContain('default');
     expect(argv).toContain('true');
   });
@@ -1694,6 +1698,7 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
 
   it('parses Gemini tool_use and tool_result events into readable activity previews', async () => {
     const activities: string[] = [];
+    const previewMetas: Array<{ lastEvent?: string | null }> = [];
     writeFakeScript('gemini', [
       { type: 'init', session_id: 'gemini-tools', model: 'gemini-2.5-pro' },
       { type: 'tool_use', tool_name: 'list_directory', tool_id: 'tool-1', parameters: { dir_path: '.' } },
@@ -1703,16 +1708,40 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
     ]);
 
     const result = await doGeminiStream(baseOpts('gemini', {
+      onText: (_text, _thinking, activity, meta) => {
+        if (activity) activities.push(activity);
+        if (meta) previewMetas.push(meta);
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe('Done');
+    expect(result.activity).toContain('Thinking...');
+    expect(result.activity).toContain('List files: .');
+    expect(result.activity).toContain('List files: . -> Listed 38 item(s). (2 ignored)');
+    expect(activities.some(activity => activity.includes('Thinking...'))).toBe(true);
+    expect(activities.some(activity => activity.includes('List files: . -> Listed 38 item(s). (2 ignored)'))).toBe(true);
+    expect(previewMetas.some(meta => meta.lastEvent === 'List files: . -> Listed 38 item(s). (2 ignored)')).toBe(true);
+  });
+
+  it('surfaces Gemini init thinking progress before the first tool event', async () => {
+    const activities: string[] = [];
+    writeFakeScript('gemini', [
+      { type: 'init', session_id: 'gemini-thinking', model: 'gemini-2.5-pro' },
+      { type: 'message', role: 'assistant', delta: true, content: 'Hello' },
+      { type: 'result', session_id: 'gemini-thinking', status: 'success' },
+    ]);
+
+    const result = await doGeminiStream(baseOpts('gemini', {
       onText: (_text, _thinking, activity) => {
         if (activity) activities.push(activity);
       },
     }));
 
     expect(result.ok).toBe(true);
-    expect(result.message).toBe('Done');
-    expect(result.activity).toContain('List files: .');
-    expect(result.activity).toContain('List files: . -> Listed 38 item(s). (2 ignored)');
-    expect(activities.some(activity => activity.includes('List files: . -> Listed 38 item(s). (2 ignored)'))).toBe(true);
+    expect(result.activity).toContain('Thinking...');
+    expect(activities[0]).toBe('Starting Gemini...');
+    expect(activities.some(activity => activity.includes('Thinking...'))).toBe(true);
   });
 
   it('normalizes structured Gemini result errors without crashing', async () => {
@@ -1732,6 +1761,22 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
     expect(result.message).toBe('Operation cancelled.');
     expect(result.error).toBe('Operation cancelled.');
     expect(result.incomplete).toBe(true);
+  });
+
+  it('maps unknown Gemini API errors to clearer quota guidance when stderr mentions capacity', async () => {
+    const stderrLine = 'Attempt 8 failed: You have exhausted your capacity on this model.. Retrying after 30050ms...';
+    const script = `#!/bin/sh
+printf '%s\\n' '${stderrLine.replace(/'/g, "'\\''")}' >&2
+printf '%s\\n' '${JSON.stringify({ type: 'init', session_id: 'gemini-quota', model: 'gemini-3.1-pro-preview' })}'
+printf '%s\\n' '${JSON.stringify({ type: 'result', session_id: 'gemini-quota', status: 'error', errors: ['API Error: An unknown error occurred.'] })}'
+`;
+    fs.writeFileSync(path.join(fakeBin, 'gemini'), script, { mode: 0o755 });
+
+    const result = await doGeminiStream(baseOpts('gemini'));
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('capacity exhausted');
+    expect(result.activity).toContain('Retrying (attempt 8)');
   });
 });
 

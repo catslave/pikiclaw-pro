@@ -54,6 +54,8 @@ export type EffectiveLiveStreamInput = {
   streamTaskId: string | null | undefined;
   displayModel: string | null;
   displayEffort: string | null;
+  /** Session record says running even when the stream snapshot hasn't arrived yet. */
+  sessionRunning?: boolean;
 };
 
 export type EffectiveLiveStreamShell = {
@@ -95,14 +97,38 @@ export function resolveEffectiveLiveStream<T extends EffectiveLiveStreamInput['l
   // with an empty "waiting" shell.
   if (live && input.pendingTaskId && live.taskId === input.pendingTaskId) return live as T;
   if (live && liveMatchesPending && liveMatchesTask) return live as T;
-  if (!input.streamSnapshotActive) return null;
+  if (!input.streamSnapshotActive) {
+    if (input.sessionRunning) {
+      return {
+        taskId: input.streamTaskId ?? null,
+        prompt: pendingTrimmed || livePromptTrimmed || null,
+        phase: 'streaming' as const,
+        text: '',
+        thinking: '',
+        activity: 'Working...',
+        activitySummary: null,
+        activityEvents: null,
+        plan: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: null,
+        model: input.displayModel,
+        effort: input.displayEffort,
+        previewMeta: { lastEvent: 'Working...' },
+        subAgents: null,
+        generatingImages: 0,
+        error: null,
+      };
+    }
+    return null;
+  }
   return {
     taskId: input.streamTaskId ?? null,
     prompt: pendingTrimmed || livePromptTrimmed || null,
     phase: 'streaming' as const,
     text: '',
     thinking: '',
-    activity: '',
+    activity: input.sessionRunning ? 'Working...' : '',
     activitySummary: null,
     activityEvents: null,
     plan: null,
@@ -182,7 +208,9 @@ export function isLiveStreamActive(input: {
   pendingPrompt: string | null | undefined;
   pendingTaskId: string | null | undefined;
   pendingImageCount: number;
+  sessionRunning?: boolean;
 }): boolean {
+  if (input.sessionRunning) return true;
   if (input.streaming || input.streamPhase === 'streaming' || input.streamPhase === 'queued') return true;
   if (input.liveStreamPhase === 'streaming') return true;
   const hasPendingContent = !!input.pendingPrompt?.trim() || input.pendingImageCount > 0;

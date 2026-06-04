@@ -219,6 +219,11 @@ export interface StreamOpts {
   cursorModel?: string;
   cursorSystemPrompt?: string;
   cursorExtraArgs?: string[];
+  // agy (Antigravity CLI)
+  agyModel?: string;
+  agySystemPrompt?: string;
+  agySandbox?: boolean;
+  agyExtraArgs?: string[];
   // hermes — `hermes acp` ignores -m / --provider on the CLI, so the model
   // is bound per-session via the ACP `session/set_model` request after
   // `session/new`. The expected format is the ACP wire encoding
@@ -477,6 +482,8 @@ export interface ManagedSessionRecord {
   lastAnswer: string | null;
   lastMessageText: string | null;
   lastThinking: string | null;
+  /** Latest turn's activity narrative (tool/file/command summaries). */
+  lastActivity: string | null;
   lastPlan: StreamPreviewPlan | null;
   outputs?: SessionOutput[];
   migratedFrom: SessionLineageRef | null;

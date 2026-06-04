@@ -18,3 +18,5 @@ replied_issues.txt
 .pikiclaw/*
 !.pikiclaw/skills/
 !.pikiclaw/skills/**
+desktop/
+assets/icons/

@@ -11,14 +11,18 @@ import { useDashboardEvent, useDashboardReconnect } from '../../ws';
 import {
   applyLiveSessionState,
   cn,
+  dashboardColumnForSession,
   fmtTime,
   fmtRelative,
   getAgentMeta,
+  isUnreadCompletedSession,
   normalizeLiveSessionState,
+  shouldIncludeInboxDashboardItem,
   shortenModel,
   sessionDisplayState,
   sessionListContextText,
   sessionListDisplayText,
+  type DashboardInboxColumnKey,
   type LiveSessionState,
 } from '../../utils';
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
@@ -1164,7 +1168,7 @@ type OpenAgentTestChatState = {
   newSessionNonce?: number;
 };
 type ChatLayoutMode = 'single' | 'multi-2' | 'multi-3';
-type DashboardColumnKey = 'running' | 'review' | 'incomplete' | 'done';
+type DashboardColumnKey = DashboardInboxColumnKey;
 type DashboardSessionItem = {
   key: string;
   session: SessionInfo;
@@ -1311,25 +1315,6 @@ function useElapsedNow(enabled: boolean): number {
   return now;
 }
 
-function dashboardColumnForSession(
-  session: SessionInfo,
-  live: LiveSessionState | null,
-  recentCutoff: number,
-): DashboardColumnKey | null {
-  if (live?.phase === 'queued' || live?.phase === 'streaming') return null;
-
-  const displayState = sessionDisplayState(session);
-  if (displayState === 'running') return null;
-  if (session.userStatus === 'done') return null;
-  if (session.userStatus === 'parked') return null;
-  if (displayState === 'incomplete') return 'review';
-
-  const recentlyFinished = (statusTimestampMs(session) ?? 0) >= recentCutoff;
-  if (session.userStatus === 'review') return 'review';
-  if (recentlyFinished && isUnreadCompletedSession(session)) return 'review';
-  return null;
-}
-
 type SessionAttentionKind = 'running' | 'unread' | 'warn';
 
 function sessionAttentionVariant(session: SessionInfo): SessionAttentionKind | null {
@@ -1375,19 +1360,6 @@ function SessionAttentionDot({
       )}
     />
   );
-}
-
-function isUnreadCompletedSession(session: SessionInfo): boolean {
-  const hasReadableContent = !!(
-    session.lastQuestion
-    || session.lastAnswer
-    || session.lastMessageText
-    || (typeof session.numTurns === 'number' && session.numTurns > 0)
-  );
-  return sessionDisplayState(session) === 'completed'
-    && hasReadableContent
-    && session.userStatus !== 'done'
-    && session.userStatus !== 'parked';
 }
 
 function shouldMarkSessionReadOnOpen(session: SessionInfo): boolean {
@@ -2200,6 +2172,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [inboxAttentionPulse, setInboxAttentionPulse] = useState(false);
   const [chatWorkspaceOverviewOpen, setChatWorkspaceOverviewOpen] = useState(true);
   const previousInboxAlertCountRef = useRef(-1);
+  const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
     setInboxOpen(true);
   }, []);
@@ -4806,6 +4779,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [appState, hydrateSession, liveSessionStates, loadingMap, openSessions, sessionsMap, showNewSession, workspaces]);
   const dashboardItems = useMemo<DashboardSessionItem[]>(() => {
     const recentCutoff = Date.now() - STATUS_SUMMARY_RECENT_MS;
+    const openExactKeys = new Set(openSessions.map(slot => `${slot.workdir}:${slot.agent}:${slot.sessionId}`));
     const items: DashboardSessionItem[] = [];
     const seen = new Set<string>();
 
@@ -4823,6 +4797,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
         const column = dashboardColumnForSession(session, live, recentCutoff);
         if (!column) continue;
+        const openKey = `${ws.path}:${session.agent}:${session.sessionId}`;
+        if (!shouldIncludeInboxDashboardItem(column, { mode, openInWorkspace: openExactKeys.has(openKey) })) continue;
         items.push({
           key: mapKey,
           session,
@@ -4835,21 +4811,40 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
 
     return items.sort((a, b) => (statusTimestampMs(b.session) || 0) - (statusTimestampMs(a.session) || 0));
-  }, [checkedInboxItemKeys, hydrateSession, liveSessionStates, sessionsMap, workspaces]);
+  }, [checkedInboxItemKeys, hydrateSession, liveSessionStates, mode, openSessions, sessionsMap, workspaces]);
 
 	  const inboxAlertCount = dashboardItems.length;
+  const runningInboxKeys = useMemo(
+    () => new Set(dashboardItems.filter(item => item.column === 'running').map(item => item.key)),
+    [dashboardItems],
+  );
 
   useEffect(() => {
-    const previous = previousInboxAlertCountRef.current;
+    const previousCount = previousInboxAlertCountRef.current;
+    const previousRunning = previousRunningInboxKeysRef.current;
     previousInboxAlertCountRef.current = inboxAlertCount;
-    if (inboxOpen || inboxAlertCount <= 0 || (previous >= 0 && inboxAlertCount <= previous)) {
+    previousRunningInboxKeysRef.current = runningInboxKeys;
+
+    if (inboxOpen) {
       if (inboxAlertCount === 0) setInboxAttentionPulse(false);
       return undefined;
     }
+
+    const countIncreased = previousCount >= 0 && inboxAlertCount > previousCount;
+    const runningCompleted = [...previousRunning].some(key => (
+      !runningInboxKeys.has(key)
+      && dashboardItems.some(item => item.key === key && item.column === 'review')
+    ));
+
+    if (inboxAlertCount <= 0 || (!countIncreased && !runningCompleted)) {
+      if (inboxAlertCount === 0) setInboxAttentionPulse(false);
+      return undefined;
+    }
+
     setInboxAttentionPulse(true);
     const timer = window.setTimeout(() => setInboxAttentionPulse(false), 4200);
     return () => window.clearTimeout(timer);
-  }, [inboxAlertCount, inboxOpen]);
+  }, [dashboardItems, inboxAlertCount, inboxOpen, runningInboxKeys]);
 
   const revealWorkspaceSidebar = useCallback(() => {
     setWorkspaceSidebarCollapsed(false);
@@ -5076,8 +5071,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	    const agent = item.session.agent || '';
 	    if (!agent || !item.session.sessionId) return;
 	    warmSession(item.session, item.workdir);
-	    markSessionReadOnOpen(item.session, item.workdir);
-	    void markDashboardItemChecked(item);
+	    const isRunning = item.column === 'running' || sessionDisplayState(item.session) === 'running';
+	    if (!isRunning) {
+	      markSessionReadOnOpen(item.session, item.workdir);
+	      void markDashboardItemChecked(item);
+	    }
 	    const slot: SessionSlot = {
 	      agent,
 	      sessionId: item.session.sessionId,
@@ -5938,31 +5936,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   : <ThreeUpLayoutIcon className="h-3.5 w-3.5 shrink-0" />}
               </Button>
             )}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setTodoModalOpen(true)}
-              title={t('todo.workspaceTitle')}
-              aria-label={t('todo.workspaceTitle')}
-              className="relative h-8 w-8 shrink-0"
-            >
-              <TodoGlyph className="h-3.5 w-3.5" />
-              {todoItems.some(item => item.status === 'open') && (
-                <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-ok shadow-[0_0_0_2px_var(--th-panel)]" />
-              )}
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={openCreateQuickTodo}
-              title={t('todo.quickAction')}
-              aria-label={t('todo.quickAction')}
-              className="h-8 w-8 shrink-0"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-            </Button>
           </div>
         </div>
 
@@ -8870,6 +8843,7 @@ function InboxDrawer({
     return grouped;
   }, [items]);
 	  const orderedColumns: Array<{ key: DashboardColumnKey; hintKey: string }> = [
+	    { key: 'running', hintKey: 'inbox.runningHint' },
 	    { key: 'review', hintKey: 'inbox.unreadHint' },
   ];
   const alertCount = items.length;

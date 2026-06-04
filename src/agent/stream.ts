@@ -174,6 +174,13 @@ export function listAgents(options: AgentDetectOptions = {}): AgentListResult {
 // Shared CLI spawn framework (used by driver-claude.ts, driver-gemini.ts)
 // ---------------------------------------------------------------------------
 
+function formatStreamElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return `${minutes}m ${String(rem).padStart(2, '0')}s`;
+}
+
 export async function run(
   cmd: string[],
   opts: StreamOpts,
@@ -206,6 +213,8 @@ export async function run(
     codexCumulative: null as CodexCumulativeUsage | null,
     stopReason: null as string | null, activity: '',
     recentActivity: [] as string[],
+    lastEvent: null as string | null,
+    diagnostics: [] as string[],
     claudeToolsById: new Map<string, { name: string; summary: string }>(),
     seenClaudeToolIds: new Set<string>(),
     geminiToolsById: new Map<string, { name: string; summary: string }>(),
@@ -225,6 +234,21 @@ export async function run(
   agentLog(`[spawn] timeout: ${opts.timeout}s session: ${opts.sessionId || '(new)'}`);
   agentLog(`[spawn] prompt (stdin): "${opts.prompt.slice(0, 300)}${opts.prompt.length > 300 ? '…' : ''}"`);
 
+  const touchStreamProgress = () => {
+    const elapsedSec = Math.max(0, Math.floor((Date.now() - start) / 1000));
+    const elapsed = formatStreamElapsed(elapsedSec);
+    const lines = [...s.recentActivity];
+    const stripElapsed = (value: string) => value.replace(/\s*\(\d+m?\s*\d*s\)$/i, '').trim();
+    const last = stripElapsed(lines[lines.length - 1] || s.activity.split('\n').slice(-1)[0] || 'Working...') || 'Working...';
+    const next = `${last} (${elapsed})`;
+    if (lines.length) lines[lines.length - 1] = next;
+    else lines.push(next);
+    s.recentActivity = lines;
+    s.activity = lines.join('\n');
+    s.lastEvent = next;
+  };
+  let progressTimer: ReturnType<typeof setInterval> | null = null;
+
   const spawnEnv = processEnvWithUserBins({ ...process.env, ...(opts.extraEnv || {}) });
   delete spawnEnv.CLAUDECODE;
   const proc = spawn(shellCmd, {
@@ -235,6 +259,11 @@ export async function run(
     detached: process.platform !== 'win32',
   });
   agentLog(`[spawn] pid=${proc.pid}`);
+  progressTimer = setInterval(() => {
+    if (interrupted || timedOut || proc.killed) return;
+    touchStreamProgress();
+    try { opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), null); } catch {}
+  }, 5000);
   const abortStream = () => {
     if (interrupted || proc.killed) return;
     interrupted = true;
@@ -304,8 +333,8 @@ export async function run(
   }, opts.timeout * 1000 + AGENT_STREAM_HARD_KILL_GRACE_MS);
 
   const [procOk, code] = await new Promise<[boolean, number | null]>(resolve => {
-    proc.on('close', code => { clearTimeout(hardTimer); agentLog(`[exit] code=${code} lines_parsed=${lineCount}`); resolve([code === 0, code]); });
-    proc.on('error', e => { clearTimeout(hardTimer); agentError(`[error] ${e.message}`); stderr += e.message; resolve([false, -1]); });
+    proc.on('close', code => { clearTimeout(hardTimer); if (progressTimer) clearInterval(progressTimer); agentLog(`[exit] code=${code} lines_parsed=${lineCount}`); resolve([code === 0, code]); });
+    proc.on('error', e => { clearTimeout(hardTimer); if (progressTimer) clearInterval(progressTimer); agentError(`[error] ${e.message}`); stderr += e.message; resolve([false, -1]); });
   });
   opts.abortSignal?.removeEventListener('abort', abortStream);
 
@@ -423,6 +452,7 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   session.record.lastAnswer = shortValue(cleanResult.message, 500);
   session.record.lastMessageText = shortValue(cleanResult.message, 500) || shortValue(displayPrompt, 500);
   session.record.lastThinking = trimSessionText(cleanResult.thinking);
+  session.record.lastActivity = trimSessionText(cleanResult.activity);
   session.record.lastPlan = normalizeStreamPreviewPlan(cleanResult.plan);
   applySessionRunResult(session.record, cleanResult);
   saveSessionRecord(workdir, session.record);
@@ -500,6 +530,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
         else if (prepared.agent === 'codex') prepared.codexModel = injection.modelOverride;
         else if (prepared.agent === 'copilot') prepared.copilotModel = injection.modelOverride;
         else if (prepared.agent === 'cursor') prepared.cursorModel = injection.modelOverride;
+        else if (prepared.agent === 'agy') prepared.agyModel = injection.modelOverride;
         else if (prepared.agent === 'gemini') prepared.geminiModel = injection.modelOverride;
         else if (prepared.agent === 'hermes') prepared.hermesModel = injection.modelOverride;
         prepared.model = injection.modelOverride;
@@ -580,6 +611,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
     session.record.lastAnswer = shortValue(failedResult.message, 500);
     session.record.lastMessageText = shortValue(failedResult.message, 500) || shortValue(failureDisplayPrompt, 500);
     session.record.lastThinking = null;
+    session.record.lastActivity = null;
     session.record.lastPlan = null;
     applySessionRunResult(session.record, failedResult);
     saveSessionRecord(opts.workdir, session.record);

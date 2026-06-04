@@ -166,6 +166,24 @@ describe('session stream UI helpers', () => {
         displayEffort: null,
       })).toBeNull();
     });
+
+    it('synthesizes a running shell when the session record is still running', () => {
+      expect(resolveEffectiveLiveStream({
+        liveStream: null,
+        pendingPrompt: null,
+        pendingTaskId: null,
+        streamSnapshotActive: false,
+        streamTaskId: 'task-1',
+        displayModel: 'gemini-3.1-pro-preview',
+        displayEffort: 'high',
+        sessionRunning: true,
+      })).toMatchObject({
+        taskId: 'task-1',
+        phase: 'streaming',
+        activity: 'Working...',
+        previewMeta: { lastEvent: 'Working...' },
+      });
+    });
   });
 
   describe('shouldSkipEmptyStreamingHandoff', () => {
@@ -264,6 +282,18 @@ describe('session stream UI helpers', () => {
         pendingPrompt: null,
         pendingTaskId: null,
         pendingImageCount: 0,
+      })).toBe(true);
+    });
+
+    it('treats session record running state as active even without a local snapshot', () => {
+      expect(isLiveStreamActive({
+        streaming: false,
+        streamPhase: null,
+        liveStreamPhase: null,
+        pendingPrompt: null,
+        pendingTaskId: null,
+        pendingImageCount: 0,
+        sessionRunning: true,
       })).toBe(true);
     });
   });

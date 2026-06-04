@@ -1100,6 +1100,7 @@ app.post('/api/runtime-agent', async (c) => {
       if (targetAgent === 'codex') nextConfig.codexModel = model;
       if (targetAgent === 'copilot') nextConfig.copilotModel = model;
       if (targetAgent === 'cursor') nextConfig.cursorModel = model;
+      if (targetAgent === 'agy') nextConfig.agyModel = model;
       if (targetAgent === 'gemini') nextConfig.geminiModel = model;
       if (targetAgent === 'openclaw') nextConfig.openclawModel = model;
       if (targetAgent === 'hermes') {
@@ -1117,6 +1118,7 @@ app.post('/api/runtime-agent', async (c) => {
       if (targetAgent === 'codex') nextConfig.codexReasoningEffort = effort;
       if (targetAgent === 'copilot') nextConfig.copilotReasoningEffort = effort;
       if (targetAgent === 'cursor') nextConfig.cursorReasoningEffort = effort;
+      if (targetAgent === 'agy') nextConfig.agyReasoningEffort = effort;
       if (targetAgent === 'gemini') nextConfig.geminiReasoningEffort = effort;
       if (targetAgent === 'hermes') nextConfig.hermesReasoningEffort = effort;
       if (targetAgent === 'openclaw') nextConfig.openclawReasoningEffort = effort;

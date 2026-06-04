@@ -9,6 +9,7 @@ const MODEL_FIELD_BY_AGENT: Record<Agent, keyof UserConfig> = {
   codex: 'codexModel',
   copilot: 'copilotModel',
   cursor: 'cursorModel',
+  agy: 'agyModel',
   gemini: 'geminiModel',
   // Hermes' default model lives on the Profile binding, not on UserConfig.
   // No top-level claudeModel-style field — use a harmless config field as

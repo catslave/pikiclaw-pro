@@ -370,7 +370,7 @@ async function waitForCrossCheckResults(
   return results.sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onStopAll, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   compact?: boolean;
@@ -403,6 +403,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   pendingQueuedSends?: Array<{ localId?: string; taskId: string | null; prompt: string; imageUrls?: string[] }>;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
+  onStopAll?: () => void | Promise<void>;
   onReorderQueued?: (taskIds: string[]) => void | Promise<void>;
   onHeightChange?: (height: number) => void;
   editDraft?: string | null;
@@ -412,6 +413,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
 }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [stoppingAll, setStoppingAll] = useState(false);
   const [uploadingAttachmentCount, setUploadingAttachmentCount] = useState(0);
   const [localTaskId, setLocalTaskId] = useState<string | null>(null);
   // Per-task in-flight tracking. A global boolean would freeze every row's
@@ -1161,6 +1163,18 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   const effectiveQueuedId = effectiveQueuedIds[effectiveQueuedIds.length - 1] || null;
   const hasQueuedTask = effectiveQueuedIds.length > 0;
   const showTaskBar = hasQueuedTask;
+  const sessionRunning = !!(session.running || session.runState === 'running');
+  const showStopAll = !!onStopAll && (sessionRunning || streamPhase === 'streaming' || streamPhase === 'queued' || sending);
+  const handleStopAll = useCallback(async () => {
+    if (stoppingAll || !onStopAll) return;
+    setStoppingAll(true);
+    try {
+      await onStopAll();
+    } finally {
+      setStoppingAll(false);
+      setSending(false);
+    }
+  }, [onStopAll, stoppingAll]);
 
   const toggleQueuedExpanded = useCallback((taskId: string) => {
     setExpandedQueuedTaskIds(prev => {
@@ -2220,6 +2234,22 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
             <div className="min-w-0 flex-1" />
 
             <ContextUsageChip chip={contextChip} />
+
+            {showStopAll && (
+              <button
+                type="button"
+                onClick={() => void handleStopAll()}
+                disabled={stoppingAll}
+                title={t('hub.stopHint')}
+                aria-label={t('hub.stop')}
+                className="inline-flex h-[30px] shrink-0 items-center justify-center gap-1 rounded-lg border border-err/35 bg-err/[0.08] px-2.5 text-[11px] font-semibold leading-none text-err/90 transition-colors hover:border-err/55 hover:bg-err/[0.14] hover:text-err disabled:pointer-events-none disabled:opacity-45"
+              >
+                {stoppingAll
+                  ? <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-err/30 border-t-err" />
+                  : <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" /></svg>}
+                <span className="whitespace-nowrap">{t('hub.stop')}</span>
+              </button>
+            )}
 
             {/* Send button */}
             <button

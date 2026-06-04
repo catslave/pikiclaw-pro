@@ -1,0 +1,13 @@
+{
+  "apps": [
+    {
+      "name": "Pikiclaw Pro",
+      "slug": "pikiclaw-pro",
+      "port": 3939,
+      "start_command": "env PIKICLAW_OPEN_BROWSER=0 npx tsx src/cli/main.ts --no-daemon --dashboard-port $PORT",
+      "bundle_id": "com.user.pikiclaw-pro",
+      "version": "0.4.0",
+      "polyfill_path": ""
+    }
+  ]
+}

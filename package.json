@@ -34,7 +34,12 @@
     "build": "npm run build:dashboard && tsc",
     "prepack": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "desktop:icons": "APP_NAME='Pikiclaw Pro' APP_SLUG='pikiclaw-pro' ./scripts/desktop-icons.sh",
+    "desktop:build": "./scripts/desktop-build.sh",
+    "desktop:install": "./scripts/desktop-install.sh",
+    "desktop:quit": "./scripts/desktop-quit.sh",
+    "desktop:doctor": "./scripts/desktop-doctor.sh"
   },
   "engines": {
     "node": ">=20.0.0"

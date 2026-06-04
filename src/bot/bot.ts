@@ -1056,6 +1056,12 @@ export class Bot {
   }
 
   private classifyStreamActivityLine(line: string): { bucket: keyof StreamActivityEvents; item: { kind: StreamActivityKind; label: string; action?: string | null; target?: string | null } } {
+    if (/^thinking(?:\.\.\.)?$/i.test(line) || /^starting gemini(?:\.\.\.)?$/i.test(line)) {
+      return { bucket: 'tools', item: { kind: 'tool', label: line, action: 'think', target: null } };
+    }
+    if (/^retrying after/i.test(line)) {
+      return { bucket: 'tools', item: { kind: 'tool', label: line, action: 'retry', target: null } };
+    }
     if (/^(Bash|Shell|Command|Run shell)\b/i.test(line)) {
       const command = line.replace(/^(?:Bash|Shell|Command|Run shell)\s*:?\s*/i, '');
       return { bucket: 'commands', item: { kind: 'command', label: this.humanizeStreamCommand(command), action: 'run', target: command } };
@@ -1235,6 +1241,12 @@ export class Bot {
         model: resolveAgentModel(config, 'cursor'),
         reasoningEffort: resolveAgentEffort(config, 'cursor') || 'medium',
         extraArgs: shellSplit(process.env.CURSOR_EXTRA_ARGS || ''),
+      },
+      agy: {
+        model: resolveAgentModel(config, 'agy'),
+        reasoningEffort: resolveAgentEffort(config, 'agy') || 'high',
+        sandbox: envBool('AGY_SANDBOX', false),
+        extraArgs: shellSplit(process.env.AGY_EXTRA_ARGS || ''),
       },
       gemini: {
         model: resolveAgentModel(config, 'gemini'),
@@ -2967,6 +2979,7 @@ export class Bot {
         else if (agent === 'codex') patch.codexModel = value;
         else if (agent === 'copilot') patch.copilotModel = value;
         else if (agent === 'cursor') patch.cursorModel = value;
+        else if (agent === 'agy') patch.agyModel = value;
         else if (agent === 'gemini') patch.geminiModel = value;
         else if (agent === 'hermes') patch.hermesModel = value;
         else if (agent === 'openclaw') patch.openclawModel = value;
@@ -2975,6 +2988,7 @@ export class Bot {
         else if (agent === 'codex') patch.codexReasoningEffort = value;
         else if (agent === 'copilot') patch.copilotReasoningEffort = value;
         else if (agent === 'cursor') patch.cursorReasoningEffort = value;
+        else if (agent === 'agy') patch.agyReasoningEffort = value;
         else if (agent === 'gemini') patch.geminiReasoningEffort = value;
         else if (agent === 'hermes') patch.hermesReasoningEffort = value;
         else if (agent === 'openclaw') patch.openclawReasoningEffort = value;
@@ -3140,7 +3154,7 @@ export class Bot {
     if (opts.initial) this.defaultAgent = nextDefaultAgent;
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
 
-    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'] as Agent[]) {
+    for (const agent of ['claude', 'codex', 'copilot', 'cursor', 'agy', 'gemini', 'hermes'] as Agent[]) {
       const nextModel = resolveAgentModel(config, agent);
       if (nextModel && this.modelForAgent(agent) !== nextModel) {
         if (opts.initial) this.agentConfigs[agent].model = nextModel;
@@ -3304,6 +3318,10 @@ export class Bot {
       cursorModel: cs.agent === 'cursor' ? resolvedModel : (this.agentConfigs.cursor?.model || ''),
       cursorSystemPrompt: effectiveSystemPrompt || undefined,
       cursorExtraArgs: (this.agentConfigs.cursor?.extraArgs || []).length ? this.agentConfigs.cursor.extraArgs : undefined,
+      // agy-specific
+      agySystemPrompt: effectiveSystemPrompt || undefined,
+      agySandbox: this.agentConfigs.agy?.sandbox ?? false,
+      agyExtraArgs: (this.agentConfigs.agy?.extraArgs || []).length ? this.agentConfigs.agy.extraArgs : undefined,
       // hermes-specific. Wire the chat's current model so /models switching in
       // IM takes effect even without a BYOK Profile (the BYOK injector in
       // stream.ts overrides this with the ACP-encoded `provider:model` when

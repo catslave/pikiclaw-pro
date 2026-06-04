@@ -1873,7 +1873,7 @@ function CreateTaskSpaceModal({
           <label className="space-y-1">
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Default agent</div>
             <select value={draft.defaultAgent} onChange={event => setDraft(prev => ({ ...prev, defaultAgent: event.target.value }))} className="h-9 w-full rounded-md border border-edge bg-inset px-2.5 text-[12px] text-fg outline-none focus:border-primary/40">
-              {['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
+              {['codex', 'claude', 'copilot', 'cursor', 'agy', 'gemini', 'hermes'].map(agent => <option key={agent} value={agent}>{agent}</option>)}
             </select>
           </label>
           <label className="space-y-1">

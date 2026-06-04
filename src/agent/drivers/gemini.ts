@@ -53,6 +53,20 @@ export function buildGeminiPromptText(prompt: string, attachments: string[]): st
   return prompt ? `${refs}\n\n${prompt}` : refs;
 }
 
+function improveGeminiFailureMessage(message: string, stderr: string): string {
+  const trimmed = message.trim();
+  const stderrText = stderr.trim();
+  if (/^API Error:\s*An unknown error occurred\.?$/i.test(trimmed)) {
+    if (/exhausted your capacity|RetryableQuota|rate limit|MODEL_CAPACITY/i.test(stderrText)) {
+      return 'Gemini model capacity exhausted (quota or rate limit). Try again later or switch to another model.';
+    }
+    return 'Gemini API returned an unknown error. Check auth, quota, and model availability.';
+  }
+  const apiMatch = trimmed.match(/^API Error:\s*(.+)$/i);
+  if (apiMatch?.[1]?.trim()) return apiMatch[1].trim();
+  return trimmed;
+}
+
 function geminiCmd(o: StreamOpts): string[] {
   const approvalMode = o.geminiApprovalMode || 'yolo';
   const sandbox = typeof o.geminiSandbox === 'boolean' ? o.geminiSandbox : false;
@@ -64,6 +78,11 @@ function geminiCmd(o: StreamOpts): string[] {
   }
   if (!hasGeminiFlag(o.geminiExtraArgs, ['--sandbox', '-s'])) {
     args.push('--sandbox', String(sandbox));
+  }
+  // gemini-cli blocks non-trusted directories until the user confirms in TTY.
+  // pikiclaw drives arbitrary workspaces headlessly, so trust per session.
+  if (!hasGeminiFlag(o.geminiExtraArgs, ['--skip-trust'])) {
+    args.push('--skip-trust');
   }
   if (o.geminiExtraArgs?.length) args.push(...o.geminiExtraArgs);
   // gemini's -p requires the prompt as its value (not via stdin)
@@ -191,6 +210,18 @@ function geminiToolResultSummary(tool: { name: string; summary: string } | undef
   return detail ? `${summary} -> ${detail}` : `${summary} done`;
 }
 
+function markGeminiProgress(s: {
+  lastEvent?: string | null;
+  diagnostics?: string[];
+  recentActivity: string[];
+  activity: string;
+}, label: string): void {
+  s.lastEvent = label;
+  if (!s.diagnostics) s.diagnostics = [];
+  pushRecentActivity(s.recentActivity, label);
+  s.activity = s.recentActivity.join('\n');
+}
+
 function geminiParse(ev: any, s: any) {
   const t = ev.type || '';
 
@@ -204,8 +235,7 @@ function geminiParse(ev: any, s: any) {
     // surface — easily 10–30s on Gemini 3 Pro with HIGH thinking, longer when
     // 429 backoffs kick in. Plant a sentinel so the IM/dashboard activity area
     // shows progress instead of staying blank.
-    pushRecentActivity(s.recentActivity, 'Thinking...');
-    s.activity = s.recentActivity.join('\n');
+    markGeminiProgress(s, 'Thinking...');
   }
 
   // message delta: {"type":"message","role":"assistant","content":"...","delta":true}
@@ -219,15 +249,13 @@ function geminiParse(ev: any, s: any) {
     const summary = geminiToolSummary(name, ev.parameters || ev.args || ev.input || {});
     const toolId = String(ev.tool_id || ev.id || '').trim();
     if (toolId) s.geminiToolsById.set(toolId, { name, summary });
-    pushRecentActivity(s.recentActivity, summary);
-    s.activity = s.recentActivity.join('\n');
+    markGeminiProgress(s, summary);
   }
 
   if (t === 'tool_result') {
     const toolId = String(ev.tool_id || ev.id || '').trim();
     const tool = toolId ? s.geminiToolsById.get(toolId) : undefined;
-    pushRecentActivity(s.recentActivity, geminiToolResultSummary(tool, ev));
-    s.activity = s.recentActivity.join('\n');
+    markGeminiProgress(s, geminiToolResultSummary(tool, ev));
   }
 
   if (t === 'error') {
@@ -235,8 +263,7 @@ function geminiParse(ev: any, s: any) {
     if (ev.severity === 'error') {
       s.errors = [...(s.errors || []), message];
     } else {
-      pushRecentActivity(s.recentActivity, message);
-      s.activity = s.recentActivity.join('\n');
+      markGeminiProgress(s, message);
     }
   }
 
@@ -244,11 +271,12 @@ function geminiParse(ev: any, s: any) {
   if (t === 'result') {
     emitSessionIdUpdate(s, ev.session_id);
     if (ev.status === 'error' || ev.status === 'failure') {
-      const message = normalizeErrorMessage(ev.error)
+      const raw = normalizeErrorMessage(ev.error)
         || normalizeErrorMessage(ev.errors)
         || normalizeErrorMessage(ev.message)
         || `Gemini returned status: ${ev.status}`;
-      s.errors = [message];
+      const stderr = typeof s.geminiStderr === 'string' ? s.geminiStderr : '';
+      s.errors = [improveGeminiFailureMessage(raw, stderr)];
     }
     s.stopReason = ev.status === 'success' ? 'end_turn' : ev.status;
     const u = ev.stats;
@@ -269,17 +297,36 @@ function geminiParse(ev: any, s: any) {
 // without emitting any stream-json event — only stderr gets a line like
 // `Attempt 1 failed with status 429. Retrying with backoff...`. Surface those
 // lines as activity so users don't see a frozen UI during MODEL_CAPACITY_EXHAUSTED.
-const GEMINI_RETRY_RE = /^Attempt\s+(\d+)\s+failed\s+with\s+status\s+(\d+)/i;
+const GEMINI_RETRY_STATUS_RE = /^Attempt\s+(\d+)\s+failed\s+with\s+status\s+(\d+)/i;
+const GEMINI_RETRY_REASON_RE = /^Attempt\s+(\d+)\s+failed:\s*(.+?)(?:\.\s*Retrying after|\.\.\.\s*Retrying after|\.$)/i;
+const GEMINI_API_ERROR_RE = /Error when talking to Gemini API/i;
+
+function appendGeminiStderr(s: any, line: string) {
+  const chunk = line.trim();
+  if (!chunk) return;
+  s.geminiStderr = s.geminiStderr ? `${s.geminiStderr}\n${chunk}` : chunk;
+}
+
 function geminiParseStderrLine(line: string, s: any) {
-  const m = GEMINI_RETRY_RE.exec(line);
-  if (!m) return;
-  const attempt = m[1];
-  const status = m[2];
-  const reason = status === '429' ? 'rate limit / capacity exhausted'
-    : status === '503' ? 'service unavailable'
-    : `status ${status}`;
-  pushRecentActivity(s.recentActivity, `Retrying after ${reason} (attempt ${attempt})`);
-  s.activity = s.recentActivity.join('\n');
+  appendGeminiStderr(s, line);
+  let m = GEMINI_RETRY_STATUS_RE.exec(line);
+  if (m) {
+    const attempt = m[1];
+    const status = m[2];
+    const reason = status === '429' ? 'rate limit / capacity exhausted'
+      : status === '503' ? 'service unavailable'
+      : `status ${status}`;
+    markGeminiProgress(s, `Retrying after ${reason} (attempt ${attempt})`);
+    return;
+  }
+  m = GEMINI_RETRY_REASON_RE.exec(line);
+  if (m) {
+    markGeminiProgress(s, `Retrying (attempt ${m[1]}): ${shortValue(m[2], 100)}`);
+    return;
+  }
+  if (GEMINI_API_ERROR_RE.test(line)) {
+    markGeminiProgress(s, 'Gemini API error — retrying…');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +483,15 @@ function prepareGeminiHomeOverlay(opts: GeminiOverlayOpts): GeminiHomeOverlay | 
   };
 }
 
+function buildGeminiExtraEnv(opts: StreamOpts, overlayHomeDir?: string): Record<string, string> {
+  const extraEnv: Record<string, string> = { ...(opts.extraEnv || {}) };
+  if (overlayHomeDir) extraEnv.GEMINI_CLI_HOME = overlayHomeDir;
+  if (!extraEnv.GEMINI_CLI_TRUST_WORKSPACE && !process.env.GEMINI_CLI_TRUST_WORKSPACE) {
+    extraEnv.GEMINI_CLI_TRUST_WORKSPACE = 'true';
+  }
+  return extraEnv;
+}
+
 // ---------------------------------------------------------------------------
 // Stream
 // ---------------------------------------------------------------------------
@@ -446,11 +502,12 @@ export async function doGeminiStream(opts: StreamOpts): Promise<StreamResult> {
     effort: opts.thinkingEffort,
     hasAttachments: (opts.attachments?.length ?? 0) > 0,
   });
-  const extraEnv = overlay
-    ? { ...(opts.extraEnv || {}), GEMINI_CLI_HOME: overlay.homeDir }
-    : opts.extraEnv;
+  const extraEnv = buildGeminiExtraEnv(opts, overlay?.homeDir);
   const streamOpts = { ...opts, _stdinOverride: '', extraEnv };
   try {
+    try {
+      opts.onText('', '', 'Starting Gemini...', { lastEvent: 'Starting Gemini' }, null);
+    } catch {}
     return await run(geminiCmd(opts), streamOpts, geminiParse, geminiParseStderrLine);
   } finally {
     overlay?.cleanup();
@@ -827,10 +884,76 @@ function getGeminiSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
         richMsgs.push({ role, text: rawText, blocks: [{ type: 'text', content: rawText }], createdAt });
       }
     }
-    return applyTurnWindow(allMsgs, opts, opts.rich ? richMsgs : undefined);
+    const windowed = applyTurnWindow(allMsgs, opts, opts.rich ? richMsgs : undefined);
+    if (!opts.rich || !windowed.richMessages?.length) return windowed;
+    return {
+      ...windowed,
+      richMessages: overlayGeminiManagedPreview(opts.workdir, opts.sessionId, windowed.richMessages),
+    };
   } catch (e: any) {
     return { ok: false, messages: [], totalTurns: 0, error: e.message };
   }
+}
+
+function geminiActivityLines(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  return raw.split('\n').map(line => line.trim()).filter(Boolean);
+}
+
+function geminiActivityToBlocks(lines: string[]): MessageBlock[] {
+  const blocks: MessageBlock[] = [];
+  for (const line of lines) {
+    if (/^thinking(?:\.\.\.)?$/i.test(line) || /^starting gemini(?:\.\.\.)?$/i.test(line)) continue;
+    const arrow = line.indexOf(' -> ');
+    if (arrow >= 0) {
+      const summary = line.slice(0, arrow).trim();
+      const detail = line.slice(arrow + 4).trim();
+      if (summary) blocks.push({ type: 'tool_use', content: summary, toolName: 'gemini' });
+      if (detail) blocks.push({ type: 'tool_result', content: detail });
+      continue;
+    }
+    if (/\bfailed\b/i.test(line)) {
+      blocks.push({ type: 'tool_result', content: line });
+      continue;
+    }
+    blocks.push({ type: 'tool_use', content: line, toolName: 'gemini' });
+  }
+  return blocks;
+}
+
+function overlayGeminiManagedPreview(workdir: string, sessionId: string, richMessages: RichMessage[]): RichMessage[] {
+  const managed = findPikiclawSession(workdir, 'gemini', sessionId);
+  if (!managed) return richMessages;
+  const assistantIndex = [...richMessages]
+    .map((message, index) => ({ message, index }))
+    .reverse()
+    .find(entry => entry.message.role === 'assistant')?.index ?? -1;
+  if (assistantIndex < 0) return richMessages;
+
+  const current = richMessages[assistantIndex];
+  const blocks = [...current.blocks];
+  let changed = false;
+  const insertIndex = blocks.findIndex(block => block.type === 'text' && block.phase !== 'commentary');
+
+  if (managed.lastThinking?.trim() && !blocks.some(block => block.type === 'thinking' && block.content.trim())) {
+    const thinkingBlock: MessageBlock = { type: 'thinking', content: managed.lastThinking.trim() };
+    if (insertIndex >= 0) blocks.splice(insertIndex, 0, thinkingBlock);
+    else blocks.push(thinkingBlock);
+    changed = true;
+  }
+
+  const activityBlocks = geminiActivityToBlocks(geminiActivityLines(managed.lastActivity));
+  if (activityBlocks.length && !blocks.some(block => block.type === 'tool_use' || block.type === 'tool_result')) {
+    const at = insertIndex >= 0 ? insertIndex : blocks.length;
+    blocks.splice(at, 0, ...activityBlocks);
+    changed = true;
+  }
+
+  if (!changed) return richMessages;
+
+  const merged = [...richMessages];
+  merged[assistantIndex] = { ...current, blocks };
+  return merged;
 }
 
 function geminiMessageCreatedAt(msg: any): string | null {

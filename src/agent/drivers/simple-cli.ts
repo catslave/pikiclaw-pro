@@ -126,7 +126,7 @@ function attachmentsPrompt(attachments: string[] | undefined): string {
 
 function buildPromptWithHistory(opts: StreamOpts, transcript: SimpleTranscript | null): string {
   const sections: string[] = [];
-  const systemPrompt = String(opts.cursorSystemPrompt || opts.copilotSystemPrompt || '').trim();
+  const systemPrompt = String(opts.cursorSystemPrompt || opts.copilotSystemPrompt || opts.agySystemPrompt || '').trim();
   if (systemPrompt) sections.push(`[System instructions]\n${systemPrompt}`);
 
   const priorTurns = (transcript?.turns || []).slice(-MAX_HISTORY_TURNS);

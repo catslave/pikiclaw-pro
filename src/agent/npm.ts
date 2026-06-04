@@ -23,6 +23,7 @@ const AGENT_LABELS: Record<Agent, string> = {
   codex: 'Codex',
   copilot: 'GitHub Copilot',
   cursor: 'Cursor Agent',
+  agy: 'Antigravity',
   gemini: 'Gemini CLI',
   hermes: 'Hermes',
   openclaw: 'OpenClaw',

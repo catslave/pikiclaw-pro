@@ -11,6 +11,7 @@ export const DEFAULT_AGENT_MODELS: Record<Agent, string> = {
   codex: 'gpt-5.5',
   copilot: 'gpt-5.3-codex',
   cursor: 'auto',
+  agy: 'gemini-3.1-pro-preview',
   gemini: 'gemini-3.1-pro-preview',
   hermes: '',
   openclaw: '',
@@ -21,6 +22,7 @@ export const DEFAULT_AGENT_EFFORTS: Partial<Record<Agent, string>> = {
   codex: 'medium',
   copilot: 'medium',
   cursor: 'medium',
+  agy: 'high',
   gemini: 'high',
   hermes: 'medium',
   openclaw: 'medium',
@@ -36,6 +38,7 @@ export function agentModelEnv(agent: Agent, env: Record<string, string | undefin
     case 'codex': return trimmed(env.CODEX_MODEL);
     case 'copilot': return trimmed(env.COPILOT_MODEL);
     case 'cursor': return trimmed(env.CURSOR_MODEL);
+    case 'agy': return trimmed(env.AGY_MODEL);
     case 'gemini': return trimmed(env.GEMINI_MODEL);
     case 'hermes': return trimmed(env.HERMES_MODEL);
     case 'openclaw': return trimmed(env.OPENCLAW_MODEL);
@@ -49,6 +52,7 @@ export function agentEffortEnv(agent: Agent, env: Record<string, string | undefi
     case 'codex': return trimmed(env.CODEX_REASONING_EFFORT).toLowerCase();
     case 'copilot': return trimmed(env.COPILOT_REASONING_EFFORT).toLowerCase();
     case 'cursor': return trimmed(env.CURSOR_REASONING_EFFORT).toLowerCase();
+    case 'agy': return trimmed(env.AGY_REASONING_EFFORT).toLowerCase();
     case 'gemini': return trimmed(env.GEMINI_REASONING_EFFORT).toLowerCase();
     case 'hermes': return trimmed(env.HERMES_REASONING_EFFORT).toLowerCase();
     case 'openclaw': return trimmed(env.OPENCLAW_REASONING_EFFORT).toLowerCase();
@@ -72,6 +76,9 @@ export function resolveAgentModel(config: Partial<UserConfig> | Record<string, a
       value = trimmed((config as Partial<UserConfig>).cursorModel || agentModelEnv('cursor') || DEFAULT_AGENT_MODELS.cursor);
       if (value === 'gpt-5') return DEFAULT_AGENT_MODELS.cursor;
       return value || DEFAULT_AGENT_MODELS.cursor;
+    case 'agy':
+      value = trimmed((config as Partial<UserConfig>).agyModel || agentModelEnv('agy') || DEFAULT_AGENT_MODELS.agy);
+      return value || DEFAULT_AGENT_MODELS.agy;
     case 'gemini':
       value = trimmed((config as Partial<UserConfig>).geminiModel || agentModelEnv('gemini') || DEFAULT_AGENT_MODELS.gemini);
       return value || DEFAULT_AGENT_MODELS.gemini;
@@ -103,6 +110,10 @@ export function resolveAgentEffort(config: Partial<UserConfig> | Record<string, 
       const value = trimmed((config as Partial<UserConfig>).cursorReasoningEffort || agentEffortEnv('cursor') || DEFAULT_AGENT_EFFORTS.cursor).toLowerCase();
       return value || DEFAULT_AGENT_EFFORTS.cursor || null;
     }
+    case 'agy': {
+      const value = trimmed((config as Partial<UserConfig>).agyReasoningEffort || agentEffortEnv('agy') || DEFAULT_AGENT_EFFORTS.agy).toLowerCase();
+      return value || DEFAULT_AGENT_EFFORTS.agy || null;
+    }
     case 'gemini': {
       const value = trimmed((config as Partial<UserConfig>).geminiReasoningEffort || agentEffortEnv('gemini') || DEFAULT_AGENT_EFFORTS.gemini).toLowerCase();
       return value || DEFAULT_AGENT_EFFORTS.gemini || null;
@@ -125,6 +136,7 @@ export function setAgentModelEnv(agent: Agent, value: string, env: NodeJS.Proces
     case 'codex': env.CODEX_MODEL = value; break;
     case 'copilot': env.COPILOT_MODEL = value; break;
     case 'cursor': env.CURSOR_MODEL = value; break;
+    case 'agy': env.AGY_MODEL = value; break;
     case 'gemini': env.GEMINI_MODEL = value; break;
     case 'hermes': env.HERMES_MODEL = value; break;
     case 'openclaw': env.OPENCLAW_MODEL = value; break;
@@ -137,6 +149,7 @@ export function setAgentEffortEnv(agent: Agent, value: string, env: NodeJS.Proce
     case 'codex': env.CODEX_REASONING_EFFORT = value; break;
     case 'copilot': env.COPILOT_REASONING_EFFORT = value; break;
     case 'cursor': env.CURSOR_REASONING_EFFORT = value; break;
+    case 'agy': env.AGY_REASONING_EFFORT = value; break;
     case 'gemini': env.GEMINI_REASONING_EFFORT = value; break;
     case 'hermes': env.HERMES_REASONING_EFFORT = value; break;
     case 'openclaw': env.OPENCLAW_REASONING_EFFORT = value; break;

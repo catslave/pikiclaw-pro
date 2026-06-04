@@ -83,6 +83,8 @@ export interface UserConfig {
   copilotReasoningEffort?: string;
   cursorModel?: string;
   cursorReasoningEffort?: string;
+  agyModel?: string;
+  agyReasoningEffort?: string;
   geminiModel?: string;
   geminiReasoningEffort?: string;
   hermesModel?: string;

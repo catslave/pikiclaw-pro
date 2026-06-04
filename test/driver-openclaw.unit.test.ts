@@ -36,7 +36,7 @@ function writeOpenClawScript(body: string) {
 }
 
 function writeFastAgentStubs() {
-  for (const name of ['claude', 'codex', 'copilot', 'cursor-agent', 'gemini', 'hermes']) {
+  for (const name of ['agy', 'claude', 'codex', 'copilot', 'cursor-agent', 'gemini', 'hermes']) {
     fs.writeFileSync(path.join(fakeBin, name), `#!/bin/sh\necho "${name} 0.0.0"\n`, { mode: 0o755 });
   }
 }

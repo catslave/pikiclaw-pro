@@ -103,7 +103,14 @@ export function LivePreview({
   const diagnosticLines = stream.previewMeta?.diagnostics?.map(line => cleanWorkingPreview(String(line || ''))).filter(Boolean) || [];
   const diagnosticPreview = diagnosticLines[diagnosticLines.length - 1] || cleanWorkingPreview(stream.previewMeta?.lastEvent || '');
   const activitySummary = summarizeWorkingActivity(activityLines, t, stream.activitySummary ?? null);
-  const workingPreview = activitySummary[0] || currentPlanStep || thinkingPreview || cleanWorkingPreview(lastActivity) || diagnosticPreview || '';
+  const structuredCurrentLabel = stream.activitySummary?.current?.label?.trim() || '';
+  const workingPreview = structuredCurrentLabel
+    || activitySummary[0]
+    || currentPlanStep
+    || thinkingPreview
+    || cleanWorkingPreview(lastActivity)
+    || diagnosticPreview
+    || '';
   const structuredStepCount = stream.activitySummary
     ? stream.activitySummary.files + stream.activitySummary.searches + stream.activitySummary.commands + stream.activitySummary.tools
     : 0;
@@ -131,6 +138,7 @@ export function LivePreview({
             phase="streaming"
             t={t}
             resetKey={stream.taskId || null}
+            defaultOpen
             startedAt={stream.startedAt ?? null}
             completedAt={stream.completedAt ?? null}
             updatedAt={stream.updatedAt ?? null}

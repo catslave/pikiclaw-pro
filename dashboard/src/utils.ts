@@ -16,6 +16,7 @@ export const AGENT_ACCEPTED_PROVIDER_KINDS: Record<Agent, readonly string[]> = {
   codex: ['openai', 'openai-compatible'],
   copilot: [],
   cursor: [],
+  agy: [],
   gemini: ['google'],
   hermes: ['anthropic', 'openai', 'openai-compatible', 'google'],
   openclaw: [],
@@ -124,6 +125,16 @@ export const agentMeta: Record<string, AgentMeta> = {
     border: 'rgba(167,243,208,0.18)',
     advantageKey: 'config.agentAdvantageCursor',
   },
+  agy: {
+    label: 'Antigravity',
+    shortLabel: 'agy',
+    color: '#fda4af',
+    bg: 'rgba(253,164,175,0.12)',
+    letter: 'A',
+    glow: 'rgba(253,164,175,0.2)',
+    border: 'rgba(253,164,175,0.2)',
+    advantageKey: 'config.agentAdvantageAgy',
+  },
   gemini: {
     label: 'Gemini CLI',
     shortLabel: 'Gemini',
@@ -165,6 +176,7 @@ export const EFFORT_OPTIONS: Record<Agent, string[]> = {
   codex: ['low', 'medium', 'high', 'xhigh'],
   copilot: ['low', 'medium', 'high'],
   cursor: ['low', 'medium', 'high'],
+  agy: ['low', 'medium', 'high'],
   gemini: ['low', 'high'],
   // The Hermes driver forwards the chosen value via ACP `session/set_mode`;
   // upstream may or may not act on it depending on the bound model, but we
@@ -348,4 +360,54 @@ export function sessionListContextText(
   if (detail && !/interrupted by user/i.test(detail) && detail !== primary) return detail;
 
   return '';
+}
+
+export type DashboardInboxColumnKey = 'running' | 'review' | 'incomplete' | 'done';
+export type SessionWorkspaceMode = 'workspace' | 'chat-workspace' | 'dashboard' | 'settings';
+
+function sessionStatusTimestampMs(session: Pick<SessionInfo, 'runUpdatedAt' | 'createdAt'>): number | null {
+  const raw = session.runUpdatedAt || session.createdAt || '';
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function isUnreadCompletedSession(session: SessionInfo): boolean {
+  const hasReadableContent = !!(
+    session.lastQuestion
+    || session.lastAnswer
+    || session.lastMessageText
+    || (typeof session.numTurns === 'number' && session.numTurns > 0)
+  );
+  return sessionDisplayState(session) === 'completed'
+    && hasReadableContent
+    && session.userStatus !== 'done'
+    && session.userStatus !== 'parked';
+}
+
+export function dashboardColumnForSession(
+  session: SessionInfo,
+  live: Pick<LiveSessionState, 'phase'> | null,
+  recentCutoff: number,
+): DashboardInboxColumnKey | null {
+  if (session.userStatus === 'done' || session.userStatus === 'parked') return null;
+
+  const displayState = sessionDisplayState(session);
+  const liveActive = live?.phase === 'queued' || live?.phase === 'streaming';
+  if (displayState === 'running' || liveActive) return 'running';
+  if (displayState === 'incomplete') return 'review';
+
+  const recentlyFinished = (sessionStatusTimestampMs(session) ?? 0) >= recentCutoff;
+  if (session.userStatus === 'review') return 'review';
+  if (recentlyFinished && isUnreadCompletedSession(session)) return 'review';
+  return null;
+}
+
+export function shouldIncludeInboxDashboardItem(
+  column: DashboardInboxColumnKey,
+  opts: { mode: SessionWorkspaceMode; openInWorkspace: boolean },
+): boolean {
+  if (column !== 'running') return true;
+  if (opts.mode === 'dashboard' || opts.mode === 'settings') return true;
+  return !opts.openInWorkspace;
 }

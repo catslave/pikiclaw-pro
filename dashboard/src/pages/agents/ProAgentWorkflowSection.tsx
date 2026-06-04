@@ -25,7 +25,7 @@ function Empty({ title, label, action }: { title: string; label?: string; action
   );
 }
 
-const FALLBACK_AGENTS = ['codex', 'claude', 'copilot', 'cursor', 'gemini', 'hermes'];
+const FALLBACK_AGENTS = ['codex', 'claude', 'copilot', 'cursor', 'agy', 'gemini', 'hermes'];
 const OPEN_SESSIONS_STORAGE_KEY = 'pikiclaw:session-workspace:open-sessions:v1';
 const ACTIVE_SLOT_STORAGE_KEY = 'pikiclaw:session-workspace:active-slot:v1';
 const ASSISTANT_HISTORY_LIMIT = 'all';

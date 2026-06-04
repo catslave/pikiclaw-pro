@@ -1,4 +1,4 @@
-export type Agent = 'claude' | 'codex' | 'copilot' | 'cursor' | 'gemini' | 'hermes' | 'openclaw';
+export type Agent = 'claude' | 'codex' | 'copilot' | 'cursor' | 'agy' | 'gemini' | 'hermes' | 'openclaw';
 export type OpenTarget = 'vscode' | 'cursor' | 'windsurf' | 'finder' | 'default';
 
 export interface AgentInfo {
@@ -259,6 +259,8 @@ export interface UserConfig {
   copilotReasoningEffort?: string;
   cursorModel?: string;
   cursorReasoningEffort?: string;
+  agyModel?: string;
+  agyReasoningEffort?: string;
   geminiModel?: string;
   geminiReasoningEffort?: string;
   hermesModel?: string;

@@ -1189,6 +1189,19 @@ export const SessionPanel = memo(function SessionPanel({
     void loadLatestTurns({ keepOlder: true, force: true });
   }, [applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns]));
 
+  /* ── Poll stream state while a session is running (WS fallback) ── */
+  useEffect(() => {
+    const sessionRunning = session.running || session.runState === 'running';
+    const streamActive = streaming || streamPhase === 'streaming' || streamPhase === 'queued';
+    if (!sessionRunning && !streamActive) return;
+    const timer = window.setInterval(() => {
+      void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
+        applyStreamSnapshot(res.state);
+      }).catch(() => {});
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [applyStreamSnapshot, session.agent, session.sessionId, session.running, session.runState, streaming, streamPhase]);
+
   /* ── Safety: clear stale pending state when session stops running ── */
   // Must wait until the stream snapshot is gone (streamPhase null, no queued
   // tasks). Otherwise a steer/recall mid-flight — where session.running can
@@ -1406,6 +1419,7 @@ export const SessionPanel = memo(function SessionPanel({
   const displayModelShort = displayModel ? shortenModel(displayModel) : null;
 
   const rawTurns = history?.turns || [];
+  const sessionRunning = !!(session.running || session.runState === 'running');
   const streamSnapshotActive = isLiveStreamActive({
     streaming,
     streamPhase: streamPhase as 'queued' | 'streaming' | 'done' | null,
@@ -1413,6 +1427,7 @@ export const SessionPanel = memo(function SessionPanel({
     pendingPrompt,
     pendingTaskId,
     pendingImageCount: pendingImageUrls.length,
+    sessionRunning,
   });
   const effectiveLiveStream = useMemo(() => resolveEffectiveLiveStream({
     liveStream,
@@ -1422,6 +1437,7 @@ export const SessionPanel = memo(function SessionPanel({
     streamTaskId,
     displayModel,
     displayEffort,
+    sessionRunning,
   }), [
     liveStream,
     streamSnapshotActive,
@@ -1430,6 +1446,7 @@ export const SessionPanel = memo(function SessionPanel({
     streamTaskId,
     displayModel,
     displayEffort,
+    sessionRunning,
   ]);
   const activeLivePrompt = (pendingPrompt || effectiveLiveStream?.prompt || '').trim();
   // When a live stream is active, the stream prompt owns where the live assistant
@@ -1833,6 +1850,7 @@ export const SessionPanel = memo(function SessionPanel({
             contextMeta={composerContextMeta}
             onRecall={handleRecallTask}
             onSteer={handleSteerTask}
+            onStopAll={handleStopAll}
             onReorderQueued={handleReorderQueuedTasks}
             editDraft={editRequest?.draftPending ? editRequest.text : null}
             editAtTurn={editRequest?.atTurn ?? null}

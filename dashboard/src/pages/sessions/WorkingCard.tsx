@@ -272,6 +272,11 @@ function activityLabelsFromSummary(summary: StreamActivitySummary, t: (key: stri
 
 function workingActivityLabels(lines: string[], t: (key: string) => string, activitySummary?: StreamActivitySummary | null): string[] {
   if (activitySummary) return activityLabelsFromSummary(activitySummary, t);
+  const normalizedLines = lines.map(normalizeActivityLine).filter(Boolean);
+  const latest = normalizedLines[normalizedLines.length - 1] || '';
+  if (/^thinking(?:\.\.\.)?$/i.test(latest) || /^starting gemini(?:\.\.\.)?$/i.test(latest) || /^retrying after/i.test(latest)) {
+    return [latest];
+  }
   const seen = new Set<string>();
   let files = 0;
   let searches = 0;
@@ -287,15 +292,15 @@ function workingActivityLabels(lines: string[], t: (key: string) => string, acti
       commands = Math.max(commands, Number(executed[1]) || 0);
       continue;
     }
-    if (/^(Bash|Shell|Command)\b/i.test(line) || /\b\/bin\/(zsh|bash|sh)\b/.test(line)) {
+    if (/^(Bash|Shell|Command|Run shell)\b/i.test(line) || /\b\/bin\/(zsh|bash|sh)\b/.test(line)) {
       commands += 1;
       continue;
     }
-    if (/^(Read|Open|Edit|Write|File|Diff)\b/i.test(line) || /\b[A-Za-z0-9_.-]+\.(tsx?|jsx?|css|json|md|py|go|java|kt|rs|yaml|yml)\b/.test(line)) {
+    if (/^(Read|Open|Edit|Write|List|Updated|Inspect image|Find files)\b/i.test(line) || /\b[A-Za-z0-9_.-]+\.(tsx?|jsx?|css|json|md|py|go|java|kt|rs|yaml|yml)\b/.test(line)) {
       files += 1;
       continue;
     }
-    if (/^(Grep|Glob|Search|WebSearch|Find)\b/i.test(line) || /\b(rg|grep|find)\b/.test(line)) {
+    if (/^(Grep|Glob|Search|WebSearch|Find|Search text|Search web)\b/i.test(line) || /\b(rg|grep|find)\b/.test(line)) {
       searches += 1;
       continue;
     }

@@ -188,6 +188,9 @@ export function resolveAgentUpdateStrategy(
     // untouched and can make the dashboard flip-flop between update/install.
     return { kind: 'self', cmd: binPath, args: ['update'] };
   }
+  if (id === 'agy') {
+    return { kind: 'self', cmd: binPath, args: ['update'] };
+  }
   return { kind: 'skip', reason: 'binary is not owned by the npm package' };
 }
 
