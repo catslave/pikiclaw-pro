@@ -880,6 +880,7 @@ function ChatWorkspaceLauncher({
   const [selectedTargetValue, setSelectedTargetValue] = useState(() => (agent ? `agent:${agent}` : ''));
   const [highlightedWorkspace, setHighlightedWorkspace] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastDefaultWorkdirRef = useRef(defaultWorkdir);
 
   const launchAgentOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -931,9 +932,13 @@ function ChatWorkspaceLauncher({
 
   useEffect(() => {
     if (!workspaceChoices.length) return;
+    const defaultChanged = lastDefaultWorkdirRef.current !== defaultWorkdir;
+    lastDefaultWorkdirRef.current = defaultWorkdir;
     setSelectedWorkdir(prev => (
-      prev && workspaceChoices.some(ws => ws.path === prev)
-        ? prev
+      defaultChanged && defaultWorkdir && workspaceChoices.some(ws => ws.path === defaultWorkdir)
+        ? defaultWorkdir
+        : prev && workspaceChoices.some(ws => ws.path === prev)
+          ? prev
         : (defaultWorkdir || workspaceChoices[0].path)
     ));
   }, [defaultWorkdir, workspaceChoices]);
@@ -4901,6 +4906,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, []);
 
   const handleNewSessionRequest = useCallback((wsPath: string) => {
+    if (mode === 'chat-workspace') {
+      setShowNewSession(wsPath);
+      return;
+    }
     const shouldFloatDraft = mode === 'workspace' && chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
     const templateAgent = openSessionsRef.current[activeSlotRef.current]?.agent || '';
     setNewSessionInitialDraftPrompt(null);
