@@ -91,6 +91,13 @@ type ProCopy = {
   jobPromptPlaceholder: string;
   selectAssistant: string;
   customSchedulePlaceholder: string;
+  openChat: string;
+  activeJobsLabel: string;
+  recurringJobsLabel: string;
+  latestRunLabel: string;
+  assistantTargetsLabel: string;
+  neverRun: string;
+  openRunChat: string;
 } & Record<SchedulePresetLabelKey, string>;
 
 function getCopy(locale: Locale): ProCopy {
@@ -144,6 +151,13 @@ function getCopy(locale: Locale): ProCopy {
       jobPromptPlaceholder: '这个助手应该做什么？',
       selectAssistant: '选择助手',
       customSchedulePlaceholder: '自定义计划，例如 every weekday at 9am',
+      openChat: '回到 Chat',
+      activeJobsLabel: '启用作业',
+      recurringJobsLabel: '周期计划',
+      latestRunLabel: '最近执行',
+      assistantTargetsLabel: '助手绑定',
+      neverRun: '尚未执行',
+      openRunChat: '打开 chat',
       scheduleOneTime: '一次性',
       scheduleDaily: '每天',
       scheduleWeekly: '每周',
@@ -201,6 +215,13 @@ function getCopy(locale: Locale): ProCopy {
     jobPromptPlaceholder: 'What should the assistant do?',
     selectAssistant: 'Select assistant',
     customSchedulePlaceholder: 'Custom schedule, e.g. every weekday at 9am',
+    openChat: 'Open Chat',
+    activeJobsLabel: 'Active jobs',
+    recurringJobsLabel: 'Recurring schedules',
+    latestRunLabel: 'Latest run',
+    assistantTargetsLabel: 'Assistant targets',
+    neverRun: 'Never run',
+    openRunChat: 'Open chat',
     scheduleOneTime: 'One time',
     scheduleDaily: 'Daily',
     scheduleWeekly: 'Weekly',
@@ -241,6 +262,28 @@ function PixelAvatar({ seed, label }: { seed?: string; label: string }) {
 
 function scheduleLabel(draft: typeof defaultJobDraft) {
   return draft.scheduleType === 'custom' ? draft.customSchedule.trim() : draft.scheduleType;
+}
+
+function scheduleDisplay(value: string, copy: ProCopy) {
+  switch (value) {
+    case 'one-time': return copy.scheduleOneTime;
+    case 'daily': return copy.scheduleDaily;
+    case 'weekly': return copy.scheduleWeekly;
+    case 'biweekly': return copy.scheduleBiweekly;
+    case 'monthly': return copy.scheduleMonthly;
+    default: return value || 'manual';
+  }
+}
+
+function isRecurringSchedule(value: string | undefined) {
+  return !!value && value !== 'one-time' && value !== 'manual';
+}
+
+function parseSessionKey(sessionKey: string | undefined): { agent: string; sessionId: string } | null {
+  if (!sessionKey) return null;
+  const index = sessionKey.indexOf(':');
+  if (index <= 0 || index >= sessionKey.length - 1) return null;
+  return { agent: sessionKey.slice(0, index), sessionId: sessionKey.slice(index + 1) };
 }
 
 function AgentChip({ agent, label }: { agent: string; label?: string }) {
@@ -764,7 +807,8 @@ export function ProAssistantsSection() {
   );
 }
 
-export function ProAutomationSection() {
+export function ProAutomationSection({ standalone = false }: { standalone?: boolean } = {}) {
+  const navigate = useNavigate();
   const toast = useStore(s => s.toast);
   const locale = useStore(s => s.locale);
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? '');
@@ -785,6 +829,16 @@ export function ProAutomationSection() {
 
   const history = useMemo(() => jobs.flatMap(job => (job.runHistory || []).map(run => ({ ...run, job })))
     .sort((a, b) => Date.parse(b.ranAt) - Date.parse(a.ranAt)), [jobs]);
+
+  const stats = useMemo(() => {
+    const assistantTargets = new Set(jobs.map(job => job.assistantId).filter(Boolean));
+    return [
+      { label: copy.activeJobsLabel, value: String(jobs.filter(job => job.enabled).length), detail: copy.jobCount(jobs.length) },
+      { label: copy.recurringJobsLabel, value: String(jobs.filter(job => isRecurringSchedule(job.schedule)).length), detail: copy.runCount(history.length) },
+      { label: copy.latestRunLabel, value: history[0] ? fmt(history[0].ranAt) : copy.neverRun, detail: history[0]?.job.name || copy.neverRun },
+      { label: copy.assistantTargetsLabel, value: String(assistantTargets.size), detail: copy.assistantReadyCount(assistants.length) },
+    ];
+  }, [assistants.length, copy, history, jobs]);
 
   const createJob = useCallback(async () => {
     const schedule = scheduleLabel(draft);
@@ -823,8 +877,48 @@ export function ProAutomationSection() {
     }
   }, [copy.queued, toast]);
 
+  const openRunChat = useCallback((job: AutomationRule, sessionKey: string | undefined) => {
+    const parsed = parseSessionKey(sessionKey);
+    const workdir = job.workdir || runtimeWorkdir;
+    if (!parsed || !workdir) return;
+    const existing = openSessionsFromStorage();
+    const exactIndex = existing.findIndex(slot => (
+      slot.workdir === workdir
+      && slot.agent === parsed.agent
+      && slot.sessionId === parsed.sessionId
+    ));
+    const next = exactIndex >= 0
+      ? existing.map((slot, index) => index === exactIndex ? { ...slot, archiveOnly: false } : slot)
+      : [{ workdir, agent: parsed.agent, sessionId: parsed.sessionId, mountKey: mountKey(), archiveOnly: false }, ...existing];
+    try {
+      localStorage.setItem(OPEN_SESSIONS_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(ACTIVE_SLOT_STORAGE_KEY, String(exactIndex >= 0 ? exactIndex : 0));
+    } catch {
+      // Storage may be unavailable in restricted browser contexts.
+    }
+    navigate('/chat', {
+      state: {
+        openSessionWorkdir: workdir,
+        openSessionAgent: parsed.agent,
+        openSessionId: parsed.sessionId,
+        openSessionNonce: Date.now(),
+      },
+    });
+  }, [navigate, runtimeWorkdir]);
+
   return (
-    <section className="space-y-3 border-t border-edge pt-4">
+    <section className={cn('space-y-4', standalone ? '' : 'border-t border-edge pt-4')}>
+      {standalone && (
+        <div className="grid gap-3 md:grid-cols-4">
+          {stats.map(item => (
+            <div key={item.label} className="rounded-lg border border-edge bg-panel px-3 py-3 shadow-sm">
+              <div className="text-[11px] font-semibold uppercase text-fg-5">{item.label}</div>
+              <div className="mt-2 truncate text-[20px] font-semibold tracking-tight text-fg">{item.value}</div>
+              <div className="mt-1 truncate text-[11px] text-fg-5">{item.detail}</div>
+            </div>
+          ))}
+        </div>
+      )}
       <SectionHeading
         title={copy.automationTitle}
         description={copy.automationDescription}
@@ -835,16 +929,23 @@ export function ProAutomationSection() {
           </span>
         )}
         action={(
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => {
-              setDraft({ ...defaultJobDraft, assistantId: assistants[0]?.id || '' });
-              setCreateOpen(true);
-            }}
-          >
-            {copy.createJob}
-          </Button>
+          <div className="flex flex-wrap justify-end gap-2">
+            {standalone && (
+              <Button variant="secondary" size="sm" onClick={() => navigate('/chat')}>
+                {copy.openChat}
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                setDraft({ ...defaultJobDraft, assistantId: assistants[0]?.id || '' });
+                setCreateOpen(true);
+              }}
+            >
+              {copy.createJob}
+            </Button>
+          </div>
         )}
       />
 
@@ -877,7 +978,7 @@ export function ProAutomationSection() {
                 <div className="min-w-0">
                   <div className="font-semibold text-fg">{job.name}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-5">
-                    <Badge variant="muted">{job.schedule}</Badge>
+                    <Badge variant="muted">{scheduleDisplay(job.schedule, copy)}</Badge>
                     <span>{copy.lastRun(fmt(job.lastRunAt))}</span>
                   </div>
                   <div className="mt-2 line-clamp-3 text-sm leading-relaxed text-fg-4">{job.prompt}</div>
@@ -913,7 +1014,14 @@ export function ProAutomationSection() {
                     </Badge>
                   </div>
                   <div className="mt-1 text-[11px] text-fg-5">{fmt(run.ranAt)}</div>
-                  {run.sessionKey && <div className="mt-1 truncate font-mono text-[11px] text-fg-4">{run.sessionKey}</div>}
+                  {run.sessionKey && (
+                    <div className="mt-2 flex min-w-0 items-center gap-2">
+                      <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-4">{run.sessionKey}</div>
+                      <Button size="sm" variant="ghost" onClick={() => openRunChat(run.job, run.sessionKey)} className="h-7 px-2">
+                        {copy.openRunChat}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
