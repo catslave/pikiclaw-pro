@@ -1943,6 +1943,7 @@ function readStoredChatRecallCollapsed(): boolean {
 
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'chat-workspace' | 'dashboard' | 'settings';
+type ChatWorkspacePanelTarget = 'assistants' | 'memory' | 'team' | 'workflows';
 
 type OpenAgentTestChatState = {
   newSessionAgent?: string;
@@ -1955,6 +1956,8 @@ type OpenAgentTestChatState = {
   openSessionAgent?: string;
   openSessionId?: string;
   openSessionNonce?: number;
+  openChatPanel?: ChatWorkspacePanelTarget;
+  openChatPanelNonce?: number;
   focusContext?: FocusContextPayload;
 };
 type ChatLayoutMode = 'single' | 'multi-2' | 'multi-3';
@@ -3100,6 +3103,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setWorkflowLibraryOpen(false);
     void refreshChatWorkspaceAutomations();
   }, [refreshChatWorkspaceAutomations]);
+  useEffect(() => {
+    if (!active || mode !== 'chat-workspace') return;
+    const navState = location.state as OpenAgentTestChatState | null;
+    const panel = navState?.openChatPanel;
+    if (!panel) return;
+    if (panel === 'assistants') setAssistantLibraryOpen(true);
+    else if (panel === 'memory') setMemoryLibraryOpen(true);
+    else if (panel === 'team') setTeamLibraryOpen(true);
+    else if (panel === 'workflows') setWorkflowLibraryOpen(true);
+    navigate('/chat', { replace: true, state: null });
+  }, [active, location.state, mode, navigate]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
   const [quickTodoText, setQuickTodoText] = useState('');

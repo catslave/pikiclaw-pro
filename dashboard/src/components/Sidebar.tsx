@@ -68,16 +68,17 @@ const TAB_ROUTES: Record<string, string> = {
   dashboard: '/tasks',
   daily: '/daily',
   notes: '/notes',
-  knowledge: '/memory',
-  workflows: '/workflows',
+  knowledge: '/chat',
+  workflows: '/chat',
   usage: '/usage',
   im: '/im',
   agents: '/agents',
-  assistants: '/assistants',
-  team: '/team',
+  assistants: '/chat',
+  team: '/chat',
   extensions: '/extensions',
   system: '/system',
 };
+type ChatPanelNavTarget = 'assistants' | 'memory' | 'team' | 'workflows';
 
 export type RestartPhase = null | 'confirm' | 'restarting' | 'reconnecting';
 
@@ -105,22 +106,22 @@ export function Sidebar({
     { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('nav.dashboard'), state: undefined },
     { key: 'daily', to: TAB_ROUTES.daily, label: t('nav.daily'), state: undefined },
     { key: 'notes', to: TAB_ROUTES.notes, label: t('nav.notes'), state: undefined },
-    { key: 'knowledge', to: TAB_ROUTES.knowledge, label: t('nav.knowledge'), state: undefined },
-    { key: 'workflows', to: TAB_ROUTES.workflows, label: t('nav.workflows'), state: undefined },
+    { key: 'knowledge', to: TAB_ROUTES.knowledge, label: t('nav.knowledge'), chatPanel: 'memory' as ChatPanelNavTarget },
+    { key: 'workflows', to: TAB_ROUTES.workflows, label: t('nav.workflows'), chatPanel: 'workflows' as ChatPanelNavTarget },
   ], [t]);
   const configNavItems = useMemo(() => [
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), state: undefined },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), state: undefined },
-    { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), state: undefined },
-    { key: 'team', to: TAB_ROUTES.team, label: t('nav.team'), state: undefined },
+    { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), chatPanel: 'assistants' as ChatPanelNavTarget },
+    { key: 'team', to: TAB_ROUTES.team, label: t('nav.team'), chatPanel: 'team' as ChatPanelNavTarget },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), state: undefined },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), state: undefined },
   ], [t]);
   const immersiveConfigNavItems = useMemo(() => [
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), icon: IconIM },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), icon: IconAgents },
-    { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), icon: IconAssistant },
-    { key: 'team', to: TAB_ROUTES.team, label: t('nav.team'), icon: IconTeam },
+    { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), icon: IconAssistant, chatPanel: 'assistants' as ChatPanelNavTarget },
+    { key: 'team', to: TAB_ROUTES.team, label: t('nav.team'), icon: IconTeam, chatPanel: 'team' as ChatPanelNavTarget },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), icon: IconExtensions },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), icon: IconSystem },
   ], [t]);
@@ -130,6 +131,9 @@ export function Sidebar({
   const confirming = restartPhase === 'confirm';
   const themeToggleLabel = theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode');
   const languageToggleLabel = locale === 'zh-CN' ? 'Switch to English' : '切换到中文';
+  const chatPanelState = (panel?: ChatPanelNavTarget) => panel
+    ? { openChatPanel: panel, openChatPanelNonce: Date.now() }
+    : undefined;
 
   if (immersive) {
     return (
@@ -206,24 +210,24 @@ export function Sidebar({
             <MenuTooltip label={t('nav.notes')} />
           </NavLink>
           <NavLink
-            to="/memory"
+            to="/chat"
+            state={chatPanelState('memory')}
             title={t('nav.knowledge')}
             aria-label={t('nav.knowledge')}
-            className={({ isActive }) => cn(
+            className={() => cn(
               'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
             )}
           >
             {IconKnowledge}
             <MenuTooltip label={t('nav.knowledge')} />
           </NavLink>
           <NavLink
-            to="/workflows"
+            to="/chat"
+            state={chatPanelState('workflows')}
             title={t('nav.workflows')}
             aria-label={t('nav.workflows')}
-            className={({ isActive }) => cn(
+            className={() => cn(
               'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
             )}
           >
             {IconWorkflow}
@@ -235,10 +239,11 @@ export function Sidebar({
               <NavLink
                 key={item.key}
                 to={item.to}
+                state={chatPanelState('chatPanel' in item ? item.chatPanel : undefined)}
                 title={item.label}
                 aria-label={item.label}
                 className={({ isActive }) => {
-                  const active = item.key === 'system' ? location.pathname === '/system' : isActive;
+                  const active = 'chatPanel' in item ? false : (item.key === 'system' ? location.pathname === '/system' : isActive);
                   return cn(
                     'group relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
                     active && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
@@ -328,11 +333,11 @@ export function Sidebar({
                 key={item.key}
                 to={item.to}
                 end={item.exact}
-                state={item.state}
+                state={chatPanelState('chatPanel' in item ? item.chatPanel : undefined)}
                 className={({ isActive }) => cn(
                   'inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-sm font-semibold transition-colors duration-200',
                   'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
-                  isActive ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
+                  isActive && !('chatPanel' in item) ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
                 )}
               >
                 {item.label}
@@ -344,11 +349,11 @@ export function Sidebar({
               <NavLink
                 key={item.key}
                 to={item.to}
-                state={item.state}
+                state={chatPanelState('chatPanel' in item ? item.chatPanel : undefined)}
                 className={({ isActive }) => {
                   const active = item.key === 'system'
                     ? location.pathname === '/system'
-                    : isActive;
+                    : isActive && !('chatPanel' in item);
                   return cn(
                     'inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-[13px] font-semibold transition-colors duration-200',
                     'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
