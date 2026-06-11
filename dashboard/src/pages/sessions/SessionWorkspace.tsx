@@ -35,6 +35,7 @@ import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest 
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 import { ProAssistantsSection, ProAutomationSection } from '../agents/ProAgentWorkflowSection';
+import { TeamTab } from '../team/TeamTab';
 import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
 import type { SessionPanelChange, SessionPanelScrollRequest } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
@@ -851,6 +852,7 @@ function ChatWorkspaceLauncher({
   onProjectContext,
   onKnowledge,
   onOpenAssistants,
+  onOpenTeam,
   t,
 }: {
   workspaces: WorkspaceEntry[];
@@ -864,6 +866,7 @@ function ChatWorkspaceLauncher({
   onProjectContext: (workspace: WorkspaceEntry) => void;
   onKnowledge: (workdir: string) => void;
   onOpenAssistants: () => void;
+  onOpenTeam: () => void;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(defaultWorkdir);
@@ -1024,8 +1027,16 @@ function ChatWorkspaceLauncher({
       <div className="mb-2 flex min-w-0 items-center gap-2">
         <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{t('chatWorkspace.launcherTitle')}</span>
         <span className="shrink-0 rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onOpenTeam}
+          className="ml-auto h-7 shrink-0 px-2 text-[11px]"
+        >
+          {t('chatWorkspace.team')}
+        </Button>
         <label
-          className="ml-auto flex max-w-[240px] shrink-0 items-center gap-1.5 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5"
+          className="flex min-w-[108px] max-w-[240px] flex-1 items-center gap-1.5 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5"
           title={selectedTargetLabel}
         >
           <span className="shrink-0 uppercase tracking-[0.08em]">{t('chatWorkspace.target')}</span>
@@ -3048,6 +3059,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatWorkspaceAutomationsLoading, setChatWorkspaceAutomationsLoading] = useState(false);
   const [chatWorkspaceAutomationRunningId, setChatWorkspaceAutomationRunningId] = useState<string | null>(null);
   const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
+  const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
@@ -7393,6 +7405,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onProjectContext={openProjectContextModal}
               onKnowledge={openWorkspaceKnowledgeModal}
               onOpenAssistants={() => setAssistantLibraryOpen(true)}
+              onOpenTeam={() => setTeamLibraryOpen(true)}
               t={t}
             />
             <ChatWorkspaceSchedulesStrip
@@ -9655,6 +9668,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         />
         <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
           <ProAutomationSection embedded onChange={refreshChatWorkspaceAutomations} />
+        </div>
+      </Modal>
+
+      {/* Chat team library modal */}
+      <Modal
+        open={teamLibraryOpen}
+        onClose={() => setTeamLibraryOpen(false)}
+        wide
+        panelClassName="max-w-[980px]"
+      >
+        <ModalHeader
+          title={t('chatWorkspace.teamLibraryTitle')}
+          description={t('chatWorkspace.teamLibraryDescription')}
+          onClose={() => setTeamLibraryOpen(false)}
+        />
+        <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
+          <TeamTab />
         </div>
       </Modal>
 
