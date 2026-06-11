@@ -1240,23 +1240,54 @@ function ChatWorkspaceLauncher({
       )}
       {workspaceMenuOpen && (
         <div className="absolute left-3 right-3 top-[calc(100%-0.25rem)] z-50 max-h-[240px] overflow-y-auto rounded-xl border border-edge/75 bg-dropdown p-1 shadow-xl backdrop-blur-md">
-          {filteredWorkspaces.length ? filteredWorkspaces.map((ws, index) => (
-            <button
-              type="button"
-              key={ws.path}
-              onClick={() => chooseWorkspace(ws)}
-              className={cn(
-                'flex h-9 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-left text-[12px] transition-colors',
-                index === highlightedWorkspace ? 'bg-primary/[0.12] text-fg' : 'text-fg-3 hover:bg-panel-h',
-              )}
-            >
-              <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-edge/55 bg-inset text-[10px] font-semibold text-fg-5">/</span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-semibold">{ws.name || workspaceBaseName(ws.path)}</span>
-                <span className="block truncate text-[10px] text-fg-5">{ws.path}</span>
-              </span>
-            </button>
-          )) : (
+          {filteredWorkspaces.length ? filteredWorkspaces.map((ws, index) => {
+            const bits = ([
+              [t('chatWorkspace.projectRulesShort'), ws.rules],
+              [t('chatWorkspace.projectInstructionsShort'), ws.instructions],
+              [t('chatWorkspace.projectMemoryShort'), ws.memory],
+            ] as const).filter(([, value]) => String(value || '').trim());
+            const selected = ws.path === selectedWorkspace?.path;
+            return (
+              <button
+                type="button"
+                key={ws.path}
+                onClick={() => chooseWorkspace(ws)}
+                className={cn(
+                  'flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition-colors',
+                  index === highlightedWorkspace ? 'bg-primary/[0.12] text-fg' : 'text-fg-3 hover:bg-panel-h',
+                )}
+              >
+                <span className={cn(
+                  'grid h-7 w-7 shrink-0 place-items-center rounded-md border text-[10px] font-semibold',
+                  bits.length ? 'border-primary/25 bg-primary/[0.08] text-primary' : 'border-edge/55 bg-inset text-fg-5',
+                )}>
+                  /
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="min-w-0 truncate font-semibold">{ws.name || workspaceBaseName(ws.path)}</span>
+                    {selected && (
+                      <span className="shrink-0 rounded border border-primary/25 bg-primary/[0.08] px-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-primary">
+                        {t('chatWorkspace.projectSelected')}
+                      </span>
+                    )}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[10px] text-fg-5">{ws.path}</span>
+                  <span className="mt-1 flex min-w-0 flex-wrap gap-1">
+                    {bits.length ? bits.map(([label]) => (
+                      <span key={label} className="rounded border border-edge/55 bg-panel/70 px-1.5 py-0.5 text-[9px] font-semibold text-fg-5">
+                        {label}
+                      </span>
+                    )) : (
+                      <span className="rounded border border-edge/45 bg-inset px-1.5 py-0.5 text-[9px] font-semibold text-fg-5">
+                        {t('chatWorkspace.projectNoContext')}
+                      </span>
+                    )}
+                  </span>
+                </span>
+              </button>
+            );
+          }) : (
             <div className="px-3 py-2 text-[12px] text-fg-5">{t('chatWorkspace.noWorkspaceMatch')}</div>
           )}
         </div>
