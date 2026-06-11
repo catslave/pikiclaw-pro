@@ -12,6 +12,7 @@ import type { BrowserPanelSnapshot } from './types';
 
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
+const AssistantsTab = lazy(async () => ({ default: (await import('./pages/assistants/AssistantsTab')).AssistantsTab }));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const TasksTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).TasksTab }));
 const NotesTab = lazy(async () => ({ default: (await import('./pages/notes')).NotesWorkspace }));
@@ -65,6 +66,7 @@ function locationToTab(pathname: string): DashboardTab {
     '/archive': 'system',
     '/im': 'im',
     '/agents': 'agents',
+    '/assistants': 'assistants',
     '/extensions': 'extensions',
     '/skills': 'extensions',
     '/permissions': 'system',
@@ -85,7 +87,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/dashboard') return '/tasks';
   if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/chat', '/workspace', '/tasks', '/daily', '/notes', '/knowledge', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/chat', '/workspace', '/tasks', '/daily', '/notes', '/knowledge', '/usage', '/im', '/agents', '/assistants', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -432,6 +434,11 @@ export function App() {
         <Route path="/agents" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <AgentTab />
+          </PageWrapper>
+        } />
+        <Route path="/assistants" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <AssistantsTab />
           </PageWrapper>
         } />
         <Route path="/usage" element={

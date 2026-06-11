@@ -11,6 +11,7 @@ const IconSun = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stro
 const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
 const IconRestart = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>;
 const IconAgents = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.8-3 2.8-4.5 5.5-4.5s4.7 1.5 5.5 4.5" /><circle cx="17" cy="10" r="2.3" /><path d="M14.8 15.2c2.9.2 4.8 1.4 5.7 3.8" /></svg>;
+const IconAssistant = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2" /><path d="M5.8 20c.9-3.6 3-5.4 6.2-5.4s5.3 1.8 6.2 5.4" /><path d="M19 4v3" /><path d="M20.5 5.5h-3" /></svg>;
 const IconIM = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 4v-4A2.5 2.5 0 0 1 4 12.5z" /><path d="M8 8h8" /><path d="M8 11.5h5" /></svg>;
 const IconExtensions = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 3h6v4h2.5a2.5 2.5 0 0 1 0 5H15v3h3.5a2.5 2.5 0 0 1 0 5H9v-5H5.5a2.5 2.5 0 0 1 0-5H9V7H6.5a2.5 2.5 0 0 1 0-5H9z" /></svg>;
 const IconSystem = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z" /></svg>;
@@ -69,6 +70,7 @@ const TAB_ROUTES: Record<string, string> = {
   usage: '/usage',
   im: '/im',
   agents: '/agents',
+  assistants: '/assistants',
   extensions: '/extensions',
   system: '/system',
 };
@@ -104,12 +106,14 @@ export function Sidebar({
   const configNavItems = useMemo(() => [
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), state: undefined },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), state: undefined },
+    { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), state: undefined },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), state: undefined },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), state: undefined },
   ], [t]);
   const immersiveConfigNavItems = useMemo(() => [
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), icon: IconIM },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), icon: IconAgents },
+    { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), icon: IconAssistant },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), icon: IconExtensions },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), icon: IconSystem },
   ], [t]);

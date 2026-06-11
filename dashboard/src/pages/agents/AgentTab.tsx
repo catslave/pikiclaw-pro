@@ -29,7 +29,6 @@ import { SectionCard } from '../shared';
 import ModelsSection, { useModelLayer, type ModelLayerSnapshot } from '../models/ModelsTab';
 import LocalModelsSection, { useLocalBackends } from '../local-models/LocalModelsSection';
 import ProfilesSection from '../profiles/ProfilesSection';
-import { ProAssistantsSection, ProAutomationSection } from './ProAgentWorkflowSection';
 import { SessionPanel } from '../sessions/SessionPanel';
 import { FeatureAgentDialog } from '../../components/FeatureAgentDialog';
 
@@ -1589,10 +1588,6 @@ export function AgentTab() {
           </div>
         </SectionCard>
       )}
-
-      <ProAssistantsSection />
-
-      <ProAutomationSection />
 
       <section className="space-y-3 pt-4">
         <div className="flex items-baseline justify-between border-t border-edge pt-4">
