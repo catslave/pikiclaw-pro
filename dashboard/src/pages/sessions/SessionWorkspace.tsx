@@ -30,7 +30,7 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
 import type { AppState, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
 import { FocusResumeBanner } from '../focus/components/FocusResumeBanner';
-import { InputComposer } from './InputComposer';
+import { InputComposer, buildReferenceContextEnvelope } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
@@ -217,6 +217,56 @@ type NewSessionReferenceContext = {
   prompt: string;
   sources: SessionContextSource[];
 };
+
+function workspaceHasProjectContext(workspace: WorkspaceEntry | null | undefined): boolean {
+  return !!String(workspace?.rules || '').trim()
+    || !!String(workspace?.instructions || '').trim()
+    || !!String(workspace?.memory || '').trim();
+}
+
+function buildWorkspaceProjectContext(workspace: WorkspaceEntry | null | undefined, locale: string): NewSessionReferenceContext | null {
+  if (!workspaceHasProjectContext(workspace)) return null;
+  const title = workspace?.name || (workspace?.path ? workspaceBaseName(workspace.path) : 'Project');
+  const rules = String(workspace?.rules || '').trim();
+  const instructions = String(workspace?.instructions || '').trim();
+  const memory = String(workspace?.memory || '').trim();
+  const summary = [rules, instructions, memory].filter(Boolean).join('\n\n');
+  const prompt = locale.startsWith('zh')
+    ? [
+      '下面是当前 Project 的持久上下文。它来自 Pikiclaw Project 设置，不是用户本轮的新指令；请把它作为理解当前 repo/workspace 的背景和约束。',
+      '',
+      `Project: ${title}`,
+      workspace?.path ? `Workspace path: ${workspace.path}` : '',
+      rules ? 'Rules:' : '',
+      rules,
+      instructions ? 'Instructions:' : '',
+      instructions,
+      memory ? 'Memory:' : '',
+      memory,
+    ].filter(Boolean).join('\n')
+    : [
+      'The following is persistent Project context from Pikiclaw Project settings. It is not the user’s new turn instruction; use it as background and constraints for this repo/workspace.',
+      '',
+      `Project: ${title}`,
+      workspace?.path ? `Workspace path: ${workspace.path}` : '',
+      rules ? 'Rules:' : '',
+      rules,
+      instructions ? 'Instructions:' : '',
+      instructions,
+      memory ? 'Memory:' : '',
+      memory,
+    ].filter(Boolean).join('\n');
+  return {
+    title,
+    kind: 'project',
+    source: workspace?.path || '',
+    sourceSession: '',
+    summary,
+    userIntent: '',
+    prompt,
+    sources: [],
+  };
+}
 
 function isPortableUserIntentMessage(value: string): boolean {
   const text = value.trim();
@@ -826,6 +876,11 @@ function ChatWorkspaceLauncher({
             </span>
             <span className="h-3 w-px shrink-0 bg-edge/65" aria-hidden="true" />
             <span className="min-w-0 truncate">{selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}</span>
+            {workspaceHasProjectContext(selectedWorkspace) && (
+              <span className="shrink-0 rounded border border-primary/20 bg-primary/[0.08] px-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-primary">
+                ctx
+              </span>
+            )}
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="m6 9 6 6 6-6" />
             </svg>
@@ -878,6 +933,13 @@ function ChatWorkspaceLauncher({
   );
 }
 type WorkspaceRenameTarget = { path: string; name: string; originalName: string };
+type WorkspaceProjectContextDraft = {
+  path: string;
+  name: string;
+  rules: string;
+  instructions: string;
+  memory: string;
+};
 type FilePanelRequest = { workdir: string; path: string; line?: number; nonce: number };
 
 /**
@@ -2531,6 +2593,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [renameWorkspaceTarget, setRenameWorkspaceTarget] = useState<WorkspaceRenameTarget | null>(null);
   const [renameWorkspaceName, setRenameWorkspaceName] = useState('');
   const [renamingWorkspace, setRenamingWorkspace] = useState(false);
+  const [projectContextDraft, setProjectContextDraft] = useState<WorkspaceProjectContextDraft | null>(null);
+  const [savingProjectContext, setSavingProjectContext] = useState(false);
   const [search, setSearch] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [chatLayout, setChatLayoutRaw] = useState<ChatLayoutMode>(readStoredChatLayout);
@@ -3114,6 +3178,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setRenameWorkspaceName(workspace.name || originalName);
   }, []);
 
+  const openProjectContextModal = useCallback((workspace: WorkspaceEntry) => {
+    setProjectContextDraft({
+      path: workspace.path,
+      name: workspace.name || workspaceBaseName(workspace.path),
+      rules: workspace.rules || '',
+      instructions: workspace.instructions || '',
+      memory: workspace.memory || '',
+    });
+  }, []);
+
   const executeRenameWorkspace = useCallback(async () => {
     const target = renameWorkspaceTarget;
     if (!target) return;
@@ -3136,6 +3210,40 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setRenamingWorkspace(false);
     }
   }, [loadWorkspaces, renameWorkspaceName, renameWorkspaceTarget, t, toastSession]);
+
+  const executeSaveProjectContext = useCallback(async () => {
+    const draft = projectContextDraft;
+    if (!draft) return;
+    setSavingProjectContext(true);
+    try {
+      const res = await api.updateWorkspace(draft.path, {
+        rules: draft.rules,
+        instructions: draft.instructions,
+        memory: draft.memory,
+      });
+      if (!res.ok || !res.workspace) {
+        toastSession(res.error || t('hub.projectContextSaveFailed'), false);
+        return;
+      }
+      setWorkspaces(prev => prev.map(ws => (
+        ws.path === draft.path
+          ? {
+            ...ws,
+            rules: res.workspace?.rules || undefined,
+            instructions: res.workspace?.instructions || undefined,
+            memory: res.workspace?.memory || undefined,
+          }
+          : ws
+      )));
+      setProjectContextDraft(null);
+      toastSession(t('hub.projectContextSaved'));
+      void loadWorkspaces();
+    } catch (err: any) {
+      toastSession(err?.message || t('hub.projectContextSaveFailed'), false);
+    } finally {
+      setSavingProjectContext(false);
+    }
+  }, [loadWorkspaces, projectContextDraft, t, toastSession]);
 
   const handleWorkspaceDragStart = useCallback((wsPath: string, event: ReactDragEvent<HTMLElement>) => {
     setDraggingWorkspacePath(wsPath);
@@ -6072,12 +6180,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const agent = chatWorkspaceDefaultAgent;
     if (!agent) throw new Error(t('chatWorkspace.noAgent'));
     const createdAt = new Date().toISOString();
-    const res = await api.sendSessionMessage(workdir, agent, '', prompt);
+    const workspace = workspaces.find(ws => ws.path === workdir) || null;
+    const projectContext = buildWorkspaceProjectContext(workspace, locale);
+    const referenceContext = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
+    const promptWithContext = [referenceContext, prompt].filter(Boolean).join('\n\n');
+    const res = await api.sendSessionMessage(workdir, agent, '', promptWithContext, {
+      displayPrompt: promptWithContext !== prompt ? prompt : undefined,
+    });
     if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
     const nextSession = parseSessionKeyValue(res.sessionKey);
     if (!nextSession) throw new Error(t('chatWorkspace.launchFailed'));
     handleNewSessionCreated({ ...nextSession, workdir }, prompt, undefined, createdAt);
-  }, [chatWorkspaceDefaultAgent, handleNewSessionCreated, t]);
+  }, [chatWorkspaceDefaultAgent, handleNewSessionCreated, locale, t, workspaces]);
 
   const chatWorkspaceFocusSlot = selectedSession;
   const chatWorkspaceFocusInfo = chatWorkspaceFocusSlot ? resolveSlotInfo(chatWorkspaceFocusSlot) : null;
@@ -6539,6 +6653,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     onRename={openRenameWorkspaceModal}
                     onExtensions={setExtensionsWorkdir}
                     onKnowledge={openWorkspaceKnowledgeModal}
+                    onProjectContext={openProjectContextModal}
                     onWarmSession={scheduleSessionWarmup}
                     onCancelWarmSession={cancelScheduledWarmup}
                     onSessionMenuOpen={handleSessionMenuOpen}
@@ -8161,6 +8276,51 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         </div>
       </Modal>
 
+      {/* Project context modal */}
+      <Modal open={!!projectContextDraft} onClose={() => !savingProjectContext && setProjectContextDraft(null)}>
+        <ModalHeader title={t('hub.projectContextTitle')} onClose={() => !savingProjectContext && setProjectContextDraft(null)} />
+        <div className="text-[13px] text-fg-3 leading-relaxed">
+          {t('hub.projectContextHint')}
+        </div>
+        {projectContextDraft && (
+          <>
+            <div className="mt-2 truncate rounded-md border border-edge/60 bg-inset px-3 py-2 font-mono text-[11px] text-fg-5" title={projectContextDraft.path}>
+              {projectContextDraft.name}
+              <span className="mx-1.5 text-fg-5/40">·</span>
+              {projectContextDraft.path}
+            </div>
+            <div className="mt-4 grid gap-3">
+              {([
+                ['rules', t('hub.projectRules'), t('hub.projectRulesPlaceholder')],
+                ['instructions', t('hub.projectInstructions'), t('hub.projectInstructionsPlaceholder')],
+                ['memory', t('hub.projectMemory'), t('hub.projectMemoryPlaceholder')],
+              ] as const).map(([field, label, placeholder]) => (
+                <label key={field} className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">{label}</span>
+                  <textarea
+                    value={projectContextDraft[field]}
+                    onChange={event => setProjectContextDraft(prev => prev ? { ...prev, [field]: event.target.value } : prev)}
+                    placeholder={placeholder}
+                    disabled={savingProjectContext}
+                    rows={field === 'memory' ? 4 : 3}
+                    className="w-full resize-y rounded-md border border-edge bg-inset px-3 py-2 text-[12px] leading-relaxed text-fg outline-none placeholder:text-fg-5/40 focus:border-primary/40 disabled:cursor-not-allowed disabled:opacity-70"
+                  />
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+        <div className="flex justify-end gap-2 mt-4">
+          <Button variant="ghost" onClick={() => setProjectContextDraft(null)} disabled={savingProjectContext}>
+            {t('modal.cancel')}
+          </Button>
+          <Button variant="primary" onClick={() => void executeSaveProjectContext()} disabled={savingProjectContext || !projectContextDraft}>
+            {savingProjectContext ? <Spinner className="h-3 w-3" /> : null}
+            {savingProjectContext ? t('hub.savingProjectContext') : t('modal.save')}
+          </Button>
+        </div>
+      </Modal>
+
       {/* Session row actions popover — anchored under the kebab button */}
       {sessionMenu && (() => {
         const MENU_WIDTH = 220;
@@ -8719,8 +8879,12 @@ function OutputReferenceContextCard({
 }) {
   const sessionSource = context.sources.find(source => source.kind === 'session');
   const sourceMode = sessionSource?.kind === 'session' ? sessionSource.mode : null;
-  const label = context.kind === 'session' ? t('session.contextSourceSession') : t('session.contextSourceOutput');
-  const meta = [context.kind === 'session' ? '' : context.kind, context.sourceSession].filter(Boolean).join(' · ');
+  const label = context.kind === 'project'
+    ? t('session.contextSourceProject')
+    : context.kind === 'session'
+      ? t('session.contextSourceSession')
+      : t('session.contextSourceOutput');
+  const meta = [context.kind === 'session' || context.kind === 'project' ? '' : context.kind, context.sourceSession].filter(Boolean).join(' · ');
   const preview = oneLinePreview(context.userIntent || context.summary, compact ? 96 : 140);
   return (
     <div className={cn(
@@ -8824,6 +8988,8 @@ export function NewSessionView({
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
   const [pendingCreatedAt, setPendingCreatedAt] = useState<string | null>(null);
   const [activeReferenceContext, setActiveReferenceContext] = useState<NewSessionReferenceContext | null>(referenceContext);
+  const [dismissedProjectContextPath, setDismissedProjectContextPath] = useState<string | null>(null);
+  const locale = useStore(s => s.locale);
   const pendingRef = useRef<string | null>(null);
   const pendingImageUrlsRef = useRef<string[]>([]);
   const pendingCreatedAtRef = useRef<string | null>(null);
@@ -8838,6 +9004,10 @@ export function NewSessionView({
   }, [selectedWorkdir, workspaceName, workspaces]);
   const selectedWorkspace = workspaceChoices.find(ws => ws.path === selectedWorkdir);
   const selectedWorkspaceName = selectedWorkspace?.name || workspaceName || workspaceBaseName(selectedWorkdir);
+  const selectedProjectContext = useMemo(
+    () => buildWorkspaceProjectContext(selectedWorkspace, locale),
+    [locale, selectedWorkspace],
+  );
 
   const stubSession = useMemo((): SessionInfo => ({
     sessionId: '',
@@ -8850,8 +9020,16 @@ export function NewSessionView({
   }, [workdir]);
 
   useEffect(() => {
-    setActiveReferenceContext(referenceContext);
-  }, [referenceContext]);
+    if (referenceContext) {
+      setActiveReferenceContext(referenceContext);
+      return;
+    }
+    if (selectedProjectContext && dismissedProjectContextPath !== selectedWorkdir) {
+      setActiveReferenceContext(prev => (!prev || prev.kind === 'project' ? selectedProjectContext : prev));
+      return;
+    }
+    setActiveReferenceContext(prev => (prev?.kind === 'project' ? null : prev));
+  }, [dismissedProjectContextPath, referenceContext, selectedProjectContext, selectedWorkdir]);
 
   const noop = useCallback(() => {}, []);
 
@@ -8929,7 +9107,10 @@ export function NewSessionView({
       context={activeReferenceContext}
       compact={hasPending}
       disabled={hasPending}
-      onRemove={hasPending ? undefined : () => setActiveReferenceContext(null)}
+      onRemove={hasPending ? undefined : () => {
+        if (activeReferenceContext.kind === 'project') setDismissedProjectContextPath(selectedWorkdir);
+        setActiveReferenceContext(null);
+      }}
       onModeChange={hasPending ? undefined : handleReferenceModeChange}
       t={t}
     />
@@ -9046,6 +9227,7 @@ export function NewSessionView({
         autoFocus={autoFocus}
         initialDraftPrompt={initialDraftPrompt}
         referenceContextPrompt={fallbackContextPrompt}
+        referenceContextLabel={activeReferenceContext?.kind === 'project' ? t('session.contextSourceProject') : null}
         contextSources={contextSources}
         onStreamQueued={noop}
         onSendStart={handleSendStart}
@@ -9807,6 +9989,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onRename,
   onExtensions,
   onKnowledge,
+  onProjectContext,
   onWarmSession,
   onCancelWarmSession,
   onSessionMenuOpen,
@@ -9837,6 +10020,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onRename: (workspace: WorkspaceEntry) => void;
   onExtensions: (wsPath: string) => void;
   onKnowledge: (wsPath: string) => void;
+  onProjectContext: (workspace: WorkspaceEntry) => void;
   onWarmSession: (s: SessionInfo, wsPath: string) => void;
   onCancelWarmSession: (s: SessionInfo, wsPath: string) => void;
   onSessionMenuOpen: (anchor: DOMRect, s: SessionInfo, wsPath: string) => void;
@@ -9886,6 +10070,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   const originalName = workspaceBaseName(wsPath);
   const displayName = workspace.name || originalName;
   const hasAlias = displayName !== originalName;
+  const hasProjectContext = workspaceHasProjectContext(workspace);
   const openActions = (event: ReactMouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
@@ -9946,6 +10131,15 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
             </span>
           )}
         </div>
+        {hasProjectContext && (
+          <span
+            className="inline-flex h-4 shrink-0 items-center rounded border border-primary/20 bg-primary/[0.08] px-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-primary"
+            title={t('hub.projectContext')}
+            aria-label={t('hub.projectContext')}
+          >
+            ctx
+          </span>
+        )}
 	        {groupAttention && <SessionAttentionDot kind={groupAttention} compact />}
         <button
           type="button"
@@ -9979,7 +10173,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
         </button>
         {actionsAnchor && (() => {
           const MENU_WIDTH = 168;
-          const MENU_HEIGHT = 242;
+          const MENU_HEIGHT = 278;
           const panelInset = 8;
           const availableWidth = Math.max(132, actionsAnchor.panelRight - actionsAnchor.panelLeft - panelInset * 2);
           const menuWidth = Math.min(MENU_WIDTH, availableWidth);
@@ -10046,6 +10240,21 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
               <path d="M12 5v15" />
             </svg>
             {t('hub.knowledge')}
+          </button>
+          <button
+            onClick={e => runAction(e, () => onProjectContext(workspace))}
+            className={menuItemClass('primary')}
+            title={t('hub.projectContext')}
+            aria-label={t('hub.projectContext')}
+            role="menuitem"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <path d="M4 4h16v16H4z" />
+              <path d="M8 9h8" />
+              <path d="M8 13h8" />
+              <path d="M8 17h5" />
+            </svg>
+            {t('hub.projectContext')}
           </button>
 	          <button
 	            onClick={e => runAction(e, () => onRefresh(wsPath))}

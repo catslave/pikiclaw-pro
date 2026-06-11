@@ -560,7 +560,18 @@ export const api = {
     ),
   addWorkspace: (wsPath: string, name?: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; workspace?: WorkspaceEntry; error?: string }>('/api/workspaces', { path: wsPath, name }, opts),
-  updateWorkspace: (wsPath: string, patch: { name?: string; preferredAgent?: string | null; order?: number }, opts?: ApiRequestOptions) =>
+  updateWorkspace: (
+    wsPath: string,
+    patch: {
+      name?: string;
+      preferredAgent?: string | null;
+      order?: number;
+      rules?: string;
+      instructions?: string;
+      memory?: string;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
     json<{ ok: boolean; workspace?: WorkspaceEntry | null; error?: string }>('/api/workspaces', { ...opts, method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: wsPath, ...patch }) }),
   reorderWorkspaces: (paths: string[], opts?: ApiRequestOptions) =>
     post<{ ok: boolean; workspaces?: WorkspaceEntry[]; error?: string }>('/api/workspaces/reorder', { paths }, opts),

@@ -64,6 +64,12 @@ export interface WorkspaceEntry {
   order?: number;
   /** Preferred default agent for this workspace */
   preferredAgent?: string;
+  /** Project-level rules applied when starting chats in this workspace. */
+  rules?: string;
+  /** Project-level assistant instructions applied when starting chats in this workspace. */
+  instructions?: string;
+  /** Durable project memory surfaced when starting chats in this workspace. */
+  memory?: string;
   /** When the workspace was registered */
   addedAt: string;
 }
@@ -273,6 +279,15 @@ function normalizeWorkspaces(raw: unknown): WorkspaceEntry[] {
       order: typeof (item as any).order === 'number' ? (item as any).order : entries.length,
       preferredAgent: typeof (item as any).preferredAgent === 'string' && (item as any).preferredAgent.trim()
         ? (item as any).preferredAgent.trim()
+        : undefined,
+      rules: typeof (item as any).rules === 'string' && (item as any).rules.trim()
+        ? (item as any).rules.trim()
+        : undefined,
+      instructions: typeof (item as any).instructions === 'string' && (item as any).instructions.trim()
+        ? (item as any).instructions.trim()
+        : undefined,
+      memory: typeof (item as any).memory === 'string' && (item as any).memory.trim()
+        ? (item as any).memory.trim()
         : undefined,
       addedAt: typeof (item as any).addedAt === 'string' && (item as any).addedAt.trim()
         ? (item as any).addedAt
@@ -643,8 +658,11 @@ export function reorderWorkspaces(orderedPaths: string[]): WorkspaceEntry[] {
   return reordered;
 }
 
-/** Update workspace preferences (preferredAgent, etc.) */
-export function updateWorkspace(workspacePath: string, patch: Partial<Pick<WorkspaceEntry, 'name' | 'preferredAgent' | 'order'>>): WorkspaceEntry | null {
+/** Update workspace preferences and project context metadata. */
+export function updateWorkspace(
+  workspacePath: string,
+  patch: Partial<Pick<WorkspaceEntry, 'name' | 'preferredAgent' | 'order' | 'rules' | 'instructions' | 'memory'>>,
+): WorkspaceEntry | null {
   const resolved = path.resolve(expandHomeDir(workspacePath));
   const config = loadUserConfig();
   const workspaces = normalizeWorkspaces(config.workspaces);
@@ -653,6 +671,9 @@ export function updateWorkspace(workspacePath: string, patch: Partial<Pick<Works
   if (patch.name !== undefined) entry.name = patch.name.trim() || entry.name;
   if (patch.preferredAgent !== undefined) entry.preferredAgent = patch.preferredAgent || undefined;
   if (patch.order !== undefined) entry.order = patch.order;
+  if (patch.rules !== undefined) entry.rules = patch.rules.trim() || undefined;
+  if (patch.instructions !== undefined) entry.instructions = patch.instructions.trim() || undefined;
+  if (patch.memory !== undefined) entry.memory = patch.memory.trim() || undefined;
   saveUserConfig({ ...config, workspaces });
   return entry;
 }

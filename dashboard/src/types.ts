@@ -581,6 +581,12 @@ export interface SessionSideChatRef {
 export interface WorkspaceEntry {
   path: string;
   name: string;
+  order?: number;
+  preferredAgent?: string;
+  rules?: string;
+  instructions?: string;
+  memory?: string;
+  addedAt?: string;
 }
 
 export interface SessionHubResult {
