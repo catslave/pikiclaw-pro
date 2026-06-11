@@ -889,7 +889,7 @@ function ChatWorkspaceLauncher({
   onError: (message: string) => void;
   onProjectContext: (workspace: WorkspaceEntry) => void;
   onKnowledge: (workdir: string) => void;
-  onOpenAssistants: () => void;
+  onOpenAssistants: (assistantId?: string) => void;
   onOpenMemory: () => void;
   onOpenTeam: () => void;
   onOpenWorkflows: () => void;
@@ -1082,7 +1082,7 @@ function ChatWorkspaceLauncher({
           <Button
             variant="ghost"
             size="sm"
-            onClick={onOpenAssistants}
+            onClick={() => onOpenAssistants()}
             className="h-7 shrink-0 px-2 text-[11px]"
           >
             {t('chatWorkspace.assistant')}
@@ -1277,7 +1277,7 @@ function ChatWorkspaceLauncher({
             <Button
               variant="ghost"
               size="sm"
-              onClick={onOpenAssistants}
+              onClick={() => onOpenAssistants(selectedAssistant.id)}
               className="h-7 shrink-0 px-2 text-[11px]"
             >
               {t('chatWorkspace.manageAssistant')}
@@ -3122,6 +3122,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [savingProjectContext, setSavingProjectContext] = useState(false);
   const [chatAssistants, setChatAssistants] = useState<AgentAssistant[]>([]);
   const [assistantLibraryOpen, setAssistantLibraryOpen] = useState(false);
+  const [assistantLibraryInitialEditId, setAssistantLibraryInitialEditId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [chatLayout, setChatLayoutRaw] = useState<ChatLayoutMode>(readStoredChatLayout);
@@ -3179,6 +3180,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatLauncherWorkdir, setChatLauncherWorkdir] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
+  const openAssistantLibrary = useCallback((assistantId?: string) => {
+    setAssistantLibraryInitialEditId(assistantId || null);
+    setAssistantLibraryOpen(true);
+  }, []);
   const openInboxFromTrigger = useCallback(() => {
     setInboxOpen(true);
   }, []);
@@ -3209,13 +3214,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const panel = navState?.openChatPanel;
     const openProjectPicker = navState?.openChatProjectPicker;
     if (!panel && !openProjectPicker) return;
-    if (panel === 'assistants') setAssistantLibraryOpen(true);
+    if (panel === 'assistants') openAssistantLibrary();
     else if (panel === 'memory') setMemoryLibraryOpen(true);
     else if (panel === 'team') setTeamLibraryOpen(true);
     else if (panel === 'workflows') setWorkflowLibraryOpen(true);
     if (openProjectPicker) setChatProjectPickerNonce(navState.openChatProjectPickerNonce || Date.now());
     navigate('/chat', { replace: true, state: null });
-  }, [active, location.state, mode, navigate]);
+  }, [active, location.state, mode, navigate, openAssistantLibrary]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
   const [quickTodoText, setQuickTodoText] = useState('');
@@ -3309,6 +3314,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   useEffect(() => { void loadChatAssistants(); }, [loadChatAssistants]);
 
   const closeAssistantLibrary = useCallback(() => {
+    setAssistantLibraryInitialEditId(null);
     setAssistantLibraryOpen(false);
     void loadChatAssistants();
   }, [loadChatAssistants]);
@@ -7557,7 +7563,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onError={(message) => toastSession(message, false)}
               onProjectContext={openProjectContextModal}
               onKnowledge={openWorkspaceKnowledgeModal}
-              onOpenAssistants={() => setAssistantLibraryOpen(true)}
+              onOpenAssistants={openAssistantLibrary}
               onOpenMemory={() => setMemoryLibraryOpen(true)}
               onOpenTeam={() => setTeamLibraryOpen(true)}
               onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
@@ -9818,7 +9824,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           onClose={closeAssistantLibrary}
         />
         <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
-          <ProAssistantsSection embedded onChange={loadChatAssistants} />
+          <ProAssistantsSection
+            embedded
+            initialEditAssistantId={assistantLibraryInitialEditId}
+            onInitialEditConsumed={() => setAssistantLibraryInitialEditId(null)}
+            onChange={loadChatAssistants}
+          />
         </div>
       </Modal>
 

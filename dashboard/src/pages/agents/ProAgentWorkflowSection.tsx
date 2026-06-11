@@ -405,7 +405,17 @@ function AssistantHistoryList({
   );
 }
 
-export function ProAssistantsSection({ embedded = false, onChange }: { embedded?: boolean; onChange?: () => void } = {}) {
+export function ProAssistantsSection({
+  embedded = false,
+  onChange,
+  initialEditAssistantId,
+  onInitialEditConsumed,
+}: {
+  embedded?: boolean;
+  onChange?: () => void;
+  initialEditAssistantId?: string | null;
+  onInitialEditConsumed?: () => void;
+} = {}) {
   const navigate = useNavigate();
   const toast = useStore(s => s.toast);
   const locale = useStore(s => s.locale);
@@ -590,6 +600,13 @@ export function ProAssistantsSection({ embedded = false, onChange }: { embedded?
     () => assistants.filter(item => item.kind !== 'page-owner'),
     [assistants],
   );
+  useEffect(() => {
+    if (!initialEditAssistantId) return;
+    const target = visibleAssistants.find(item => item.id === initialEditAssistantId);
+    if (!target) return;
+    openEdit(target);
+    onInitialEditConsumed?.();
+  }, [initialEditAssistantId, onInitialEditConsumed, openEdit, visibleAssistants]);
   const assistantsWithAgents = useMemo(
     () => visibleAssistants.filter(item => filterInstalledAgents(item.preferredAgents).length > 0).length,
     [filterInstalledAgents, visibleAssistants],
