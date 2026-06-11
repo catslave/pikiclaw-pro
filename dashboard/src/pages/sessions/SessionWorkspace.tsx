@@ -9872,7 +9872,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           onClose={() => setTeamLibraryOpen(false)}
         />
         <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
-          <TeamTab />
+          <TeamTab
+            onEditAssistant={(assistant) => {
+              setTeamLibraryOpen(false);
+              openAssistantLibrary(assistant.id);
+            }}
+          />
         </div>
       </Modal>
 

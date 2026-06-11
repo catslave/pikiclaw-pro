@@ -29,6 +29,7 @@ type Copy = {
   assistantsMetric: string;
   agentsMetric: string;
   bindingsMetric: string;
+  manageAssistant: string;
 };
 
 function copyFor(locale: Locale): Copy {
@@ -54,6 +55,7 @@ function copyFor(locale: Locale): Copy {
       assistantsMetric: '员工',
       agentsMetric: '可用 Agent',
       bindingsMetric: '绑定',
+      manageAssistant: '管理 Assistant',
     };
   }
   return {
@@ -77,6 +79,7 @@ function copyFor(locale: Locale): Copy {
     assistantsMetric: 'Employees',
     agentsMetric: 'Available agents',
     bindingsMetric: 'Bindings',
+    manageAssistant: 'Manage Assistant',
   };
 }
 
@@ -89,7 +92,15 @@ function assistantInitials(name: string) {
     .join('') || 'A';
 }
 
-function AssistantCard({ assistant, copy }: { assistant: AgentAssistant; copy: Copy }) {
+function AssistantCard({
+  assistant,
+  copy,
+  onManage,
+}: {
+  assistant: AgentAssistant;
+  copy: Copy;
+  onManage?: (assistant: AgentAssistant) => void;
+}) {
   const agents = assistant.preferredAgents || [];
   return (
     <SectionCard className="p-3">
@@ -121,13 +132,24 @@ function AssistantCard({ assistant, copy }: { assistant: AgentAssistant; copy: C
               <div className="text-[11px] text-fg-5">{copy.noPreferredAgents}</div>
             )}
           </div>
+          {onManage && (
+            <div className="mt-3 flex justify-end">
+              <Button variant="secondary" size="sm" onClick={() => onManage(assistant)}>
+                {copy.manageAssistant}
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </SectionCard>
   );
 }
 
-export function TeamTab() {
+export function TeamTab({
+  onEditAssistant,
+}: {
+  onEditAssistant?: (assistant: AgentAssistant) => void;
+} = {}) {
   const locale = useStore(s => s.locale);
   const toast = useStore(s => s.toast);
   const agentStatus = useStore(s => s.agentStatus);
@@ -183,7 +205,14 @@ export function TeamTab() {
           </div>
         ) : visibleAssistants.length ? (
           <div className="grid gap-2 lg:grid-cols-2">
-            {visibleAssistants.map(assistant => <AssistantCard key={assistant.id} assistant={assistant} copy={copy} />)}
+            {visibleAssistants.map(assistant => (
+              <AssistantCard
+                key={assistant.id}
+                assistant={assistant}
+                copy={copy}
+                onManage={onEditAssistant}
+              />
+            ))}
           </div>
         ) : (
           <div className="rounded-lg border border-dashed border-edge bg-panel-alt px-4 py-8 text-center text-sm text-fg-5">
