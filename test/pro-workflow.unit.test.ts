@@ -6,11 +6,16 @@ import {
   createAgentAssistant,
   createAutomationRule,
   createJiraSyncRun,
+  createJiraRemoteUpdateRun,
   applyJiraSyncRunItems,
+  cancelJiraRemoteUpdateRun,
   createKnowledgeEntry,
+  deleteKnowledgeEntry,
   getAssistantPrompt,
+  getJiraRemoteUpdateRun,
   getJiraSyncRun,
   listAgentAssistants,
+  listJiraRemoteUpdateRuns,
   listAutomationRules,
   listKnowledgeEntries,
   markAutomationRun,
@@ -18,6 +23,8 @@ import {
   resetAgentAssistantPrompt,
   stopJiraSyncRun,
   updateAgentAssistantPrompt,
+  updateKnowledgeEntry,
+  updateJiraRemoteUpdateRun,
   updateJiraSyncRun,
 } from '../src/pro/workflow.ts';
 import { listProTasks } from '../src/pro/tasks.ts';
@@ -102,7 +109,63 @@ describe('Pro workflow store', () => {
       body: 'Point means user understanding and validation effort.',
       tags: ['jira', 'estimate'],
     });
-    expect(listKnowledgeEntries()[0]).toMatchObject({ id: entry.id, tags: ['jira', 'estimate'] });
+    expect(listKnowledgeEntries()[0]).toMatchObject({
+      id: entry.id,
+      kind: 'knowledge-card',
+      status: 'published',
+      createdBy: 'manual',
+      confidence: 'medium',
+      tags: ['jira', 'estimate'],
+    });
+  });
+
+  it('normalizes legacy and new knowledge entries and supports hide/update', () => {
+    fs.writeFileSync(process.env.PIKICLAW_PRO_WORKFLOW_FILE!, JSON.stringify({
+      version: 1,
+      assistants: [],
+      automations: [],
+      knowledge: [
+        {
+          id: 'legacy_1',
+          title: 'Legacy chat note',
+          body: 'Old shape',
+          source: { type: 'chat', workdir: '/repo/app', agent: 'codex', sessionId: 's1' },
+          tags: ['legacy'],
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-01T00:00:00.000Z',
+        },
+        {
+          id: 'new_1',
+          title: 'Digest',
+          body: 'New shape',
+          kind: 'session-digest',
+          status: 'hidden',
+          summary: 'Digest summary',
+          sourceRefs: [{ type: 'chat', workdir: '/repo/app', agent: 'codex', sessionId: 's2' }],
+          artifactRefs: [{ kind: 'document', outputId: 'out1', path: '/repo/app/out.md' }],
+          confidence: 'high',
+          createdBy: 'agent',
+          tags: ['digest'],
+          createdAt: '2026-06-02T00:00:00.000Z',
+          updatedAt: '2026-06-02T00:00:00.000Z',
+        },
+      ],
+    }, null, 2));
+
+    const legacy = listKnowledgeEntries({ status: 'published' }).find(entry => entry.id === 'legacy_1');
+    expect(legacy).toMatchObject({
+      kind: 'knowledge-card',
+      status: 'published',
+      createdBy: 'manual',
+      sourceRefs: [{ type: 'chat', workdir: '/repo/app', agent: 'codex', sessionId: 's1' }],
+    });
+    expect(listKnowledgeEntries({ status: 'hidden' })[0]).toMatchObject({ id: 'new_1', confidence: 'high' });
+
+    const updated = updateKnowledgeEntry('legacy_1', { summary: 'Better summary', tags: ['focus'], status: 'hidden' });
+    expect(updated).toMatchObject({ summary: 'Better summary', tags: ['focus'], status: 'hidden' });
+
+    const hidden = deleteKnowledgeEntry('new_1');
+    expect(hidden?.status).toBe('hidden');
   });
 
   it('persists Jira sync run status and analysis summary', () => {
@@ -143,7 +206,12 @@ describe('Pro workflow store', () => {
         summary: 'Current sprint task',
         description: 'Implement active work.',
         issueType: 'Task',
-        sprint: 'AIR2612(0601-0614)',
+        customfield_10652: {
+          value: [
+            'com.atlassian.greenhopper.service.sprint.Sprint@old[id=1,name=AIR2611(0518-0531),state=CLOSED]',
+            'com.atlassian.greenhopper.service.sprint.Sprint@new[id=2,name=AIR2612(0601-0614),state=ACTIVE]',
+          ],
+        },
         assignee: 'Michael Yang',
         reporter: 'PM',
         status: 'Open',
@@ -160,7 +228,8 @@ describe('Pro workflow store', () => {
     expect(updated.items?.[0]).toMatchObject({
       jiraKey: 'PRO-1',
       title: 'Current sprint task',
-      sprint: 'AIR2612(0601-0614)',
+      jiraUrl: 'https://jira.ringcentral.com/browse/PRO-1',
+      sprint: 'AIR2611(0518-0531), AIR2612(0601-0614)',
       selected: true,
       status: 'candidate',
     });
@@ -182,7 +251,7 @@ describe('Pro workflow store', () => {
   it('applies only selected Jira sync items to Pikiclaw tasks', () => {
     const run = createJiraSyncRun({ assistantId: 'assistant_ticket_sync', agent: 'codex', workdir: '/repo/app' });
     const withItems = recordJiraSyncCandidates(run.id, [
-      { jiraKey: 'PRO-1', summary: 'Selected task', status: 'Open', sprint: 'AIR2612(0601-0614)' },
+      { jiraKey: 'PRO-1', summary: 'Selected task', status: 'Open', sprint: 'AIR2612(0601-0614)', fixVersions: [{ name: '2026.06' }], dueDate: '2026-06-15' },
       { jiraKey: 'PRO-2', summary: 'Unselected task', status: 'Open', sprint: 'AIR2612(0601-0614)' },
     ]);
 
@@ -194,6 +263,58 @@ describe('Pro workflow store', () => {
       { key: 'PRO-1', status: 'applied', selected: true },
       { key: 'PRO-2', status: 'candidate', selected: false },
     ]);
-    expect(listProTasks().map(task => task.jiraKey)).toEqual(['PRO-1']);
+    const tasks = listProTasks();
+    expect(tasks.map(task => task.jiraKey)).toEqual(['PRO-1']);
+    expect(tasks[0].jiraFields).toMatchObject({
+      status: 'Open',
+      fixVersions: ['2026.06'],
+      dueDate: '2026-06-15',
+    });
+    expect(tasks[0].jiraUrl).toBe('https://jira.ringcentral.com/browse/PRO-1');
+    expect(tasks[0].sprint).toBe('AIR2612(0601-0614)');
+  });
+
+  it('records Jira remote update drafts, failed runs, and cancellations', () => {
+    const draft = createJiraRemoteUpdateRun({
+      taskId: 'task_1',
+      jiraKey: 'PRO-1',
+      currentFields: {
+        status: 'Open',
+        fixVersions: ['2026.06'],
+        sprint: 'Sprint 1',
+        dueDate: '2026-06-10',
+      },
+      fields: {
+        status: 'In Progress',
+        fixVersions: ['2026.07'],
+        sprint: '',
+        dueDate: '',
+      },
+    });
+
+    expect(draft.status).toBe('draft');
+    expect(draft.diff.map(item => item.field)).toEqual(['status', 'fixVersions', 'sprint', 'dueDate']);
+    expect(listJiraRemoteUpdateRuns('task_1')).toHaveLength(1);
+    expect(() => createJiraRemoteUpdateRun({
+      taskId: 'task_1',
+      jiraKey: 'PRO-1',
+      currentFields: { status: 'Open' },
+      fields: { status: 'Open' },
+    })).toThrow('no jira field changes');
+
+    const failed = updateJiraRemoteUpdateRun(draft.id, {
+      status: 'failed',
+      error: 'MCP update failed',
+      event: { label: 'Jira update failed', detail: 'MCP update failed' },
+    });
+
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe('MCP update failed');
+    expect(failed.completedAt).toBeTruthy();
+    expect(getJiraRemoteUpdateRun(draft.id)?.events.map(event => event.label)).toContain('Jira update failed');
+
+    const cancelled = cancelJiraRemoteUpdateRun(draft.id);
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.events.map(event => event.label)).toContain('Jira update cancelled');
   });
 });

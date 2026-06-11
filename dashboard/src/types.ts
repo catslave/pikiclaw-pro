@@ -489,6 +489,7 @@ export interface SessionInfo {
   lastQuestion?: string | null;
   lastAnswer?: string | null;
   lastMessageText?: string | null;
+  lastPlan?: StreamPlan | null;
   outputs?: ProOutput[];
   classification?: {
     outcome: 'answer' | 'proposal' | 'implementation' | 'partial' | 'blocked' | 'conversation';
@@ -497,6 +498,7 @@ export interface SessionInfo {
     classifiedAt?: string;
   } | null;
   userStatus?: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
+  userStatusUpdatedAt?: string | null;
   userNote?: string | null;
   pinned?: boolean;
   archived?: boolean;
@@ -1068,7 +1070,7 @@ export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 
 export type ProSubtaskStatus = 'todo' | 'running' | 'review' | 'done' | 'blocked';
 export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
 export type VerificationResult = 'passed' | 'failed' | 'blocked' | 'not-run';
-export type ProOutputKind = 'final' | 'document' | 'image' | 'file' | 'diff' | 'estimate' | 'stage-summary' | 'link';
+export type ProOutputKind = 'background' | 'final' | 'document' | 'image' | 'file' | 'diff' | 'estimate' | 'stage-summary' | 'link';
 export type TaskSpaceKind = 'personal' | 'jira' | 'custom';
 
 export interface TaskSpace {
@@ -1084,7 +1086,7 @@ export interface TaskSpace {
 }
 
 export interface TaskOrigin {
-  type: 'manual' | 'jira';
+  type: 'manual' | 'jira' | 'jira-analyze';
   key?: string;
   url?: string;
 }
@@ -1188,6 +1190,7 @@ export interface StageRun {
   selectedAgentReason?: string;
   session: StageSessionRef;
   prompt: string;
+  displayPrompt?: string;
   startedAt?: string;
   completedAt?: string;
   focus?: FocusSessionState;
@@ -1248,6 +1251,8 @@ export interface ProTask {
     agent?: string;
     assistantId?: string;
     mode?: 'direct' | 'interactive';
+    model?: string | null;
+    effort?: string | null;
   };
   jiraKey?: string;
   jiraUrl?: string;
@@ -1256,6 +1261,7 @@ export interface ProTask {
     assignee?: string;
     status?: string;
     dueDate?: string;
+    fixVersions?: string[];
     priority?: string;
     labels?: string[];
     issueType?: string;
@@ -1296,6 +1302,7 @@ export interface ProTaskWorkbench {
     assignee?: string;
     status?: string;
     dueDate?: string;
+    fixVersions?: string[];
     priority?: string;
     labels?: string[];
     issueType?: string;
@@ -1378,6 +1385,40 @@ export interface DailyItem {
   updatedAt: string;
 }
 
+export type NotePageKind = 'inbox' | 'page' | 'daily';
+
+export interface NotePage {
+  id: string;
+  kind: NotePageKind;
+  title: string;
+  parentId?: string | null;
+  date?: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export interface NoteTree {
+  pages: NotePage[];
+  todayDate: string;
+  inboxId: string;
+}
+
+export interface NoteSearchResult {
+  page: NotePage;
+  snippet: string;
+}
+
+export interface NoteAsset {
+  url: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}
+
+export type NotePromotionTarget = 'todo' | 'daily' | 'task';
+
 export interface AgentAssistant {
   id: string;
   name: string;
@@ -1424,6 +1465,14 @@ export interface AssistantHistoryItem {
   numTurns?: number | null;
 }
 
+export type JiraWorkspaceRouteMatchType = 'project' | 'component' | 'label' | 'text';
+
+export interface JiraWorkspaceRoute {
+  match: string;
+  matchType: JiraWorkspaceRouteMatchType;
+  workdir: string;
+}
+
 export interface JiraWorkflowConfig {
   executionOwnerMode?: 'status' | 'agent' | 'assistant';
   lifecycleAgent?: string;
@@ -1435,11 +1484,20 @@ export interface JiraWorkflowConfig {
   knowledgeAssistantId?: string;
   runKnowledgeOnRefinement?: boolean;
   runKnowledgeOnCoding?: boolean;
+  analyzeTicketPrompt?: string;
+  jiraWorkspaceRoutes?: JiraWorkspaceRoute[];
   statusWorkflows?: Partial<Record<ProTaskStatus, {
     instruction?: string;
     assistantId?: string;
     modelPool?: string[];
   }>>;
+}
+
+export interface WorkdirResolution {
+  workdir: string;
+  reason: string;
+  confidence: 'high' | 'medium' | 'low';
+  matchedRule?: string;
 }
 
 export interface AutomationRule {
@@ -1534,10 +1592,74 @@ export interface JiraSyncRun {
   events: JiraSyncRunEvent[];
 }
 
+export type JiraRemoteUpdateField = 'status' | 'fixVersions' | 'sprint' | 'dueDate';
+export type JiraRemoteUpdateStatus = 'draft' | 'applying' | 'applied' | 'failed' | 'cancelled';
+
+export interface JiraRemoteUpdateFields {
+  status?: string;
+  fixVersions?: string[];
+  sprint?: string;
+  dueDate?: string;
+}
+
+export interface JiraRemoteUpdateDiff {
+  field: JiraRemoteUpdateField;
+  from?: string | string[];
+  to?: string | string[];
+}
+
+export interface JiraRemoteUpdateRun {
+  id: string;
+  taskId: string;
+  jiraKey?: string;
+  jiraUrl?: string;
+  status: JiraRemoteUpdateStatus;
+  fields: JiraRemoteUpdateFields;
+  diff: JiraRemoteUpdateDiff[];
+  error?: string;
+  remoteTool?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  events: JiraSyncRunEvent[];
+}
+
+export type KnowledgeEntryKind = 'knowledge-card' | 'session-digest';
+export type KnowledgeEntryStatus = 'published' | 'hidden';
+export type KnowledgeEntryConfidence = 'low' | 'medium' | 'high';
+export type KnowledgeEntryCreatedBy = 'auto' | 'manual' | 'agent';
+
+export interface KnowledgeSourceRef {
+  type: 'manual' | 'chat' | 'task' | 'output' | 'file' | 'link';
+  workdir?: string;
+  agent?: string;
+  sessionId?: string;
+  taskId?: string;
+  outputId?: string;
+  path?: string;
+  url?: string;
+  title?: string;
+}
+
+export interface KnowledgeArtifactRef {
+  kind?: string;
+  title?: string;
+  outputId?: string;
+  workdir?: string;
+  agent?: string;
+  sessionId?: string;
+  path?: string;
+  url?: string;
+}
+
 export interface KnowledgeEntry {
   id: string;
   title: string;
   body: string;
+  kind: KnowledgeEntryKind;
+  status: KnowledgeEntryStatus;
+  summary?: string;
   source?: {
     type: 'manual' | 'chat' | 'task';
     workdir?: string;
@@ -1545,7 +1667,253 @@ export interface KnowledgeEntry {
     sessionId?: string;
     taskId?: string;
   };
+  sourceRefs: KnowledgeSourceRef[];
+  artifactRefs: KnowledgeArtifactRef[];
+  confidence: KnowledgeEntryConfidence;
+  createdBy: KnowledgeEntryCreatedBy;
   tags: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export type KnowledgeTreeNodeKind = 'folder' | 'repo';
+export type KnowledgeTreeNodeStatus = 'ready' | 'missing' | 'error';
+
+export interface KnowledgeTreeStats {
+  fileCount: number;
+  directoryCount: number;
+  primaryLanguages: string[];
+  frameworks: string[];
+  topLevelFiles: string[];
+}
+
+export interface KnowledgeTreeNode {
+  id: string;
+  title: string;
+  kind: KnowledgeTreeNodeKind;
+  status: KnowledgeTreeNodeStatus;
+  path?: string;
+  relativePath?: string;
+  parentId?: string | null;
+  workspacePaths: string[];
+  summary: string;
+  design: string;
+  boundary?: string;
+  implementation?: string;
+  highlights: string[];
+  stats?: KnowledgeTreeStats;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  analyzedAt?: string;
+  children: KnowledgeTreeNode[];
+}
+
+export interface FocusSessionSignal {
+  key: string;
+  label: string;
+}
+
+export interface FocusSessionItem {
+  key: string;
+  workdir?: string | null;
+  workspaceName?: string | null;
+  agent?: string | null;
+  sessionId?: string | null;
+  session: SessionInfo;
+  signals: FocusSessionSignal[];
+}
+
+export interface FocusOutputItem {
+  id: string;
+  kind: string;
+  title: string;
+  summary?: string | null;
+  path?: string | null;
+  url?: string | null;
+  createdAt?: string | null;
+  workdir?: string | null;
+  workspaceName?: string | null;
+  agent?: string | null;
+  sessionId?: string | null;
+  sessionTitle?: string | null;
+  output: ProOutput;
+}
+
+export type FocusSandboxType = 'jira' | 'todo' | 'bug' | 'review' | 'chat';
+export type FocusSandboxState = 'active' | 'paused' | 'completed';
+export type FocusPriority = 'high' | 'medium' | 'low';
+export type FocusActionKind = 'continue' | 'open-source' | 'open-task' | 'open-output' | 'maintain' | 'sync';
+
+export interface FocusAction {
+  kind: FocusActionKind;
+  label: string;
+  sourceRef?: KnowledgeSourceRef | null;
+  taskId?: string | null;
+  outputId?: string | null;
+  url?: string | null;
+}
+
+export interface FocusBriefItem {
+  id: string;
+  title: string;
+  summary?: string | null;
+  updatedAt?: string | null;
+  workspaceName?: string | null;
+  priority?: FocusPriority;
+  action?: FocusAction | null;
+}
+
+export interface FocusRecommendation extends FocusBriefItem {
+  sandboxId?: string | null;
+  reason?: string | null;
+}
+
+export interface FocusEvidence {
+  kind: 'chat' | 'output' | 'knowledge' | 'git' | 'task' | 'plan';
+  label: string;
+  count?: number;
+}
+
+export interface FocusSandbox {
+  id: string;
+  type: FocusSandboxType;
+  state: FocusSandboxState;
+  title: string;
+  summary?: string | null;
+  progress: number;
+  workdir?: string | null;
+  workspaceName?: string | null;
+  agent?: string | null;
+  sessionId?: string | null;
+  taskId?: string | null;
+  jiraKey?: string | null;
+  jiraUrl?: string | null;
+  status?: string | null;
+  updatedAt?: string | null;
+  breakpoint?: string | null;
+  nextActions: string[];
+  evidence: FocusEvidence[];
+  sourceRef?: KnowledgeSourceRef | null;
+}
+
+export interface FocusGitSnapshot {
+  workdir: string;
+  workspaceName: string;
+  branch?: string | null;
+  changedFiles: number;
+  lastCommitMessage?: string | null;
+  hasUnstaged?: boolean;
+  ok: boolean;
+  error?: string | null;
+}
+
+export type FocusCanvasBlockType = 'standup' | 'sandbox-grid' | 'checkout' | 'memory-strip' | 'intent-echo';
+
+export interface FocusCanvasBlock {
+  type: FocusCanvasBlockType;
+  title?: string | null;
+  standup?: FocusCommandCenter['standup'];
+  sandboxes?: FocusSandbox[];
+  maxVisible?: number;
+  checkout?: FocusCommandCenter['checkout'];
+  memory?: FocusCommandCenter['memory'];
+  artifacts?: FocusOutputItem[];
+  userIntent?: string | null;
+  revisedHeadline?: string | null;
+}
+
+export interface FocusSensorSnapshot {
+  capturedAt: string;
+  localDay: string;
+  git: FocusGitSnapshot[];
+  session: {
+    running: number;
+    blocked: number;
+    review: number;
+    incomplete: number;
+    attentionTotal: number;
+  };
+  jira: {
+    todayIncoming: Array<{ taskId: string; jiraKey?: string | null; title: string; status?: string | null; updatedAt?: string | null; changeHint?: string | null }>;
+    resolvedPendingSync: Array<{ taskId: string; jiraKey?: string | null; title: string; status?: string | null; updatedAt?: string | null; changeHint?: string | null }>;
+    ok: boolean;
+    error?: string | null;
+  };
+  sandboxes: Array<{ sandboxId: string; title: string; progress: number; state: string; deltaHint?: string | null }>;
+}
+
+export interface FocusOrchestratorMeta {
+  lastRun: string | null;
+  stale: boolean;
+  source: 'agent' | 'rules' | null;
+  userIntent?: string | null;
+}
+
+export interface FocusSandboxRecord {
+  id: string;
+  kind: FocusSandboxType;
+  state: FocusSandboxState;
+  title: string;
+  jiraKey?: string | null;
+  taskId?: string | null;
+  sessionRef?: { workdir: string; agent: string; sessionId: string } | null;
+  scope: { workdir: string; branch?: string | null; fileGlobs?: string[] };
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface FocusContextPayload {
+  sandboxId: string;
+  breakpoint?: string | null;
+  suggestedActions: string[];
+  sourceRef?: KnowledgeSourceRef | null;
+  resumeMode?: boolean;
+  agentHint?: string | null;
+  taskId?: string | null;
+  focusSessionSeconds?: number | null;
+}
+
+export interface FocusCommandCenter {
+  generatedAt: string;
+  localDay: string;
+  headline: string;
+  standup: {
+    yesterdayReview: FocusBriefItem[];
+    todayIncoming: FocusBriefItem[];
+    recommendations: FocusRecommendation[];
+  };
+  sandboxes: {
+    active: FocusSandbox[];
+    paused: FocusSandbox[];
+    completed: FocusSandbox[];
+  };
+  checkout: {
+    completedToday: FocusBriefItem[];
+    syncProposals: FocusBriefItem[];
+    cleanupCandidates: FocusBriefItem[];
+  };
+  memory: {
+    knowledgeCount: number;
+    hiddenKnowledgeCount: number;
+    outputCount: number;
+    candidateCount: number;
+  };
+  git: FocusGitSnapshot[];
+  canvas?: FocusCanvasBlock[];
+}
+
+export interface FocusOverviewResponse {
+  ok: boolean;
+  workspaces: WorkspaceEntry[];
+  commandCenter?: FocusCommandCenter;
+  attention: FocusSessionItem[];
+  knowledge: KnowledgeEntry[];
+  outputs: FocusOutputItem[];
+  recentlySunk: FocusSessionItem[];
+  candidates: FocusSessionItem[];
+  sensorSnapshot?: FocusSensorSnapshot;
+  orchestratorMeta?: FocusOrchestratorMeta;
+  errors?: string[];
 }

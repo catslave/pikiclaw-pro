@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, HTMLAttributes, ReactNode } from 'react';
 import { cn } from '../../utils';
 
 /* ── Badge ── */
@@ -32,10 +32,17 @@ const badgeStyles: Record<BadgeVariant, CSSProperties> = {
   },
 };
 
-export function Badge({ variant = 'muted', children, className }: { variant?: BadgeVariant; children: ReactNode; className?: string }) {
+type BadgeProps = {
+  variant?: BadgeVariant;
+  children: ReactNode;
+  className?: string;
+} & HTMLAttributes<HTMLSpanElement>;
+
+export function Badge({ variant = 'muted', children, className, style, ...props }: BadgeProps) {
   return (
     <span
-      style={badgeStyles[variant]}
+      {...props}
+      style={{ ...badgeStyles[variant], ...style }}
       className={cn(
         'inline-flex h-5 items-center gap-1 rounded-md border px-2 text-[11px] font-medium tracking-[0.01em]',
         className

@@ -14,6 +14,8 @@ const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const TasksTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).TasksTab }));
+const NotesTab = lazy(async () => ({ default: (await import('./pages/notes')).NotesWorkspace }));
+const KnowledgeTab = lazy(async () => ({ default: (await import('./pages/knowledge/KnowledgeTab')).KnowledgeTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
@@ -48,12 +50,17 @@ type HoveredLinkState = {
 };
 
 function locationToTab(pathname: string): DashboardTab {
+  if (pathname === '/notes' || pathname.startsWith('/notes/')) return 'notes';
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
+    '/chat': 'sessions',
+    '/focus': 'sessions',
     '/chat-workspace': 'sessions',
     '/dashboard': 'dashboard',
     '/tasks': 'dashboard',
     '/daily': 'dashboard',
+    '/notes': 'notes',
+    '/knowledge': 'knowledge',
     '/jira': 'dashboard',
     '/usage': 'usage',
     '/archive': 'system',
@@ -68,14 +75,17 @@ function locationToTab(pathname: string): DashboardTab {
 }
 
 function normalizeDashboardPath(pathname: string): string | null {
+  if (pathname === '/notes' || pathname.startsWith('/notes/')) return pathname;
   if (pathname === '/') return '/';
-  if (pathname === '/chat-workspace') return '/chat-workspace';
+  if (pathname === '/chat') return '/chat';
+  if (pathname === '/focus') return '/chat';
+  if (pathname === '/chat-workspace') return '/chat';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
   if (pathname === '/dashboard') return '/tasks';
   if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/chat-workspace', '/tasks', '/daily', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/chat', '/tasks', '/daily', '/notes', '/knowledge', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -271,13 +281,11 @@ export function App() {
   const navigate = useNavigate();
   const tab = locationToTab(location.pathname);
   const sessionShellActive = normalizeDashboardPath(location.pathname) !== null;
-  const configReady = state !== null;
-  const chatWorkspaceBetaEnabled = state?.config?.chatWorkspaceBetaEnabled === true;
   const sessionWorkspaceMode = tab === 'dashboard'
     ? 'dashboard'
-    : location.pathname === '/chat-workspace' && chatWorkspaceBetaEnabled
+    : location.pathname === '/chat'
       ? 'chat-workspace'
-    : tab === 'sessions'
+      : tab === 'sessions'
       ? 'workspace'
       : 'settings';
   const workspaceImmersive = sessionShellActive;
@@ -356,10 +364,8 @@ export function App() {
 
   useEffect(() => {
     const navState = location.state as { forceWorkspace?: boolean } | null;
-    if (location.pathname === '/chat-workspace' && configReady && !chatWorkspaceBetaEnabled) {
-      initialPathRestoreCheckedRef.current = true;
-      writeLastDashboardPath('/');
-      navigate('/', { replace: true, state: { forceWorkspace: true } });
+    if (location.pathname === '/focus' || location.pathname === '/chat-workspace') {
+      navigate('/chat', { replace: true, state: location.state });
       return;
     }
     if (location.pathname === '/jira' || location.pathname === '/dashboard') {
@@ -387,7 +393,7 @@ export function App() {
     }
     initialPathRestoreCheckedRef.current = true;
     writeLastDashboardPath(normalized);
-  }, [chatWorkspaceBetaEnabled, configReady, location.pathname, location.state, navigate]);
+  }, [location.pathname, location.state, navigate]);
 
   // Restart: phase-based overlay
   const [restartPhase, setRestartPhase] = useState<RestartPhase>(null);
@@ -464,6 +470,9 @@ export function App() {
             <UsageTab />
           </PageWrapper>
         } />
+        <Route path="/notes" element={<NotesTab />} />
+        <Route path="/notes/:pageId" element={<NotesTab />} />
+        <Route path="/knowledge" element={<KnowledgeTab />} />
         <Route path="/jira" element={<Navigate to="/tasks" replace />} />
         <Route path="/dashboard" element={<Navigate to="/tasks" replace />} />
         <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />

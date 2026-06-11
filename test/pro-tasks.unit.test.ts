@@ -3,20 +3,26 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
 import {
+  ANALYZE_TASK_SPACE_ID,
+  confirmStageRunOutput,
   createProTask,
   createTaskSpace,
   archiveTaskSpace,
   addStageRun,
+  findAnalyzeTaskByJiraKey,
+  upsertAnalyzeTicketTask,
   createSubtask,
   finishVerificationRun,
   getProTask,
   listProTasks,
   listTaskSpaces,
+  resetProTask,
   setExclusiveMode,
   startVerificationRun,
   syncJiraTask,
   updateJiraFields,
   updateProTaskExecution,
+  updateTaskBackground,
   updateProTaskMeta,
   updateProTaskStatus,
   updateStageRun,
@@ -47,8 +53,8 @@ describe('Pro task spaces', () => {
       defaultAssistantId: 'assistant_hermes_acp',
     });
 
-    expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal', space.id]);
-    expect(listTaskSpaces()[2]).toMatchObject({
+    expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal', ANALYZE_TASK_SPACE_ID, space.id]);
+    expect(listTaskSpaces()[3]).toMatchObject({
       name: 'Pikiclaw Roadmap',
       kind: 'custom',
       defaultAgent: 'codex',
@@ -56,7 +62,32 @@ describe('Pro task spaces', () => {
     });
 
     archiveTaskSpace(space.id);
-    expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal']);
+    expect(listTaskSpaces().map(item => item.id)).toEqual(['jira', 'personal', ANALYZE_TASK_SPACE_ID]);
+  });
+
+  it('stores ticket analyze sessions in the dedicated analyze space', () => {
+    const created = upsertAnalyzeTicketTask({
+      title: 'IVAG-1177 handoff bug',
+      jiraKey: 'IVAG-1177',
+      jiraUrl: 'https://jira.ringcentral.com/browse/IVAG-1177',
+      kind: 'jira-bug',
+      workdir: '/repo/iva-ng',
+    });
+    expect(created.spaceId).toBe(ANALYZE_TASK_SPACE_ID);
+    expect(created.origin).toMatchObject({ type: 'jira-analyze', key: 'IVAG-1177' });
+    expect(created.status).toBe('refinement');
+
+    const synced = syncJiraTask({ title: 'IVAG-1177 synced ticket', jiraKey: 'IVAG-1177', issueType: 'Bug' });
+    expect(synced.spaceId).toBe('jira');
+    expect(findAnalyzeTaskByJiraKey('IVAG-1177')?.id).toBe(created.id);
+
+    const refreshed = upsertAnalyzeTicketTask({
+      title: 'IVAG-1177 refreshed analysis',
+      jiraKey: 'IVAG-1177',
+      workdir: '/repo/iva-ng',
+    });
+    expect(refreshed.id).toBe(created.id);
+    expect(refreshed.title).toBe('IVAG-1177 refreshed analysis');
   });
 
   it('assigns legacy/default task kinds to Jira or Personal spaces', () => {
@@ -199,6 +230,29 @@ describe('Pro task spaces', () => {
     expect(cleared.execution?.agent).toBeUndefined();
   });
 
+  it('persists task runtime model and effort overrides', () => {
+    const task = createProTask({ title: 'Pick runtime', defaultAgent: 'codex' });
+
+    const updated = updateProTaskExecution(task.id, {
+      ownerMode: 'agent',
+      agent: 'cursor',
+      model: 'claude-sonnet-4',
+      effort: 'medium',
+    });
+
+    expect(updated.execution).toMatchObject({
+      ownerMode: 'agent',
+      agent: 'cursor',
+      model: 'claude-sonnet-4',
+      effort: 'medium',
+    });
+    expect(getProTask(task.id)?.execution).toMatchObject({
+      agent: 'cursor',
+      model: 'claude-sonnet-4',
+      effort: 'medium',
+    });
+  });
+
   it('links stage runs to subtasks', () => {
     const task = createProTask({ title: 'Large task' });
     const updated = getProTask(task.id);
@@ -226,13 +280,27 @@ describe('Pro task spaces', () => {
     expect(withRun.subTasks[0].stageRunIds).toEqual([withRun.stageRuns[0].id]);
     expect(withRun.subTasks[0].status).toBe('running');
   });
+
+  it('keeps a short display prompt for button-triggered stage runs', () => {
+    const task = createProTask({ title: 'Analyze ticket' });
+    const withRun = addStageRun({
+      taskId: task.id,
+      stage: 'refinement',
+      prompt: 'Raw ticket context and full background instructions.',
+      displayPrompt: 'Start background',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-1' },
+    });
+
+    expect(withRun.stageRuns[0].prompt).toContain('Raw ticket context');
+    expect(withRun.stageRuns[0].displayPrompt).toBe('Start background');
+  });
 });
 
 describe('Pro task store', () => {
   it('upserts Jira tasks, records stage chat state, and links verification runs', () => {
     const created = syncJiraTask({
       title: 'Fix login redirect',
-      description: 'Initial bug report',
+      description: 'Initial bug report\nReference MR: https://gitlab.example/group/app/-/merge_requests/105/diffs',
       issueType: 'Bug',
       jiraKey: 'PRO-123',
       jiraUrl: 'https://jira.example/browse/PRO-123',
@@ -242,6 +310,8 @@ describe('Pro task store', () => {
 
     expect(created.kind).toBe('jira-bug');
     expect(created.status).toBe('backlog');
+    expect(created.jiraUrl).toBe('https://jira.example/browse/PRO-123');
+    expect(created.prUrl).toBe('https://gitlab.example/group/app/-/merge_requests/105');
     expect(created.verificationRuns).toEqual([]);
 
     const synced = syncJiraTask({
@@ -256,6 +326,7 @@ describe('Pro task store', () => {
     expect(synced.id).toBe(created.id);
     expect(synced.description).toBe('Updated bug report');
     expect(synced.sprint).toBe('Sprint 2');
+    expect(synced.jiraUrl).toBe('https://jira.example/browse/PRO-123');
     expect(synced.events[0].type).toBe('jira-updated');
     expect(listProTasks()).toHaveLength(1);
 
@@ -352,6 +423,216 @@ describe('Pro task store', () => {
     expect(reopened.events.some(event => event.summary.includes('Status changed from done to backlog'))).toBe(true);
   });
 
+  it('stores synced Jira status, fixVersions, sprint, and due date with local clear support', () => {
+    const task = syncJiraTask({
+      title: 'Ship release train ticket',
+      issueType: 'Task',
+      jiraKey: 'PRO-789',
+      ticketStatus: 'In Progress',
+      sprint: 'Sprint 8',
+      dueDate: '2026-06-15',
+      fixVersions: [{ name: '2026.06' }, 'Hotfix'],
+      workdir: '/repo/app',
+    });
+
+    expect(task.jiraFields).toMatchObject({
+      status: 'In Progress',
+      dueDate: '2026-06-15',
+      fixVersions: ['2026.06', 'Hotfix'],
+    });
+    expect(task.sprint).toBe('Sprint 8');
+    expect(task.jiraUrl).toBe('https://jira.ringcentral.com/browse/PRO-789');
+    expect(task.origin).toMatchObject({ type: 'jira', key: 'PRO-789', url: 'https://jira.ringcentral.com/browse/PRO-789' });
+
+    const updated = syncJiraTask({
+      title: 'Ship release train ticket',
+      jiraKey: 'PRO-789',
+      ticketStatus: 'Review',
+      sprint: 'Sprint 9',
+      dueDate: '2026-06-20',
+      rawFields: { fixVersions: [{ name: '2026.07' }] },
+    });
+
+    expect(updated.jiraFields).toMatchObject({
+      status: 'Review',
+      dueDate: '2026-06-20',
+      fixVersions: ['2026.07'],
+    });
+    expect(updated.sprint).toBe('Sprint 9');
+
+    const cleared = updateJiraFields(updated.id, {
+      sprint: '',
+      dueDate: '',
+      fixVersions: [],
+    });
+    expect(cleared.sprint).toBeUndefined();
+    expect(cleared.jiraFields?.dueDate).toBeUndefined();
+    expect(cleared.jiraFields?.fixVersions).toEqual([]);
+    expect(cleared.jiraFields?.status).toBe('Review');
+  });
+
+  it('writes completed Jira stage summaries to the configured Obsidian-style output directory', () => {
+    const previousOutputDir = process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR;
+    const outputDir = path.join(tmpDir, 'obsidian', 'repo', 'pikiclaw', 'jira');
+    process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR = outputDir;
+    try {
+      const task = syncJiraTask({
+        title: 'Document stage output',
+        issueType: 'Task',
+        jiraKey: 'PRO-321',
+        workdir: '/repo/app',
+      });
+      const withRun = addStageRun({
+        taskId: task.id,
+        stage: 'refinement',
+        prompt: 'Clarify the task.',
+        session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-stage-summary' },
+      });
+      const run = withRun.stageRuns[0];
+      const completed = updateStageRun(task.id, run.id, {
+        status: 'completed',
+        summary: 'Clarified acceptance criteria and risk.',
+      });
+      expect(completed.outputs?.some(output => output.stageRunId === run.id)).toBe(false);
+
+      const confirmed = confirmStageRunOutput(task.id, run.id);
+      const output = confirmed.outputs?.[0];
+      expect(output).toMatchObject({
+        kind: 'stage-summary',
+        title: 'Clarification document',
+        summary: 'Clarified acceptance criteria and risk.',
+      });
+      expect(output?.path).toContain(path.join('PRO-321'));
+      expect(path.basename(output!.path!)).toContain('refinement');
+      expect(fs.existsSync(output!.path!)).toBe(true);
+      expect(fs.readFileSync(output!.path!, 'utf8')).toContain('Clarified acceptance criteria and risk.');
+    } finally {
+      if (previousOutputDir == null) delete process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR;
+      else process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR = previousOutputDir;
+    }
+  });
+
+  it('labels explicit Jira background analysis as a ticket background report', () => {
+    const task = syncJiraTask({
+      title: 'Document background output',
+      issueType: 'Task',
+      jiraKey: 'PRO-322',
+      workdir: '/repo/app',
+    });
+    const withRun = addStageRun({
+      taskId: task.id,
+      stage: 'refinement',
+      prompt: '[pikiclaw-ticket-background] Analyze this ticket and create the durable Background document.',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-background-summary' },
+    });
+    const run = withRun.stageRuns[0];
+    const completed = updateStageRun(task.id, run.id, {
+      status: 'completed',
+      summary: 'Readable background analysis for the ticket.',
+    });
+    expect(completed.outputs?.some(output => output.stageRunId === run.id)).toBe(false);
+
+    const confirmed = confirmStageRunOutput(task.id, run.id);
+    expect(confirmed.outputs?.[0]).toMatchObject({
+      kind: 'background',
+      title: 'Ticket background report',
+      summary: 'Readable background analysis for the ticket.',
+    });
+    expect(confirmed.events[0]).toMatchObject({ type: 'background-updated' });
+  });
+
+  it('creates and updates a persistent ticket background output for Jira tasks', () => {
+    const previousOutputDir = process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR;
+    const outputDir = path.join(tmpDir, 'obsidian', 'repo', 'pikiclaw', 'jira');
+    process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR = outputDir;
+    try {
+      const task = syncJiraTask({
+        title: 'Restore inference continuity',
+        description: 'Carry the Nova conversation id across the NCA gRPC boundary.',
+        issueType: 'Task',
+        jiraKey: 'IVAS-7185',
+        workdir: '/repo/app',
+      });
+
+      const background = task.outputs?.find(output => output.kind === 'background');
+      expect(background).toMatchObject({
+        title: 'Ticket background',
+        pinned: true,
+      });
+      expect(background?.summary).toContain('我的理解');
+      expect(background?.summary).toContain('Carry the Nova conversation id');
+      expect(background?.path).toBe(path.join(outputDir, 'IVAS-7185', 'background.md'));
+      expect(fs.existsSync(background!.path!)).toBe(true);
+
+      const updated = updateTaskBackground(task.id, {
+        summary: '# Revised Background\n\n这个 ticket 要我恢复 AIR session rebuild 后的推理连续性。',
+      });
+      const updatedBackground = updated.outputs?.find(output => output.kind === 'background');
+      expect(updatedBackground?.summary).toContain('恢复 AIR session rebuild');
+      expect(fs.readFileSync(updatedBackground!.path!, 'utf8')).toContain('恢复 AIR session rebuild');
+      expect(updated.events[0]).toMatchObject({ type: 'background-updated' });
+    } finally {
+      if (previousOutputDir == null) delete process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR;
+      else process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR = previousOutputDir;
+    }
+  });
+
+  it('resets task progress while keeping ticket metadata', () => {
+    const task = syncJiraTask({
+      title: 'Resettable ticket',
+      description: 'Original Jira description.',
+      issueType: 'Task',
+      jiraKey: 'PRO-555',
+      jiraUrl: 'https://jira.example/browse/PRO-555',
+      ticketStatus: 'Closed',
+      workdir: '/repo/app',
+      prUrl: 'https://gitlab.example/mr/1',
+    });
+    const withRun = addStageRun({
+      taskId: task.id,
+      stage: 'coding',
+      prompt: 'Implement it.',
+      session: { workdir: '/repo/app', agent: 'codex', sessionId: 'session-reset' },
+    });
+    updateStageRun(task.id, withRun.stageRuns[0].id, {
+      status: 'completed',
+      summary: 'Implemented.',
+      changedFiles: ['src/app.ts'],
+    });
+    createSubtask(task.id, { title: 'Child work' });
+    const verifying = startVerificationRun(task.id, { environment: 'lab', url: 'https://lab.example' });
+    finishVerificationRun(task.id, verifying.verificationRuns[0].id, 'passed');
+    updateProTaskStatus(task.id, 'resolved');
+
+    const reset = resetProTask(task.id);
+
+    expect(reset).toMatchObject({
+      id: task.id,
+      title: 'Resettable ticket',
+      description: 'Original Jira description.',
+      status: 'backlog',
+      jiraKey: 'PRO-555',
+      jiraUrl: 'https://jira.example/browse/PRO-555',
+      workdir: '/repo/app',
+    });
+    expect(reset.prUrl).toBeUndefined();
+    expect(reset.jiraFields?.status).toBe('Reopened');
+    expect(reset.stageRuns).toEqual([]);
+    expect(reset.outputs).toEqual([]);
+    expect(reset.subTasks).toEqual([]);
+    expect(reset.verificationRuns).toEqual([]);
+    expect(reset.focusSessions).toEqual([]);
+    expect(reset.events[0]).toMatchObject({
+      type: 'task-reset',
+      summary: 'Task status and generated progress were reset.',
+    });
+    expect(reset.events.some(event => event.type === 'background-updated')).toBe(false);
+
+    const listed = listProTasks().find(item => item.id === task.id);
+    expect(listed?.outputs?.find(output => output.kind === 'background')).toBeUndefined();
+    expect(listed?.events.some(event => event.type === 'background-updated' && event.actor !== 'system')).toBe(false);
+  });
+
   it('marks a linked Jira task done when a daily task is completed', () => {
     const jira = syncJiraTask({
       title: 'Ship the linked fix',
@@ -394,7 +675,9 @@ describe('Pro task store', () => {
       summary: 'Clarified the objective and linked acceptance criteria.',
     });
 
-    expect(afterRefinement.outputs?.[0]).toMatchObject({
+    expect(afterRefinement.outputs).toEqual([]);
+    const confirmedRefinement = confirmStageRunOutput(daily.id, refinementRun.id);
+    expect(confirmedRefinement.outputs?.[0]).toMatchObject({
       title: 'Goal',
       summary: 'Clarified the objective and linked acceptance criteria.',
     });
@@ -411,7 +694,9 @@ describe('Pro task store', () => {
       summary: 'Implemented the changes and captured the result.',
     });
 
-    expect(afterCoding.outputs?.[0]).toMatchObject({
+    expect(afterCoding.outputs).toHaveLength(1);
+    const confirmedCoding = confirmStageRunOutput(daily.id, codingRun.id);
+    expect(confirmedCoding.outputs?.[0]).toMatchObject({
       title: 'Working output',
       summary: 'Implemented the changes and captured the result.',
     });
@@ -428,7 +713,9 @@ describe('Pro task store', () => {
       summary: 'Reviewed the implementation against the goal.',
     });
 
-    expect(afterReview.outputs?.[0]).toMatchObject({
+    expect(afterReview.outputs).toHaveLength(2);
+    const confirmedReview = confirmStageRunOutput(daily.id, reviewRun.id);
+    expect(confirmedReview.outputs?.[0]).toMatchObject({
       title: 'Review result',
       summary: 'Reviewed the implementation against the goal.',
     });

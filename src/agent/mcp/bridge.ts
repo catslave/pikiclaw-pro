@@ -233,7 +233,7 @@ export function buildSupplementalMcpServers(
     // Computer Use via Peekaboo — native macOS GUI automation via Accessibility + ScreenCaptureKit.
     // Run the dedicated MCP bin from the multi-bin @steipete/peekaboo package.
     servers.push({
-      name: 'computer-use',
+      name: 'pikiclaw-computer-use',
       command: 'npx',
       args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
     });
@@ -286,6 +286,43 @@ function buildGeminiMcpConfig(servers: RegisteredMcpServer[]) {
 
 function sanitizeEnvVarName(name: string): string {
   return name.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([^A-Za-z_])/, '_$1').toUpperCase();
+}
+
+const BUILTIN_MCP_PASSTHROUGH_ENV = [
+  'PIKICLAW_CONFIG',
+  'RC_JIRA_READ_TOKEN',
+  'RC_CONFLUENCE_READ_TOKEN',
+  'PIKICLAW_JIRA_MCP_SERVICE_URL',
+] as const;
+
+export function buildBuiltinMcpServerEnv(
+  context: {
+    workspacePath: string;
+    workdir?: string;
+    agent?: string;
+    sessionDir: string;
+    stagedFiles: string[];
+    callbackUrl?: string;
+    logUrl?: string;
+    tools: string[];
+  },
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const envVars: Record<string, string> = {
+    MCP_WORKSPACE_PATH: context.workspacePath,
+    MCP_WORKDIR: context.workdir || '',
+    MCP_AGENT: context.agent || '',
+    MCP_SESSION_ID: path.basename(context.sessionDir),
+    MCP_STAGED_FILES: JSON.stringify(context.stagedFiles),
+    MCP_CALLBACK_URL: context.callbackUrl || '',
+    MCP_LOG_URL: context.logUrl || '',
+    MCP_TOOLS_AVAILABLE: context.tools.join(','),
+  };
+  for (const name of BUILTIN_MCP_PASSTHROUGH_ENV) {
+    const value = env[name];
+    if (typeof value === 'string' && value.trim()) envVars[name] = value;
+  }
+  return envVars;
 }
 
 function bearerTokenFromHeaders(headers?: Record<string, string>): string | undefined {
@@ -749,16 +786,16 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       callbackServer = null;
       port = 0;
     } else {
-      const envVars = {
-        MCP_WORKSPACE_PATH: workspacePath,
-        MCP_WORKDIR: opts.workdir || '',
-        MCP_AGENT: opts.agent || '',
-        MCP_SESSION_ID: path.basename(sessionDir),
-        MCP_STAGED_FILES: JSON.stringify(stagedFiles),
-        MCP_CALLBACK_URL: port ? `http://127.0.0.1:${port}` : '',
-        MCP_LOG_URL: port ? `http://127.0.0.1:${port}/log` : '',
-        MCP_TOOLS_AVAILABLE: enabledTools.join(','),
-      };
+      const envVars = buildBuiltinMcpServerEnv({
+        workspacePath,
+        workdir: opts.workdir,
+        agent: opts.agent,
+        sessionDir,
+        stagedFiles,
+        callbackUrl: port ? `http://127.0.0.1:${port}` : '',
+        logUrl: port ? `http://127.0.0.1:${port}/log` : '',
+        tools: enabledTools,
+      });
       servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
     }
   }

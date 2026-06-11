@@ -98,6 +98,12 @@ interface RegisteredMcpServer {
   headers?: Record<string, string>;
 }
 
+export function agentVisibleMcpServerName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed || /^pikiclaw(?:[-_]|$)/i.test(trimmed)) return trimmed;
+  return `pikiclaw-${trimmed}`;
+}
+
 // ---------------------------------------------------------------------------
 // Global extensions (setting.json)
 // ---------------------------------------------------------------------------
@@ -531,16 +537,17 @@ export function mergeExtensionsForSession(
   if (globalMcp) {
     for (const [name, cfg] of Object.entries(globalMcp)) {
       if (cfg.enabled === false || cfg.disabled) continue;
+      const visibleName = agentVisibleMcpServerName(name);
       if (cfg.type === 'http' && cfg.url) {
         const oauthKey = cfg.catalogId || name;
         const headers = injectOAuthHeaders(oauthKey, { headers: cfg.headers });
-        merged[name] = {
+        merged[visibleName] = {
           type: 'http',
           url: cfg.url,
           ...(Object.keys(headers).length ? { headers } : {}),
         };
       } else if (cfg.command) {
-        merged[name] = {
+        merged[visibleName] = {
           type: 'stdio',
           command: cfg.command,
           args: cfg.args || [],
@@ -563,10 +570,11 @@ export function mergeExtensionsForSession(
         const servers = parsed?.mcpServers ?? parsed;
         if (servers && typeof servers === 'object') {
           for (const [name, cfg] of Object.entries(servers) as [string, any][]) {
+            const visibleName = agentVisibleMcpServerName(name);
             if (cfg?.disabled === true) {
-              delete merged[name];
+              delete merged[visibleName];
             } else {
-              Object.assign(merged, { [name]: cfg });
+              Object.assign(merged, { [visibleName]: cfg });
             }
           }
         }
@@ -606,17 +614,18 @@ export function getGlobalExtensionsAsServers(workdir?: string): RegisteredMcpSer
   if (globalMcp) {
     for (const [name, cfg] of Object.entries(globalMcp)) {
       if (cfg.enabled === false || cfg.disabled) continue;
+      const visibleName = agentVisibleMcpServerName(name);
       if (cfg.type === 'http' && cfg.url) {
         const oauthKey = cfg.catalogId || name;
         const headers = injectOAuthHeaders(oauthKey, { headers: cfg.headers });
-        merged.set(name, {
-          name,
+        merged.set(visibleName, {
+          name: visibleName,
           type: 'http',
           url: cfg.url,
           ...(Object.keys(headers).length ? { headers } : {}),
         });
       } else if (cfg.command) {
-        merged.set(name, { name, type: 'stdio', command: cfg.command, args: cfg.args || [], env: cfg.env });
+        merged.set(visibleName, { name: visibleName, type: 'stdio', command: cfg.command, args: cfg.args || [], env: cfg.env });
       }
     }
   }
@@ -624,19 +633,20 @@ export function getGlobalExtensionsAsServers(workdir?: string): RegisteredMcpSer
   if (workdir) {
     const wsServers = readMcpJson(workspaceMcpJsonPath(workdir));
     for (const [name, cfg] of Object.entries(wsServers)) {
+      const visibleName = agentVisibleMcpServerName(name);
       if (cfg.disabled) {
-        merged.delete(name);
+        merged.delete(visibleName);
       } else if (cfg.type === 'http' && cfg.url) {
         const oauthKey = cfg.catalogId || name;
         const headers = injectOAuthHeaders(oauthKey, { headers: cfg.headers });
-        merged.set(name, {
-          name,
+        merged.set(visibleName, {
+          name: visibleName,
           type: 'http',
           url: cfg.url,
           ...(Object.keys(headers).length ? { headers } : {}),
         });
       } else if (cfg.command) {
-        merged.set(name, { name, type: 'stdio', command: cfg.command, args: cfg.args || [], env: cfg.env });
+        merged.set(visibleName, { name: visibleName, type: 'stdio', command: cfg.command, args: cfg.args || [], env: cfg.env });
       }
     }
   }

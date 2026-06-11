@@ -30,7 +30,7 @@ import {
 } from '../agent/index.js';
 import { normalizeSessionContextSources } from '../agent/context-sources.js';
 import { loadUserConfig } from '../core/config/user-config.js';
-import { isLogTraceSlash, runLogTraceSkill } from '../platform/logtrace.js';
+import { isLogTraceSlash, runLogTraceSkill, stripLogTraceSlash } from '../platform/logtrace.js';
 import { runtime } from './runtime.js';
 
 const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'copilot', 'cursor', 'agy', 'gemini', 'hermes']);
@@ -161,6 +161,7 @@ export interface QueueSessionTaskRequest {
   agent?: Agent | string | null;
   sessionId: string;
   prompt: string;
+  displayPrompt?: string | null;
   model?: string | null;
   effort?: string | null;
   attachments?: string[];
@@ -202,6 +203,11 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     return { ok: false as const, error: 'workdir and either prompt or attachments are required' };
   }
   const userPrompt = request.prompt || '';
+  const displayPrompt = typeof request.displayPrompt === 'string'
+    ? request.displayPrompt.trim()
+    : request.displayPrompt === null
+      ? null
+      : undefined;
 
   const config = loadUserConfig();
   const resolvedAgent = typeof request.agent === 'string' && KNOWN_AGENTS.has(request.agent as Agent)
@@ -225,7 +231,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
   // controlled adapter first, then sends the collected trace/report evidence to
   // the selected agent for the actual explanation.
   if (request.prompt && isLogTraceSlash(request.prompt)) {
-    const rawArgs = request.prompt.trim().replace(/^\/logtrace(?:\s+)?/, '');
+    const rawArgs = stripLogTraceSlash(request.prompt);
     const session = ensureManagedSession({
       workdir: request.workdir,
       agent: resolvedAgent,
@@ -246,14 +252,6 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       `artifact=${logTrace.artifactPath || 'none'} traceDir=${logTrace.traceOutputDir || 'none'} ` +
       `error=${logTrace.error || 'none'}`,
     );
-    if (!logTrace.ok) {
-      return {
-        ok: false as const,
-        error: `/logtrace failed: ${logTrace.error || 'unknown error'}`,
-        artifactPath: logTrace.artifactPath,
-        traceOutputDir: logTrace.traceOutputDir,
-      };
-    }
   }
 
   // /goal — route directly to the goal bridge (claude native slash, codex RPC,
@@ -329,7 +327,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       workdir: request.workdir,
       files: attachments,
       sessionId: sessionId || null,
-      title: userPrompt || request.prompt || 'New session',
+      title: displayPrompt || userPrompt || request.prompt || 'New session',
       threadId: null,
       handoverFrom,
       contextSources,
@@ -346,7 +344,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     agent: effectiveAgent,
     sessionId,
     prompt: prompt || 'Please inspect the attached file(s).',
-    ...((userPrompt && userPrompt !== prompt) ? { displayPrompt: userPrompt } : {}),
+    ...(displayPrompt !== undefined ? { displayPrompt } : (userPrompt && userPrompt !== prompt) ? { displayPrompt: userPrompt } : {}),
     attachments,
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),

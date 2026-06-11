@@ -294,6 +294,7 @@ export function applySessionRunResult(
   // Only set userStatus if not manually overridden by the user
   if (!record.userStatus) {
     record.userStatus = deriveUserStatus(classification.outcome);
+    record.userStatusUpdatedAt = new Date().toISOString();
   }
 }
 
@@ -434,6 +435,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     autoResumeLastError: typeof raw?.autoResumeLastError === 'string' && raw.autoResumeLastError.trim() ? raw.autoResumeLastError : null,
     classification: raw?.classification ?? null,
     userStatus: raw?.userStatus ?? null,
+    userStatusUpdatedAt: typeof raw?.userStatusUpdatedAt === 'string' && raw.userStatusUpdatedAt.trim() ? raw.userStatusUpdatedAt : null,
     userNote: typeof raw?.userNote === 'string' ? raw.userNote : null,
     pinned: raw?.pinned === true,
     archived: raw?.archived === true,
@@ -489,6 +491,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     autoResumeLastError: record.autoResumeLastError ?? null,
     classification: record.classification,
     userStatus: record.userStatus,
+    userStatusUpdatedAt: record.userStatusUpdatedAt ?? null,
     userNote: record.userNote,
     pinned: record.pinned === true,
     archived: record.archived === true,
@@ -656,6 +659,7 @@ export function updateSessionMeta(
       autoResumeLastError: null,
       classification: null,
       userStatus: null,
+      userStatusUpdatedAt: null,
       userNote: null,
       pinned: false,
       archived: false,
@@ -681,7 +685,10 @@ export function updateSessionMeta(
     record.title = patch.title;
     record.titleSource = patch.title ? 'user' : null;
   }
-  if (patch.userStatus !== undefined) record.userStatus = patch.userStatus;
+  if (patch.userStatus !== undefined) {
+    record.userStatus = patch.userStatus;
+    record.userStatusUpdatedAt = new Date().toISOString();
+  }
   if (patch.userNote !== undefined) record.userNote = patch.userNote;
   if (patch.pinned !== undefined) record.pinned = patch.pinned === true;
   if (patch.archived !== undefined) {
@@ -984,7 +991,7 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       autoResumeAttempts: 0,
       autoResumeLastAt: null,
       autoResumeLastError: null,
-      classification: null, userStatus: null, userNote: null, pinned: false,
+      classification: null, userStatus: null, userStatusUpdatedAt: null, userNote: null, pinned: false,
       archived: false, archivedAt: null,
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
       lastThinking: null, lastActivity: null, lastPlan: null,
@@ -1059,6 +1066,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     autoResumeLastError: record.autoResumeLastError ?? null,
     classification: record.classification,
     userStatus: record.userStatus,
+    userStatusUpdatedAt: record.userStatusUpdatedAt ?? null,
     userNote: record.userNote,
     pinned: record.pinned === true,
     archived: record.archived === true,
@@ -1066,6 +1074,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText,
+    lastPlan: record.lastPlan,
     outputs: readSessionOutputs(record.workspacePath, { workdir: record.workdir, agent: record.agent, sessionId: record.sessionId }),
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
@@ -1421,6 +1430,7 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       origin: managed.origin ?? native.origin ?? null,
       classification: managed.classification ?? native.classification ?? null,
       userStatus: managed.userStatus ?? native.userStatus ?? null,
+      userStatusUpdatedAt: managed.userStatusUpdatedAt ?? native.userStatusUpdatedAt ?? null,
       userNote: managed.userNote ?? native.userNote ?? null,
       pinned: managed.pinned === true,
       archived: managed.archived === true,
@@ -1434,6 +1444,7 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       lastMessageText: useNativeTimeline
         ? (native.lastMessageText ?? managed.lastMessageText ?? native.lastAnswer ?? native.lastQuestion ?? managed.lastAnswer ?? managed.lastQuestion ?? null)
         : (managed.lastMessageText ?? native.lastMessageText ?? managed.lastAnswer ?? managed.lastQuestion ?? native.lastAnswer ?? native.lastQuestion ?? null),
+      lastPlan: managed.lastPlan ?? native.lastPlan ?? null,
       migratedFrom: managed.migratedFrom ?? native.migratedFrom ?? null,
       migratedTo: managed.migratedTo ?? native.migratedTo ?? null,
       linkedSessions: managed.linkedSessions?.length ? managed.linkedSessions : (native.linkedSessions ?? []),

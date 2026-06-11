@@ -15,8 +15,8 @@ dashboard-*.png
 **/.playwright-cli/
 replied_issues.txt
 .scratch/
+desktop/
+assets/icons/
 .pikiclaw/*
 !.pikiclaw/skills/
 !.pikiclaw/skills/**
-desktop/
-assets/icons/

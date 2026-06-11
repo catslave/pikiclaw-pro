@@ -544,3 +544,78 @@ button:disabled { cursor: not-allowed; }
 .session-md code {
   overflow-wrap: anywhere;
 }
+
+/* Notes workspace: BlockNote is themed as a Pikiclaw editor island. */
+.notes-workspace .bn-container {
+  --bn-colors-editor-text: var(--th-fg);
+  --bn-colors-editor-background: transparent;
+  --bn-colors-menu-text: var(--th-fg-2);
+  --bn-colors-menu-background: var(--th-dropdown);
+  --bn-colors-tooltip-text: var(--th-fg-2);
+  --bn-colors-tooltip-background: var(--th-dropdown);
+  --bn-colors-hovered-text: var(--th-fg);
+  --bn-colors-hovered-background: var(--th-panel-alt);
+  --bn-colors-selected-text: var(--th-fg);
+  --bn-colors-selected-background: var(--th-panel-h);
+  --bn-colors-disabled-text: var(--th-fg-6);
+  --bn-colors-disabled-background: var(--th-inset);
+  --bn-colors-shadow: rgba(0,0,0,0.18);
+  --bn-colors-border: var(--th-edge);
+  --bn-colors-side-menu: var(--th-fg-5);
+  --bn-border-radius: 8px;
+  background: transparent;
+  color: var(--th-fg);
+  font-family: var(--font-sans);
+}
+
+.notes-workspace .bn-editor {
+  min-height: 62vh;
+  padding-inline: 0;
+  background: transparent;
+}
+
+.notes-workspace .bn-block-content {
+  font-size: 15px;
+  line-height: 1.72;
+}
+
+.notes-workspace .bn-block-content[data-content-type="heading"] {
+  line-height: 1.22;
+}
+
+.notes-workspace .notes-callout {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  border: 1px solid var(--th-edge);
+  border-radius: 8px;
+  background: var(--th-panel-alt);
+  padding: 10px 12px;
+}
+
+.notes-workspace .notes-callout-icon {
+  display: flex;
+  height: 22px;
+  width: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--th-accent) 16%, transparent);
+  color: var(--th-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.notes-workspace .notes-callout-content {
+  min-width: 0;
+}
+
+.notes-workspace .bn-side-menu,
+.notes-workspace .bn-formatting-toolbar,
+.notes-workspace .bn-suggestion-menu,
+.notes-workspace .bn-file-panel {
+  border-color: var(--th-edge);
+  box-shadow: var(--th-elevated-shadow);
+}

@@ -22,6 +22,7 @@ export interface PersistedQueuedTask {
   agent: Agent;
   sessionId: string;
   prompt: string;
+  displayPrompt?: string | null;
   attachments: string[];
   modelId?: string | null;
   thinkingEffort?: string | null;

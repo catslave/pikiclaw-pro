@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { createT } from '../i18n';
 import { Button, Dot, TabsList } from './ui';
 import { cn } from '../utils';
+import { FrequentAssistantDock } from './assistant/FrequentAssistantDock';
 
 const IconSun = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>;
 const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
@@ -15,6 +16,8 @@ const IconExtensions = <svg width="15" height="15" viewBox="0 0 24 24" fill="non
 const IconSystem = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z" /></svg>;
 const IconTasks = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>;
 const IconDaily = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M8 2v4" /><path d="M16 2v4" /><path d="M3 10h18" /><path d="m9 15 2 2 4-4" /></svg>;
+const IconNotes = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M14 3v4h4" /><path d="M9 12h6" /><path d="M9 16h4" /></svg>;
+const IconKnowledge = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H10l2 2h5.5A2.5 2.5 0 0 1 20 7.5v10A2.5 2.5 0 0 1 17.5 20h-11A2.5 2.5 0 0 1 4 17.5z" /><path d="M8 10h8" /><path d="M8 14h5" /><path d="M12 5v15" /></svg>;
 const IconChatWorkspace = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="11" height="8" rx="2" /><path d="M7 16h10a3 3 0 0 0 3-3V9" /><path d="M8 8h1.5" /><path d="M16 16l3 3v-3" /></svg>;
 
 function PikiclawLogo() {
@@ -58,9 +61,11 @@ function MenuTooltip({ label }: { label: string }) {
 
 const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
-  chatWorkspace: '/chat-workspace',
+  focus: '/chat',
   dashboard: '/tasks',
   daily: '/daily',
+  notes: '/notes',
+  knowledge: '/knowledge',
   usage: '/usage',
   im: '/im',
   agents: '/agents',
@@ -88,15 +93,14 @@ export function Sidebar({
   const setLocale = useStore(s => s.setLocale);
   const t = useMemo(() => createT(locale), [locale]);
   const location = useLocation();
-  const chatWorkspaceBetaEnabled = state?.config?.chatWorkspaceBetaEnabled === true;
   const primaryNavItems = useMemo(() => [
     { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, state: { forceWorkspace: true } },
-    ...(chatWorkspaceBetaEnabled
-      ? [{ key: 'chatWorkspace', to: TAB_ROUTES.chatWorkspace, label: t('nav.chatWorkspace'), state: undefined }]
-      : []),
+    { key: 'focus', to: TAB_ROUTES.focus, label: t('nav.focus'), state: undefined },
     { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('nav.dashboard'), state: undefined },
     { key: 'daily', to: TAB_ROUTES.daily, label: t('nav.daily'), state: undefined },
-  ], [chatWorkspaceBetaEnabled, t]);
+    { key: 'notes', to: TAB_ROUTES.notes, label: t('nav.notes'), state: undefined },
+    { key: 'knowledge', to: TAB_ROUTES.knowledge, label: t('nav.knowledge'), state: undefined },
+  ], [t]);
   const configNavItems = useMemo(() => [
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), state: undefined },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), state: undefined },
@@ -164,20 +168,42 @@ export function Sidebar({
             {IconDaily}
             <MenuTooltip label={t('nav.daily')} />
           </NavLink>
-          {chatWorkspaceBetaEnabled && (
-            <NavLink
-              to="/chat-workspace"
-              title={t('nav.chatWorkspace')}
-              aria-label={t('nav.chatWorkspace')}
-              className={({ isActive }) => cn(
-                'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-                isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
-              )}
-            >
-              {IconChatWorkspace}
-              <MenuTooltip label={t('nav.chatWorkspace')} />
-            </NavLink>
-          )}
+          <NavLink
+            to="/notes"
+            title={t('nav.notes')}
+            aria-label={t('nav.notes')}
+            className={({ isActive }) => cn(
+              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+            )}
+          >
+            {IconNotes}
+            <MenuTooltip label={t('nav.notes')} />
+          </NavLink>
+          <NavLink
+            to="/knowledge"
+            title={t('nav.knowledge')}
+            aria-label={t('nav.knowledge')}
+            className={({ isActive }) => cn(
+              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+            )}
+          >
+            {IconKnowledge}
+            <MenuTooltip label={t('nav.knowledge')} />
+          </NavLink>
+          <NavLink
+            to="/chat"
+            title={t('nav.focus')}
+            aria-label={t('nav.focus')}
+            className={({ isActive }) => cn(
+              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+              (isActive || location.pathname === '/focus' || location.pathname === '/chat-workspace') && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+            )}
+          >
+            {IconChatWorkspace}
+            <MenuTooltip label={t('nav.focus')} />
+          </NavLink>
           <div className="mt-3 h-px w-6 bg-edge/70" />
           <nav className="mt-3 flex shrink-0 flex-col items-center gap-1" aria-label="Settings navigation">
             {immersiveConfigNavItems.map(item => (
@@ -201,6 +227,7 @@ export function Sidebar({
           </nav>
           <div id="global-inbox-host" className="mt-3 flex shrink-0 flex-col items-center gap-1 empty:hidden" />
           <div className="mt-3 h-px w-6 bg-edge/70" />
+          <FrequentAssistantDock className="mt-2" />
           <div className="mt-auto flex shrink-0 flex-col items-center gap-1 py-1">
             <div className="group relative flex h-8 w-8 shrink-0 items-center justify-center" title={appStatus.badgeContent} aria-label={appStatus.badgeContent}>
               <Dot variant={appStatus.dotVariant} pulse={appStatus.dotPulse} />

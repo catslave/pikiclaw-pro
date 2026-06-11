@@ -1061,7 +1061,7 @@ rl.on('line', (line) => {
     ).some((line: string) => line.includes('Skill config error')))).toBe(true);
   });
 
-  it('skips an empty codex MCP bridge when only native user input is available', async () => {
+  it('registers callback-free codex MCP tools when only native user input is available', async () => {
     await withTempHome(async () => {
       const callsFile = path.join(tmpDir, 'codex-mcp-calls.log');
       const script = `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(callsFile)}\nexit 0\n`;
@@ -1079,8 +1079,13 @@ rl.on('line', (line) => {
         onInteraction: async () => null,
       });
 
-      expect(handle).toBeNull();
-      expect(fs.existsSync(callsFile)).toBe(false);
+      expect(handle).not.toBeNull();
+      await handle?.stop();
+
+      const calls = fs.readFileSync(callsFile, 'utf8');
+      expect(calls).toContain('mcp add');
+      expect(calls).toContain('MCP_TOOLS_AVAILABLE=pro,outputs');
+      expect(calls).toContain('mcp remove pikiclaw');
     });
   });
 

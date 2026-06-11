@@ -92,10 +92,10 @@ const BUILTIN_COMPOSER_COMMANDS: BuiltinComposerCommand[] = [
   },
   {
     command: 'logtrace',
-    insert: '/logtrace env=lab id= last=24h ',
+    insert: '/logtrace conversationId= last=24h ',
     labelKey: 'hub.commandLogTrace',
     descriptionKey: 'hub.commandLogTraceDesc',
-    aliases: ['logs', 'trace', 'kibana', '日志', '排查'],
+    aliases: ['logs', 'trace', 'logstrace', 'kibana', '日志', '排查'],
   },
 ];
 
@@ -290,7 +290,7 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-function buildReferenceContextEnvelope(context: string): string {
+export function buildReferenceContextEnvelope(context: string): string {
   const trimmed = context.trim();
   if (!trimmed) return '';
   const safe = trimmed.replace(/<\/pikiclaw_context>/gi, '</pikiclaw-context>');
@@ -370,7 +370,7 @@ async function waitForCrossCheckResults(
   return results.sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onStopAll, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, initialRuntimeSelection = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onStopAll, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   compact?: boolean;
@@ -378,6 +378,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   initialDraftPrompt?: string | null;
   referenceContextPrompt?: string | null;
   referenceContextLabel?: string | null;
+  initialRuntimeSelection?: { agent?: string | null; model?: string | null; effort?: string | null } | null;
   onReferenceContextClear?: () => void;
   contextSources?: SessionContextSource[];
   onStreamQueued: () => void;
@@ -386,6 +387,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   onSendFailed?: () => void;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
   onMultiSessionChange?: (next: Array<{ agent: string; sessionId: string; workdir: string }>, prompt: string) => void;
+  onRuntimeSelectionChange?: (next: { agent: string; model: string | null; effort: string | null }) => void;
   t: (k: string) => string;
   streamPhase: string | null;
   streamTaskId?: string | null;
@@ -560,15 +562,15 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
 
   // Reset applied cascade choice + transient pending state when session changes.
   useEffect(() => {
-    setSelectedAgent('');
-    setSelectedModel('');
-    setSelectedEffort('');
+    setSelectedAgent(initialRuntimeSelection?.agent || '');
+    setSelectedModel(initialRuntimeSelection?.model || '');
+    setSelectedEffort(initialRuntimeSelection?.effort || '');
     setPendingAgent(null);
     setPendingModel(null);
     setPendingEffort(null);
     setCascadeStep('closed');
     setModeMenuOpen(false);
-  }, [session.agent, session.sessionId]);
+  }, [initialRuntimeSelection?.agent, initialRuntimeSelection?.effort, initialRuntimeSelection?.model, session.agent, session.sessionId]);
 
   useEffect(() => {
     const text = String(initialDraftPrompt || '').trim();
@@ -1013,6 +1015,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
           previousAgent: previousAgent && previousAgent !== agent ? previousAgent : null,
           previousSessionId: previousAgent && previousAgent !== agent ? previousSessionId : null,
           contextSources,
+          displayPrompt: visiblePrompt,
         });
         if (!res.ok) throw new Error(res.error || `Failed to start ${agent}`);
         const nextSession = typeof res.sessionKey === 'string' ? parseSessionKey(res.sessionKey) : null;
@@ -1082,6 +1085,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       previousAgent,
       previousSessionId,
       contextSources,
+      displayPrompt: prompt !== visiblePrompt ? visiblePrompt : undefined,
     })
       .then(res => {
         if (!res.ok) {
@@ -1456,9 +1460,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     setSelectedAgent(agent);
     setSelectedModel(model);
     setSelectedEffort(nextEffort);
+    onRuntimeSelectionChange?.({ agent, model: model || null, effort: nextEffort || null });
     resetCascade();
     setCascadeStep('closed');
-  }, [pendingProfileSelection, refreshModelLayer, refreshAgentStatus]);
+  }, [onRuntimeSelectionChange, pendingProfileSelection, refreshModelLayer, refreshAgentStatus]);
 
   const toggleCascade = () => {
     if (cascadeStep === 'closed') {
@@ -1768,7 +1773,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
               </span>
               <div className="min-w-0 flex-1">
                 <div className="truncate font-semibold text-fg-3">{referenceContextLabel || t('session.referenceContextAttached')}</div>
-                <div className="truncate text-[10px] text-fg-5">{t('session.referenceContextHint')}</div>
+                <div className="truncate text-[10px] text-fg-5">
+                  {t(onReferenceContextClear ? 'session.referenceContextHint' : 'session.referenceContextPersistentHint')}
+                </div>
               </div>
               {onReferenceContextClear && (
                 <button

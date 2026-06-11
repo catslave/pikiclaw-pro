@@ -22,6 +22,7 @@ import {
   appendSystemPrompt, pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
   sanitizeSessionUserPreviewText, emitSessionIdUpdate,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
+  adoptNativeSessionTitles, mergeManagedAndNativeSessions,
   applyTurnWindow,
   stripInjectedPrompts, attachAgentImage,
   roundPercent, emptyUsage, Q,
@@ -506,7 +507,14 @@ export async function doGeminiStream(opts: StreamOpts): Promise<StreamResult> {
   const streamOpts = { ...opts, _stdinOverride: '', extraEnv };
   try {
     try {
-      opts.onText('', '', 'Starting Gemini...', { lastEvent: 'Starting Gemini' }, null);
+      opts.onText('', '', 'Starting Gemini...', buildStreamPreviewMeta({
+        inputTokens: null,
+        outputTokens: null,
+        cachedInputTokens: null,
+        cacheCreationInputTokens: null,
+        contextWindow: null,
+        lastEvent: 'Starting Gemini',
+      }), null);
     } catch {}
     return await run(geminiCmd(opts), streamOpts, geminiParse, geminiParseStderrLine);
   } finally {
@@ -818,12 +826,15 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     outputs: record.outputs ?? [],
     numTurns: record.numTurns ?? null,
   }));
-  const sessions = typeof limit === 'number' ? pikiclawSessions.slice(0, limit) : pikiclawSessions;
+  const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
+  const managedSessions = adoptNativeSessionTitles(resolvedWorkdir, 'gemini', pikiclawSessions, nativeSessions);
+  const mergedSessions = mergeManagedAndNativeSessions(managedSessions, nativeSessions);
+  const sessions = typeof limit === 'number' ? mergedSessions.slice(0, limit) : mergedSessions;
   const projectName = geminiProjectName(resolvedWorkdir);
   const chatsDir = projectName ? geminiChatsDir(resolvedWorkdir) || '' : '';
   agentLog(
     `[sessions:gemini] workdir=${resolvedWorkdir} projectName=${projectName || '(none)'} chatsDir=${chatsDir || '(none)'} ` +
-    `chatsDirExists=${chatsDir ? fs.existsSync(chatsDir) : false} pikiclaw=${pikiclawSessions.length} returned=${sessions.length}`
+    `chatsDirExists=${chatsDir ? fs.existsSync(chatsDir) : false} pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} returned=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }

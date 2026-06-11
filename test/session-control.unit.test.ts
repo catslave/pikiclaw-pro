@@ -54,6 +54,31 @@ describe('session-control', () => {
     expect(result).toEqual({ ok: true, queued: true, taskId: 'task-1', sessionKey: 'codex:sess-1' });
   });
 
+  it('passes a separate display prompt when the agent prompt includes hidden context', async () => {
+    const submitSessionTask = vi.fn(() => ({ ok: true, queued: true, taskId: 'task-display', sessionKey: 'codex:sess-1' }));
+    getBotRefMock.mockReturnValue({ submitSessionTask });
+
+    const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
+    const result = await queueDashboardSessionTask({
+      workdir: '/tmp/pikiclaw',
+      agent: 'codex',
+      sessionId: 'sess-1',
+      prompt: '<pikiclaw_context type="reference">Ticket context</pikiclaw_context>\n\n这个 ticket 是做什么',
+      displayPrompt: '这个 ticket 是做什么',
+      attachments: [],
+    });
+
+    expect(submitSessionTask).toHaveBeenCalledWith({
+      workdir: '/tmp/pikiclaw',
+      agent: 'codex',
+      sessionId: 'sess-1',
+      prompt: '<pikiclaw_context type="reference">Ticket context</pikiclaw_context>\n\n这个 ticket 是做什么',
+      displayPrompt: '这个 ticket 是做什么',
+      attachments: [],
+    });
+    expect(result).toEqual({ ok: true, queued: true, taskId: 'task-display', sessionKey: 'codex:sess-1' });
+  });
+
   it('passes context sources when creating a fresh dashboard session', async () => {
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-context-send-'));
     const sourceWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-context-source-'));

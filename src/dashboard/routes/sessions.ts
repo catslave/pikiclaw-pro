@@ -201,6 +201,7 @@ async function parseSessionSendRequest(c: any): Promise<{
   agent: string;
   sessionId: string;
   prompt: string;
+  displayPrompt: string;
   model: string;
   effort: string;
   attachments: string[];
@@ -218,6 +219,7 @@ async function parseSessionSendRequest(c: any): Promise<{
       agent: readStringField(form.get('agent')),
       sessionId: readStringField(form.get('sessionId')),
       prompt: readStringField(form.get('prompt')),
+      displayPrompt: readStringField(form.get('displayPrompt')),
       model: readStringField(form.get('model')),
       effort: readStringField(form.get('effort')).toLowerCase(),
       attachments: uploads.attachments,
@@ -234,6 +236,7 @@ async function parseSessionSendRequest(c: any): Promise<{
     agent: readStringField(body?.agent),
     sessionId: readStringField(body?.sessionId),
     prompt: readStringField(body?.prompt),
+    displayPrompt: readStringField(body?.displayPrompt),
     model: readStringField(body?.model),
     effort: readStringField(body?.effort).toLowerCase(),
     attachments: [],
@@ -812,12 +815,13 @@ app.get('/api/session-hub/skills', (c) => {
 
 app.post('/api/session-hub/session/send', async (c) => {
   try {
-    const { workdir, agent, sessionId, prompt, model, effort, attachments, previousAgent, previousSessionId, contextSources, cleanup } = await parseSessionSendRequest(c);
+    const { workdir, agent, sessionId, prompt, displayPrompt, model, effort, attachments, previousAgent, previousSessionId, contextSources, cleanup } = await parseSessionSendRequest(c);
     const queued = await queueDashboardSessionTask({
       workdir,
       agent,
       sessionId,
       prompt,
+      displayPrompt: displayPrompt || undefined,
       model,
       effort,
       attachments,

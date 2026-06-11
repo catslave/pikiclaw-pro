@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Hono } from 'hono';
-import { loadUserConfig } from '../../core/config/user-config.js';
+import { loadUserConfig, loadWorkspaces } from '../../core/config/user-config.js';
 import { findPikiclawSessionInfo } from '../../agent/session.js';
 import { runtime } from '../runtime.js';
 import { queueDashboardSessionTask } from '../session-control.js';
@@ -26,6 +26,7 @@ import {
   createSubtask,
   createProTask,
   createTaskSpace,
+  confirmStageRunOutput,
   deleteProTask,
   finishVerificationRun,
   finishUserFocusSession,
@@ -36,6 +37,7 @@ import {
   isProSubtaskStatus,
   listProTasks,
   listTaskSpaces,
+  resetProTask,
   setExclusiveMode,
   startVerificationRun,
   startUserFocusSession,
@@ -46,8 +48,10 @@ import {
   updateProTaskExecution,
   updateProTaskCycle,
   updateProTaskMeta,
+  updateTaskBackground,
   updateProTaskStatus,
   updateTaskSpace,
+  upsertAnalyzeTicketTask,
   type VerificationResult,
 } from '../../pro/tasks.js';
 import {
@@ -63,21 +67,50 @@ import {
   updateDailyItem,
 } from '../../pro/daily-items.js';
 import { createTodoItem, deleteTodoItem, getTodoItems, linkTodoChat, listTodoItems, updateTodoItem, type TodoImageAttachment, type TodoItem } from '../../pro/todos.js';
+import {
+  createNotePage,
+  deleteNotePage,
+  getNotePage,
+  getOrCreateDailyNote,
+  listNoteTree,
+  promoteNoteSelection,
+  readNoteDocument,
+  reorderNotePages,
+  resolveNoteAsset,
+  saveNoteAsset,
+  searchNotes,
+  updateNotePage,
+  writeNoteDocument,
+} from '../../pro/notes.js';
 import { closeActiveJiraCycle, deleteJiraCycle, kickOffJiraCycle, listJiraCycles } from '../../pro/jira-cycles.js';
+import {
+  buildAnalyzeTicketPrompt,
+  issueKindFromType,
+  parseJiraTicketQuery,
+  resolveWorkdirForJiraAnalyze,
+} from '../../pro/jira-analyze.js';
+import { applyJiraRemoteUpdate, fetchJiraIssueFromMcp, resolveJiraIssueKeyInput } from '../../pro/jira-remote.js';
 import { buildProUsageSummary } from '../../pro/usage-summary.js';
 import {
+  cancelJiraRemoteUpdateRun,
   createAgentAssistant,
   createAutomationRule,
   createJiraSyncRun,
+  createJiraRemoteUpdateRun,
   createKnowledgeEntry,
+  deleteKnowledgeEntry,
   deleteAgentAssistant,
+  getJiraRemoteUpdateRun,
   applyJiraSyncRunItems,
   getAssistantPrompt,
+  getAnalyzeTicketPrompt,
   getJiraWorkflowConfig,
   getJiraSyncRun,
+  resetAnalyzeTicketPrompt,
   listAgentAssistants,
   listAutomationRules,
   listJiraSyncRuns,
+  listJiraRemoteUpdateRuns,
   listKnowledgeEntries,
   markAutomationRun,
   stopJiraSyncRun,
@@ -85,7 +118,10 @@ import {
   resetAgentAssistantPrompt,
   updateAgentAssistantPrompt,
   updateJiraSyncRun,
+  updateJiraRemoteUpdateRun,
+  updateAnalyzeTicketPrompt,
   updateJiraWorkflowConfig,
+  updateKnowledgeEntry,
   upsertAutomationRuleByKey,
   type AgentAssistant,
   type AutomationRule,
@@ -93,9 +129,193 @@ import {
 
 const app = new Hono();
 const JIRA_MCP_SYNC_AUTOMATION_KEY = 'jira-mcp-sync';
+const REVIEW_LINK_META_CACHE_TTL_MS = 10 * 60 * 1000;
+const reviewLinkMetaCache = new Map<string, { value: ReviewLinkMeta; cachedAt: number }>();
+
+type ReviewLinkMeta = {
+  provider: 'gitlab' | 'github' | 'unknown';
+  url: string;
+  repo?: string;
+  number?: string;
+  title?: string;
+  displayTitle?: string;
+};
 
 function readString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function firstEnvString(...names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function parseReviewLink(value: string): ReviewLinkMeta | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  const segments = url.pathname.split('/').filter(Boolean);
+  const mergeIndex = segments.findIndex(item => item === 'merge_requests');
+  if (mergeIndex > 0 && segments[mergeIndex + 1]) {
+    const repoIndex = segments[mergeIndex - 1] === '-' ? mergeIndex - 2 : mergeIndex - 1;
+    const repo = segments[repoIndex] || url.hostname.replace(/^www\./, '');
+    return {
+      provider: 'gitlab',
+      url: url.toString(),
+      repo,
+      number: segments[mergeIndex + 1],
+      displayTitle: `${repo} !${segments[mergeIndex + 1]}`,
+    };
+  }
+  const pullIndex = segments.findIndex(item => item === 'pull');
+  if (pullIndex > 0 && segments[pullIndex + 1]) {
+    const repo = segments[pullIndex - 1] || url.hostname.replace(/^www\./, '');
+    return {
+      provider: 'github',
+      url: url.toString(),
+      repo,
+      number: segments[pullIndex + 1],
+      displayTitle: `${repo} #${segments[pullIndex + 1]}`,
+    };
+  }
+  return {
+    provider: 'unknown',
+    url: url.toString(),
+    repo: url.hostname.replace(/^www\./, ''),
+    displayTitle: url.hostname.replace(/^www\./, '') + url.pathname.replace(/\/$/, ''),
+  };
+}
+
+function gitlabApiUrl(meta: ReviewLinkMeta): string | null {
+  if (meta.provider !== 'gitlab' || !meta.number) return null;
+  const url = new URL(meta.url);
+  const segments = url.pathname.split('/').filter(Boolean);
+  const mergeIndex = segments.findIndex(item => item === 'merge_requests');
+  if (mergeIndex <= 0) return null;
+  const projectSegments = segments.slice(0, segments[mergeIndex - 1] === '-' ? mergeIndex - 1 : mergeIndex);
+  if (!projectSegments.length) return null;
+  return `${url.origin}/api/v4/projects/${encodeURIComponent(projectSegments.join('/'))}/merge_requests/${encodeURIComponent(meta.number)}`;
+}
+
+function githubApiUrl(meta: ReviewLinkMeta): string | null {
+  if (meta.provider !== 'github' || !meta.number) return null;
+  const url = new URL(meta.url);
+  const segments = url.pathname.split('/').filter(Boolean);
+  const pullIndex = segments.findIndex(item => item === 'pull');
+  if (pullIndex < 2) return null;
+  return `https://api.github.com/repos/${encodeURIComponent(segments[0])}/${encodeURIComponent(segments[1])}/pulls/${encodeURIComponent(meta.number)}`;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code) || 0));
+}
+
+function titleFromPageTitle(rawTitle: string, meta: ReviewLinkMeta): string {
+  let title = decodeHtmlEntities(rawTitle).replace(/\s+/g, ' ').trim();
+  if (!title) return '';
+  if (/^(sign in|sign-in|login|log in)(\s+·\s+|\s+-\s+|$)/i.test(title)) return '';
+  if (meta.provider === 'github') {
+    title = title
+      .replace(/\s+by\s+.+?\s+·\s+Pull Request\s+#\d+\s+·\s+.+$/i, '')
+      .replace(/\s+·\s+Pull Request\s+#\d+\s+·\s+.+$/i, '')
+      .trim();
+  } else if (meta.provider === 'gitlab') {
+    title = title
+      .replace(/\s+\(!?\d+\)\s+·\s+Merge requests\s+·\s+.+$/i, '')
+      .replace(/\s+·\s+Merge requests\s+·\s+.+$/i, '')
+      .trim();
+  }
+  return title.length > 180 ? `${title.slice(0, 177).trimEnd()}...` : title;
+}
+
+async function fetchReviewPageTitle(meta: ReviewLinkMeta): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(meta.url, {
+      headers: { Accept: 'text/html' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) return '';
+    const html = await response.text();
+    const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    return match?.[1] ? titleFromPageTitle(match[1], meta) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function fetchReviewLinkMeta(rawUrl: string): Promise<ReviewLinkMeta | null> {
+  const parsed = parseReviewLink(rawUrl);
+  if (!parsed) return null;
+  const cached = reviewLinkMetaCache.get(parsed.url);
+  if (cached && Date.now() - cached.cachedAt < REVIEW_LINK_META_CACHE_TTL_MS) return cached.value;
+
+  const apiUrl = parsed.provider === 'gitlab' ? gitlabApiUrl(parsed) : githubApiUrl(parsed);
+  if (!apiUrl) {
+    reviewLinkMetaCache.set(parsed.url, { value: parsed, cachedAt: Date.now() });
+    return parsed;
+  }
+
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (parsed.provider === 'gitlab') {
+    const token = firstEnvString('GITLAB_TOKEN', 'GITLAB_PRIVATE_TOKEN', 'GITLAB_ACCESS_TOKEN');
+    if (token) headers['PRIVATE-TOKEN'] = token;
+  } else if (parsed.provider === 'github') {
+    const token = firstEnvString('GITHUB_TOKEN', 'GH_TOKEN');
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(apiUrl, { headers, signal: controller.signal });
+    clearTimeout(timer);
+    if (response.ok) {
+      const body: any = await response.json();
+      const title = readString(body?.title);
+      const value = title
+        ? { ...parsed, title, displayTitle: `${parsed.displayTitle} · ${title}` }
+        : parsed;
+      reviewLinkMetaCache.set(parsed.url, { value, cachedAt: Date.now() });
+      return value;
+    }
+  } catch {
+    // Fall back to the readable repo + review number title below.
+  }
+  const pageTitle = await fetchReviewPageTitle(parsed);
+  if (pageTitle) {
+    const value = { ...parsed, title: pageTitle, displayTitle: `${parsed.displayTitle} · ${pageTitle}` };
+    reviewLinkMetaCache.set(parsed.url, { value, cachedAt: Date.now() });
+    return value;
+  }
+  reviewLinkMetaCache.set(parsed.url, { value: parsed, cachedAt: Date.now() });
+  return parsed;
+}
+
+function isUploadFile(value: unknown): value is {
+  name?: string;
+  type?: string;
+  size?: number;
+  arrayBuffer: () => Promise<ArrayBuffer>;
+} {
+  return !!value
+    && typeof value === 'object'
+    && typeof (value as any).arrayBuffer === 'function';
 }
 
 function extensionForTodoImage(mimeType: string): string {
@@ -176,6 +396,21 @@ function buildAssistantPrompt(prompt: string, assistant?: AgentAssistant): strin
   ].join('\n');
 }
 
+function buildQuickAssistantPrompt(prompt: string, assistant: AgentAssistant): string {
+  const workingPrompt = readString(assistant.prompt) || readString(assistant.defaultPrompt);
+  return [
+    `You are running as Pikiclaw Assistant: ${assistant.name}`,
+    '',
+    'Assistant responsibility:',
+    assistant.responsibility,
+    workingPrompt ? 'Assistant working prompt:' : '',
+    workingPrompt,
+    '',
+    'User input:',
+    prompt,
+  ].filter(part => part !== '').join('\n');
+}
+
 function mergeJiraRawFields(input: any): Record<string, unknown> | undefined {
   const raw = input?.rawFields && typeof input.rawFields === 'object'
     ? { ...input.rawFields }
@@ -195,6 +430,9 @@ function buildJiraMcpSyncPrompt(runId?: string): string {
     'Requirements:',
     runId ? '- Immediately call `pikiclaw_pro_report_jira_sync_progress` with this runId before each visible step.' : '',
     runId ? '- Report which Jira MCP tool/query you are using, how many tickets you found, and when task writing starts.' : '',
+    '- Prefer `pikiclaw_pro_pull_jira_sync_candidates` for the pull step. It uses the configured Jira MCP service from the Pikiclaw backend, records candidates, and avoids relying on agent-visible Atlassian tool namespace selection.',
+    '- If `pikiclaw_pro_pull_jira_sync_candidates` succeeds, do not call Jira search/get issue yourself and do not call `pikiclaw_pro_record_jira_sync_candidates` again.',
+    '- Only fall back to direct Jira MCP tools when `pikiclaw_pro_pull_jira_sync_candidates` is unavailable or returns an error. In that fallback, prefer `mcp_atlassian_service` / `mcp__mcp_atlassian_service` Jira tools before generic `mcp__atlassian`.',
     '- Only sync Jira issues assigned to me / the current Jira user. Do not sync issues assigned to other people, unassigned issues, watched issues, reporter-only issues, or team-wide results unless they are also assigned to me.',
     '- Default sync scope is current sprint active work only: use an assignee-scoped query such as `assignee = currentUser() AND sprint in openSprints() AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC`.',
     '- If Jira does not support `sprint in openSprints()` in this instance, keep `assignee = currentUser()` and exclude Closed/Cancelled before writing candidates.',
@@ -203,7 +441,7 @@ function buildJiraMcpSyncPrompt(runId?: string): string {
     '- After pulling Jira issues, call `pikiclaw_pro_record_jira_sync_candidates` with an `issues` array. Do not call `pikiclaw_pro_sync_jira_issues` during the pull step; the user will apply selected candidates from the dashboard.',
     runId ? '- Include the same runId when calling `pikiclaw_pro_record_jira_sync_candidates`.' : '',
     '- When using Jira search/get issue, request summary, description, issuetype, status, assignee, reporter, fixVersions, duedate, priority, labels, updated, and the sprint custom field `customfield_10652` when available.',
-    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, fixVersion/fixVersions, reporter, assignee, ticketStatus/status, dueDate, priority, labels, and updatedAt when available.',
+    '- Each issue passed to that tool should include jiraKey/key, title/summary, description, issueType, jiraUrl/url, sprint, fixVersion/fixVersions, reporter, assignee, ticketStatus/status, dueDate, priority, labels, updatedAt, linked issues, remote links, and development/MR links when available.',
     '- Sync Jira tickets into Pikiclaw task context: keep title, description, ticket key, link, sprint, native Jira fields, and changed remote notes.',
     '- Append remote updates as new notes instead of overwriting existing local task context.',
     '- Mark newly assigned tickets and changed tickets clearly.',
@@ -405,6 +643,146 @@ app.get('/api/pro/usage-summary', async (c) => {
     return c.json({ ok: true, summary: await buildProUsageSummary(c.req.query('limit')) });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.get('/api/pro/notes/tree', (c) => {
+  try {
+    return c.json({ ok: true, ...listNoteTree() });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/notes/daily', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    return c.json({ ok: true, page: getOrCreateDailyNote(body?.date) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/notes/pages', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    return c.json({ ok: true, page: createNotePage({ title: body?.title, parentId: body?.parentId }) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/notes/pages/reorder', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    return c.json({ ok: true, pages: reorderNotePages(body?.parentId, Array.isArray(body?.pageIds) ? body.pageIds : []) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.get('/api/pro/notes/search', (c) => {
+  try {
+    return c.json({ ok: true, results: searchNotes(c.req.query('q') || '') });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.get('/api/pro/notes/assets/:pageId/:fileName', async (c) => {
+  try {
+    const asset = resolveNoteAsset(c.req.param('pageId'), c.req.param('fileName'));
+    const bytes = await fs.readFile(asset.filePath);
+    return c.body(bytes, 200, {
+      'Content-Type': asset.mimeType,
+      'Cache-Control': 'private, max-age=31536000, immutable',
+    });
+  } catch (e: any) {
+    const status = e?.code === 'ENOENT' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.get('/api/pro/notes/pages/:pageId', (c) => {
+  const page = getNotePage(c.req.param('pageId'));
+  return page ? c.json({ ok: true, page }) : c.json({ ok: false, error: 'note page not found' }, 404);
+});
+
+app.patch('/api/pro/notes/pages/:pageId', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const patch: { title?: string; parentId?: string | null; deletedAt?: string | null } = {};
+    if (body && Object.prototype.hasOwnProperty.call(body, 'title')) patch.title = body.title;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'parentId')) patch.parentId = body.parentId;
+    if (body && Object.prototype.hasOwnProperty.call(body, 'deletedAt')) patch.deletedAt = body.deletedAt;
+    return c.json({ ok: true, page: updateNotePage(c.req.param('pageId'), patch) });
+  } catch (e: any) {
+    const status = e?.message === 'note page not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/notes/pages/:pageId', (c) => {
+  try {
+    return c.json({ ok: true, page: deleteNotePage(c.req.param('pageId'), c.req.query('permanent') === '1') });
+  } catch (e: any) {
+    const status = e?.message === 'note page not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.get('/api/pro/notes/pages/:pageId/document', (c) => {
+  try {
+    return c.json({ ok: true, blocks: readNoteDocument(c.req.param('pageId')) });
+  } catch (e: any) {
+    const status = e?.message === 'note page not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.put('/api/pro/notes/pages/:pageId/document', async (c) => {
+  try {
+    const body = await c.req.json();
+    const blocks = Array.isArray(body) ? body : body?.blocks;
+    return c.json({ ok: true, blocks: writeNoteDocument(c.req.param('pageId'), blocks) });
+  } catch (e: any) {
+    const status = e?.message === 'note page not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/notes/pages/:pageId/assets', async (c) => {
+  try {
+    const form = await c.req.formData();
+    const file = form.get('file') || form.get('image');
+    if (!isUploadFile(file)) return c.json({ ok: false, error: 'image file is required' }, 400);
+    const asset = saveNoteAsset(c.req.param('pageId'), {
+      name: readString(file.name) || 'note-image.png',
+      mimeType: readString(file.type) || 'image/png',
+      bytes: Buffer.from(await file.arrayBuffer()),
+    });
+    return c.json({ ok: true, asset });
+  } catch (e: any) {
+    const status = e?.message === 'note page not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/notes/promote', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const config = loadUserConfig();
+    const result = promoteNoteSelection({
+      pageId: body?.pageId,
+      target: body?.target,
+      text: body?.text,
+      date: body?.date,
+      workdir: readString(body?.workdir) || runtime.getRequestWorkdir(config),
+    });
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    const status = e?.message === 'note page not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
   }
 });
 
@@ -627,6 +1005,14 @@ app.get('/api/pro/assistants', (c) => {
   return c.json({ ok: true, assistants: listAgentAssistants() });
 });
 
+app.get('/api/pro/review-link-meta', async (c) => {
+  const url = readString(c.req.query('url'));
+  if (!url) return c.json({ ok: false, error: 'url is required' }, 400);
+  const meta = await fetchReviewLinkMeta(url);
+  if (!meta) return c.json({ ok: false, error: 'unsupported review link' }, 400);
+  return c.json({ ok: true, meta });
+});
+
 app.get('/api/pro/assistants/history', (c) => {
   const limitQuery = readString(c.req.query('limit'));
   const limitRaw = Number.parseInt(limitQuery || '50', 10);
@@ -723,6 +1109,51 @@ app.get('/api/pro/assistants/history', (c) => {
   }
 
   return c.json({ ok: true, history });
+});
+
+app.post('/api/pro/assistants/:assistantId/run', async (c) => {
+  try {
+    const assistantId = readString(c.req.param('assistantId'));
+    const assistant = listAgentAssistants().find(item => item.id === assistantId);
+    if (!assistant) return c.json({ ok: false, error: 'assistant not found' }, 404);
+    if (assistant.enabled === false) return c.json({ ok: false, error: 'assistant is disabled' }, 400);
+
+    const body = await c.req.json();
+    const userPrompt = readString(body?.prompt);
+    if (!userPrompt) return c.json({ ok: false, error: 'prompt is required' }, 400);
+
+    const config = loadUserConfig();
+    const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
+    const agent = pickAssistantAgent(assistant, readString(body?.agent) || null);
+    const queued = await queueDashboardSessionTask({
+      workdir,
+      agent,
+      sessionId: '',
+      prompt: buildQuickAssistantPrompt(userPrompt, assistant),
+      displayPrompt: userPrompt,
+      attachments: [],
+      origin: {
+        channel: 'dashboard',
+        chatId: `quick-assistant:${assistant.id}`,
+        chatType: 'quick-assistant',
+        sourceMessageId: `quick-${Date.now().toString(36)}`,
+      },
+    });
+    if (!queued.ok) {
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, statusCode);
+    }
+
+    const session = parseSessionKey(queued.sessionKey);
+    return c.json({
+      ok: true,
+      assistant,
+      queued,
+      session: session ? { workdir, agent: session.agent, sessionId: session.sessionId } : null,
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
 });
 
 app.get('/api/pro/assistants/:assistantId/prompt', (c) => {
@@ -926,40 +1357,146 @@ app.post('/api/pro/jira/mcp-sync/run', async (c) => {
   }
 });
 
+app.get('/api/pro/jira/analyze-ticket/prompt', (c) => {
+  try {
+    const result = getAnalyzeTicketPrompt();
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.patch('/api/pro/jira/analyze-ticket/prompt', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = updateAnalyzeTicketPrompt({ prompt: body?.prompt });
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/jira/analyze-ticket/prompt/reset', (c) => {
+  try {
+    const result = resetAnalyzeTicketPrompt();
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
 app.post('/api/pro/jira/analyze-ticket', async (c) => {
   try {
     const body = await c.req.json();
-    const query = readString(body?.query);
-    if (!query) return c.json({ ok: false, error: 'query is required' }, 400);
+    const parsed = parseJiraTicketQuery(body?.query);
+    if (!parsed) return c.json({ ok: false, error: 'query is required' }, 400);
     const config = loadUserConfig();
-    const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
+    const jiraConfig = getJiraWorkflowConfig();
+    const fallbackWorkdir = runtime.getRequestWorkdir(config);
+    let issue: Awaited<ReturnType<typeof fetchJiraIssueFromMcp>>['issue'] | null = null;
+    let issueLookupError: string | undefined;
+    if (parsed.jiraKey) {
+      try {
+        const fetched = await fetchJiraIssueFromMcp(parsed.jiraKey);
+        issue = fetched.issue;
+      } catch (error: any) {
+        issueLookupError = error?.message || String(error);
+      }
+    }
+    const workdirResolution = resolveWorkdirForJiraAnalyze({
+      jiraKey: parsed.jiraKey || issue?.jiraKey,
+      issue,
+      query: parsed.query,
+      fallbackWorkdir,
+      workspaces: loadWorkspaces(),
+      routes: jiraConfig.jiraWorkspaceRoutes,
+    });
+    const workdir = readString(body?.workdir) || workdirResolution.workdir || fallbackWorkdir;
     const agent = readString(body?.agent) || null;
-    const prompt = [
-      'Analyze a Jira ticket and its related merge requests for me.',
-      '',
-      `Ticket/search query: ${query}`,
-      '',
-      'Requirements:',
-      '- Use available Jira/Atlassian MCP tools to find the ticket when the exact key is not enough.',
-      '- Find linked or likely related merge requests from Jira development links, issue comments, branch names, or repository references when available.',
-      '- Summarize the ticket goal, current status, owner, sprint, risk, missing context, and next action.',
-      '- Summarize each related MR: purpose, state, risk, notable changed areas, and whether it appears aligned with the ticket.',
-      '- If evidence is incomplete, say exactly which lookup failed or what is missing.',
-    ].join('\n');
+    const promptTemplate = getAnalyzeTicketPrompt().prompt;
+    const prompt = buildAnalyzeTicketPrompt(promptTemplate, parsed.query, {
+      jiraKey: parsed.jiraKey || issue?.jiraKey,
+      issueSummary: issue?.title || issue?.summary,
+      workdirResolution: { ...workdirResolution, workdir },
+    });
+    const taskTitle = issue?.title || issue?.summary || parsed.jiraKey || parsed.query.slice(0, 120);
+    const task = upsertAnalyzeTicketTask({
+      title: taskTitle,
+      description: issue?.description || undefined,
+      kind: issueKindFromType(issue?.issueType),
+      workdir,
+      jiraKey: parsed.jiraKey || issue?.jiraKey,
+      jiraUrl: parsed.jiraUrl || issue?.jiraUrl,
+    });
+    const assistantId = jiraConfig.refinementAssistantId;
     const queued = await queueDashboardSessionTask({
       workdir,
       agent,
       sessionId: '',
       prompt,
+      displayPrompt: `Analyze ${parsed.jiraKey || parsed.query}`,
       attachments: [],
+      origin: {
+        channel: 'task',
+        chatId: task.id,
+        chatType: 'refinement',
+        sourceMessageId: null,
+      },
     });
     if (!queued.ok) {
       const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
       return c.json(queued, statusCode);
     }
-    return c.json({ ok: true, queued });
+    const session = parseSessionKey(queued.sessionKey);
+    if (!session) return c.json({ ok: false, error: 'analyze session was not created' }, 500);
+    const updated = addStageRun({
+      taskId: task.id,
+      stage: 'refinement',
+      prompt,
+      session: { workdir, agent: session.agent, sessionId: session.sessionId },
+      assistantId,
+      selectedAgentReason: 'Ticket analyze flow uses the Pikiclaw runtime default agent.',
+    });
+    return c.json({
+      ok: true,
+      task: updated,
+      queued,
+      workdirResolution: { ...workdirResolution, workdir },
+      issueLookupError,
+      session: { workdir, agent: session.agent, sessionId: session.sessionId },
+    });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/jira/sync-ticket', async (c) => {
+  try {
+    const body = await c.req.json();
+    const query = readString(body?.query || body?.jiraKey || body?.ticket);
+    const jiraKey = resolveJiraIssueKeyInput(query, body?.projectKey || body?.projectKeyHint);
+    if (!jiraKey) {
+      return c.json({ ok: false, error: 'Enter a Jira key/link, or provide a project key for ticket numbers.' }, 400);
+    }
+    const config = loadUserConfig();
+    const existing = listProTasks().find(task => task.jiraKey?.toLowerCase() === jiraKey.toLowerCase()) || null;
+    const pulled = await fetchJiraIssueFromMcp(jiraKey);
+    const task = syncJiraTask({
+      ...pulled.issue,
+      jiraKey: pulled.issue.jiraKey || jiraKey,
+      workdir: readString(body?.workdir) || runtime.getRequestWorkdir(config),
+      spaceId: readString(body?.spaceId) || undefined,
+    });
+    return c.json({
+      ok: true,
+      task,
+      issueKey: task.jiraKey || jiraKey,
+      action: existing ? 'updated' : 'created',
+      source: pulled.source,
+      tried: pulled.tried,
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
   }
 });
 
@@ -1019,7 +1556,18 @@ app.post('/api/pro/jira/mcp-sync/schedule', async (c) => {
 });
 
 app.get('/api/pro/knowledge', (c) => {
-  return c.json({ ok: true, knowledge: listKnowledgeEntries() });
+  const query = c.req.query();
+  return c.json({
+    ok: true,
+    knowledge: listKnowledgeEntries({
+      query: query.query || query.q,
+      tag: query.tag,
+      sourceType: query.sourceType,
+      workspace: query.workspace || query.workdir,
+      status: query.status,
+      kind: query.kind,
+    }),
+  });
 });
 
 app.post('/api/pro/knowledge', async (c) => {
@@ -1028,9 +1576,46 @@ app.post('/api/pro/knowledge', async (c) => {
     const entry = createKnowledgeEntry({
       title: body?.title,
       body: body?.body,
+      kind: body?.kind,
+      status: body?.status,
+      summary: body?.summary,
       source: body?.source,
+      sourceRefs: body?.sourceRefs,
+      artifactRefs: body?.artifactRefs,
+      confidence: body?.confidence,
+      createdBy: body?.createdBy,
       tags: body?.tags,
     });
+    return c.json({ ok: true, entry });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/knowledge/:id', async (c) => {
+  try {
+    const body = await c.req.json();
+    const entry = updateKnowledgeEntry(c.req.param('id'), {
+      title: body?.title,
+      body: body?.body,
+      kind: body?.kind,
+      status: body?.status,
+      summary: body?.summary,
+      tags: body?.tags,
+      confidence: body?.confidence,
+      sourceRefs: body?.sourceRefs,
+      artifactRefs: body?.artifactRefs,
+    });
+    return c.json({ ok: true, entry });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.delete('/api/pro/knowledge/:id', async (c) => {
+  try {
+    const hard = c.req.query('hard') === '1' || c.req.query('hard') === 'true';
+    const entry = deleteKnowledgeEntry(c.req.param('id'), { hard });
     return c.json({ ok: true, entry });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
@@ -1142,6 +1727,16 @@ app.delete('/api/pro/tasks/:taskId', (c) => {
   }
 });
 
+app.post('/api/pro/tasks/:taskId/reset', (c) => {
+  try {
+    const task = resetProTask(c.req.param('taskId'));
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.post('/api/pro/tasks', async (c) => {
   try {
     const body = await c.req.json();
@@ -1216,6 +1811,8 @@ app.post('/api/pro/jira/sync', async (c) => {
       assignee: issue?.assignee,
       ticketStatus: issue?.ticketStatus || issue?.status,
       dueDate: issue?.dueDate,
+      fixVersion: issue?.fixVersion,
+      fixVersions: issue?.fixVersions,
       priority: issue?.priority,
       labels: Array.isArray(issue?.labels) ? issue.labels : undefined,
       updatedAt: issue?.updatedAt || issue?.updated,
@@ -1251,6 +1848,108 @@ app.patch('/api/pro/tasks/:taskId/jira-fields', async (c) => {
   }
 });
 
+app.post('/api/pro/tasks/:taskId/jira-sync', async (c) => {
+  try {
+    const taskId = c.req.param('taskId');
+    const task = getProTask(taskId);
+    if (!task) return c.json({ ok: false, error: 'task not found' }, 404);
+    if (!task.jiraKey) return c.json({ ok: false, error: 'task is not linked to a Jira ticket' }, 400);
+    const config = loadUserConfig();
+    const pulled = await fetchJiraIssueFromMcp(task.jiraKey);
+    const synced = syncJiraTask({
+      ...pulled.issue,
+      jiraKey: task.jiraKey,
+      jiraUrl: pulled.issue.jiraUrl || task.jiraUrl,
+      spaceId: task.spaceId,
+      workdir: task.workdir || runtime.getRequestWorkdir(config),
+      prUrl: task.prUrl,
+    });
+    return c.json({ ok: true, task: synced, source: pulled.source, tried: pulled.tried });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.get('/api/pro/jira/remote-updates', (c) => {
+  const taskId = readString(c.req.query('taskId'));
+  return c.json({ ok: true, runs: listJiraRemoteUpdateRuns(taskId || undefined) });
+});
+
+app.post('/api/pro/tasks/:taskId/jira-remote-updates', async (c) => {
+  try {
+    const taskId = c.req.param('taskId');
+    const task = getProTask(taskId);
+    if (!task) return c.json({ ok: false, error: 'task not found' }, 404);
+    if (!task.jiraKey) return c.json({ ok: false, error: 'task is not linked to a Jira ticket' }, 400);
+    const body = await c.req.json();
+    const currentFields = {
+      status: task.jiraFields?.status,
+      fixVersions: task.jiraFields?.fixVersions,
+      sprint: task.sprint,
+      dueDate: task.jiraFields?.dueDate,
+    };
+    const run = createJiraRemoteUpdateRun({
+      taskId,
+      jiraKey: task.jiraKey,
+      jiraUrl: task.jiraUrl,
+      currentFields,
+      fields: body?.fields || body,
+    });
+    return c.json({ ok: true, run });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/jira/remote-updates/:runId/apply', async (c) => {
+  const runId = c.req.param('runId');
+  try {
+    const existing = getJiraRemoteUpdateRun(runId);
+    if (!existing) return c.json({ ok: false, error: 'jira remote update run not found' }, 404);
+    if (existing.status === 'applied') return c.json({ ok: false, error: 'jira update already applied' }, 400);
+    if (existing.status === 'cancelled') return c.json({ ok: false, error: 'cancelled jira update cannot be applied' }, 400);
+    const applying = updateJiraRemoteUpdateRun(runId, {
+      status: 'applying',
+      event: { label: 'Applying Jira update', detail: existing.diff.map(item => item.field).join(', ') },
+    });
+    const applied = await applyJiraRemoteUpdate(applying);
+    const localPatch: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(applying.fields, 'status')) localPatch.status = applying.fields.status;
+    if (Object.prototype.hasOwnProperty.call(applying.fields, 'sprint')) localPatch.sprint = applying.fields.sprint;
+    if (Object.prototype.hasOwnProperty.call(applying.fields, 'dueDate')) localPatch.dueDate = applying.fields.dueDate;
+    if (Object.prototype.hasOwnProperty.call(applying.fields, 'fixVersions')) localPatch.fixVersions = applying.fields.fixVersions;
+    const task = updateJiraFields(applying.taskId, localPatch);
+    const run = updateJiraRemoteUpdateRun(runId, {
+      status: 'applied',
+      remoteTool: applied.remoteTool,
+      event: { label: 'Jira update applied', detail: applied.remoteTool },
+    });
+    return c.json({ ok: true, run, task });
+  } catch (e: any) {
+    const message = e?.message || String(e);
+    let run = getJiraRemoteUpdateRun(runId);
+    if (run) {
+      run = updateJiraRemoteUpdateRun(runId, {
+        status: 'failed',
+        error: message,
+        event: { label: 'Jira update failed', detail: message },
+      });
+    }
+    return c.json({ ok: false, error: message, run }, 400);
+  }
+});
+
+app.post('/api/pro/jira/remote-updates/:runId/cancel', (c) => {
+  try {
+    const run = cancelJiraRemoteUpdateRun(c.req.param('runId'));
+    return c.json({ ok: true, run });
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.patch('/api/pro/tasks/:taskId/exclusive-mode', async (c) => {
   try {
     const body = await c.req.json();
@@ -1271,6 +1970,8 @@ app.patch('/api/pro/tasks/:taskId/execution', async (c) => {
       assistantId: body?.assistantId,
       defaultAssistantId: body?.defaultAssistantId,
       mode: body?.mode,
+      model: body?.model,
+      effort: body?.effort,
     });
     return c.json({ ok: true, task });
   } catch (e: any) {
@@ -1304,6 +2005,20 @@ app.patch('/api/pro/tasks/:taskId/meta', async (c) => {
       task = getProTask(c.req.param('taskId')) || task;
       return c.json({ ok: true, task, dailyItem: reverted });
     }
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/tasks/:taskId/background', async (c) => {
+  try {
+    const body = await c.req.json();
+    const task = updateTaskBackground(c.req.param('taskId'), {
+      summary: body?.summary,
+      source: body?.source,
+    });
     return c.json({ ok: true, task });
   } catch (e: any) {
     const status = e?.message === 'task not found' ? 404 : 400;
@@ -1352,11 +2067,13 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
       readString(body?.executionMode) || task.execution?.mode || 'direct',
     );
     const requestedAgent = readString(body?.agent) || task.execution?.agent || task.defaultAgent || assistant?.preferredAgents?.[0] || null;
+    const displayPrompt = readString(body?.displayPrompt) || undefined;
     const queued = await queueDashboardSessionTask({
       workdir,
       agent: requestedAgent,
       sessionId: '',
       prompt,
+      displayPrompt,
       model: readString(body?.model) || null,
       effort: readString(body?.effort) || null,
       attachments: [],
@@ -1379,6 +2096,7 @@ app.post('/api/pro/tasks/:taskId/stage-runs', async (c) => {
       subtaskId: body?.subtaskId,
       stage,
       prompt,
+      displayPrompt,
       session: { workdir, agent: session.agent, sessionId: session.sessionId },
       assistantId,
       selectedAgentReason: requestedAgent
@@ -1413,6 +2131,16 @@ app.patch('/api/pro/tasks/:taskId/stage-runs/:stageRunId', async (c) => {
       knowledgeRefs: Array.isArray(body?.knowledgeRefs) ? body.knowledgeRefs : undefined,
       focus: body?.focus,
     });
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message?.includes('not found') ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/tasks/:taskId/stage-runs/:stageRunId/confirm-output', async (c) => {
+  try {
+    const task = confirmStageRunOutput(c.req.param('taskId'), c.req.param('stageRunId'), { actor: 'user' });
     return c.json({ ok: true, task });
   } catch (e: any) {
     const status = e?.message?.includes('not found') ? 404 : 400;
@@ -1607,6 +2335,8 @@ function jiraDescriptionToText(value: unknown): string {
 }
 
 function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>>, stage: string, assistant?: ReturnType<typeof listAgentAssistants>[number]): string {
+  const outputRule = 'When you produce a durable background, plan, clarification, implementation analysis, test cases, or report, treat it as a draft for the current stage. Stage output artifacts such as wiki/document/report should default to Chinese unless the user explicitly asks for another language; ordinary chat replies may naturally follow the user language. The user may discuss and revise it in chat; Pikiclaw will save it as a formal ticket output only after the user clicks Confirm output.';
+  const workflowRule = 'Do not force every task through one fixed workflow. Choose the next useful phase from the ticket type, prompt, existing outputs, and latest stage result. After finishing a phase, proactively offer next actions such as discuss questions, confirm the current draft as the formal output, move to the next phase, skip an unnecessary phase, or collect testing evidence.';
   const common = [
     assistant ? `Assistant: ${assistant.name}\nResponsibility:\n${assistant.responsibility}` : '',
     `Task: ${task.title}`,
@@ -1615,19 +2345,20 @@ function buildDefaultStagePrompt(task: NonNullable<ReturnType<typeof getProTask>
     task.subTasks?.length
       ? `Subtasks:\n${task.subTasks.map((subtask, index) => `${index + 1}. [${subtask.status}] ${subtask.title}${subtask.assignedAgent ? ` (agent: ${subtask.assignedAgent})` : ''}`).join('\n')}`
       : 'Subtasks: none yet. If the work naturally spans multiple projects or independent streams, propose subtasks with title, scope, recommended agent/assistant, and dependencies.',
+    workflowRule,
   ].filter(Boolean).join('\n\n');
 
   if (stage === 'focus') {
-    return `${common}\n\nEnter Focus Mode. Discuss the requirement with me before coding. Keep asking for goal, boundary, constraints, risks, and acceptance criteria until they are clear. Maintain a concise mind-map outline in markdown with nodes for Goal, Scope, Non-goals, Constraints, Risks, Acceptance Criteria, Open Questions, and Plan. End with an estimated completion time split into coding, user understanding, review, and verification time.`;
+    return `${common}\n\nEnter Focus Mode. Discuss the requirement with me before coding. Keep asking for goal, boundary, constraints, risks, and acceptance criteria until they are clear. Maintain a concise mind-map outline in markdown with nodes for Goal, Scope, Non-goals, Constraints, Risks, Acceptance Criteria, Open Questions, and Plan. End with an estimated completion time split into coding, user understanding, review, and verification time.\n\n${outputRule}`;
   }
   if (stage === 'refinement') {
-    return `${common}\n\nRefine this task. Analyze goal, scope, risks, dependencies, acceptance criteria, implementation approach, estimate point, and estimated completion time split into coding, user understanding, review, and verification time. Do not modify files yet.`;
+    return `${common}\n\nRefine this task. Analyze goal, scope, risks, dependencies, acceptance criteria, implementation approach, estimate point, and estimated completion time split into coding, user understanding, review, and verification time. Do not modify files yet. Produce a Background or Clarification document when the understanding is stable.\n\n${outputRule}`;
   }
   if (stage === 'coding') {
-    return `${common}\n\nImplement this task with minimal changes. After coding, summarize branch/status, changed files, tests run, remaining uncertainty, and verification steps.`;
+    return `${common}\n\nImplement this task with minimal changes. After coding, summarize branch/status, changed files, tests run, remaining uncertainty, and verification steps. If coding happened elsewhere, analyze the branch/MR instead of modifying files and produce an Implementation / MR Analysis document.\n\n${outputRule}`;
   }
   if (stage === 'verification' || stage === 'demo') {
-    return `${common}\n\nPrepare ${stage} for this task. Identify the target environment, deployment/pipeline checks needed, browser entry URL if known, login assumptions, and the manual steps I should verify. Do not proceed with destructive actions.`;
+    return `${common}\n\nPrepare ${stage} for this task. Identify the target environment, deployment/pipeline checks needed, browser entry URL if known, login assumptions, and the manual steps I should verify. Produce Test Cases before manual execution and a Test Report after evidence is provided. Do not proceed with destructive actions.\n\n${outputRule}`;
   }
   if (stage === 'bugfix') {
     return `${common}\n\nAnalyze the reported bug, identify likely root cause, propose a minimal fix, implement it if enough evidence is available, and summarize verification steps.`;

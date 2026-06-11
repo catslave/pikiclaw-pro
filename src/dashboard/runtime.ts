@@ -254,6 +254,17 @@ class Runtime {
         this.emitDashboardEvent({ type: 'sessions-changed', key: sessionKey, snapshot: phase ? { phase } : null });
       }
     });
+    bot.onSessionFinished(event => {
+      if (!event.result.ok || event.result.incomplete || !event.session.sessionId) return;
+      void import('./focus-service.js')
+        .then(service => service.queueFocusExtractionByRef(event.session.workdir, event.session.agent, event.session.sessionId!))
+        .then(result => {
+          if (result.ok && result.queued) {
+            this.emitDashboardEvent({ type: 'sessions-changed', key: event.session.key, snapshot: { phase: 'focus-queued' } });
+          }
+        })
+        .catch(() => {});
+    });
   }
 
   // -- Type guards --

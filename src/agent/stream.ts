@@ -46,6 +46,15 @@ function trimSessionText(value: unknown, max = 24_000): string | null {
   return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
 }
 
+function streamDisplayPrompt(prompt: string, displayPrompt?: string | null): string {
+  if (typeof displayPrompt === 'string') {
+    const trimmed = displayPrompt.trim();
+    if (trimmed) return trimmed;
+  }
+  if (displayPrompt === null) return '';
+  return collapseSkillPrompt(prompt) ?? prompt;
+}
+
 /**
  * Spot known browser-MCP failure signatures inside an agent stdout line so the
  * supervisor can force-restart Chrome before the next turn. Both patterns are
@@ -377,7 +386,7 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   // `/skillname` shorthand the user typed over the long expansion we
   // synthesized for the agent — the expanded form is what the CLI consumes,
   // but it shouldn't leak into session list previews or sidebar tabs.
-  const displayPrompt = collapseSkillPrompt(opts.prompt) ?? opts.prompt;
+  const displayPrompt = streamDisplayPrompt(opts.prompt, opts.displayPrompt);
   const session = ensureSessionWorkspace({ agent: opts.agent, workdir: opts.workdir, sessionId: opts.sessionId, title: displayPrompt });
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.attachments || []);
   const attachmentRelPaths = dedupeStrings([...session.record.stagedFiles, ...importedFiles]);
@@ -423,7 +432,7 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   };
 }
 
-function finalizeStreamResult(result: StreamResult, workdir: string, prompt: string, session: SessionWorkspaceInfo): StreamResult {
+function finalizeStreamResult(result: StreamResult, workdir: string, prompt: string, session: SessionWorkspaceInfo, displayPrompt?: string | null): StreamResult {
   if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
   const message = stripOaiMemoryCitations(result.message);
   const assistantBlocks = result.assistantBlocks
@@ -440,17 +449,17 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   };
   session.record.model = result.model || session.record.model;
   if (result.thinkingEffort) session.record.thinkingEffort = result.thinkingEffort;
-  const displayPrompt = collapseSkillPrompt(prompt) ?? prompt;
+  const visiblePrompt = streamDisplayPrompt(prompt, displayPrompt);
   if (!session.record.title || (session.record.titleSource === 'prompt' && session.record.title === 'New session')) {
-    const title = summarizePromptTitle(displayPrompt);
+    const title = summarizePromptTitle(visiblePrompt);
     if (title) {
       session.record.title = title;
       session.record.titleSource = session.record.titleSource || 'prompt';
     }
   }
-  session.record.lastQuestion = shortValue(displayPrompt, 500);
+  session.record.lastQuestion = shortValue(visiblePrompt, 500);
   session.record.lastAnswer = shortValue(cleanResult.message, 500);
-  session.record.lastMessageText = shortValue(cleanResult.message, 500) || shortValue(displayPrompt, 500);
+  session.record.lastMessageText = shortValue(cleanResult.message, 500) || shortValue(visiblePrompt, 500);
   session.record.lastThinking = trimSessionText(cleanResult.thinking);
   session.record.lastActivity = trimSessionText(cleanResult.activity);
   session.record.lastPlan = normalizeStreamPreviewPlan(cleanResult.plan);
@@ -567,7 +576,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       throw new Error(`Agent ${prepared.agent} does not support fork`);
     }
     const result = await driver.doStream(prepared);
-    const finalized = finalizeStreamResult(result, opts.workdir, opts.prompt, session);
+    const finalized = finalizeStreamResult(result, opts.workdir, opts.prompt, session, opts.displayPrompt);
     // Once the child has its real session ID, link the lineage. We do this
     // after finalize so the child record is persisted with its native ID.
     if (opts.forkOf && finalized.sessionId) {
@@ -606,7 +615,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       activity: null,
       plan: null,
     };
-    const failureDisplayPrompt = collapseSkillPrompt(opts.prompt) ?? opts.prompt;
+    const failureDisplayPrompt = streamDisplayPrompt(opts.prompt, opts.displayPrompt);
     session.record.lastQuestion = shortValue(failureDisplayPrompt, 500);
     session.record.lastAnswer = shortValue(failedResult.message, 500);
     session.record.lastMessageText = shortValue(failedResult.message, 500) || shortValue(failureDisplayPrompt, 500);

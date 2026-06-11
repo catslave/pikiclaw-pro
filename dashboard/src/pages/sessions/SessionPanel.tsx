@@ -11,7 +11,7 @@ import type { AgentCapabilityDescriptor, InteractionSnapshot, MessageBlock, Sess
 import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
 import { hasRenderableAssistant, insertComposerCommand, messageHasProposedPlan, textHasProposedPlan } from './AssistantContent';
-import { InputComposer, type PendingReviewComment } from './InputComposer';
+import { buildReferenceContextEnvelope, InputComposer, type PendingReviewComment } from './InputComposer';
 import { InteractionPromptModal } from './InteractionPromptModal';
 import type { OpenFileLinkHandler } from './markdown';
 import {
@@ -206,7 +206,7 @@ function PlanDecisionBar({ compact }: { compact: boolean }) {
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, scrollToTurnRequest = null, initialDraftPrompt = null, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, initialRuntimeSelection = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, onTranscriptScroll, scrollToTurnRequest = null, initialDraftPrompt = null, suppressLiveStreamState = false, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
@@ -217,15 +217,19 @@ export const SessionPanel = memo(function SessionPanel({
   transcriptFooter?: ReactNode;
   referenceContextPrompt?: string | null;
   referenceContextLabel?: string | null;
+  initialRuntimeSelection?: { agent?: string | null; model?: string | null; effort?: string | null } | null;
   onReferenceContextClear?: () => void;
   onSessionChange?: (next: SessionPanelChange) => void;
   onMultiSessionChange?: (next: SessionPanelChange[], prompt: string) => void;
+  onRuntimeSelectionChange?: (next: { agent: string; model: string | null; effort: string | null }) => void;
   onOpenFileLink?: OpenFileLinkHandler;
   onCreateSideChatFromSelection?: (request: SelectionSideChatRequest) => void | Promise<void>;
   onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
+  onTranscriptScroll?: (state: { scrollTop: number }) => void;
   scrollToTurnRequest?: SessionPanelScrollRequest | null;
   initialDraftPrompt?: string | null;
+  suppressLiveStreamState?: boolean;
   initialPendingPrompt?: string | null;
   /** Blob-URL previews for images attached to the first message of a new session.
    *  Ownership transfers to this panel: we revoke them once the turn completes. */
@@ -273,6 +277,7 @@ export const SessionPanel = memo(function SessionPanel({
   } | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [streamPhase, setStreamPhase] = useState<string | null>(null);
+  const [streamStateChecked, setStreamStateChecked] = useState(false);
   const [streamPollNonce, setStreamPollNonce] = useState(0);
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
   const [lastContextMeta, setLastContextMeta] = useState<StreamPreviewMeta | null>(null);
@@ -742,6 +747,7 @@ export const SessionPanel = memo(function SessionPanel({
   /** Apply a stream snapshot to local state — called from both WS push and poll fallback.
    *  All open panels receive full updates regardless of active state. */
   const applyStreamSnapshot = useCallback((state: any | null) => {
+    setStreamStateChecked(true);
     // Detect session promotion: backend promoted pending_XXX → native ID.
     // Update sessionKeyRef immediately so subsequent WS events match the new key,
     // then notify parent — but do NOT return: the snapshot carries live stream data
@@ -974,6 +980,10 @@ export const SessionPanel = memo(function SessionPanel({
     prevPhaseRef.current = state.phase;
   }, [canFollowStreamToBottom, clearPending, clearPendingQueuedSends, loadLatestTurns, pendingPrompt, session.sessionId, session.agent, onSessionChange, workdir]);
 
+  useEffect(() => {
+    setStreamStateChecked(false);
+  }, [session.agent, session.sessionId]);
+
   const requestStreamPolling = useCallback(() => {
     localStreamPendingRef.current = true;
     setStreamPollNonce(current => current + 1);
@@ -1076,11 +1086,15 @@ export const SessionPanel = memo(function SessionPanel({
   }, [clearPendingQueuedSends, loadLatestTurns, requestStreamPolling, session.agent, session.sessionId]);
 
   const handleResendText = useCallback((txt: string) => {
+    const referenceContext = buildReferenceContextEnvelope(String(referenceContextPrompt || ''));
+    const prompt = [referenceContext, txt].filter(Boolean).join('\n\n');
     forceScrollToBottomRef.current = true;
     scrollToBottomRef.current = true;
     handleSendStart(txt);
     requestStreamPolling();
-    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt)
+    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, prompt, {
+      displayPrompt: prompt !== txt ? txt : undefined,
+    })
       .then((res) => {
         if (!res.ok) {
           handleSendFailed();
@@ -1089,7 +1103,7 @@ export const SessionPanel = memo(function SessionPanel({
         if (res.taskId) handleSendTaskAssigned(res.taskId);
       })
       .catch(() => { handleSendFailed(); });
-  }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, requestStreamPolling, session.agent, session.sessionId, workdir]);
+  }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, referenceContextPrompt, requestStreamPolling, session.agent, session.sessionId, workdir]);
 
   const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
@@ -1166,31 +1180,41 @@ export const SessionPanel = memo(function SessionPanel({
   useDashboardEvent(
     'stream-update',
     useCallback((event: DashboardEvent) => {
+      if (suppressLiveStreamState) return;
       if (event.key !== sessionKeyRef.current) return;
       applyStreamSnapshot(event.snapshot ?? null);
-    }, [applyStreamSnapshot]),
+    }, [applyStreamSnapshot, suppressLiveStreamState]),
   );
+
+  useEffect(() => {
+    if (!suppressLiveStreamState) return;
+    applyStreamSnapshot(null);
+  }, [applyStreamSnapshot, suppressLiveStreamState]);
 
   /* ── Initial stream-state fetch (WS handles all subsequent updates).
      Runs for ALL open panels so inactive panels know the current phase. ── */
   useEffect(() => {
+    if (suppressLiveStreamState) return;
     let mounted = true;
     void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
       if (mounted) applyStreamSnapshot(res.state);
     }).catch(() => {});
     return () => { mounted = false; };
-  }, [applyStreamSnapshot, session.agent, session.sessionId, streamPollNonce]);
+  }, [applyStreamSnapshot, session.agent, session.sessionId, streamPollNonce, suppressLiveStreamState]);
 
   /* ── Refresh stream state after WS reconnect (covers missed events) ── */
   useDashboardReconnect(useCallback(() => {
-    void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
-      applyStreamSnapshot(res.state);
-    }).catch(() => {});
+    if (!suppressLiveStreamState) {
+      void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
+        applyStreamSnapshot(res.state);
+      }).catch(() => {});
+    }
     void loadLatestTurns({ keepOlder: true, force: true });
-  }, [applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns]));
+  }, [applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns, suppressLiveStreamState]));
 
   /* ── Poll stream state while a session is running (WS fallback) ── */
   useEffect(() => {
+    if (suppressLiveStreamState) return;
     const sessionRunning = session.running || session.runState === 'running';
     const streamActive = streaming || streamPhase === 'streaming' || streamPhase === 'queued';
     if (!sessionRunning && !streamActive) return;
@@ -1200,7 +1224,7 @@ export const SessionPanel = memo(function SessionPanel({
       }).catch(() => {});
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [applyStreamSnapshot, session.agent, session.sessionId, session.running, session.runState, streaming, streamPhase]);
+  }, [applyStreamSnapshot, session.agent, session.sessionId, session.running, session.runState, streaming, streamPhase, suppressLiveStreamState]);
 
   /* ── Safety: clear stale pending state when session stops running ── */
   // Must wait until the stream snapshot is gone (streamPhase null, no queued
@@ -1348,6 +1372,7 @@ export const SessionPanel = memo(function SessionPanel({
     if (!el) return;
     const previousScrollTop = lastScrollTopRef.current;
     const nextScrollTop = el.scrollTop;
+    onTranscriptScroll?.({ scrollTop: nextScrollTop });
     lastScrollTopRef.current = nextScrollTop;
     const userMovedUp = nextScrollTop < previousScrollTop - USER_SCROLL_UP_THRESHOLD_PX;
     const remaining = remainingToMessageBottom(el);
@@ -1391,7 +1416,7 @@ export const SessionPanel = memo(function SessionPanel({
       if (autoStickPaused) scrollToBottomRef.current = false;
     }
     if (el.scrollTop <= TOP_LOAD_THRESHOLD_PX) void loadOlderTurns();
-  }, [loadOlderTurns]);
+  }, [loadOlderTurns, onTranscriptScroll]);
 
   const pauseAutoStickForUserScroll = useCallback((event?: { deltaY?: number }) => {
     const deltaY = event?.deltaY ?? 0;
@@ -1419,18 +1444,19 @@ export const SessionPanel = memo(function SessionPanel({
   const displayModelShort = displayModel ? shortenModel(displayModel) : null;
 
   const rawTurns = history?.turns || [];
-  const sessionRunning = !!(session.running || session.runState === 'running');
+  const sessionRunning = !suppressLiveStreamState && !!(session.running || session.runState === 'running');
   const streamSnapshotActive = isLiveStreamActive({
     streaming,
-    streamPhase: streamPhase as 'queued' | 'streaming' | 'done' | null,
-    liveStreamPhase: liveStream?.phase ?? null,
+    streamPhase: suppressLiveStreamState ? null : streamPhase as 'queued' | 'streaming' | 'done' | null,
+    liveStreamPhase: suppressLiveStreamState ? null : liveStream?.phase ?? null,
     pendingPrompt,
     pendingTaskId,
     pendingImageCount: pendingImageUrls.length,
     sessionRunning,
+    streamStateChecked,
   });
   const effectiveLiveStream = useMemo(() => resolveEffectiveLiveStream({
-    liveStream,
+    liveStream: suppressLiveStreamState ? null : liveStream,
     pendingPrompt,
     pendingTaskId,
     streamSnapshotActive,
@@ -1438,7 +1464,9 @@ export const SessionPanel = memo(function SessionPanel({
     displayModel,
     displayEffort,
     sessionRunning,
+    streamStateChecked,
   }), [
+    suppressLiveStreamState,
     liveStream,
     streamSnapshotActive,
     pendingPrompt,
@@ -1447,6 +1475,7 @@ export const SessionPanel = memo(function SessionPanel({
     displayModel,
     displayEffort,
     sessionRunning,
+    streamStateChecked,
   ]);
   const activeLivePrompt = (pendingPrompt || effectiveLiveStream?.prompt || '').trim();
   // When a live stream is active, the stream prompt owns where the live assistant
@@ -1634,6 +1663,22 @@ export const SessionPanel = memo(function SessionPanel({
   }, [session.agent, session.sessionId, workdir]);
   const composerContextMeta = latestContextMeta ?? lastContextMeta;
   const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || effectiveLiveStream);
+  const staleRuntimeConfirmed = sessionRunning
+    && streamStateChecked
+    && !streaming
+    && !liveStream
+    && !streamPhase;
+  const showStaleRuntimeNotice = staleRuntimeConfirmed
+    && !pendingPrompt
+    && pendingImageUrls.length === 0;
+  const composerSession = staleRuntimeConfirmed
+    ? {
+      ...session,
+      running: false,
+      runState: session.runState === 'running' ? 'incomplete' as const : session.runState,
+      runDetail: session.runDetail || 'No active runtime for this session.',
+    }
+    : session;
   const transcriptTailKey = [
     showStandalonePending ? 1 : 0,
     liveStreamVisible ? 1 : 0,
@@ -1793,6 +1838,14 @@ export const SessionPanel = memo(function SessionPanel({
                 <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
               </div>
             )}
+            {showStaleRuntimeNotice && (
+              <div className="mb-6 rounded-lg border border-amber-300/30 bg-amber-300/[0.08] px-3 py-2.5 text-[12px] leading-relaxed text-amber-900/80 dark:text-amber-100/80">
+                <div className="font-semibold text-amber-900 dark:text-amber-100">No active runtime</div>
+                <div className="mt-0.5 text-amber-900/70 dark:text-amber-100/70">
+                  This session was last saved as running, but the live stream is gone. Continue the chat or restart the task stage to create a new run.
+                </div>
+              </div>
+            )}
             {transcriptFooter && (
               <div className="mb-6">
                 {transcriptFooter}
@@ -1825,12 +1878,13 @@ export const SessionPanel = memo(function SessionPanel({
           />
           {hasVisiblePlanDecision && <PlanDecisionBar compact={compact} />}
           <InputComposer
-            session={session}
+            session={composerSession}
             workdir={workdir}
             compact={compact}
             initialDraftPrompt={initialDraftPrompt}
             referenceContextPrompt={referenceContextPrompt}
             referenceContextLabel={referenceContextLabel}
+            initialRuntimeSelection={initialRuntimeSelection}
             onReferenceContextClear={onReferenceContextClear}
             onStreamQueued={requestStreamPolling}
             onSendStart={handleSendStart}
@@ -1838,11 +1892,12 @@ export const SessionPanel = memo(function SessionPanel({
             onSendFailed={handleSendFailed}
             onSessionChange={onSessionChange}
             onMultiSessionChange={onMultiSessionChange}
+            onRuntimeSelectionChange={onRuntimeSelectionChange}
             t={t}
-            streamPhase={streamPhase}
-            streamTaskId={streamTaskId}
-            queuedTaskIds={queuedTaskIds}
-            queuedTasks={queuedTasks}
+            streamPhase={suppressLiveStreamState ? null : streamPhase}
+            streamTaskId={suppressLiveStreamState ? null : streamTaskId}
+            queuedTaskIds={suppressLiveStreamState ? [] : queuedTaskIds}
+            queuedTasks={suppressLiveStreamState ? [] : queuedTasks}
             pendingQueuedSends={pendingQueuedSends}
             pendingReviewComments={pendingReviewComments}
             onRemovePendingReviewComment={(id) => setPendingReviewComments(prev => prev.filter(comment => comment.id !== id))}
@@ -1850,7 +1905,7 @@ export const SessionPanel = memo(function SessionPanel({
             contextMeta={composerContextMeta}
             onRecall={handleRecallTask}
             onSteer={handleSteerTask}
-            onStopAll={handleStopAll}
+            onStopAll={suppressLiveStreamState ? undefined : handleStopAll}
             onReorderQueued={handleReorderQueuedTasks}
             editDraft={editRequest?.draftPending ? editRequest.text : null}
             editAtTurn={editRequest?.atTurn ?? null}

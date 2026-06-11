@@ -221,6 +221,18 @@ export interface SessionRuntime {
   contextSources?: SessionContextSource[];
 }
 
+export interface SessionFinishedEvent {
+  taskId: string;
+  chatId: ChatId;
+  session: {
+    key: string;
+    workdir: string;
+    agent: Agent;
+    sessionId: string | null;
+  };
+  result: StreamResult;
+}
+
 /** Events emitted to dashboard listeners during a stream. */
 /** Serialisable subset of AgentInteraction for SSE/snapshot (excludes resolveWith). */
 export interface InteractionSnapshot {
@@ -775,6 +787,7 @@ export class Bot {
 
   /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
   private _onStreamSnapshot: ((sessionKey: string, snapshot: StreamSnapshot | null) => void) | null = null;
+  private _onSessionFinished: ((event: SessionFinishedEvent) => void | Promise<void>) | null = null;
   private streamPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private streamPushPending = new Map<string, boolean>();
   private streamTextDebugState = new Map<string, { loggedAt: number; textBytes: number; thinkingBytes: number; phase: string }>();
@@ -783,6 +796,21 @@ export class Bot {
   /** Called by the dashboard layer to subscribe to stream snapshot changes. */
   onStreamSnapshot(cb: (sessionKey: string, snapshot: StreamSnapshot | null) => void): void {
     this._onStreamSnapshot = cb;
+  }
+
+  onSessionFinished(cb: (event: SessionFinishedEvent) => void | Promise<void>): void {
+    this._onSessionFinished = cb;
+  }
+
+  private emitSessionFinished(event: SessionFinishedEvent) {
+    if (!this._onSessionFinished) return;
+    try {
+      void Promise.resolve(this._onSessionFinished(event)).catch((error: any) => {
+        this.debug(`[session-finished] listener failed: ${error?.message || error}`);
+      });
+    } catch (error: any) {
+      this.debug(`[session-finished] listener failed: ${error?.message || error}`);
+    }
   }
 
   private pushSnapshotToSSE(sessionKey: string, immediate: boolean) {
@@ -1295,6 +1323,7 @@ export class Bot {
           sessionId: task.sessionId,
           workdir: task.workdir,
           prompt: task.prompt,
+          displayPrompt: task.displayPrompt !== undefined ? task.displayPrompt : undefined,
           attachments: task.attachments || [],
           chatId: task.chatId,
           sourceMessageId: task.sourceMessageId,
@@ -1730,6 +1759,7 @@ export class Bot {
       agent: session.agent,
       sessionId: session.sessionId || opts.sessionId,
       prompt,
+      ...(opts.displayPrompt !== undefined ? { displayPrompt: opts.displayPrompt } : {}),
       attachments,
       modelId: opts.modelId ?? null,
       thinkingEffort: opts.thinkingEffort ?? null,
@@ -2354,7 +2384,11 @@ export class Bot {
           this.createInteractionHandler(chatId, taskId),
           undefined,
           undefined,
-          { ...(opts.forkOf ? { forkOf: opts.forkOf } : {}), queueWaitMs: Date.now() - queuedAt },
+          {
+            ...(opts.forkOf ? { forkOf: opts.forkOf } : {}),
+            queueWaitMs: Date.now() - queuedAt,
+            ...(opts.displayPrompt !== undefined ? { displayPrompt: opts.displayPrompt } : {}),
+          },
           opts.capabilityRoute || null,
         );
         this.emitStreamDone(taskId, session.key, {
@@ -2363,6 +2397,17 @@ export class Bot {
           ...(result.ok ? {} : { error: result.error || result.message }),
         });
         this.recordPlanViewFromResult(session, result);
+        this.emitSessionFinished({
+          taskId,
+          chatId,
+          session: {
+            key: session.key,
+            workdir: session.workdir,
+            agent: session.agent,
+            sessionId: result.sessionId || session.sessionId,
+          },
+          result,
+        });
         if (presenter) {
           try { await presenter.onSuccess(result); }
           catch (e: any) { this.warn(`[submitSessionTask] presenter onSuccess failed task=${taskId}: ${e?.message || e}`); }
@@ -3180,7 +3225,7 @@ export class Bot {
     onInteraction?: (request: AgentInteraction) => Promise<Record<string, any> | null>,
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
-    extras?: { forkOf?: { parentSessionId: string; atTurn: number }; queueWaitMs?: number },
+    extras?: { forkOf?: { parentSessionId: string; atTurn: number }; queueWaitMs?: number; displayPrompt?: string | null },
     capabilityRoute?: CapabilityRouteDecision | null,
   ): Promise<StreamResult> {
     const agentConfig = this.agentConfigs[cs.agent] || {};
@@ -3252,6 +3297,16 @@ export class Bot {
         this.warn(`[runStream] handover threw: ${e?.message || e}; proceeding without prior context`);
       }
     }
+    const displayPrompt = typeof extras?.displayPrompt === 'string' ? extras.displayPrompt.trim() : extras?.displayPrompt;
+    const taskActionSystemPrompt = displayPrompt
+      ? [
+          'Pikiclaw generated this turn from a task UI action.',
+          'The visible user message is only a short action label. Use the full task action payload below as the authoritative user request and task context for this turn.',
+          '<pikiclaw_task_action_payload>',
+          prompt,
+          '</pikiclaw_task_action_payload>',
+        ].join('\n')
+      : '';
     const mcpSystemPrompt = appendExtraPrompt(
       appendExtraPrompt(
         appendExtraPrompt(
@@ -3272,9 +3327,11 @@ export class Bot {
     // contents, so Claude silently regresses to the built-in tools on turn 2+.
     // The caller-supplied `systemPrompt` (per-task scaffolding) remains
     // first-turn-only since later turns inherit it via the session transcript.
-    const effectiveSystemPrompt = isFirstTurnOfSession
-      ? appendExtraPrompt(systemPrompt, mcpSystemPrompt)
-      : (mcpSystemPrompt || undefined);
+    const effectiveSystemPrompt = appendExtraPrompt(
+      isFirstTurnOfSession ? systemPrompt : '',
+      appendExtraPrompt(taskActionSystemPrompt, mcpSystemPrompt),
+    ) || undefined;
+    const streamPrompt = displayPrompt || prompt;
     const syncNativeSessionId = (nativeSessionId: string) => {
       const resolvedSessionId = nativeSessionId.trim();
       if (!resolvedSessionId) return;
@@ -3288,7 +3345,7 @@ export class Bot {
       cs.sessionId = resolvedSessionId;
     };
     const opts: StreamOpts = {
-      agent: cs.agent, prompt, workdir: sessionWorkdir, timeout: this.runTimeout,
+      agent: cs.agent, prompt: streamPrompt, displayPrompt, workdir: sessionWorkdir, timeout: this.runTimeout,
       sessionId: cs.sessionId, model: null,
       thinkingEffort: resolvedThinkingEffort, onText,
       onSessionId: syncNativeSessionId,

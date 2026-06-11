@@ -17,7 +17,7 @@ export type ProTaskStage = 'refinement' | 'focus' | 'coding' | 'verification' | 
 export type ProStageRunStatus = 'queued' | 'running' | 'waiting-user' | 'completed' | 'failed' | 'cancelled';
 export type VerificationResult = 'passed' | 'failed' | 'blocked' | 'not-run';
 export type ProSubtaskStatus = 'todo' | 'running' | 'review' | 'done' | 'blocked';
-export type ProOutputKind = 'final' | 'document' | 'image' | 'file' | 'diff' | 'estimate' | 'stage-summary' | 'link';
+export type ProOutputKind = 'background' | 'final' | 'document' | 'image' | 'file' | 'diff' | 'estimate' | 'stage-summary' | 'link';
 export type TaskSpaceKind = 'personal' | 'jira' | 'custom';
 
 export interface TaskSpace {
@@ -33,7 +33,7 @@ export interface TaskSpace {
 }
 
 export interface TaskOrigin {
-  type: 'manual' | 'jira';
+  type: 'manual' | 'jira' | 'jira-analyze';
   key?: string;
   url?: string;
 }
@@ -127,6 +127,7 @@ export interface StageRun {
   selectedAgentReason?: string;
   session: StageSessionRef;
   prompt: string;
+  displayPrompt?: string;
   startedAt?: string;
   completedAt?: string;
   focus?: FocusSessionState;
@@ -154,12 +155,15 @@ export interface ProTaskEvent {
     | 'comment'
     | 'bug-added'
     | 'knowledge-created'
+    | 'background-updated'
     | 'verification-started'
     | 'verification-finished'
     | 'deployment-linked'
     | 'focus-started'
     | 'focus-finished'
     | 'task-created'
+    | 'task-reset'
+    | 'stage-output-confirmed'
     | 'exclusive-mode-changed'
     | 'subtask-created'
     | 'subtask-updated'
@@ -213,6 +217,8 @@ export interface ProTask {
     agent?: string;
     assistantId?: string;
     mode?: 'direct' | 'interactive';
+    model?: string | null;
+    effort?: string | null;
   };
   jiraKey?: string;
   jiraUrl?: string;
@@ -221,6 +227,7 @@ export interface ProTask {
     assignee?: string;
     status?: string;
     dueDate?: string;
+    fixVersions?: string[];
     priority?: string;
     labels?: string[];
     issueType?: string;
@@ -271,6 +278,7 @@ export interface CreateProTaskInput {
   plannedDate?: string;
   linkedTaskId?: string;
   spaceId?: string;
+  origin?: TaskOrigin;
   workdir?: string;
   prUrl?: string;
   defaultAgent?: string;
@@ -280,12 +288,22 @@ export interface CreateProTaskInput {
   sprint?: string;
 }
 
+export interface UpsertAnalyzeTicketTaskInput {
+  title: string;
+  description?: string;
+  kind?: ProTaskKind;
+  workdir?: string;
+  jiraKey?: string;
+  jiraUrl?: string;
+}
+
 export interface StartStageRunInput {
   taskId: string;
   subtaskId?: string;
   stage: ProTaskStage;
   status?: ProStageRunStatus;
   prompt: string;
+  displayPrompt?: string | null;
   session: StageSessionRef;
   assistantId?: string;
   selectedAgentReason?: string;
@@ -293,11 +311,14 @@ export interface StartStageRunInput {
 
 export interface SyncJiraTaskInput {
   title: string;
+  summary?: string;
   description?: string;
   issueType?: string;
   jiraKey?: string;
   jiraUrl?: string;
   sprint?: string;
+  fixVersion?: string;
+  fixVersions?: unknown;
   spaceId?: string;
   workdir?: string;
   prUrl?: string;
@@ -315,7 +336,10 @@ export interface UpdateJiraFieldsInput {
   reporter?: unknown;
   assignee?: unknown;
   status?: unknown;
+  sprint?: unknown;
   dueDate?: unknown;
+  fixVersion?: unknown;
+  fixVersions?: unknown;
   priority?: unknown;
   labels?: unknown;
   issueType?: unknown;
@@ -328,6 +352,8 @@ export interface UpdateTaskExecutionInput {
   assistantId?: unknown;
   defaultAssistantId?: unknown;
   mode?: unknown;
+  model?: unknown;
+  effort?: unknown;
 }
 
 export interface UpdateTaskCycleInput {
@@ -339,6 +365,11 @@ export interface UpdateTaskMetaInput {
   prUrl?: unknown;
   plannedDate?: unknown;
   linkedTaskId?: unknown;
+}
+
+export interface UpdateTaskBackgroundInput {
+  summary?: unknown;
+  source?: unknown;
 }
 
 export interface UpdateStageRunInput {
@@ -353,6 +384,10 @@ export interface UpdateStageRunInput {
   knowledgeRefs?: string[];
   outputIds?: string[];
   focus?: FocusSessionState;
+}
+
+export interface ConfirmStageRunOutputInput {
+  actor?: 'user' | 'assistant' | 'system';
 }
 
 export interface ProTaskWorkbench {
@@ -370,6 +405,7 @@ export interface ProTaskWorkbench {
     assignee?: string;
     status?: string;
     dueDate?: string;
+    fixVersions?: string[];
     priority?: string;
     labels?: string[];
     issueType?: string;
@@ -415,6 +451,7 @@ const VALID_SUBTASK_STATUSES: ProSubtaskStatus[] = ['todo', 'running', 'review',
 const VALID_TASK_SPACE_KINDS: TaskSpaceKind[] = ['personal', 'jira', 'custom'];
 export const JIRA_TASK_SPACE_ID = 'jira';
 export const PERSONAL_TASK_SPACE_ID = 'personal';
+export const ANALYZE_TASK_SPACE_ID = 'ticket-analyze';
 const BUILTIN_TASK_SPACES: TaskSpace[] = [
   {
     id: JIRA_TASK_SPACE_ID,
@@ -427,6 +464,13 @@ const BUILTIN_TASK_SPACES: TaskSpace[] = [
     id: PERSONAL_TASK_SPACE_ID,
     name: 'Personal',
     kind: 'personal',
+    createdAt: '1970-01-01T00:00:00.000Z',
+    updatedAt: '1970-01-01T00:00:00.000Z',
+  },
+  {
+    id: ANALYZE_TASK_SPACE_ID,
+    name: 'Ticket Analyze',
+    kind: 'custom',
     createdAt: '1970-01-01T00:00:00.000Z',
     updatedAt: '1970-01-01T00:00:00.000Z',
   },
@@ -449,6 +493,63 @@ function normalizeText(value: unknown, max = 16_000): string {
   return text.length > max ? text.slice(0, max).trimEnd() : text;
 }
 
+function jiraBrowseUrlForKey(value: unknown): string | undefined {
+  const key = normalizeText(value, 80);
+  return key ? `https://jira.ringcentral.com/browse/${encodeURIComponent(key)}` : undefined;
+}
+
+function normalizeJiraUrl(value: unknown, jiraKey?: string): string | undefined {
+  return normalizeText(value, 2048) || jiraBrowseUrlForKey(jiraKey);
+}
+
+function normalizeMergeRequestUrl(value: unknown): string | undefined {
+  const text = normalizeText(value, 2048);
+  if (!/^https?:\/\//i.test(text)) return undefined;
+  return text
+    .replace(/[)\].,;]+$/g, '')
+    .replace(/\/(diffs?|commits?|pipelines?)$/i, '');
+}
+
+function inferMergeRequestUrlFromJira(input: Pick<SyncJiraTaskInput, 'description' | 'rawFields'>): string | undefined {
+  const text = [
+    normalizeText(input.description),
+    input.rawFields && typeof input.rawFields === 'object' ? JSON.stringify(input.rawFields) : '',
+  ].join('\n');
+  const urlPattern = /https?:\/\/[^\s<>"']+(?:\/-\/merge_requests\/\d+|\/merge_requests\/\d+|\/pull\/\d+|\/pulls\/\d+)[^\s<>"']*/i;
+  const match = text.match(urlPattern);
+  return match ? normalizeMergeRequestUrl(match[0]) : undefined;
+}
+
+function resolveSyncedMergeRequestUrl(input: SyncJiraTaskInput, existing?: ProTask): string | undefined {
+  return normalizeMergeRequestUrl(input.prUrl)
+    || normalizeMergeRequestUrl(existing?.prUrl)
+    || inferMergeRequestUrlFromJira(input);
+}
+
+function namedJiraValue(value: unknown): string {
+  if (typeof value === 'string') return normalizeText(value, 240);
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return namedJiraValue(object.name)
+      || namedJiraValue(object.value)
+      || namedJiraValue(object.displayName)
+      || namedJiraValue(object.key);
+  }
+  return '';
+}
+
+function normalizeJiraVersionList(...values: unknown[]): string[] | undefined {
+  const versions = new Set<string>();
+  for (const value of values) {
+    const items = Array.isArray(value) ? value : [value];
+    for (const item of items) {
+      const text = namedJiraValue(item);
+      if (text) versions.add(text);
+    }
+  }
+  return versions.size ? [...versions].slice(0, 20) : undefined;
+}
+
 function normalizePlannedDate(value: unknown): string | undefined {
   const text = normalizeText(value, 32);
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : undefined;
@@ -458,13 +559,17 @@ function isJiraTaskKind(kind: ProTaskKind | undefined): boolean {
   return kind === 'jira-ticket' || kind === 'jira-bug' || kind === 'jira-epic';
 }
 
+function isAnalyzeTicketTask(task: Pick<ProTask, 'spaceId' | 'origin'>): boolean {
+  return task.spaceId === ANALYZE_TASK_SPACE_ID || task.origin?.type === 'jira-analyze';
+}
+
 function defaultSpaceIdForTask(task: Pick<ProTask, 'kind' | 'jiraKey'>): string {
   return isJiraTaskKind(task.kind) || !!task.jiraKey ? JIRA_TASK_SPACE_ID : PERSONAL_TASK_SPACE_ID;
 }
 
 function defaultOriginForTask(task: Pick<ProTask, 'kind' | 'jiraKey' | 'jiraUrl'>): TaskOrigin {
   if (isJiraTaskKind(task.kind) || task.jiraKey || task.jiraUrl) {
-    return { type: 'jira', key: task.jiraKey, url: task.jiraUrl };
+    return { type: 'jira', key: task.jiraKey, url: normalizeJiraUrl(task.jiraUrl, task.jiraKey) };
   }
   return { type: 'manual' };
 }
@@ -488,14 +593,25 @@ function resolveTaskSpaceId(inputSpaceId: unknown, task: Pick<ProTask, 'kind' | 
   return defaultSpaceIdForTask(task);
 }
 
-function normalizeTaskOrigin(value: unknown, task: Pick<ProTask, 'kind' | 'jiraKey' | 'jiraUrl'>): TaskOrigin {
-  if (!value || typeof value !== 'object') return defaultOriginForTask(task);
+function normalizeTaskOrigin(value: unknown, task: Pick<ProTask, 'kind' | 'jiraKey' | 'jiraUrl' | 'spaceId'>): TaskOrigin {
+  if (!value || typeof value !== 'object') {
+    if (task.spaceId === ANALYZE_TASK_SPACE_ID && (task.jiraKey || task.jiraUrl)) {
+      return { type: 'jira-analyze', key: task.jiraKey, url: normalizeJiraUrl(task.jiraUrl, task.jiraKey) };
+    }
+    return defaultOriginForTask(task);
+  }
   const origin = value as Partial<TaskOrigin>;
-  const type = origin.type === 'jira' ? 'jira' : origin.type === 'manual' ? 'manual' : defaultOriginForTask(task).type;
+  const type = origin.type === 'jira-analyze'
+    ? 'jira-analyze'
+    : origin.type === 'jira'
+      ? 'jira'
+      : origin.type === 'manual'
+        ? 'manual'
+        : defaultOriginForTask(task).type;
   return {
     type,
     key: normalizeText(origin.key, 120) || (type === 'jira' ? task.jiraKey : undefined),
-    url: normalizeText(origin.url, 2048) || (type === 'jira' ? task.jiraUrl : undefined),
+    url: normalizeText(origin.url, 2048) || (type === 'jira' ? normalizeJiraUrl(task.jiraUrl, task.jiraKey) : undefined),
   };
 }
 
@@ -573,16 +689,21 @@ function readFile(): ProTaskFile {
       .filter(task => task && typeof task.id === 'string' && typeof task.title === 'string')
       .map(task => {
         const kind = VALID_KINDS.includes((task as any).kind) ? (task as any).kind as ProTaskKind : taskKindFromIssueType((task as any).jiraFields?.issueType);
+        const jiraKey = normalizeText((task as any).jiraKey, 80) || undefined;
+        const jiraUrl = normalizeJiraUrl((task as any).jiraUrl, jiraKey);
+        const spaceId = normalizeTaskSpaceId((task as any).spaceId) || defaultSpaceIdForTask({ kind, jiraKey });
         const normalized: ProTask = {
         ...(task as any),
         localKey: normalizeLocalKey((task as any).localKey),
         kind,
         plannedDate: normalizePlannedDate((task as any).plannedDate),
         linkedTaskId: normalizeLinkedTaskId((task as any).linkedTaskId),
-        spaceId: normalizeTaskSpaceId((task as any).spaceId) || defaultSpaceIdForTask({ kind, jiraKey: (task as any).jiraKey }),
-        origin: normalizeTaskOrigin((task as any).origin, { kind, jiraKey: (task as any).jiraKey, jiraUrl: (task as any).jiraUrl }),
+        spaceId,
+        origin: normalizeTaskOrigin((task as any).origin, { kind, jiraKey, jiraUrl, spaceId }),
         workdir: normalizeText((task as any).workdir, 2048) || undefined,
         prUrl: normalizeText((task as any).prUrl ?? (task as any).mergeRequestUrl, 2048) || undefined,
+        jiraKey,
+        jiraUrl,
         subTasks: Array.isArray((task as any).subTasks) ? (task as any).subTasks : [],
         stageRuns: Array.isArray(task.stageRuns)
           ? task.stageRuns.map((run: any) => ({
@@ -623,7 +744,7 @@ function normalizeOutputs(outputs: unknown[], taskId: string): ProOutput[] {
       id: normalizeText(output.id, 160),
       kind: isOutputKind(output.kind) ? output.kind : 'stage-summary',
       title: normalizeText(output.title, 240) || 'Output',
-      summary: normalizeText(output.summary, 8000) || undefined,
+      summary: normalizeText(output.summary, 24_000) || undefined,
       taskId,
       stageRunId: normalizeText(output.stageRunId, 160) || undefined,
       session: normalizeSessionRef(output.session),
@@ -637,7 +758,8 @@ function normalizeOutputs(outputs: unknown[], taskId: string): ProOutput[] {
 }
 
 function isOutputKind(value: unknown): value is ProOutputKind {
-  return value === 'final'
+  return value === 'background'
+    || value === 'final'
     || value === 'document'
     || value === 'image'
     || value === 'file'
@@ -715,6 +837,7 @@ function stageRunTimestamp(run: StageRun): number {
 }
 
 function deriveOutputKind(run: StageRun, output: NonNullable<StageRun['output']>): ProOutputKind {
+  if (/\[pikiclaw-ticket-background\]|\bbackground document\b|\bticket background\b/i.test(run.prompt || '')) return 'background';
   if (output.diffSummary || output.changedFiles?.length) return 'diff';
   if (output.estimate) return 'estimate';
   if (output.knowledgeRefs?.length) return 'document';
@@ -736,12 +859,317 @@ function outputTitleForRun(task: ProTask, run: StageRun, kind: ProOutputKind): s
       return 'Review result';
     }
   }
+  if (isJiraLikeTask(task)) {
+    if (run.stage === 'focus' || run.stage === 'refinement') {
+      if (/\[pikiclaw-ticket-background\]|\bbackground document\b|\bticket background\b/i.test(run.prompt || '')) return 'Ticket background report';
+      if (kind === 'estimate') return 'Clarification estimate';
+      return 'Clarification document';
+    }
+    if (run.stage === 'coding') {
+      if (kind === 'diff') return 'Implementation diff';
+      if (kind === 'link') return 'Implementation link';
+      return task.prUrl ? 'MR analysis' : 'Implementation analysis';
+    }
+    if (run.stage === 'verification') return 'Test report';
+    if (run.stage === 'demo') return 'Final delivery note';
+  }
   const stageLabel = `${run.stage.slice(0, 1).toUpperCase()}${run.stage.slice(1)}`;
   if (kind === 'diff') return `${stageLabel} diff`;
   if (kind === 'estimate') return `${stageLabel} estimate`;
   if (kind === 'final') return `${stageLabel} result`;
   if (kind === 'document') return `${stageLabel} notes`;
   return `${stageLabel} output`;
+}
+
+function safeFilePart(value: string): string {
+  return value
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'task';
+}
+
+function stageOutputRoot(): string | undefined {
+  const explicit = normalizeText(process.env.PIKICLAW_PRO_STAGE_OUTPUT_DIR, 2048);
+  if (explicit) return explicit;
+  if (process.env.PIKICLAW_PRO_TASK_FILE) return undefined;
+  return path.join(os.homedir(), 'Documents', 'Obsidian Vault', 'repo', 'pikiclaw', 'jira');
+}
+
+function writeStageOutputDocument(task: ProTask, run: StageRun, title: string, summary: string): string | undefined {
+  const root = stageOutputRoot();
+  if (!root) return undefined;
+  try {
+    const taskKey = safeFilePart(task.jiraKey || task.localKey || task.id);
+    const dir = path.join(root, taskKey);
+    ensureDir(dir);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const filePath = path.join(dir, `${stamp}-${safeFilePart(run.stage)}-${safeFilePart(run.id.slice(-8))}.md`);
+    const body = [
+      `# ${title}`,
+      '',
+      `- Task: ${task.title}`,
+      task.jiraKey ? `- Jira: ${task.jiraKey}` : '',
+      `- Stage: ${run.stage}`,
+      `- Status: ${run.status}`,
+      run.session ? `- Session: ${run.session.agent}:${run.session.sessionId}` : '',
+      '',
+      summary,
+      '',
+    ].filter(line => line !== '').join('\n');
+    fs.writeFileSync(filePath, body);
+    return filePath;
+  } catch {
+    return undefined;
+  }
+}
+
+function stripRemoteSyncNotes(description?: string): string {
+  const text = normalizeText(description, 16_000);
+  const markerIndex = text.indexOf('[Jira remote sync]');
+  return (markerIndex >= 0 ? text.slice(0, markerIndex) : text).trim();
+}
+
+function backgroundOutputId(task: Pick<ProTask, 'id'>): string {
+  return `background-${task.id}`;
+}
+
+function taskBackgroundDir(task: ProTask): string | undefined {
+  const root = stageOutputRoot();
+  if (!root) return undefined;
+  return path.join(root, safeFilePart(task.jiraKey || task.localKey || task.id));
+}
+
+function writeTaskBackgroundDocument(task: ProTask, summary: string): string | undefined {
+  const dir = taskBackgroundDir(task);
+  if (!dir) return undefined;
+  try {
+    ensureDir(dir);
+    const filePath = path.join(dir, 'background.md');
+    fs.writeFileSync(filePath, `${summary.trim()}\n`);
+    return filePath;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanBackgroundLine(line: string): string {
+  return line
+    .replace(/^\s*(?:[-*]|\d+[.)])\s+/, '')
+    .replace(/\{\{([^}]+)\}\}/g, '`$1`')
+    .trim();
+}
+
+function backgroundSectionLabel(line: string): string | null {
+  const text = line.trim();
+  const headingMatch = text.match(/^h\d+\.\s*(.+)$/i);
+  const labelText = headingMatch?.[1] || text.match(/^([A-Za-z][A-Za-z0-9 /_-]{1,80}):\s*$/)?.[1];
+  if (!labelText) return null;
+  return labelText.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function extractBackgroundSectionLines(description: string, labels: string[]): string[] {
+  const wanted = new Set(labels.map(label => label.toLowerCase()));
+  const lines = description.split(/\r?\n/);
+  const collected: string[] = [];
+  let active = false;
+  for (const line of lines) {
+    const label = backgroundSectionLabel(line);
+    if (label) {
+      if (active && !wanted.has(label)) break;
+      active = wanted.has(label);
+      continue;
+    }
+    if (active) collected.push(line);
+  }
+  return collected;
+}
+
+function extractBackgroundItems(description: string, labels: string[], maxItems: number): string[] {
+  const items: string[] = [];
+  for (const line of extractBackgroundSectionLines(description, labels)) {
+    const cleaned = cleanBackgroundLine(line);
+    if (!cleaned) continue;
+    if (/^(?:scope|notes?|expected outcome|acceptance criteria|simulate steps?)[:：]?$/i.test(cleaned)) continue;
+    if (cleaned.length < 8) continue;
+    items.push(cleaned);
+    if (items.length >= maxItems) break;
+  }
+  return items;
+}
+
+function firstBackgroundParagraph(description: string): string {
+  const source = extractBackgroundSectionLines(description, ['description', 'objective', 'background']).join('\n') || description;
+  return cleanBackgroundLine(source.split(/\n\s*\n/).map(block => block.trim()).find(Boolean) || '');
+}
+
+function formatBackgroundBullets(items: string[], fallback: string[]): string[] {
+  const source = items.length ? items : fallback;
+  return source.map(item => `- ${item}`);
+}
+
+function inferBackgroundImplementationAreas(task: ProTask, description: string): string[] {
+  const haystack = `${task.title}\n${description}`.toLowerCase();
+  const areas: string[] = [];
+  if (haystack.includes('ivar') && haystack.includes('nca') && haystack.includes('grpc')) {
+    areas.push('IVAR 调用 NCA 的 gRPC client / metadata interceptor / metadata helper。');
+  }
+  if (haystack.includes('metadata') || haystack.includes('header')) {
+    areas.push('现有 request/account/extension 等 metadata propagation 的同一条路径。');
+  }
+  if (haystack.includes('conversation id') || haystack.includes('conversationid')) {
+    areas.push('session/request context 中读取现有 Nova conversation id 的位置。');
+  }
+  if (haystack.includes('test') || haystack.includes('acceptance') || haystack.includes('simulate steps')) {
+    areas.push('覆盖 metadata 存在和缺失两种路径的测试。');
+  }
+  if (haystack.includes('nova-messaging-adaptor')) {
+    areas.push('参考 nova-messaging-adaptor 里已有 header propagation pattern。');
+  }
+  return areas.length ? areas : ['待 agent/我进一步看代码后补充具体文件和函数。'];
+}
+
+function buildDefaultTaskBackground(task: ProTask): string {
+  const fields = task.jiraFields || {};
+  const description = stripRemoteSyncNotes(task.description);
+  const meta = [
+    task.jiraKey ? `- Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
+    fields.issueType || task.kind ? `- 类型: ${fields.issueType || task.kind}` : '',
+    fields.status ? `- Jira 状态: ${fields.status}` : '',
+    task.sprint ? `- Sprint: ${task.sprint}` : '',
+    fields.fixVersions?.length ? `- Fix version: ${fields.fixVersions.join(', ')}` : '',
+    fields.assignee ? `- Owner: ${fields.assignee}` : '',
+    fields.priority ? `- Priority: ${fields.priority}` : '',
+  ].filter(Boolean).join('\n');
+  const source = description || '暂无完整描述，需要先从 Jira、相关 MR、代码和团队上下文补齐。';
+  const context = firstBackgroundParagraph(description);
+  const workItems = extractBackgroundItems(description, ['expected outcome', 'scope', 'scope / notes', 'deliverables'], 6);
+  const acceptanceItems = extractBackgroundItems(description, ['acceptance criteria', 'ac', 'simulate steps'], 8);
+  const implementationAreas = inferBackgroundImplementationAreas(task, description);
+  return [
+    `# Ticket Background - ${task.jiraKey || task.title}`,
+    '',
+    '## 元信息',
+    meta || '- 暂无 Jira 元信息',
+    '',
+    '## 我的理解',
+    `这个 ticket 要我处理：${task.title}`,
+    '',
+    context || source,
+    '',
+    '## 这个 ticket 要我干嘛',
+    ...formatBackgroundBullets(workItems, [
+      '先确认问题/需求的真实目标、触发条件和边界。',
+      '把 Jira 描述翻译成我自己的执行理解。',
+      '识别需要改动的模块、数据流、接口或配置。',
+    ]),
+    '',
+    '## 可能需要修改哪里',
+    ...formatBackgroundBullets(implementationAreas, []),
+    '',
+    '## 验收点',
+    ...formatBackgroundBullets(acceptanceItems, [
+      '行为符合 Jira 描述和后续确认的边界。',
+      '相关测试/手工验证能证明修复或功能生效。',
+      '关键风险、回归点和不确定项被记录。',
+    ]),
+    '',
+    '## 仍不确定',
+    '- 需要通过 Clarify chat 或人工补充上下文继续修正。',
+  ].join('\n');
+}
+
+function shouldRefreshDefaultBackground(task: ProTask, output: ProOutput): boolean {
+  if (!output.summary?.includes('待 agent/我进一步看代码后补充具体文件和函数。')) return false;
+  return !task.events.some(event => event.type === 'background-updated' && event.actor !== 'system');
+}
+
+function findTaskBackgroundOutput(task: ProTask): ProOutput | undefined {
+  return (task.outputs || []).find(output => output.kind === 'background');
+}
+
+function latestEventTime(task: ProTask, predicate: (event: ProTaskEvent) => boolean): number {
+  return Math.max(0, ...(task.events || [])
+    .filter(predicate)
+    .map(event => Date.parse(event.createdAt) || 0));
+}
+
+function shouldAutoCreateBackgroundOutput(task: ProTask): boolean {
+  const lastResetAt = latestEventTime(task, event => (
+    event.type === 'task-reset'
+    || (event.type === 'status-changed' && event.summary === 'Task status and generated progress were reset.')
+  ));
+  if (!lastResetAt) return true;
+  const lastBackgroundAt = latestEventTime(task, event => event.type === 'background-updated' && event.actor !== 'system');
+  return lastBackgroundAt > lastResetAt;
+}
+
+function isClosedJiraStatus(status: string | null | undefined): boolean {
+  return /^(closed|close|cancelled|canceled)$/i.test((status || '').trim());
+}
+
+function resetJiraStatusSnapshot(task: ProTask) {
+  if (!isClosedJiraStatus(task.jiraFields?.status)) return;
+  const raw = task.jiraFields?.raw && typeof task.jiraFields.raw === 'object'
+    ? { ...(task.jiraFields.raw as Record<string, unknown>) }
+    : undefined;
+  const rawStatus = raw?.status && typeof raw.status === 'object'
+    ? { ...(raw.status as Record<string, unknown>), name: 'Reopened', category: 'To Do', color: 'default' }
+    : raw?.status;
+  task.jiraFields = {
+    ...task.jiraFields,
+    status: 'Reopened',
+    updatedAt: new Date().toISOString(),
+    ...(raw ? { raw: { ...raw, status: rawStatus } } : {}),
+  };
+}
+
+function ensureTaskBackgroundOutput(task: ProTask): boolean {
+  if (!isJiraLikeTask(task)) return false;
+  const current = findTaskBackgroundOutput(task);
+  if (current) {
+    if (!current.path && current.summary) {
+      const pathValue = writeTaskBackgroundDocument(task, current.summary);
+      if (pathValue) {
+        current.path = pathValue;
+        return true;
+      }
+    }
+    if (shouldRefreshDefaultBackground(task, current)) {
+      const summary = buildDefaultTaskBackground(task);
+      current.summary = summary;
+      current.path = writeTaskBackgroundDocument(task, summary) || current.path;
+      return true;
+    }
+    return false;
+  }
+  if (!shouldAutoCreateBackgroundOutput(task)) return false;
+  const summary = buildDefaultTaskBackground(task);
+  const now = new Date().toISOString();
+  const output: ProOutput = {
+    id: backgroundOutputId(task),
+    kind: 'background',
+    title: 'Ticket background',
+    summary,
+    taskId: task.id,
+    path: writeTaskBackgroundDocument(task, summary),
+    createdAt: now,
+    pinned: true,
+  };
+  task.outputs = [output, ...(task.outputs || [])];
+  appendEvent(task, {
+    type: 'background-updated',
+    actor: 'system',
+    summary: 'Ticket background draft created.',
+  });
+  return true;
+}
+
+function ensureTaskBackgroundOutputs(file: ProTaskFile): boolean {
+  let changed = false;
+  for (const task of file.tasks) {
+    if (ensureTaskBackgroundOutput(task)) changed = true;
+  }
+  return changed;
 }
 
 function createOutputFromStageRun(task: ProTask, run: StageRun): ProOutput | null {
@@ -754,50 +1182,25 @@ function createOutputFromStageRun(task: ProTask, run: StageRun): ProOutput | nul
     || (run.status === 'completed' ? `${run.stage} stage completed.` : '');
   if (!summary && run.status !== 'completed') return null;
   const kind = deriveOutputKind(run, output);
+  const title = outputTitleForRun(task, run, kind);
+  const documentPath = writeStageOutputDocument(task, run, title, summary || `${run.stage} stage completed.`);
   return {
     id: newId('output'),
     kind,
-    title: outputTitleForRun(task, run, kind),
+    title,
     summary,
     taskId: task.id,
     stageRunId: run.id,
     session: run.session,
+    path: documentPath,
     createdAt: new Date().toISOString(),
-    pinned: false,
-  };
-}
-
-function deriveStoredOutput(task: ProTask, run: StageRun): ProOutput | null {
-  const output = run.output;
-  if (!output) return null;
-  const kind = deriveOutputKind(run, output);
-  const createdAt = run.completedAt || run.startedAt || task.updatedAt || task.createdAt;
-  const summary = normalizeText(output.summary, 8000)
-    || normalizeText(output.diffSummary, 8000)
-    || (output.changedFiles?.length ? output.changedFiles.slice(0, 8).join('\n') : '')
-    || (output.estimate ? 'Estimate updated.' : '')
-    || `${run.stage} stage output.`;
-  return {
-    id: `derived-${run.id}`,
-    kind,
-    title: outputTitleForRun(task, run, kind),
-    summary,
-    taskId: task.id,
-    stageRunId: run.id,
-    session: run.session,
-    createdAt,
     pinned: false,
   };
 }
 
 function taskOutputs(task: ProTask): ProOutput[] {
   const explicit = Array.isArray(task.outputs) ? task.outputs : [];
-  const explicitRunIds = new Set(explicit.map(output => output.stageRunId).filter(Boolean));
-  const derived = (task.stageRuns || [])
-    .filter(run => run.output && !explicitRunIds.has(run.id))
-    .map(run => deriveStoredOutput(task, run))
-    .filter((output): output is ProOutput => !!output);
-  return [...explicit, ...derived]
+  return explicit
     .sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
 }
 
@@ -819,6 +1222,7 @@ function ticketSnapshotForTask(task: ProTask): ProTaskWorkbench['ticketSnapshot'
     assignee: fields.assignee,
     status: fields.status,
     dueDate: fields.dueDate,
+    fixVersions: fields.fixVersions,
     priority: fields.priority,
     labels: fields.labels,
     issueType: fields.issueType,
@@ -941,14 +1345,19 @@ export function archiveTaskSpace(spaceId: string): TaskSpace {
 export function listProTasks(options: { spaceId?: string; plannedDate?: string } = {}): ProTask[] {
   const spaceId = normalizeTaskSpaceId(options.spaceId);
   const plannedDate = normalizePlannedDate(options.plannedDate);
-  return readFile().tasks
+  const file = readFile();
+  if (ensureTaskBackgroundOutputs(file)) writeFile(file);
+  return file.tasks
     .filter(task => !plannedDate || task.plannedDate === plannedDate)
     .filter(task => !spaceId || task.spaceId === spaceId)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 export function getProTask(taskId: string): ProTask | null {
-  return readFile().tasks.find(task => task.id === taskId) || null;
+  const file = readFile();
+  const task = file.tasks.find(task => task.id === taskId) || null;
+  if (task && ensureTaskBackgroundOutput(task)) writeFile(file);
+  return task;
 }
 
 export function getProTaskWorkbench(taskId: string): ProTaskWorkbench | null {
@@ -976,6 +1385,80 @@ export function deleteProTask(taskId: string): ProTask {
   return task;
 }
 
+export function resetProTask(taskId: string): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const now = new Date().toISOString();
+  task.status = 'backlog';
+  task.prUrl = undefined;
+  task.stageRuns = [];
+  task.outputs = [];
+  task.verificationRuns = [];
+  task.subTasks = [];
+  task.focusSessions = [];
+  task.exclusiveMode = false;
+  resetJiraStatusSnapshot(task);
+  task.updatedAt = now;
+  task.events = (task.events || []).filter(event => (
+    event.type === 'task-created'
+    || event.type === 'jira-synced'
+    || event.type === 'jira-updated'
+  ));
+  appendEvent(task, {
+    type: 'task-reset',
+    actor: 'user',
+    summary: 'Task status and generated progress were reset.',
+  });
+  writeFile(file);
+  return task;
+}
+
+export function findAnalyzeTaskByJiraKey(jiraKey: string): ProTask | null {
+  const key = normalizeText(jiraKey, 80).toLowerCase();
+  if (!key) return null;
+  const file = readFile();
+  return file.tasks.find(task => task.spaceId === ANALYZE_TASK_SPACE_ID && task.jiraKey?.toLowerCase() === key) || null;
+}
+
+export function upsertAnalyzeTicketTask(input: UpsertAnalyzeTicketTaskInput): ProTask {
+  const title = normalizeText(input.title, 240);
+  if (!title) throw new Error('title is required');
+  const jiraKey = normalizeText(input.jiraKey, 80) || undefined;
+  const jiraUrl = normalizeJiraUrl(input.jiraUrl, jiraKey);
+  const kind = input.kind && VALID_KINDS.includes(input.kind) ? input.kind : 'jira-ticket';
+  const workdir = normalizeText(input.workdir, 2048) || undefined;
+  const description = normalizeText(input.description);
+  const existing = jiraKey ? findAnalyzeTaskByJiraKey(jiraKey) : null;
+  if (existing) {
+    const file = readFile();
+    const task = file.tasks.find(candidate => candidate.id === existing.id);
+    if (!task) throw new Error('task not found');
+    task.title = title;
+    if (description) task.description = description;
+    if (workdir) task.workdir = workdir;
+    task.kind = kind;
+    task.jiraUrl = jiraUrl || task.jiraUrl;
+    task.origin = { type: 'jira-analyze', key: jiraKey, url: jiraUrl || task.jiraUrl };
+    if (task.status === 'done') task.status = 'refinement';
+    task.updatedAt = new Date().toISOString();
+    appendEvent(task, { type: 'jira-updated', actor: 'user', summary: 'Ticket analyze session refreshed.' });
+    writeFile(file);
+    return task;
+  }
+  return createProTask({
+    title,
+    description,
+    kind,
+    status: 'refinement',
+    spaceId: ANALYZE_TASK_SPACE_ID,
+    jiraKey,
+    jiraUrl,
+    workdir,
+    origin: jiraKey ? { type: 'jira-analyze', key: jiraKey, url: jiraUrl } : undefined,
+  });
+}
+
 export function createProTask(input: CreateProTaskInput): ProTask {
   const now = new Date().toISOString();
   const title = normalizeText(input.title, 240);
@@ -985,7 +1468,9 @@ export function createProTask(input: CreateProTaskInput): ProTask {
   const spaceId = resolveTaskSpaceId(input.spaceId, { kind: requestedKind || 'manual', jiraKey: input.jiraKey }, file);
   const kind = requestedKind || (spaceId === JIRA_TASK_SPACE_ID ? 'jira-ticket' : 'manual');
   const status = input.status && VALID_STATUSES.includes(input.status) ? input.status : 'backlog';
-  const jiraLike = isJiraLikeTask({ kind, jiraKey: normalizeText(input.jiraKey, 80) || undefined });
+  const jiraKey = normalizeText(input.jiraKey, 80) || undefined;
+  const jiraUrl = normalizeJiraUrl(input.jiraUrl, jiraKey);
+  const jiraLike = isJiraLikeTask({ kind, jiraKey });
   const task: ProTask = {
     id: newId('task'),
     localKey: jiraLike ? undefined : allocateLocalKey(file),
@@ -996,13 +1481,15 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     plannedDate: normalizePlannedDate(input.plannedDate),
     linkedTaskId: undefined,
     spaceId,
-    origin: defaultOriginForTask({ kind, jiraKey: input.jiraKey, jiraUrl: input.jiraUrl }),
+    origin: input.origin || (spaceId === ANALYZE_TASK_SPACE_ID && jiraKey
+      ? { type: 'jira-analyze', key: jiraKey, url: jiraUrl }
+      : defaultOriginForTask({ kind, jiraKey, jiraUrl })),
     workdir: normalizeText(input.workdir, 2048) || undefined,
     prUrl: normalizeText(input.prUrl, 2048) || undefined,
     defaultAgent: normalizeText(input.defaultAgent, 80) || undefined,
     defaultAssistantId: normalizeText(input.defaultAssistantId, 120) || undefined,
-    jiraKey: normalizeText(input.jiraKey, 80) || undefined,
-    jiraUrl: normalizeText(input.jiraUrl, 2048) || undefined,
+    jiraKey,
+    jiraUrl,
     jiraFields: undefined,
     sprint: normalizeText(input.sprint, 120) || undefined,
     cycleId: undefined,
@@ -1023,6 +1510,7 @@ export function createProTask(input: CreateProTaskInput): ProTask {
     task.linkedTaskId = linkedTaskId;
   }
   appendEvent(task, { type: 'task-created', actor: 'user', summary: 'Task created in Pikiclaw.' });
+  ensureTaskBackgroundOutput(task);
   file.tasks.unshift(task);
   writeFile(file);
   return task;
@@ -1032,11 +1520,16 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
   const title = normalizeText(input.title, 240);
   if (!title) throw new Error('title is required');
   const jiraKey = normalizeText(input.jiraKey, 80) || undefined;
+  const inputJiraUrl = normalizeText(input.jiraUrl, 2048) || undefined;
+  const fallbackJiraUrl = jiraBrowseUrlForKey(jiraKey);
+  const jiraUrl = inputJiraUrl || fallbackJiraUrl;
   const file = readFile();
   const now = new Date().toISOString();
   const spaceId = resolveTaskSpaceId(input.spaceId || JIRA_TASK_SPACE_ID, { kind: 'jira-ticket', jiraKey }, file);
   const existing = jiraKey
-    ? file.tasks.find(task => task.jiraKey && task.jiraKey.toLowerCase() === jiraKey.toLowerCase())
+    ? file.tasks.find(task => task.jiraKey
+      && task.jiraKey.toLowerCase() === jiraKey.toLowerCase()
+      && !isAnalyzeTicketTask(task))
     : null;
 
   if (existing) {
@@ -1060,16 +1553,23 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     })) {
       if (((existing.jiraFields as any)?.[key] || '') !== (nextValue || '')) changes.push(`jira.${key}`);
     }
+    const previousFixVersions = (existing.jiraFields?.fixVersions || []).join('\u0000');
+    const nextFixVersions = (nextJiraFields?.fixVersions || []).join('\u0000');
+    if (previousFixVersions !== nextFixVersions) changes.push('jira.fixVersions');
+    const nextPrUrl = resolveSyncedMergeRequestUrl(input, existing);
+    if ((existing.prUrl || '') !== (nextPrUrl || '')) changes.push('PR');
     existing.kind = issueType ? taskKindFromIssueType(issueType) : existing.kind;
     delete existing.localKey;
     existing.spaceId = spaceId;
-    existing.origin = { type: 'jira', key: jiraKey, url: normalizeText(input.jiraUrl, 2048) || existing.jiraUrl };
-    existing.jiraUrl = normalizeText(input.jiraUrl, 2048) || existing.jiraUrl;
+    const nextJiraUrl = inputJiraUrl || existing.jiraUrl || fallbackJiraUrl;
+    existing.origin = { type: 'jira', key: jiraKey, url: nextJiraUrl };
+    existing.jiraUrl = nextJiraUrl;
     existing.sprint = sprint;
     existing.workdir = normalizeText(input.workdir, 2048) || existing.workdir;
-    existing.prUrl = normalizeText(input.prUrl, 2048) || existing.prUrl;
+    existing.prUrl = nextPrUrl;
     existing.jiraFields = nextJiraFields;
     existing.updatedAt = now;
+    ensureTaskBackgroundOutput(existing);
     appendEvent(existing, {
       type: changes.length ? 'jira-updated' : 'jira-synced',
       actor: 'system',
@@ -1089,11 +1589,11 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     kind: taskKindFromIssueType(input.issueType),
     status: 'backlog',
     spaceId,
-    origin: { type: 'jira', key: jiraKey, url: normalizeText(input.jiraUrl, 2048) || undefined },
+    origin: { type: 'jira', key: jiraKey, url: jiraUrl },
     workdir: normalizeText(input.workdir, 2048) || undefined,
-    prUrl: normalizeText(input.prUrl, 2048) || undefined,
+    prUrl: resolveSyncedMergeRequestUrl(input),
     jiraKey,
-    jiraUrl: normalizeText(input.jiraUrl, 2048) || undefined,
+    jiraUrl,
     jiraFields: normalizeJiraFields(input),
     sprint: normalizeText(input.sprint, 120) || undefined,
     cycleId: undefined,
@@ -1108,6 +1608,7 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
     events: [],
   };
   appendEvent(task, { type: 'jira-synced', actor: 'system', summary: jiraKey ? `Jira issue ${jiraKey} synced.` : 'Jira issue synced.' });
+  ensureTaskBackgroundOutput(task);
   file.tasks.unshift(task);
   writeFile(file);
   return task;
@@ -1115,17 +1616,28 @@ export function syncJiraTask(input: SyncJiraTaskInput): ProTask {
 
 function normalizeJiraFields(input: SyncJiraTaskInput, current?: ProTask['jiraFields']): ProTask['jiraFields'] {
   const issueType = normalizeText(input.issueType, 80) || current?.issueType;
+  const raw = input.rawFields && typeof input.rawFields === 'object' ? input.rawFields : current?.raw;
+  const fixVersions = normalizeJiraVersionList(
+    input.fixVersions,
+    input.fixVersion,
+    raw?.fixVersions,
+    raw?.fixVersion,
+    raw?.fixversion,
+    raw?.fixversions,
+    raw?.versions,
+  ) || current?.fixVersions;
   return {
     ...(current || {}),
     reporter: normalizeText(input.reporter, 240) || current?.reporter,
     assignee: normalizeText(input.assignee, 240) || current?.assignee,
     status: normalizeText(input.ticketStatus, 120) || current?.status,
     dueDate: normalizeText(input.dueDate, 80) || current?.dueDate,
+    fixVersions,
     priority: normalizeText(input.priority, 120) || current?.priority,
     issueType,
     labels: Array.isArray(input.labels) ? input.labels.map(label => normalizeText(label, 120)).filter(Boolean).slice(0, 40) : current?.labels,
     updatedAt: normalizeText(input.updatedAt, 80) || current?.updatedAt || new Date().toISOString(),
-    raw: input.rawFields && typeof input.rawFields === 'object' ? input.rawFields : current?.raw,
+    raw,
   };
 }
 
@@ -1139,12 +1651,22 @@ export function updateJiraFields(taskId: string, input: UpdateJiraFieldsInput): 
     : typeof input.labels === 'string'
       ? input.labels.split(',').map(label => normalizeText(label, 120)).filter(Boolean).slice(0, 40)
       : current.labels;
+  const hasFixVersions = Object.prototype.hasOwnProperty.call(input, 'fixVersions') || Object.prototype.hasOwnProperty.call(input, 'fixVersion');
+  const fixVersions = hasFixVersions
+    ? normalizeJiraVersionList(input.fixVersions, input.fixVersion) || []
+    : current.fixVersions;
+  const hasDueDate = Object.prototype.hasOwnProperty.call(input, 'dueDate');
+  const hasStatus = Object.prototype.hasOwnProperty.call(input, 'status');
+  if (Object.prototype.hasOwnProperty.call(input, 'sprint')) {
+    task.sprint = normalizeText(input.sprint, 120) || undefined;
+  }
   task.jiraFields = {
     ...current,
     reporter: normalizeText(input.reporter, 240) || current.reporter,
     assignee: normalizeText(input.assignee, 240) || current.assignee,
-    status: normalizeText(input.status, 120) || current.status,
-    dueDate: normalizeText(input.dueDate, 80) || current.dueDate,
+    status: hasStatus ? normalizeText(input.status, 120) || current.status : current.status,
+    dueDate: hasDueDate ? normalizeText(input.dueDate, 80) || undefined : current.dueDate,
+    fixVersions,
     priority: normalizeText(input.priority, 120) || current.priority,
     issueType: normalizeText(input.issueType, 80) || current.issueType,
     labels,
@@ -1213,8 +1735,10 @@ export function updateProTaskExecution(taskId: string, input: UpdateTaskExecutio
     agent: normalizeText(input.agent, 80) || undefined,
     assistantId: normalizeText(input.assistantId, 160) || undefined,
     mode: mode === 'interactive' ? 'interactive' : mode === 'direct' ? 'direct' : task.execution?.mode,
+    model: Object.prototype.hasOwnProperty.call(input, 'model') ? normalizeText(input.model, 240) || null : task.execution?.model,
+    effort: Object.prototype.hasOwnProperty.call(input, 'effort') ? normalizeText(input.effort, 80) || null : task.execution?.effort,
   };
-  if (!task.execution.ownerMode && !task.execution.agent && !task.execution.assistantId && !task.execution.mode) delete task.execution;
+  if (!task.execution.ownerMode && !task.execution.agent && !task.execution.assistantId && !task.execution.mode && !task.execution.model && !task.execution.effort) delete task.execution;
   task.updatedAt = new Date().toISOString();
   appendEvent(task, {
     type: 'status-changed',
@@ -1287,6 +1811,42 @@ export function updateProTaskMeta(taskId: string, input: UpdateTaskMetaInput): P
     });
     writeFile(file);
   }
+  return task;
+}
+
+export function updateTaskBackground(taskId: string, input: UpdateTaskBackgroundInput): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const summary = normalizeText(input.summary, 24_000);
+  if (!summary) throw new Error('background summary is required');
+  const now = new Date().toISOString();
+  let output = findTaskBackgroundOutput(task);
+  if (!output) {
+    output = {
+      id: backgroundOutputId(task),
+      kind: 'background',
+      title: 'Ticket background',
+      summary,
+      taskId: task.id,
+      createdAt: now,
+      pinned: true,
+    };
+    task.outputs = [output, ...(task.outputs || [])];
+  }
+  output.kind = 'background';
+  output.title = 'Ticket background';
+  output.summary = summary;
+  output.taskId = task.id;
+  output.path = writeTaskBackgroundDocument(task, summary) || output.path;
+  output.pinned = true;
+  task.updatedAt = now;
+  appendEvent(task, {
+    type: 'background-updated',
+    actor: normalizeText(input.source, 40) === 'agent' ? 'assistant' : 'user',
+    summary: 'Ticket background updated.',
+  });
+  writeFile(file);
   return task;
 }
 
@@ -1373,6 +1933,7 @@ export function addStageRun(input: StartStageRunInput): ProTask {
     selectedAgentReason: normalizeText(input.selectedAgentReason, 500) || 'Selected by current runtime/default agent.',
     session: input.session,
     prompt: normalizeText(input.prompt, 24_000),
+    displayPrompt: normalizeText(input.displayPrompt, 1_000) || undefined,
     startedAt: now,
     outputIds: [],
     ...(input.stage === 'focus' ? { focus: defaultFocusState(task) } : {}),
@@ -1400,7 +1961,6 @@ export function updateStageRun(taskId: string, stageRunId: string, input: Update
   const run = task.stageRuns.find(candidate => candidate.id === stageRunId);
   if (!run) throw new Error('stage run not found');
   const now = new Date().toISOString();
-  const previousStatus = run.status;
   if (input.status) {
     run.status = input.status;
     if (input.status === 'completed' || input.status === 'failed' || input.status === 'cancelled') run.completedAt = now;
@@ -1427,22 +1987,8 @@ export function updateStageRun(taskId: string, stageRunId: string, input: Update
   if (input.outputIds?.length) {
     run.outputIds = Array.from(new Set([...(run.outputIds || []), ...input.outputIds.filter(id => typeof id === 'string' && id.trim())]));
   }
-  const hasOutputPatch = !!(
-    normalizeText(input.summary)
-    || input.estimate
-    || normalizeText(input.branch, 240)
-    || normalizeText(input.diffSummary, 4000)
-    || input.changedFiles?.length
-    || normalizeText(input.testResultId, 240)
-    || input.knowledgeRefs?.length
-  );
-  if (hasOutputPatch || (input.status === 'completed' && previousStatus !== 'completed')) {
-    const output = createOutputFromStageRun(task, run);
-    if (output) {
-      task.outputs = [output, ...(task.outputs || [])];
-      run.outputIds = Array.from(new Set([output.id, ...(run.outputIds || [])]));
-    }
-  }
+  // Stage output stays as a draft on the run. It becomes a durable task output
+  // only after the user confirms it from the task chat.
   if (run.subtaskId && input.status) {
     const subtask = task.subTasks.find(candidate => candidate.id === run.subtaskId);
     if (subtask) {
@@ -1459,6 +2005,31 @@ export function updateStageRun(taskId: string, stageRunId: string, input: Update
     type: run.stage === 'focus' && input.status === 'completed' ? 'focus-finished' : 'assistant-run',
     actor: 'user',
     summary: `${run.stage} stage updated${input.status ? ` to ${input.status}` : ''}.`,
+  });
+  writeFile(file);
+  return task;
+}
+
+export function confirmStageRunOutput(taskId: string, stageRunId: string, input: ConfirmStageRunOutputInput = {}): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const run = task.stageRuns.find(candidate => candidate.id === stageRunId);
+  if (!run) throw new Error('stage run not found');
+  const output = createOutputFromStageRun(task, run);
+  if (!output) throw new Error('stage run has no output to confirm');
+  const existingId = (run.outputIds || []).find(id => (task.outputs || []).some(candidate => candidate.id === id));
+  if (existingId) return task;
+  task.outputs = [output, ...(task.outputs || [])];
+  run.outputIds = Array.from(new Set([output.id, ...(run.outputIds || [])]));
+  task.updatedAt = new Date().toISOString();
+  const actor = input.actor === 'assistant' || input.actor === 'system' ? input.actor : 'user';
+  appendEvent(task, {
+    type: output.kind === 'background' ? 'background-updated' : 'stage-output-confirmed',
+    actor,
+    summary: output.kind === 'background'
+      ? 'Ticket background confirmed.'
+      : `${output.title} confirmed.`,
   });
   writeFile(file);
   return task;

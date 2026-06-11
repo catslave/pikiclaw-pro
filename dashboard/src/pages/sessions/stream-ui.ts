@@ -56,6 +56,8 @@ export type EffectiveLiveStreamInput = {
   displayEffort: string | null;
   /** Session record says running even when the stream snapshot hasn't arrived yet. */
   sessionRunning?: boolean;
+  /** True after the client has asked the backend for this session's stream state at least once. */
+  streamStateChecked?: boolean;
 };
 
 export type EffectiveLiveStreamShell = {
@@ -91,6 +93,7 @@ export function resolveEffectiveLiveStream<T extends EffectiveLiveStreamInput['l
   const liveMatchesTask = !input.pendingTaskId
     || !live?.taskId
     || live.taskId === input.pendingTaskId;
+  const canSynthesizeRunningShell = !!input.sessionRunning && !input.streamStateChecked;
   // The backend may expand slash commands such as `/plan clarify ...` into a
   // longer internal prompt. When the task id matches, the live stream is still
   // the authoritative process state; dropping it would replace real activity
@@ -98,7 +101,7 @@ export function resolveEffectiveLiveStream<T extends EffectiveLiveStreamInput['l
   if (live && input.pendingTaskId && live.taskId === input.pendingTaskId) return live as T;
   if (live && liveMatchesPending && liveMatchesTask) return live as T;
   if (!input.streamSnapshotActive) {
-    if (input.sessionRunning) {
+    if (canSynthesizeRunningShell) {
       return {
         taskId: input.streamTaskId ?? null,
         prompt: pendingTrimmed || livePromptTrimmed || null,
@@ -128,7 +131,7 @@ export function resolveEffectiveLiveStream<T extends EffectiveLiveStreamInput['l
     phase: 'streaming' as const,
     text: '',
     thinking: '',
-    activity: input.sessionRunning ? 'Working...' : '',
+    activity: canSynthesizeRunningShell ? 'Working...' : '',
     activitySummary: null,
     activityEvents: null,
     plan: null,
@@ -209,8 +212,9 @@ export function isLiveStreamActive(input: {
   pendingTaskId: string | null | undefined;
   pendingImageCount: number;
   sessionRunning?: boolean;
+  streamStateChecked?: boolean;
 }): boolean {
-  if (input.sessionRunning) return true;
+  if (input.sessionRunning && !input.streamStateChecked) return true;
   if (input.streaming || input.streamPhase === 'streaming' || input.streamPhase === 'queued') return true;
   if (input.liveStreamPhase === 'streaming') return true;
   const hasPendingContent = !!input.pendingPrompt?.trim() || input.pendingImageCount > 0;

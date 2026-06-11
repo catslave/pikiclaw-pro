@@ -14,13 +14,15 @@ export const PLATFORM_SKILLS: PlatformSkillInfo[] = [
   {
     id: 'logtrace',
     trigger: '/logtrace',
-    name: 'Log Trace',
-    description: 'Run a controlled IVA/Nova log trace, then ask the agent to summarize the trace and analyze abnormalities.',
+    name: 'Log Skill',
+    description: 'Query IVA/Nova logs or run a controlled trace for a lab/prod environment, then ask the agent to summarize abnormalities or classify log statistics. Defaults to lab and conversationId-based lookup.',
     category: 'observability',
     status: 'experimental',
     examples: [
-      '/logtrace env=lab id=s-xxx last=24h',
-      '/logtrace env=production id=conversation-uuid last=7d symptom="agent stayed silent"',
+      '/logtrace conversationId=conversation-uuid last=24h',
+      '/logtrace search conversationId=conversation-uuid query="level:ERROR" last=2h',
+      '/logtrace stats conversationId=conversation-uuid by=kubernetes.container.name last=24h',
+      '/logtrace env=production sessionId=s-xxx last=7d symptom="agent stayed silent"',
     ],
   },
 ];

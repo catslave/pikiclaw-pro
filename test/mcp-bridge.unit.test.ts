@@ -7,12 +7,14 @@ import {
 } from '../src/browser-profile.ts';
 import {
   _matchPlaywrightMcpProcessCommand,
+  buildBuiltinMcpServerEnv,
   buildGuiSetupHints,
   buildSupplementalMcpServers,
   resolveGuiIntegrationConfig,
   resolveMcpServerCommand,
   resolveSendFilePath,
 } from '../src/agent/mcp/bridge.ts';
+import { agentVisibleMcpServerName } from '../src/agent/mcp/extensions.ts';
 import { makeTmpDir } from './support/env.ts';
 
 function writeFile(filePath: string, content = '') {
@@ -55,6 +57,41 @@ describe('resolveMcpServerCommand', () => {
     expect(command2).toEqual({
       command: 'node',
       args: [serverPath],
+    });
+  });
+});
+
+describe('buildBuiltinMcpServerEnv', () => {
+  it('passes Jira sync credentials and dev config into the built-in MCP server', () => {
+    const env = buildBuiltinMcpServerEnv({
+      workspacePath: '/tmp/session/workspace',
+      workdir: '/repo/app',
+      agent: 'codex',
+      sessionDir: '/tmp/session/session_1',
+      stagedFiles: ['a.txt'],
+      callbackUrl: 'http://127.0.0.1:1234',
+      logUrl: 'http://127.0.0.1:1234/log',
+      tools: ['pro', 'outputs'],
+    }, {
+      PIKICLAW_CONFIG: '/tmp/pikiclaw-dev/setting.json',
+      RC_JIRA_READ_TOKEN: 'jira-token',
+      RC_CONFLUENCE_READ_TOKEN: 'confluence-token',
+      PIKICLAW_JIRA_MCP_SERVICE_URL: 'https://jira.example/mcp/',
+    });
+
+    expect(env).toMatchObject({
+      MCP_WORKSPACE_PATH: '/tmp/session/workspace',
+      MCP_WORKDIR: '/repo/app',
+      MCP_AGENT: 'codex',
+      MCP_SESSION_ID: 'session_1',
+      MCP_STAGED_FILES: '["a.txt"]',
+      MCP_CALLBACK_URL: 'http://127.0.0.1:1234',
+      MCP_LOG_URL: 'http://127.0.0.1:1234/log',
+      MCP_TOOLS_AVAILABLE: 'pro,outputs',
+      PIKICLAW_CONFIG: '/tmp/pikiclaw-dev/setting.json',
+      RC_JIRA_READ_TOKEN: 'jira-token',
+      RC_CONFLUENCE_READ_TOKEN: 'confluence-token',
+      PIKICLAW_JIRA_MCP_SERVICE_URL: 'https://jira.example/mcp/',
     });
   });
 });
@@ -193,7 +230,7 @@ describe('buildSupplementalMcpServers', () => {
     if (process.platform === 'darwin') {
       expect(servers).toEqual([
         {
-          name: 'computer-use',
+          name: 'pikiclaw-computer-use',
           command: 'npx',
           args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
         },
@@ -201,6 +238,14 @@ describe('buildSupplementalMcpServers', () => {
     } else {
       expect(servers).toEqual([]);
     }
+  });
+});
+
+describe('agentVisibleMcpServerName', () => {
+  it('prefixes Pikiclaw-provided MCP names without double-prefixing', () => {
+    expect(agentVisibleMcpServerName('gitlab')).toBe('pikiclaw-gitlab');
+    expect(agentVisibleMcpServerName('pikiclaw-browser')).toBe('pikiclaw-browser');
+    expect(agentVisibleMcpServerName('pikiclaw_gitlab')).toBe('pikiclaw_gitlab');
   });
 });
 

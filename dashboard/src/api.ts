@@ -13,6 +13,10 @@ import type {
   CliStatus,
   DailyItem,
   FileContentResult,
+  FocusOverviewResponse,
+  FocusSandboxRecord,
+  FocusSandboxState,
+  FocusSandboxType,
   InteractionSnapshot,
   OpenTarget,
   GitChangesResult,
@@ -20,7 +24,10 @@ import type {
   GitRemoteBranchUrlResult,
   HostInfo,
   KnowledgeEntry,
+  KnowledgeTreeNode,
   JiraSyncRun,
+  JiraRemoteUpdateFields,
+  JiraRemoteUpdateRun,
   JiraWorkflowConfig,
   JiraCycle,
   LocalModelActionResponse,
@@ -31,6 +38,11 @@ import type {
   McpHealthResult,
   McpSearchResult,
   McpServerConfig,
+  NoteAsset,
+  NotePage,
+  NotePromotionTarget,
+  NoteSearchResult,
+  NoteTree,
   PermissionRequestResult,
   PlatformSkillInfo,
   ProUsageSummary,
@@ -83,6 +95,7 @@ export interface SessionSendRequestOptions extends ApiRequestOptions {
   previousAgent?: string | null;
   previousSessionId?: string | null;
   contextSources?: SessionContextSource[];
+  displayPrompt?: string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -131,6 +144,22 @@ function post<T>(url: string, body: unknown, opts: ApiRequestOptions = {}): Prom
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+}
+
+function patch<T>(url: string, body: unknown, opts: ApiRequestOptions = {}): Promise<T> {
+  return json<T>(url, {
+    ...opts,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function del<T>(url: string, opts: ApiRequestOptions = {}): Promise<T> {
+  return json<T>(url, {
+    ...opts,
+    method: 'DELETE',
   });
 }
 
@@ -559,10 +588,12 @@ export const api = {
       previousAgent,
       previousSessionId,
       contextSources = [],
+      displayPrompt,
       ...opts
     } = options;
     const prevAgent = typeof previousAgent === 'string' ? previousAgent.trim() : '';
     const prevSessionId = typeof previousSessionId === 'string' ? previousSessionId.trim() : '';
+    const visiblePrompt = typeof displayPrompt === 'string' ? displayPrompt.trim() : '';
     const payload = {
       workdir,
       agent,
@@ -572,6 +603,7 @@ export const api = {
       ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
       ...(prevAgent && prevSessionId ? { previousAgent: prevAgent, previousSessionId: prevSessionId } : {}),
       ...(contextSources.length ? { contextSources } : {}),
+      ...(visiblePrompt ? { displayPrompt: visiblePrompt } : {}),
     };
 
     if (!attachments.length) {
@@ -587,6 +619,7 @@ export const api = {
     body.set('agent', agent);
     body.set('sessionId', sessionId);
     body.set('prompt', prompt);
+    if (visiblePrompt) body.set('displayPrompt', visiblePrompt);
     if (typeof model === 'string' && model.trim()) body.set('model', model.trim());
     if (typeof effort === 'string' && effort.trim()) body.set('effort', effort.trim());
     if (prevAgent && prevSessionId) {
@@ -612,6 +645,27 @@ export const api = {
     json<{ ok: boolean; plan?: SessionPlanView | null; error?: string }>(
       `/api/session-hub/session/plan?workdir=${encodeURIComponent(workdir)}&agent=${encodeURIComponent(agent)}&sessionId=${encodeURIComponent(sessionId)}`,
       opts,
+    ),
+
+  // Knowledge tree
+  getKnowledgeTree: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; tree: KnowledgeTreeNode[]; error?: string }>('/api/knowledge', opts),
+  getKnowledgeNode: (id: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; node?: KnowledgeTreeNode; error?: string }>(
+      `/api/knowledge/nodes/${encodeURIComponent(id)}`,
+      opts,
+    ),
+  linkWorkspaceKnowledge: (workdir: string, nodeId?: string | null, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; node?: KnowledgeTreeNode; tree?: KnowledgeTreeNode[]; created?: boolean; linked?: boolean; error?: string }>(
+      '/api/knowledge/workspace',
+      { workdir, ...(nodeId ? { nodeId } : {}) },
+      { timeoutMs: 60_000, ...opts },
+    ),
+  reanalyzeKnowledgeNode: (id: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; node?: KnowledgeTreeNode; tree?: KnowledgeTreeNode[]; error?: string }>(
+      `/api/knowledge/nodes/${encodeURIComponent(id)}/analyze`,
+      {},
+      { timeoutMs: 60_000, ...opts },
     ),
   pauseSessionGoal: (workdir: string, agent: string, sessionId: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; goal?: SessionGoalView | null; error?: string }>(
@@ -831,6 +885,85 @@ export const api = {
       `/api/pro/daily-items/${encodeURIComponent(itemId)}`,
       { method: 'DELETE', ...opts },
     ),
+  getNotesTree: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; error?: string } & NoteTree>('/api/pro/notes/tree', opts),
+  openDailyNote: (date?: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; page?: NotePage; error?: string }>('/api/pro/notes/daily', { date }, opts),
+  createNotePage: (body: { title?: string; parentId?: string | null }, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; page?: NotePage; error?: string }>('/api/pro/notes/pages', body, opts),
+  reorderNotePages: (body: { parentId?: string | null; pageIds: string[] }, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; pages?: NotePage[]; error?: string }>('/api/pro/notes/pages/reorder', body, opts),
+  searchNotes: (query: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; results: NoteSearchResult[]; error?: string }>(
+      `/api/pro/notes/search?q=${encodeURIComponent(query)}`,
+      opts,
+    ),
+  getNotePage: (pageId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; page?: NotePage; error?: string }>(
+      `/api/pro/notes/pages/${encodeURIComponent(pageId)}`,
+      opts,
+    ),
+  updateNotePage: (
+    pageId: string,
+    body: { title?: string; parentId?: string | null; deletedAt?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; page?: NotePage; error?: string }>(
+      `/api/pro/notes/pages/${encodeURIComponent(pageId)}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...opts },
+    ),
+  deleteNotePage: (pageId: string, permanent = false, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; page?: NotePage; error?: string }>(
+      `/api/pro/notes/pages/${encodeURIComponent(pageId)}${permanent ? '?permanent=1' : ''}`,
+      { method: 'DELETE', ...opts },
+    ),
+  getNoteDocument: (pageId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; blocks?: unknown[]; error?: string }>(
+      `/api/pro/notes/pages/${encodeURIComponent(pageId)}/document`,
+      opts,
+    ),
+  saveNoteDocument: (pageId: string, blocks: unknown[], opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; blocks?: unknown[]; error?: string }>(
+      `/api/pro/notes/pages/${encodeURIComponent(pageId)}/document`,
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocks }), timeoutMs: 30_000, ...opts },
+    ),
+  uploadNoteAsset: async (pageId: string, file: File, opts: ApiRequestOptions = {}) => {
+    const { timeoutMs = DEFAULT_TIMEOUT_MS, signal, ...rest } = opts;
+    const controller = new AbortController();
+    const cleanupAbort = forwardAbort(signal, controller);
+    const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
+    const form = new FormData();
+    form.set('file', file);
+    try {
+      const res = await fetch(`/api/pro/notes/pages/${encodeURIComponent(pageId)}/assets`, {
+        ...rest,
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      });
+      const raw = await res.text();
+      if (!raw) throw new Error(`Empty response (${res.status})`);
+      return JSON.parse(raw) as { ok: boolean; asset?: NoteAsset; error?: string };
+    } catch (err) {
+      if (controller.signal.aborted && !signal?.aborted) {
+        throw new Error(`Request timed out after ${timeoutMs}ms`);
+      }
+      if (err instanceof Error) throw err;
+      throw new Error(String(err ?? 'Request failed'));
+    } finally {
+      clearTimeout(timer);
+      cleanupAbort();
+    }
+  },
+  promoteNoteSelection: (
+    body: { pageId: string; target: NotePromotionTarget; text: string; date?: string; workdir?: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; target?: NotePromotionTarget; item?: TodoItem; items?: DailyItem[]; task?: ProTask; error?: string }>(
+      '/api/pro/notes/promote',
+      body,
+      opts,
+    ),
   createProTodo: (
     item: {
       kind?: TodoItemKind;
@@ -881,6 +1014,31 @@ export const api = {
     ),
   getProAssistants: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; assistants: AgentAssistant[]; error?: string }>('/api/pro/assistants', opts),
+  getReviewLinkMeta: (url: string, opts?: ApiRequestOptions) =>
+    json<{
+      ok: boolean;
+      meta?: { provider: 'gitlab' | 'github' | 'unknown'; url: string; repo?: string; number?: string; title?: string; displayTitle?: string };
+      error?: string;
+    }>(
+      `/api/pro/review-link-meta?url=${encodeURIComponent(url)}`,
+      opts,
+    ),
+  runProAssistant: (
+    assistantId: string,
+    body: { prompt: string; workdir?: string; agent?: string | null },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{
+      ok: boolean;
+      assistant?: AgentAssistant;
+      queued?: { taskId?: string; sessionKey?: string; queued?: boolean };
+      session?: { workdir: string; agent: string; sessionId: string } | null;
+      error?: string;
+    }>(
+      `/api/pro/assistants/${encodeURIComponent(assistantId)}/run`,
+      body,
+      { timeoutMs: 30_000, ...opts },
+    ),
   getProAssistantHistory: (limit: number | 'all' = 3, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; history: Record<string, AssistantHistoryItem[]>; error?: string }>(
       `/api/pro/assistants/history?limit=${encodeURIComponent(String(limit))}`,
@@ -1013,14 +1171,48 @@ export const api = {
       { itemIds },
       opts,
     ),
+  getAnalyzeTicketPrompt: (opts?: ApiRequestOptions) =>
+    get<{ ok: boolean; prompt?: string; defaultPrompt?: string; customized?: boolean; error?: string }>(
+      '/api/pro/jira/analyze-ticket/prompt',
+      opts,
+    ),
+  updateAnalyzeTicketPrompt: (body: { prompt: string }, opts?: ApiRequestOptions) =>
+    patch<{ ok: boolean; prompt?: string; defaultPrompt?: string; customized?: boolean; error?: string }>(
+      '/api/pro/jira/analyze-ticket/prompt',
+      body,
+      opts,
+    ),
+  resetAnalyzeTicketPrompt: (opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; prompt?: string; defaultPrompt?: string; customized?: boolean; error?: string }>(
+      '/api/pro/jira/analyze-ticket/prompt/reset',
+      {},
+      opts,
+    ),
   analyzeJiraTicket: (
     body: { query: string; workdir?: string; agent?: string | null },
     opts?: ApiRequestOptions,
   ) =>
-    post<{ ok: boolean; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+    post<{
+      ok: boolean;
+      task?: import('./types').ProTask;
+      queued?: { taskId?: string; sessionKey?: string; queued?: boolean };
+      workdirResolution?: import('./types').WorkdirResolution;
+      issueLookupError?: string;
+      session?: { workdir: string; agent: string; sessionId: string };
+      error?: string;
+    }>(
       '/api/pro/jira/analyze-ticket',
       body,
-      { timeoutMs: 30_000, ...opts },
+      { timeoutMs: 60_000, ...opts },
+    ),
+  syncJiraTicket: (
+    body: { query: string; projectKey?: string; workdir?: string; spaceId?: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; task?: ProTask; issueKey?: string; action?: 'created' | 'updated'; source?: string; tried?: string[]; error?: string }>(
+      '/api/pro/jira/sync-ticket',
+      body,
+      { timeoutMs: 60_000, ...opts },
     ),
   scheduleJiraMcpSync: (
     body: { schedule: string; assistantId?: string | null; workdir?: string; enabled?: boolean },
@@ -1031,13 +1223,72 @@ export const api = {
       body,
       opts,
     ),
-  getProKnowledge: (opts?: ApiRequestOptions) =>
-    json<{ ok: boolean; knowledge: KnowledgeEntry[]; error?: string }>('/api/pro/knowledge', opts),
+  getProKnowledge: (
+    filters?: { query?: string; tag?: string; sourceType?: string; workspace?: string; status?: string; kind?: string },
+    opts?: ApiRequestOptions,
+  ) => {
+    const params = new URLSearchParams();
+    if (filters?.query) params.set('query', filters.query);
+    if (filters?.tag) params.set('tag', filters.tag);
+    if (filters?.sourceType) params.set('sourceType', filters.sourceType);
+    if (filters?.workspace) params.set('workspace', filters.workspace);
+    if (filters?.status) params.set('status', filters.status);
+    if (filters?.kind) params.set('kind', filters.kind);
+    const qs = params.toString();
+    return json<{ ok: boolean; knowledge: KnowledgeEntry[]; error?: string }>(`/api/pro/knowledge${qs ? '?' + qs : ''}`, opts);
+  },
   createProKnowledge: (
-    body: { title: string; body: string; tags?: string[]; source?: KnowledgeEntry['source'] },
+    body: {
+      title: string;
+      body: string;
+      summary?: string;
+      kind?: KnowledgeEntry['kind'];
+      status?: KnowledgeEntry['status'];
+      tags?: string[];
+      source?: KnowledgeEntry['source'];
+      sourceRefs?: KnowledgeEntry['sourceRefs'];
+      artifactRefs?: KnowledgeEntry['artifactRefs'];
+      confidence?: KnowledgeEntry['confidence'];
+      createdBy?: KnowledgeEntry['createdBy'];
+    },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; entry?: KnowledgeEntry; error?: string }>('/api/pro/knowledge', body, opts),
+  updateProKnowledge: (
+    id: string,
+    body: Partial<Pick<KnowledgeEntry, 'title' | 'body' | 'summary' | 'kind' | 'status' | 'tags' | 'confidence' | 'sourceRefs' | 'artifactRefs'>>,
+    opts?: ApiRequestOptions,
+  ) =>
+    patch<{ ok: boolean; entry?: KnowledgeEntry; error?: string }>(`/api/pro/knowledge/${encodeURIComponent(id)}`, body, opts),
+  deleteProKnowledge: (id: string, opts?: ApiRequestOptions) =>
+    del<{ ok: boolean; entry?: KnowledgeEntry | null; error?: string }>(`/api/pro/knowledge/${encodeURIComponent(id)}`, opts),
+  getFocusOverview: (opts?: ApiRequestOptions & { orchestrate?: boolean }) =>
+    json<FocusOverviewResponse>(`/api/focus/overview${opts?.orchestrate ? '?orchestrate=1' : ''}`, opts),
+  orchestrateFocus: (body?: { userIntent?: string | null }, opts?: ApiRequestOptions) =>
+    post<FocusOverviewResponse>('/api/focus/orchestrate', body || {}, { timeoutMs: 60_000, ...opts }),
+  submitFocusIntent: (text: string, opts?: ApiRequestOptions) =>
+    post<FocusOverviewResponse>('/api/focus/intent', { text }, { timeoutMs: 60_000, ...opts }),
+  createFocusSandbox: (
+    body: { kind: FocusSandboxType; title: string; workdir: string; jiraKey?: string; taskId?: string; sessionRef?: { workdir: string; agent: string; sessionId: string } },
+    opts?: ApiRequestOptions,
+  ) => post<{ ok: boolean; sandbox?: FocusSandboxRecord; error?: string }>('/api/focus/sandboxes', body, opts),
+  updateFocusSandbox: (id: string, body: { state?: FocusSandboxState; title?: string }, opts?: ApiRequestOptions) =>
+    patch<{ ok: boolean; sandbox?: FocusSandboxRecord; error?: string }>(`/api/focus/sandboxes/${encodeURIComponent(id)}`, body, opts),
+  promoteFocusSandbox: (id: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; sandbox?: FocusSandboxRecord; error?: string }>(`/api/focus/sandboxes/${encodeURIComponent(id)}/promote`, {}, opts),
+  syncFocusTaskJira: (taskId: string, fields?: Record<string, unknown>, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; run?: unknown; error?: string }>(`/api/focus/tasks/${encodeURIComponent(taskId)}/jira-sync`, { fields }, opts),
+  runFocusMaintenance: (opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; archived: string[]; queued: string[]; digestsQueued?: string[]; skipped: Array<{ key: string; reason: string }>; errors: Array<{ key: string; error: string }> }>(
+      '/api/focus/maintenance',
+      {},
+      { timeoutMs: 60_000, ...opts },
+    ),
+  extractFocusChat: (
+    body: { workdir: string; agent: string; sessionId: string; force?: boolean },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; queued?: boolean; key?: string; skipped?: string; error?: string }>('/api/focus/extract-chat', body, { timeoutMs: 30_000, ...opts }),
   runSkillQuickSetup: (
     body: { repo: string; workdir?: string; agent?: string | null },
     opts?: ApiRequestOptions,
@@ -1121,7 +1372,7 @@ export const api = {
     ),
   updateProTaskJiraFields: (
     taskId: string,
-    fields: { reporter?: string; assignee?: string; status?: string; dueDate?: string; priority?: string; labels?: string[] | string; issueType?: string; updatedAt?: string },
+    fields: { reporter?: string; assignee?: string; status?: string; sprint?: string; dueDate?: string; fixVersion?: string; fixVersions?: string[] | string; priority?: string; labels?: string[] | string; issueType?: string; updatedAt?: string },
     opts?: ApiRequestOptions,
   ) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
@@ -1133,10 +1384,44 @@ export const api = {
         ...opts,
       },
     ),
+  syncProTaskJiraFromRemote: (taskId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; task?: ProTask; source?: string; tried?: string[]; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/jira-sync`,
+      {},
+      { timeoutMs: 60_000, ...opts },
+    ),
+  getJiraRemoteUpdates: (taskId?: string, opts?: ApiRequestOptions) => {
+    const qs = taskId ? `?taskId=${encodeURIComponent(taskId)}` : '';
+    return json<{ ok: boolean; runs: JiraRemoteUpdateRun[]; error?: string }>(`/api/pro/jira/remote-updates${qs}`, opts);
+  },
+  createJiraRemoteUpdate: (taskId: string, fields: JiraRemoteUpdateFields, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; run?: JiraRemoteUpdateRun; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/jira-remote-updates`,
+      { fields },
+      opts,
+    ),
+  applyJiraRemoteUpdate: (runId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; run?: JiraRemoteUpdateRun; task?: ProTask; error?: string }>(
+      `/api/pro/jira/remote-updates/${encodeURIComponent(runId)}/apply`,
+      {},
+      { timeoutMs: 120_000, ...opts },
+    ),
+  cancelJiraRemoteUpdate: (runId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; run?: JiraRemoteUpdateRun; error?: string }>(
+      `/api/pro/jira/remote-updates/${encodeURIComponent(runId)}/cancel`,
+      {},
+      opts,
+    ),
   deleteProTask: (taskId: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
       `/api/pro/tasks/${encodeURIComponent(taskId)}`,
       { method: 'DELETE', ...opts },
+    ),
+  resetProTask: (taskId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/reset`,
+      {},
+      opts,
     ),
   setProTaskExclusiveMode: (taskId: string, enabled: boolean, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
@@ -1150,7 +1435,15 @@ export const api = {
     ),
   updateProTaskExecution: (
     taskId: string,
-    execution: { ownerMode?: 'status' | 'agent' | 'assistant'; agent?: string | null; assistantId?: string | null; defaultAssistantId?: string | null; mode?: 'direct' | 'interactive' },
+    execution: {
+      ownerMode?: 'status' | 'agent' | 'assistant';
+      agent?: string | null;
+      assistantId?: string | null;
+      defaultAssistantId?: string | null;
+      mode?: 'direct' | 'interactive';
+      model?: string | null;
+      effort?: string | null;
+    },
     opts?: ApiRequestOptions,
   ) =>
     json<{ ok: boolean; task?: ProTask; error?: string }>(
@@ -1182,6 +1475,18 @@ export const api = {
         ...opts,
       },
     ),
+  updateProTaskBackground: (taskId: string, summary: string, opts?: ApiRequestOptions) =>
+    patch<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/background`,
+      { summary },
+      opts,
+    ),
+  confirmProTaskStageOutput: (taskId: string, stageRunId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/stage-runs/${encodeURIComponent(stageRunId)}/confirm-output`,
+      {},
+      opts,
+    ),
   startProTaskFocusSession: (taskId: string, source?: string, opts?: ApiRequestOptions) =>
     post<{
       ok: boolean;
@@ -1206,7 +1511,7 @@ export const api = {
   startProTaskStage: (
     taskId: string,
     stage: ProTaskStage,
-    options: { prompt?: string; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null; executionMode?: 'direct' | 'interactive'; subtaskId?: string | null } = {},
+    options: { prompt?: string; displayPrompt?: string | null; agent?: string | null; assistantId?: string | null; model?: string | null; effort?: string | null; workdir?: string | null; executionMode?: 'direct' | 'interactive'; subtaskId?: string | null } = {},
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; task?: ProTask; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
@@ -1214,6 +1519,7 @@ export const api = {
       {
         stage,
         ...(options.prompt ? { prompt: options.prompt } : {}),
+        ...(options.displayPrompt ? { displayPrompt: options.displayPrompt } : {}),
         ...(options.agent ? { agent: options.agent } : {}),
         ...(options.assistantId ? { assistantId: options.assistantId } : {}),
         ...(options.model ? { model: options.model } : {}),

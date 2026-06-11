@@ -4,32 +4,35 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import { BrowserPanelModal } from '../../components/BrowserPanelModal';
 import { DirBrowser } from '../../components/DirBrowser';
+import { useAssistantGeneratedOutput } from '../../components/assistant/AssistantGeneratedUi';
 import { Badge, Button, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, DailyItem, JiraCycle, JiraSyncRun, JiraWorkflowConfig, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, SessionInfo, StageRun, StageSessionRef, TaskSpace, TodoItem, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, BrowserPanelSnapshot, DailyItem, JiraCycle, JiraRemoteUpdateFields, JiraRemoteUpdateRun, JiraSyncRun, JiraWorkflowConfig, ProOutput, ProSubtaskStatus, ProTask, ProTaskStage, ProTaskStatus, RichMessage, SessionInfo, StageRun, StageSessionRef, TaskSpace, TodoItem, VerificationResult, VerificationRun, WorkspaceEntry } from '../../types';
 import { cn } from '../../utils';
 import { AssistantMsg, ensureRichMessageBlocks, MarkdownFilePreviewCard } from '../sessions/AssistantContent';
 import { GeneratedOutputCards } from '../sessions/GeneratedOutputCards';
 import { SessionPanel, type SessionPanelChange } from '../sessions/SessionPanel';
 import { createMdComponents, mdPlugins, type FileLinkTarget, type OpenFileLinkHandler } from '../sessions/markdown';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from '../sessions/TurnView';
-import { buildJiraFilterOptions, jiraTaskMatchesFilters } from './task-filters';
+import { buildJiraFilterOptions, jiraTaskFixVersions, jiraTaskMatchesFilters } from './task-filters';
 
 const STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
-const VISIBLE_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'done'];
+const VISIBLE_STATUSES: ProTaskStatus[] = ['backlog', 'refinement', 'coding', 'resolved', 'done'];
 const STAGES: ProTaskStage[] = ['focus', 'refinement', 'coding', 'verification', 'demo', 'bugfix'];
-type JiraColumnKey = 'backlog' | 'refinement' | 'working' | 'done';
+type JiraColumnKey = 'backlog' | 'refinement' | 'working' | 'review' | 'done';
 
 const DAILY_VIEW_ID = 'daily';
 const ALL_TASKS_SPACE_ID = 'all';
 const JIRA_TASK_SPACE_ID = 'jira';
 const PERSONAL_TASK_SPACE_ID = 'personal';
+const ANALYZE_TASK_SPACE_ID = 'ticket-analyze';
 
 const JIRA_COLUMNS: Array<{ key: JiraColumnKey; label: string; hint: string }> = [
   { key: 'backlog', label: 'Backlog', hint: 'New or planned' },
   { key: 'refinement', label: 'Refinement', hint: 'Clarify scope and plan' },
   { key: 'working', label: 'Working', hint: 'Implementation in progress' },
+  { key: 'review', label: 'Review', hint: 'Awaiting user review' },
   { key: 'done', label: 'Done', hint: 'Local work completed' },
 ];
 
@@ -37,6 +40,7 @@ const JIRA_COLUMN_BADGE: Record<JiraColumnKey, 'ok' | 'warn' | 'muted' | 'accent
   backlog: 'muted',
   refinement: 'warn',
   working: 'accent',
+  review: 'accent',
   done: 'ok',
 };
 
@@ -53,10 +57,12 @@ const TASK_DETAIL_LAYOUT_STORAGE_KEY = 'pikiclaw:tasks:detail-layout:v1';
 const TASK_SELECTED_SPACE_STORAGE_KEY = 'pikiclaw:tasks:selected-space:v1';
 const JIRA_ACTIVE_SPRINT_STORAGE_KEY = 'pikiclaw:jira-dashboard:active-sprint:v1';
 const SHOW_JIRA_CYCLE_FEATURE = false;
+const STALE_STAGE_RUN_MS = 30 * 60_000;
 const DEFAULT_JIRA_COLUMN_SORT_MODES: JiraColumnSortModes = {
   backlog: 'asc',
   refinement: 'desc',
   working: 'desc',
+  review: 'desc',
   done: 'desc',
 };
 
@@ -77,7 +83,7 @@ const STATUS_CHAT_STAGE: Record<ProTaskStatus, ProTaskStage> = {
 };
 
 function displayTaskStatus(status: ProTaskStatus): ProTaskStatus {
-  return status === 'resolved' ? 'done' : status;
+  return status;
 }
 
 const STAGE_LABEL: Record<ProTaskStage, string> = {
@@ -333,6 +339,83 @@ function taskStatusTone(status: ProTaskStatus): 'ok' | 'warn' | 'muted' | 'accen
   return 'muted';
 }
 
+function remoteStatusTone(status: string | null | undefined): 'ok' | 'warn' | 'muted' | 'accent' {
+  const normalized = (status || '').trim().toLowerCase();
+  if (!normalized) return 'muted';
+  if (/^(closed|done|resolved|cancelled|canceled)$/.test(normalized)) return 'ok';
+  if (/^(in progress|doing|working|coding)$/.test(normalized)) return 'accent';
+  if (/^(blocked|waiting|review|in review|to do|open)$/.test(normalized)) return 'warn';
+  return 'muted';
+}
+
+function compactFixVersionLabel(task: ProTask): string | null {
+  const versions = jiraTaskFixVersions(task);
+  if (!versions.length) return null;
+  return versions.length === 1 ? versions[0] : `${versions[0]} +${versions.length - 1}`;
+}
+
+type JiraRemoteUpdateDraft = {
+  status: string;
+  sprint: string;
+  dueDate: string;
+  fixVersionsText: string;
+};
+
+function jiraDateInputValue(value: string | null | undefined): string {
+  const text = (value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const time = Date.parse(text);
+  return Number.isFinite(time) ? new Date(time).toISOString().slice(0, 10) : '';
+}
+
+function normalizedListKey(values: string[]): string {
+  return values.map(item => item.trim()).filter(Boolean).join('\u0000');
+}
+
+function splitRemoteUpdateList(value: string): string[] {
+  return value.split(/[,，;；\n]+/).map(item => item.trim()).filter(Boolean).slice(0, 20);
+}
+
+function remoteUpdateDraftFromTask(task: ProTask): JiraRemoteUpdateDraft {
+  return {
+    status: taskRemoteStatus(task) || '',
+    sprint: task.sprint || '',
+    dueDate: jiraDateInputValue(task.jiraFields?.dueDate || jiraRemoteSyncField(task.description, 'Due date')),
+    fixVersionsText: jiraTaskFixVersions(task).join(', '),
+  };
+}
+
+function remoteUpdateFieldsFromDraft(task: ProTask, draft: JiraRemoteUpdateDraft): JiraRemoteUpdateFields {
+  const fields: JiraRemoteUpdateFields = {};
+  const current = remoteUpdateDraftFromTask(task);
+  const status = draft.status.trim();
+  if (status && status !== current.status) fields.status = status;
+  if (draft.sprint.trim() !== current.sprint) fields.sprint = draft.sprint.trim();
+  if (draft.dueDate.trim() !== current.dueDate) fields.dueDate = draft.dueDate.trim();
+  const nextVersions = splitRemoteUpdateList(draft.fixVersionsText);
+  const currentVersions = splitRemoteUpdateList(current.fixVersionsText);
+  if (normalizedListKey(nextVersions) !== normalizedListKey(currentVersions)) fields.fixVersions = nextVersions;
+  return fields;
+}
+
+function jiraRemoteUpdateStatusTone(status: JiraRemoteUpdateRun['status']): 'ok' | 'warn' | 'muted' | 'accent' {
+  if (status === 'applied') return 'ok';
+  if (status === 'failed') return 'warn';
+  if (status === 'applying') return 'accent';
+  return 'muted';
+}
+
+function jiraRemoteFieldLabel(field: JiraRemoteUpdateRun['diff'][number]['field']): string {
+  if (field === 'fixVersions') return 'fixVersion';
+  if (field === 'dueDate') return 'due date';
+  return field;
+}
+
+function jiraRemoteValueLabel(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '(clear)';
+  return value || '(clear)';
+}
+
 function workspaceShortLabel(path: string): string {
   const parts = path.split('/').filter(Boolean);
   return parts.slice(-2).join('/') || path;
@@ -342,6 +425,7 @@ function taskSpaceIcon(spaceId: string, kind?: TaskSpace['kind']): string {
   if (spaceId === DAILY_VIEW_ID) return 'D';
   if (spaceId === ALL_TASKS_SPACE_ID) return 'A';
   if (kind === 'jira' || spaceId === JIRA_TASK_SPACE_ID) return 'J';
+  if (spaceId === ANALYZE_TASK_SPACE_ID) return 'T';
   if (kind === 'personal' || spaceId === PERSONAL_TASK_SPACE_ID) return 'P';
   return 'T';
 }
@@ -350,6 +434,7 @@ function taskSpaceSummary(spaceId: string, count: number): string {
   if (spaceId === DAILY_VIEW_ID) return `${count} tasks planned for the day`;
   if (spaceId === ALL_TASKS_SPACE_ID) return `${count} tasks across spaces`;
   if (spaceId === JIRA_TASK_SPACE_ID) return `${count} Jira-backed tasks`;
+  if (spaceId === ANALYZE_TASK_SPACE_ID) return `${count} ticket analyze sessions`;
   if (spaceId === PERSONAL_TASK_SPACE_ID) return `${count} personal tasks`;
   return `${count} tasks`;
 }
@@ -364,6 +449,15 @@ function defaultKindForSpace(spaceId: string): ProTask['kind'] {
 
 function taskDisplayKey(task: Pick<ProTask, 'jiraKey' | 'localKey'> | null | undefined): string {
   return task?.jiraKey || task?.localKey || '';
+}
+
+function jiraBrowseUrlForKey(value?: string | null): string {
+  const key = value?.trim();
+  return key ? `https://jira.ringcentral.com/browse/${encodeURIComponent(key)}` : '';
+}
+
+function jiraTaskUrl(task: Pick<ProTask, 'jiraKey' | 'jiraUrl'> | null | undefined): string {
+  return task?.jiraUrl?.trim() || jiraBrowseUrlForKey(task?.jiraKey);
 }
 
 function assistantHasLabel(assistant: AgentAssistant, label: string): boolean {
@@ -386,9 +480,62 @@ function taskAssistantOptions(assistants: AgentAssistant[], currentAssistantId?:
   return options;
 }
 
+type TaskMrLink = {
+  url: string;
+  label: string;
+  source: 'saved' | 'ticket';
+};
+
+function normalizeMrUrl(url: string): string {
+  return url
+    .trim()
+    .replace(/[)\].,;]+$/g, '')
+    .replace(/\/(diffs?|commits?|pipelines?)$/i, '');
+}
+
+function mrLabelFromUrl(url: string, fallbackIndex: number): string {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const mrIndex = parts.findIndex(part => part === 'merge_requests' || part === 'pull' || part === 'pulls');
+    if (mrIndex >= 0 && parts[mrIndex + 1]) {
+      const repo = parts[mrIndex - 1] || parts[mrIndex - 2] || parsed.hostname;
+      const marker = parts[mrIndex] === 'merge_requests' ? '!' : '#';
+      return `${repo} ${marker}${parts[mrIndex + 1]}`;
+    }
+    return parsed.hostname.replace(/^www\./, '');
+  } catch {
+    return `MR ${fallbackIndex}`;
+  }
+}
+
+function taskMrLinks(task: ProTask): TaskMrLink[] {
+  const links = new Map<string, TaskMrLink>();
+  const add = (url: string, source: TaskMrLink['source']) => {
+    const normalized = normalizeMrUrl(url);
+    if (!/^https?:\/\//i.test(normalized) || links.has(normalized)) return;
+    links.set(normalized, {
+      url: normalized,
+      label: mrLabelFromUrl(normalized, links.size + 1),
+      source,
+    });
+  };
+  if (task.prUrl) add(task.prUrl, 'saved');
+  const rawText = [
+    task.description || '',
+    task.jiraFields?.raw ? JSON.stringify(task.jiraFields.raw) : '',
+  ].join('\n');
+  const urlPattern = /https?:\/\/[^\s<>"']+(?:\/-\/merge_requests\/\d+|\/merge_requests\/\d+|\/pull\/\d+|\/pulls\/\d+)[^\s<>"']*/gi;
+  for (const match of rawText.matchAll(urlPattern)) add(match[0], 'ticket');
+  return Array.from(links.values());
+}
+
 function TaskPrField({ task, onMetaChange }: { task: ProTask; onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void }) {
   const [draft, setDraft] = useState(task.prUrl || '');
   const skipCommitRef = useRef(false);
+  const mrLinks = taskMrLinks(task);
+  const savedLink = mrLinks.find(link => link.source === 'saved');
+  const ticketLinks = mrLinks.filter(link => link.source === 'ticket');
 
   useEffect(() => {
     setDraft(task.prUrl || '');
@@ -404,33 +551,56 @@ function TaskPrField({ task, onMetaChange }: { task: ProTask; onMetaChange: (tas
   };
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5">
-      <input
-        value={draft}
-        onChange={event => setDraft(event.target.value)}
-        onBlur={commit}
-        onKeyDown={event => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            event.currentTarget.blur();
-          } else if (event.key === 'Escape') {
-            skipCommitRef.current = true;
-            setDraft(task.prUrl || '');
-            event.currentTarget.blur();
-          }
-        }}
-        placeholder="MR / PR URL"
-        className="h-7 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-0 text-[12px] text-fg-3 outline-none transition placeholder:text-fg-5/60 hover:border-edge hover:bg-panel focus:border-primary/40 focus:px-2"
-      />
-      {task.prUrl && (
-        <a
-          href={task.prUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex h-6 shrink-0 items-center rounded-md border border-edge px-2 text-[11px] font-medium text-fg-4 transition hover:border-edge-h hover:bg-panel-h hover:text-fg"
-        >
-          Open
-        </a>
+    <div className="min-w-0 space-y-1.5">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <input
+          value={draft}
+          onChange={event => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={event => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === 'Escape') {
+              skipCommitRef.current = true;
+              setDraft(task.prUrl || '');
+              event.currentTarget.blur();
+            }
+          }}
+          placeholder={ticketLinks.length ? 'Add another MR / PR URL' : 'MR / PR URL'}
+          className="h-7 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-0 text-[12px] text-fg-3 outline-none transition placeholder:text-fg-5/60 hover:border-edge hover:bg-panel focus:border-primary/40 focus:px-2"
+        />
+        {savedLink && (
+          <a
+            href={savedLink.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-6 shrink-0 items-center rounded-md border border-edge px-2 text-[11px] font-medium text-fg-4 transition hover:border-edge-h hover:bg-panel-h hover:text-fg"
+          >
+            Open
+          </a>
+        )}
+      </div>
+      {ticketLinks.length > 0 && (
+        <div className="flex min-w-0 flex-wrap gap-1.5">
+          {ticketLinks.slice(0, 4).map(link => (
+            <a
+              key={link.url}
+              href={link.url}
+              target="_blank"
+              rel="noreferrer"
+              title={link.url}
+              className="inline-flex h-6 max-w-full min-w-0 items-center rounded-md border border-primary/20 bg-primary/[0.06] px-2 text-[11px] font-medium text-primary transition hover:border-primary/35 hover:bg-primary/[0.1]"
+            >
+              <span className="truncate">{link.label}</span>
+            </a>
+          ))}
+          {ticketLinks.length > 4 && (
+            <span className="inline-flex h-6 items-center rounded-md border border-edge/60 bg-panel-alt px-2 text-[11px] text-fg-5">
+              +{ticketLinks.length - 4}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
@@ -492,10 +662,17 @@ function jiraSyncRunMessage(run: JiraSyncRun): string {
   return syncRunStatusLabel(run.status);
 }
 
+function jiraProjectKeyFromIssueKey(value: string | undefined): string {
+  const match = value?.match(/^([A-Z][A-Z0-9]+)-\d+$/i);
+  return match?.[1] ? match[1].toUpperCase() : '';
+}
+
 function cleanTaskDescription(task: ProTask): string {
   const text = task.description?.trim() || '';
   const markerIndex = text.indexOf('[Jira remote sync]');
-  return (markerIndex >= 0 ? text.slice(0, markerIndex) : text).trim();
+  return (markerIndex >= 0 ? text.slice(0, markerIndex) : text)
+    .replace(/^\s*Description:\s*/i, '')
+    .trim();
 }
 
 function plannedDateLabel(plannedDate: string | undefined, selectedDate: string): string {
@@ -706,7 +883,11 @@ function TaskCard({
   const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
   const assistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
   const dueDate = task.jiraFields?.dueDate || jiraRemoteSyncField(task.description, 'Due date');
+  const remoteStatus = taskRemoteStatus(task);
+  const fixVersion = compactFixVersionLabel(task);
+  const sprint = task.sprint?.split(/[,，;；\n]+/).map(item => item.trim()).filter(Boolean)[0] || '';
   const displayKey = taskDisplayKey(task);
+  const metaItemClass = 'inline-flex min-w-0 max-w-[112px] shrink-0 items-center gap-1 text-[10px] leading-none text-fg-5';
   return (
     <div
       role="button"
@@ -741,29 +922,48 @@ function TaskCard({
             {displayKey && <span className="font-mono text-[12px] text-primary">{displayKey} </span>}
             {task.title}
           </div>
-          <div className="mt-1 text-[11px] text-fg-5">Created {formatTime(task.createdAt)}</div>
         </div>
       </div>
-      {cardDescription && <div className="mt-2 line-clamp-2 text-[12px] leading-relaxed text-fg-4">{cardDescription}</div>}
+      {cardDescription && <div className="mt-1.5 line-clamp-4 text-[12px] leading-relaxed text-fg-4">{cardDescription}</div>}
       <div
-        className="mt-2 flex min-w-0 items-center gap-2 text-[12px] text-fg-5"
+        className="mt-1.5 flex min-w-0 items-center gap-2"
         onClick={event => event.stopPropagation()}
         onPointerDown={event => event.stopPropagation()}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="shrink-0">Assignee</span>
-          <AssistantInlinePicker
-            value={assignedAssistantId}
-            options={assistantOptions}
-            onChange={(assistantId) => onAssignAssistant(task, assistantId)}
-            compact
-          />
-        </div>
-        {dueDate && (
-          <span className="shrink-0 rounded-md border border-edge/45 bg-panel-alt/45 px-1.5 py-0.5 text-[10.5px] font-medium text-fg-4" title={`Due ${dueDate}`}>
-            Due {formatDateOnly(dueDate)}
+        <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {dueDate && (
+            <span className={metaItemClass} title={`Due ${dueDate}`}>
+              Due {formatDateOnly(dueDate)}
+            </span>
+          )}
+          {sprint && (
+            <span className={metaItemClass} title={task.sprint}>
+              <span className="truncate">Sprint {sprint}</span>
+            </span>
+          )}
+          {fixVersion && (
+            <span className={metaItemClass} title={jiraTaskFixVersions(task).join(', ')}>
+              <span className="truncate">Fix {fixVersion}</span>
+            </span>
+          )}
+          <span className={metaItemClass}>
+            <span className="shrink-0">Assignee</span>
+            <AssistantInlinePicker
+              value={assignedAssistantId}
+              options={assistantOptions}
+              onChange={(assistantId) => onAssignAssistant(task, assistantId)}
+              compact
+            />
           </span>
-        )}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {remoteStatus && (
+            <Badge variant={remoteStatusTone(remoteStatus)} className="h-4 max-w-[92px] shrink-0 px-1.5 text-[9.5px]" title={remoteStatus}>
+              <span className="truncate">{remoteStatus}</span>
+            </Badge>
+          )}
+          <span className="whitespace-nowrap text-[10px] leading-none text-fg-5">Created {formatTime(task.createdAt)}</span>
+        </div>
       </div>
       {onSchedule && (
         <div
@@ -791,10 +991,20 @@ function TaskCard({
 function dailyTaskSourceLabel(task: ProTask, spaces: TaskSpace[]): string {
   const direct = task.spaceId ? spaces.find(space => space.id === task.spaceId) : null;
   if (direct?.name) return direct.name;
+  if (task.spaceId === ANALYZE_TASK_SPACE_ID || task.origin?.type === 'jira-analyze') return 'Ticket Analyze';
   if (task.spaceId === JIRA_TASK_SPACE_ID || task.kind.startsWith('jira')) return 'Jira';
   if (task.spaceId === PERSONAL_TASK_SPACE_ID || task.origin?.type === 'manual') return 'Personal';
   return 'Task';
 }
+
+type SyncTicketProgress = {
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  query?: string;
+  issueKey?: string;
+  action?: 'created' | 'updated';
+  task?: ProTask;
+  error?: string;
+};
 
 function dailyItemStatusTone(status: DailyItem['status']): 'ok' | 'warn' | 'muted' | 'accent' {
   if (status === 'task-created') return 'accent';
@@ -819,7 +1029,8 @@ function dailyPrimaryLabel(task: ProTask): string {
 }
 
 function jiraColumnForTask(task: ProTask): JiraColumnKey {
-  if (task.status === 'done' || task.status === 'resolved') return 'done';
+  if (task.status === 'done') return 'done';
+  if (task.status === 'resolved') return 'review';
   const latest = task.stageRuns[0];
   if (latest?.status === 'failed' || latest?.status === 'cancelled') return 'working';
   if (task.status === 'coding') return 'working';
@@ -1083,6 +1294,7 @@ function DailyPlannerSidebar({
 function jiraStatusForColumn(column: JiraColumnKey): ProTaskStatus {
   if (column === 'refinement') return 'refinement';
   if (column === 'working') return 'coding';
+  if (column === 'review') return 'resolved';
   if (column === 'done') return 'done';
   return 'backlog';
 }
@@ -1599,6 +1811,314 @@ function TodoQuickAddModal({
   );
 }
 
+function AnalyzeTicketPromptModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [prompt, setPrompt] = useState('');
+  const [defaultPrompt, setDefaultPrompt] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!open) return undefined;
+    setLoading(true);
+    void api.getAnalyzeTicketPrompt()
+      .then(res => {
+        if (cancelled) return;
+        if (!res.ok) throw new Error(res.error || 'Failed to load prompt');
+        setPrompt(res.prompt || '');
+        setDefaultPrompt(res.defaultPrompt || '');
+      })
+      .catch(err => {
+        if (!cancelled) toast(err instanceof Error ? err.message : 'Failed to load prompt', false);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [open, toast]);
+
+  const save = async () => {
+    if (!prompt.trim() || saving) return;
+    setSaving(true);
+    try {
+      const res = await api.updateAnalyzeTicketPrompt({ prompt });
+      if (!res.ok) throw new Error(res.error || 'Failed to save prompt');
+      setPrompt(res.prompt || prompt);
+      setDefaultPrompt(res.defaultPrompt || defaultPrompt);
+      toast('Analyze prompt saved');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to save prompt', false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const res = await api.resetAnalyzeTicketPrompt();
+      if (!res.ok) throw new Error(res.error || 'Failed to reset prompt');
+      setPrompt(res.prompt || '');
+      setDefaultPrompt(res.defaultPrompt || '');
+      toast('Analyze prompt reset');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to reset prompt', false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changed = prompt.trim() !== defaultPrompt.trim();
+
+  return (
+    <Modal open={open} onClose={onClose} wide panelClassName="max-w-3xl">
+      <ModalHeader title="Analyze ticket prompt" onClose={onClose} />
+      <div className="space-y-3">
+        <p className="text-[12px] leading-relaxed text-fg-5">
+          Use <code className="rounded bg-inset px-1 py-0.5 text-[11px]">{'{{ticket_query}}'}</code> where the pasted ticket link or key should appear.
+        </p>
+        {loading ? (
+          <div className="flex items-center gap-2 py-8 text-[12px] text-fg-5"><Spinner /> Loading prompt...</div>
+        ) : (
+          <textarea
+            value={prompt}
+            onChange={event => setPrompt(event.target.value)}
+            className="min-h-[360px] w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+          />
+        )}
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-fg-5">{changed ? 'Custom prompt' : 'Using default prompt'}</span>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="ghost" disabled={saving || loading} onClick={() => { void reset(); }}>Reset</Button>
+            <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>Close</Button>
+            <Button type="button" variant="primary" disabled={!prompt.trim() || saving || loading} onClick={() => { void save(); }}>
+              {saving ? <Spinner /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function AnalyzeJiraTicketModal({
+  open,
+  initialQuery,
+  busy,
+  onClose,
+  onAnalyze,
+  onOpenPrompt,
+}: {
+  open: boolean;
+  initialQuery: string;
+  busy?: boolean;
+  onClose: () => void;
+  onAnalyze: (draft: { query: string }) => void;
+  onOpenPrompt: () => void;
+}) {
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery(initialQuery);
+  }, [initialQuery, open]);
+
+  const submit = () => {
+    if (!query.trim() || busy) return;
+    onAnalyze({ query: query.trim() });
+  };
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title="Analyze ticket" onClose={onClose} />
+      <form
+        className="space-y-4"
+        onSubmit={event => {
+          event.preventDefault();
+          submit();
+        }}
+      >
+        <textarea
+          autoFocus
+          value={query}
+          onChange={event => setQuery(event.target.value)}
+          placeholder="Paste Jira link, key, or ticket number"
+          className="min-h-[110px] w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/65 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+        />
+        <p className="text-[11px] leading-relaxed text-fg-5">
+          Workspace and agent are chosen automatically from the ticket. Analysis is stored under the Ticket Analyze space.
+        </p>
+        <div className="flex items-center justify-between gap-2">
+          <Button type="button" variant="outline" disabled={busy} onClick={onOpenPrompt}>View prompt</Button>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={!query.trim() || busy}>
+              {busy ? <Spinner /> : null}
+              Analyze
+            </Button>
+          </div>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function SyncJiraTicketModal({
+  open,
+  initialQuery,
+  busy,
+  progress,
+  onClose,
+  onSync,
+  onOpenTask,
+}: {
+  open: boolean;
+  initialQuery: string;
+  busy?: boolean;
+  progress: SyncTicketProgress;
+  onClose: () => void;
+  onSync: (draft: { query: string }) => void;
+  onOpenTask: (task: ProTask) => void;
+}) {
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery(initialQuery);
+  }, [initialQuery, open]);
+
+  const submit = () => {
+    if (!query.trim() || busy) return;
+    onSync({
+      query: query.trim(),
+    });
+  };
+  const stepDetails = [
+    {
+      label: 'Retrieving ticket from remote',
+      detail: progress.status === 'running' ? (progress.query || query.trim()) : progress.issueKey || progress.query || query.trim(),
+    },
+    {
+      label: 'Ticket found',
+      detail: progress.status === 'completed' ? progress.issueKey || taskDisplayKey(progress.task) : undefined,
+    },
+    {
+      label: 'Starting sync',
+      detail: progress.status === 'completed' ? 'Jira fields are ready to apply' : undefined,
+    },
+    {
+      label: 'Checking local task',
+      detail: progress.status === 'completed'
+        ? progress.action === 'updated' ? 'Existing task found' : 'No existing task found'
+        : undefined,
+    },
+    {
+      label: progress.status === 'completed' && progress.action === 'updated' ? 'Applying incremental update' : 'Creating new task',
+      detail: progress.status === 'completed'
+        ? progress.action === 'updated' ? 'Updated changed fields' : 'Created in Jira space'
+        : undefined,
+    },
+    {
+      label: 'Sync completed',
+      detail: progress.status === 'completed' ? progress.issueKey || taskDisplayKey(progress.task) : undefined,
+    },
+  ];
+  const statusForStep = (index: number): 'done' | 'active' | 'pending' | 'failed' => {
+    if (progress.status === 'completed') return 'done';
+    if (progress.status === 'failed') return index === 0 ? 'failed' : 'pending';
+    if (progress.status === 'running') return index === 0 ? 'active' : 'pending';
+    return 'pending';
+  };
+  const hasProgress = progress.status !== 'idle';
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title="Sync ticket" onClose={onClose} />
+      <form
+        className="space-y-4"
+        onSubmit={event => {
+          event.preventDefault();
+          submit();
+        }}
+      >
+        <textarea
+          autoFocus
+          value={query}
+          onChange={event => setQuery(event.target.value)}
+          placeholder="Paste Jira link, key, or ticket number"
+          className="min-h-[96px] w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/65 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)]"
+        />
+        {hasProgress && (
+          <div className="rounded-lg border border-edge/60 bg-panel-alt/50 px-3 py-3">
+            <div className="space-y-2">
+              {stepDetails.map((step, index) => {
+                const status = statusForStep(index);
+                return (
+                  <div key={step.label} className="flex min-w-0 items-start gap-2">
+                    <span className={cn(
+                      'mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px] font-semibold',
+                      status === 'done' && 'border-ok/45 bg-ok/12 text-ok',
+                      status === 'active' && 'border-primary/45 bg-primary/12 text-primary',
+                      status === 'failed' && 'border-warn/45 bg-warn/12 text-warn',
+                      status === 'pending' && 'border-edge bg-inset text-fg-5',
+                    )}>
+                      {status === 'done' ? '✓' : status === 'active' ? <Spinner /> : status === 'failed' ? '!' : index + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className={cn(
+                        'text-[12px] font-medium',
+                        status === 'pending' ? 'text-fg-5' : 'text-fg-2',
+                      )}>
+                        {step.label}
+                      </div>
+                      {step.detail && <div className="mt-0.5 truncate text-[10.5px] text-fg-5">{step.detail}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {progress.status === 'completed' && progress.task && (
+              <div className="mt-3 flex min-w-0 items-center justify-between gap-3 rounded-md border border-ok/25 bg-ok/[0.06] px-2.5 py-2">
+                <button
+                  type="button"
+                  onClick={() => onOpenTask(progress.task!)}
+                  className="min-w-0 truncate text-left font-mono text-[12px] font-semibold text-primary hover:underline"
+                >
+                  {progress.issueKey || taskDisplayKey(progress.task)}
+                </button>
+                <Badge variant="ok">{progress.action === 'created' ? 'created' : 'updated'}</Badge>
+              </div>
+            )}
+            {progress.status === 'failed' && progress.error && (
+              <div className="mt-3 rounded-md border border-warn/30 bg-warn/[0.07] px-2.5 py-2 text-[11px] leading-relaxed text-warn">
+                {progress.error}
+              </div>
+            )}
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2">
+          <Button type="button" variant="ghost" disabled={busy} onClick={onClose}>
+            {progress.status === 'completed' ? 'Close' : 'Cancel'}
+          </Button>
+          <Button type="submit" variant="primary" disabled={!query.trim() || busy}>
+            {busy ? <Spinner /> : null}
+            Sync
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function TodoListModal({
   open,
   items,
@@ -1906,8 +2426,9 @@ const DEFAULT_JIRA_ASSISTANT_CONFIG: JiraWorkflowConfig = {
   runKnowledgeOnRefinement: true,
   runKnowledgeOnCoding: true,
   statusWorkflows: {
-    refinement: { assistantId: 'assistant_refinement', instruction: 'Analyze goal, scope, risks, dependencies, acceptance criteria, and estimate.' },
-    coding: { assistantId: 'assistant_coding', instruction: 'Implement the task with minimal changes, then summarize files, tests, and remaining risk.' },
+    refinement: { assistantId: 'assistant_refinement', instruction: 'Explain what the Jira task is, what needs to be done, retrieve relevant local/context material, state your understanding, open questions, risks, acceptance criteria, and a recommended plan. Do not code until the user confirms the goal and plan.' },
+    coding: { assistantId: 'assistant_coding', instruction: 'Implement only after the confirmed Goal & Plan. Keep changes minimal, inspect relevant code paths first, summarize changed files, why each change was made, verification run, and remaining risk. Stop in Review; do not commit, create an MR, update Jira remotely, or mark Done until user approval.' },
+    resolved: { assistantId: 'assistant_coding', instruction: 'Review the implementation with the user. Compare against the confirmed Goal & Plan, explain changed files and tradeoffs, collect user approval, and prepare the Verification plan. Do not write Jira remotely or submit an MR without explicit confirmation.' },
   },
 };
 
@@ -1956,6 +2477,15 @@ function buildStatusChatPrompt(task: ProTask, status: ProTaskStatus, userPrompt?
   const modeLine = executionMode === 'direct'
     ? 'Execution mode: direct. Answer proactively and continue with a useful next step when possible.'
     : 'Execution mode: interactive. Answer the user directly, then ask one concise follow-up only if it is needed.';
+  const phaseLine = status === 'refinement'
+    ? 'Phase guard: clarify and plan first. Explain the task, retrieve relevant context, list open questions, and wait for user confirmation before coding.'
+    : status === 'coding'
+      ? 'Phase guard: code only against the confirmed plan. After implementation, stop for user review before commit, MR, pipeline tracking, Done, or Jira write-back.'
+      : status === 'resolved'
+        ? 'Phase guard: review with the user. Prepare verification and follow-up actions, but do not submit remote changes until explicitly approved.'
+        : status === 'done'
+          ? 'Phase guard: summarize final outcome, verification evidence, and any Jira write-back/MR status that was already confirmed.'
+          : 'Phase guard: identify the useful next task stage and ask for confirmation if scope is unclear.';
   return [
     `Task: ${task.title}`,
     task.jiraKey ? `Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
@@ -1963,6 +2493,7 @@ function buildStatusChatPrompt(task: ProTask, status: ProTaskStatus, userPrompt?
     '',
     `Open the ${STATUS_LABEL[status]} chat thread for this ticket.`,
     modeLine,
+    phaseLine,
     instruction ? `Status instruction:\n${instruction}` : '',
     userPrompt?.trim()
       ? `User question:\n${userPrompt.trim()}`
@@ -1970,10 +2501,95 @@ function buildStatusChatPrompt(task: ProTask, status: ProTaskStatus, userPrompt?
   ].filter(Boolean).join('\n');
 }
 
+function buildTaskReferenceContext(task: ProTask): string {
+  const fields = task.jiraFields || {};
+  const description = cleanTaskDescription(task);
+  const fixVersions = jiraTaskFixVersions(task);
+  const labels = fields.labels || [];
+  const latestRuns = [...(task.stageRuns || [])]
+    .sort((a, b) => Date.parse(b.startedAt || b.completedAt || '') - Date.parse(a.startedAt || a.completedAt || ''))
+    .slice(0, 3);
+  const runLines = latestRuns.map(run => [
+    `- ${STAGE_LABEL[run.stage]}: ${run.status}`,
+    run.output?.summary ? `; summary: ${run.output.summary}` : '',
+  ].join(''));
+
+  return [
+    'Current Pikiclaw task context. Use this as the authoritative ticket/task background for the user message below.',
+    `Title: ${task.title}`,
+    task.jiraKey ? `Jira: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
+    fields.issueType || task.kind ? `Type: ${fields.issueType || task.kind}` : '',
+    `Pikiclaw status: ${STATUS_LABEL[task.status]}`,
+    fields.status || jiraRemoteSyncField(task.description, 'Status') ? `Jira status: ${fields.status || jiraRemoteSyncField(task.description, 'Status')}` : '',
+    task.sprint ? `Sprint: ${task.sprint}` : '',
+    fixVersions.length ? `Fix version: ${fixVersions.join(', ')}` : '',
+    fields.assignee || jiraRemoteSyncField(task.description, 'Assignee') ? `Assignee: ${fields.assignee || jiraRemoteSyncField(task.description, 'Assignee')}` : '',
+    fields.reporter || jiraRemoteSyncField(task.description, 'Reporter') ? `Reporter: ${fields.reporter || jiraRemoteSyncField(task.description, 'Reporter')}` : '',
+    fields.priority || jiraRemoteSyncField(task.description, 'Priority') ? `Priority: ${fields.priority || jiraRemoteSyncField(task.description, 'Priority')}` : '',
+    fields.dueDate || jiraRemoteSyncField(task.description, 'Due date') ? `Due date: ${fields.dueDate || jiraRemoteSyncField(task.description, 'Due date')}` : '',
+    fields.updatedAt || jiraRemoteSyncField(task.description, 'Updated') ? `Updated: ${fields.updatedAt || jiraRemoteSyncField(task.description, 'Updated')}` : '',
+    labels.length ? `Labels: ${labels.join(', ')}` : '',
+    description ? `Description:\n${description}` : '',
+    task.subTasks?.length
+      ? `Subtasks:\n${task.subTasks.map((subtask, index) => `${index + 1}. [${subtask.status}] ${subtask.title}`).join('\n')}`
+      : '',
+    runLines.length ? `Recent stage runs:\n${runLines.join('\n')}` : '',
+  ].filter(Boolean).join('\n\n');
+}
+
+const TASK_OUTPUT_LANGUAGE_PROMPT = 'Output artifact language: 阶段产出的 wiki/document/report 默认使用中文；除非用户明确要求其他语言。普通 chat 回复可自然跟随用户语言。代码标识符、文件路径、接口名、错误信息、MR/Jira 标题等保持原文。';
+const TASK_STAGE_DRAFT_PROMPT = 'Stage output rule: 当前阶段产出的 wiki/document/report 先作为 draft。后续 chat 应围绕这个 draft 回答问题和修订内容；不要把 draft 当作最终产物。只有用户点击 Confirm output 后，Pikiclaw 才会把它保存为该阶段正式 output 并显示在侧边栏。';
+const TASK_DYNAMIC_WORKFLOW_PROMPT = 'Workflow rule: 不要假设所有 ticket 都有固定的 Background → Clarification → Coding → Test 流程。请根据 ticket 类型、描述、用户当前 prompt、已有输出和最近阶段结果，动态判断下一步最合适的 phase，并在阶段完成后主动给出下一步选择，例如继续讨论问题、确认当前 draft 为正式 output、进入下一 phase、跳过不需要的 phase，或补充测试/证据。';
+
+function buildTicketChatContext(task: ProTask, status: ProTaskStatus, workflowInstruction?: string, jiraAssistantPrompt?: string | null): string {
+  return [
+    buildTaskReferenceContext(task),
+    `Current ticket chat lane: ${STATUS_LABEL[status]}`,
+    TASK_OUTPUT_LANGUAGE_PROMPT,
+    TASK_STAGE_DRAFT_PROMPT,
+    TASK_DYNAMIC_WORKFLOW_PROMPT,
+    jiraAssistantPrompt?.trim()
+      ? `Jira Assistant prompt:\n${jiraAssistantPrompt.trim()}`
+      : '',
+    workflowInstruction?.trim()
+      ? `Status workflow prompt:\n${workflowInstruction.trim()}`
+      : '',
+    'Conversation rule: The user message below is about this ticket unless the user explicitly says otherwise. Do not ask the user to provide the ticket key, ticket URL, title, or description when this context already contains it.',
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildTicketReferenceEnvelope(context: string): string {
+  const trimmed = context.trim();
+  if (!trimmed) return '';
+  const safe = trimmed.replace(/<\/pikiclaw_context>/gi, '</pikiclaw-context>');
+  return [
+    '<pikiclaw_context type="jira-ticket">',
+    safe,
+    '</pikiclaw_context>',
+    '[Jira ticket context above was attached by Pikiclaw. Use it as the authoritative task background for the user message below; do not repeat it unless useful.]',
+  ].join('\n');
+}
+
+function buildTicketChatPrompt(
+  task: ProTask,
+  status: ProTaskStatus,
+  userPrompt?: string,
+  workflowInstruction?: string,
+  executionMode: 'direct' | 'interactive' = 'interactive',
+  jiraAssistantPrompt?: string | null,
+): string {
+  return [
+    buildTicketReferenceEnvelope(buildTicketChatContext(task, status, workflowInstruction, jiraAssistantPrompt)),
+    buildStatusChatPrompt(task, status, userPrompt, workflowInstruction, executionMode),
+  ].filter(Boolean).join('\n\n');
+}
+
 const ANALYZE_TICKET_PROMPT = [
   'Analyze this ticket before coding.',
-  'Return a concise Goal & Plan artifact with: goal, scope, assumptions, likely files, risks, and verification steps.',
-  'Do not start coding yet. End with a clear recommendation for the next step.',
+  'Explain what the task is and what needs to be done.',
+  'Inspect relevant local context, previous outputs, linked task context, and likely code/documentation areas.',
+  'Return a concise Goal & Plan artifact with: goal, scope, assumptions, open questions, likely files, risks, acceptance criteria, and verification steps.',
+  'Do not start coding yet. End by asking the user to confirm the goal and plan.',
 ].join(' ');
 
 const DAILY_CLARIFY_PROMPT = [
@@ -2000,8 +2616,153 @@ const REVISE_PLAN_PROMPT = [
 
 const START_CODING_PROMPT = [
   'Start coding this ticket based on the agreed Goal & Plan.',
-  'Keep changes minimal, inspect the relevant code paths first, and summarize the implementation and verification result when done.',
+  'Keep changes minimal, inspect the relevant code paths first, and summarize what changed, why, changed files, verification result, and remaining risk when done.',
+  'Stop in Review after coding. Do not commit, create an MR, update Jira remotely, or mark Done until the user approves.',
 ].join(' ');
+
+const REVIEW_TICKET_PROMPT = [
+  'Review the implementation against the agreed Goal & Plan.',
+  'Summarize what changed, why it changed, which files matter, what was verified, and any remaining risk.',
+  'Do not commit, create an MR, update Jira remotely, or mark the task done until the user approves the review.',
+].join(' ');
+
+const IMPROVE_TICKET_BACKGROUND_PROMPT = [
+  '[pikiclaw-ticket-background]',
+  '请帮我修订这个 ticket 的 Background，目标是形成“我自己的理解版本”。',
+  '重点回答：这个 ticket 要我干嘛、为什么要做、需要做什么、可能要改哪些代码/配置/接口、验收点是什么、还有哪些不确定。',
+  '请输出 Markdown，使用这些标题：我的理解、这个 ticket 要我干嘛、可能需要修改哪里、验收点、仍不确定。',
+  '不要开始编码；如果需要看代码，可以先检索和说明依据，然后给出可保存到 Background 的版本。',
+].join(' ');
+
+const CREATE_TICKET_BACKGROUND_PROMPT = [
+  '[pikiclaw-ticket-background]',
+  'Analyze this ticket and create the durable Background document.',
+  'Explain what the ticket is asking for, why it matters, likely modules/files, risks, and acceptance points.',
+  'Do not code. Save or present a Markdown Background artifact that can replace reading the original description later.',
+  'Use these sections: Background, Goal, Scope, Likely implementation areas, Acceptance points, Risks, Open questions.',
+].join(' ');
+
+const CREATE_CLARIFICATION_DOC_PROMPT = [
+  'Use the ticket description and our conversation so far to produce the clarification document.',
+  'Capture: goal, non-goals, confirmed decisions, acceptance criteria, implementation assumptions, dependencies, risks, and still-open questions.',
+  'Do not code. End with a concise confirmation checklist for the user.',
+].join(' ');
+
+const SKIP_CODING_ANALYZE_MR_PROMPT = [
+  'Coding was completed outside this Pikiclaw coding stage, or may already exist on a branch/MR.',
+  'Ask for the MR/branch link only if it is not already available in the task context.',
+  'Analyze the MR/branch against the clarified ticket: what changed, why it changed, important files, risks, and verification suggestions.',
+  'Save or present an Implementation / MR Analysis artifact. Do not modify code unless the user explicitly asks.',
+].join(' ');
+
+const SELF_TEST_CASES_PROMPT = [
+  'Help me plan self-test for this ticket before I execute it manually.',
+  'First confirm the test cases with me. Then produce a complete Test Cases artifact with setup, cases, steps, expected results, evidence needed, and pass/fail criteria.',
+  'Do not mark the task done yet.',
+].join(' ');
+
+const SELF_TEST_REPORT_PROMPT = [
+  'Use the agreed test cases plus the evidence/conclusions I provide to produce the final Test Report.',
+  'Track each case as passed, failed, blocked, or not run. Include screenshots/evidence references when available, remaining risks, and final recommendation.',
+  'When all cases are complete, summarize whether this ticket can be marked done.',
+].join(' ');
+
+type TicketArtifactTab = 'raw' | 'background' | 'clarification' | 'implementation' | 'test-cases' | 'test-report';
+type TicketDetailShelfTab = 'workflow' | TicketArtifactTab | 'files' | 'status';
+type TicketOutputItem = {
+  id: string;
+  kind: ProOutput['kind'] | 'stage';
+  title: string;
+  summary: string;
+  path?: string;
+  url?: string;
+  time: string;
+  stage?: ProTaskStage;
+};
+
+const TICKET_ARTIFACT_TABS: Array<{ id: TicketArtifactTab; label: string }> = [
+  { id: 'raw', label: 'Raw' },
+  { id: 'background', label: 'Background' },
+  { id: 'clarification', label: 'Clarification' },
+  { id: 'implementation', label: 'Implementation' },
+  { id: 'test-cases', label: 'Test Cases' },
+  { id: 'test-report', label: 'Test Report' },
+];
+
+const TICKET_ARTIFACT_EMPTY: Record<TicketArtifactTab, string> = {
+  raw: 'No raw ticket description.',
+  background: 'No background document yet.',
+  clarification: 'No clarification document yet.',
+  implementation: 'No implementation or MR analysis yet.',
+  'test-cases': 'No test cases yet.',
+  'test-report': 'No test report yet.',
+};
+
+function isTicketArtifactTab(value: TicketDetailShelfTab): value is TicketArtifactTab {
+  return TICKET_ARTIFACT_TABS.some(tab => tab.id === value);
+}
+
+function outputSearchText(output: Pick<TicketOutputItem, 'title' | 'summary' | 'kind'>): string {
+  return `${output.kind} ${output.title} ${output.summary || ''}`.toLowerCase();
+}
+
+function outputMentions(output: Pick<TicketOutputItem, 'title' | 'summary' | 'kind'>, patterns: RegExp[]): boolean {
+  const text = outputSearchText(output);
+  return patterns.some(pattern => pattern.test(text));
+}
+
+function isTicketBackgroundOutput(output: TicketOutputItem): boolean {
+  if (output.kind === 'background') return true;
+  return outputMentions(output, [
+    /\bticket background\b/,
+    /\bbackground report\b/,
+    /\bbackground document\b/,
+    /背景分析/,
+    /背景文档/,
+  ]);
+}
+
+function ticketArtifactOutputs(task: ProTask, outputs: TicketOutputItem[], tab: TicketArtifactTab): TicketOutputItem[] {
+  if (tab === 'background') return outputs.filter(isTicketBackgroundOutput);
+  if (tab === 'clarification') {
+    return outputs.filter(output => (
+      output.stage === 'focus'
+      || output.stage === 'refinement'
+      || outputMentions(output, [/clarification/, /goal\s*&?\s*plan/, /\bplan\b/, /澄清/, /验收/, /范围/])
+    ) && !isTicketBackgroundOutput(output));
+  }
+  if (tab === 'implementation') {
+    return outputs.filter(output => (
+      output.stage === 'coding'
+      || output.kind === 'diff'
+      || outputMentions(output, [/implementation/, /\bmr\b/, /merge request/, /\bpr\b/, /branch/, /diff/, /changed files?/, /working output/, /改动/, /实现/])
+    ) && output.kind !== 'background');
+  }
+  if (tab === 'test-cases') {
+    return outputs.filter(output => outputMentions(output, [/test cases?/, /test plan/, /测试用例/, /自测用例/]));
+  }
+  if (tab === 'test-report') {
+    return outputs.filter(output => (
+      output.stage === 'verification'
+      || outputMentions(output, [/test report/, /verification result/, /review result/, /测试报告/, /验证结果/, /自测报告/])
+    ) && !outputMentions(output, [/test cases?/, /test plan/, /测试用例/, /自测用例/]));
+  }
+  return [];
+}
+
+function latestRunForStage(task: ProTask, stage: ProTaskStage): StageRun | null {
+  return [...(task.stageRuns || [])]
+    .filter(run => run.stage === stage)
+    .sort((a, b) => stageRunTimeMs(b) - stageRunTimeMs(a))[0] || null;
+}
+
+function hasCompletedStage(task: ProTask, stage: ProTaskStage): boolean {
+  return (task.stageRuns || []).some(run => run.stage === stage && run.status === 'completed');
+}
+
+function hasAnalyzedTicketBackground(task: ProTask): boolean {
+  return (task.events || []).some(event => event.type === 'background-updated' && event.actor !== 'system');
+}
 
 function buildTaskSelectionSideChatPrompt(request: SelectionSideChatRequest, locale: string): string {
   if (locale.startsWith('zh')) {
@@ -2271,13 +3032,12 @@ function TaskDescriptionMarkdown({ task }: { task: ProTask }) {
 
 type TaskFlowStepStatus = 'done' | 'active' | 'waiting';
 
-const TASK_FLOW_STEPS: Array<{ key: string; label: string; stage?: ProTaskStage; completedBy?: ProTaskStatus[] }> = [
-  { key: 'refinement', label: 'Refinement', stage: 'refinement', completedBy: ['coding', 'resolved', 'done'] },
-  { key: 'coding', label: 'Coding', stage: 'coding', completedBy: ['resolved', 'done'] },
-  { key: 'self-test', label: 'Self test', stage: 'verification', completedBy: ['done'] },
-  { key: 'deploy', label: 'Deploy', stage: 'demo', completedBy: ['done'] },
-  { key: 'done', label: 'Done', completedBy: ['done'] },
-];
+type TaskWorkflowStep = {
+  key: string;
+  label: string;
+  stage?: ProTaskStage;
+  status: TaskFlowStepStatus;
+};
 
 function latestTaskStageRun(task: ProTask): StageRun | null {
   return [...(task.stageRuns || [])].sort((a, b) => {
@@ -2287,107 +3047,421 @@ function latestTaskStageRun(task: ProTask): StageRun | null {
   })[0] || null;
 }
 
+function stageRunTimeMs(run: StageRun): number {
+  const values = [run.completedAt, run.startedAt]
+    .map(value => value ? Date.parse(value) : NaN)
+    .filter(Number.isFinite) as number[];
+  return values.length ? Math.max(...values) : 0;
+}
+
+function stageRunIsOpen(run: StageRun): boolean {
+  return run.status === 'queued' || run.status === 'running' || run.status === 'waiting-user';
+}
+
+function isStaleStageRun(run: StageRun, now = Date.now()): boolean {
+  const time = stageRunTimeMs(run);
+  return stageRunIsOpen(run) && !!time && now - time > STALE_STAGE_RUN_MS;
+}
+
 function currentFlowStage(task: ProTask, busyStage?: ProTaskStage | null): ProTaskStage | 'done' {
   if (busyStage) return busyStage;
   const latestRun = latestTaskStageRun(task);
-  if (latestRun && latestRun.status !== 'completed') return latestRun.stage;
+  if (latestRun && latestRun.status !== 'completed' && !isStaleStageRun(latestRun)) return latestRun.stage;
   if (task.status === 'done') return 'done';
   if (task.status === 'coding') return 'coding';
   if (task.status === 'resolved') return 'verification';
   return 'refinement';
 }
 
-function taskFlowStatus(task: ProTask, step: (typeof TASK_FLOW_STEPS)[number], activeStage: ProTaskStage | 'done'): TaskFlowStepStatus {
-  if (step.completedBy?.includes(task.status)) return 'done';
-  if (step.stage && task.stageRuns?.some(run => run.stage === step.stage && run.status === 'completed')) return 'done';
-  if (!step.stage && task.status === 'done') return 'done';
-  if ((step.stage && activeStage === step.stage) || (!step.stage && activeStage === 'done')) return 'active';
-  return 'waiting';
+function latestConfirmableStageRun(task: ProTask): StageRun | null {
+  return [...(task.stageRuns || [])]
+    .filter(run => run.status === 'completed'
+      && !!(run.output?.summary || run.output?.diffSummary || run.output?.branch || run.output?.estimate)
+      && !(run.outputIds || []).length)
+    .sort((a, b) => stageRunTimeMs(b) - stageRunTimeMs(a))[0] || null;
 }
 
-function TaskFlowMap({ task, busyStage, compact = false }: { task: ProTask; busyStage?: ProTaskStage | null; compact?: boolean }) {
+function deriveTaskWorkflowSteps(task: ProTask, outputItems: TicketOutputItem[], busyStage?: ProTaskStage | null): TaskWorkflowStep[] {
   const activeStage = currentFlowStage(task, busyStage);
-  const latestRun = latestTaskStageRun(task);
-  const steps = TASK_FLOW_STEPS.map(step => ({ ...step, status: taskFlowStatus(task, step, activeStage) }));
-  const completed = steps.filter(step => step.status === 'done').length;
-  const activeStep = steps.find(step => step.status === 'active') || [...steps].reverse().find(step => step.status === 'done') || steps[0];
-  const activeStatusText = latestRun
-    ? `${STAGE_LABEL[latestRun.stage]} is ${latestRun.status}`
-    : activeStep
-      ? `${activeStep.label} is current`
-      : 'The first agent message will shape this flow.';
+  const backgroundDone = hasAnalyzedTicketBackground(task) || ticketArtifactOutputs(task, outputItems, 'background').some(output => !!output.stage);
+  const clarificationDone = ticketArtifactOutputs(task, outputItems, 'clarification').length > 0;
+  const implementationDone = ticketArtifactOutputs(task, outputItems, 'implementation').length > 0 || !!task.prUrl;
+  const testCasesDone = ticketArtifactOutputs(task, outputItems, 'test-cases').length > 0;
+  const testReportDone = ticketArtifactOutputs(task, outputItems, 'test-report').length > 0;
+  const isDaily = !!task.plannedDate && !isJiraLikeTask(task);
+  const isBug = /bug|defect|incident|hotfix/i.test([task.kind, task.title, task.description].filter(Boolean).join(' '));
+  const base: Array<{ key: string; label: string; stage?: ProTaskStage; done: boolean }> = isDaily
+    ? [
+        { key: 'goal', label: 'Goal', stage: 'refinement', done: clarificationDone || backgroundDone },
+        { key: 'work', label: 'Work', stage: 'coding', done: implementationDone },
+        { key: 'review', label: 'Review', stage: 'verification', done: testReportDone || task.status === 'done' },
+        { key: 'done', label: 'Done', done: task.status === 'done' },
+      ]
+    : [
+        { key: 'background', label: isBug ? 'Root cause' : 'Background', stage: 'refinement', done: backgroundDone },
+        { key: 'clarification', label: 'Clarification', stage: 'refinement', done: clarificationDone },
+        { key: 'implementation', label: task.prUrl ? 'MR analysis' : 'Implementation', stage: 'coding', done: implementationDone },
+        { key: 'test-cases', label: 'Test cases', stage: 'verification', done: testCasesDone },
+        { key: 'test-report', label: 'Test report', stage: 'verification', done: testReportDone },
+        { key: 'done', label: 'Done', done: task.status === 'done' },
+      ];
+  let activeAssigned = false;
+  return base.map((step, index) => {
+    if (step.done) return { key: step.key, label: step.label, stage: step.stage, status: 'done' };
+    const matchesActiveStage = step.stage ? step.stage === activeStage : activeStage === 'done';
+    const firstIncomplete = base.findIndex(candidate => !candidate.done) === index;
+    if (!activeAssigned && (firstIncomplete || matchesActiveStage || activeStage === 'done')) {
+      activeAssigned = true;
+      return { key: step.key, label: step.label, stage: step.stage, status: 'active' };
+    }
+    return { key: step.key, label: step.label, stage: step.stage, status: 'waiting' };
+  });
+}
 
+function TicketWorkflowCard({
+  title,
+  label,
+  status,
+  summary,
+  active,
+  busy,
+  onOpen,
+  actions,
+}: {
+  title: string;
+  label?: string;
+  status: 'done' | 'active' | 'waiting';
+  summary: string;
+  active?: boolean;
+  busy?: boolean;
+  onOpen?: () => void;
+  actions?: ReactNode;
+}) {
+  const content = (
+    <>
+      <div className="flex min-w-0 items-center gap-2">
+        <span
+          className={cn(
+            'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
+            status === 'done' && 'border-ok bg-ok text-white',
+            status === 'active' && 'border-primary bg-primary text-primary-fg',
+            status === 'waiting' && 'border-edge bg-panel text-fg-5',
+          )}
+        >
+          {status === 'done' ? (
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m5 12 4 4L19 6" />
+            </svg>
+          ) : status === 'active' ? (
+            <span className="h-1.5 w-1.5 rounded-full bg-current" />
+          ) : null}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2">{title}</span>
+        {label && <Badge variant={status === 'done' ? 'ok' : status === 'active' ? 'accent' : 'muted'} className="h-4 px-1.5 text-[9.5px]">{label}</Badge>}
+        {busy && <Spinner className="h-3 w-3 shrink-0" />}
+      </div>
+      <div className="mt-1.5 line-clamp-3 text-[11px] leading-relaxed text-fg-5">{summary}</div>
+    </>
+  );
   return (
     <div
       className={cn(
-        'w-full rounded-lg border border-edge/65 bg-panel/82 px-3.5 shadow-sm',
-        compact ? 'py-2.5' : 'py-3',
+        'rounded-lg border px-3 py-2.5 transition-colors',
+        active
+          ? 'border-primary/40 bg-primary/[0.075]'
+          : status === 'done'
+            ? 'border-ok/25 bg-ok/[0.055]'
+            : 'border-edge/55 bg-panel-alt/48',
       )}
     >
-      <div className="flex w-full min-w-0 items-center justify-between gap-3 text-left">
+      {onOpen ? <button type="button" onClick={onOpen} className="block w-full min-w-0 text-left">{content}</button> : content}
+      {actions && <div className="mt-2 flex flex-wrap gap-1.5">{actions}</div>}
+    </div>
+  );
+}
+
+function TicketWorkflowNodeRow({
+  title,
+  label,
+  status,
+  outputCount,
+  active,
+  busy,
+  onOpen,
+}: {
+  title: string;
+  label?: string;
+  status: 'done' | 'active' | 'waiting';
+  outputCount?: number;
+  active?: boolean;
+  busy?: boolean;
+  onOpen?: () => void;
+}) {
+  const content = (
+    <>
+      <span
+        className={cn(
+          'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
+          status === 'done' && 'border-ok bg-ok text-white',
+          status === 'active' && 'border-primary bg-primary text-primary-fg',
+          status === 'waiting' && 'border-edge bg-panel text-fg-5',
+        )}
+      >
+        {status === 'done' ? (
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m5 12 4 4L19 6" />
+          </svg>
+        ) : status === 'active' ? (
+          <span className="h-1.5 w-1.5 rounded-full bg-current" />
+        ) : null}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-fg-2">{title}</span>
+      {busy && <Spinner className="h-3 w-3 shrink-0" />}
+      {outputCount ? <span className="shrink-0 text-[10px] font-medium text-primary">{outputCount}</span> : null}
+      {label && <Badge variant={status === 'done' ? 'ok' : status === 'active' ? 'accent' : 'muted'} className="h-4 px-1.5 text-[9.5px]">{label}</Badge>}
+    </>
+  );
+  const className = cn(
+    'flex h-9 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left transition-colors',
+    active ? 'bg-primary/[0.08] ring-1 ring-primary/35' : 'hover:bg-panel-alt/70',
+    !onOpen && 'cursor-default opacity-70 hover:bg-transparent',
+  );
+  return onOpen ? (
+    <button type="button" onClick={onOpen} className={className}>
+      {content}
+    </button>
+  ) : (
+    <div className={className}>{content}</div>
+  );
+}
+
+function TicketSidebarWorkflow({
+  task,
+  outputItems,
+  activeTab,
+  busyStage,
+  onOpenArtifact,
+}: {
+  task: ProTask;
+  outputItems: TicketOutputItem[];
+  activeTab: TicketDetailShelfTab;
+  busyStage?: ProTaskStage | null;
+  onOpenArtifact: (tab: TicketArtifactTab) => void;
+  onAnalyzeBackground: () => void;
+  onClarify: () => void;
+  onStartCoding: () => void;
+  onSkipCoding: () => void;
+  onPlanSelfTest: () => void;
+  onWriteTestReport: () => void;
+  onMarkDone: () => void;
+}) {
+  const hasRaw = !!cleanTaskDescription(task);
+  const backgroundOutputs = ticketArtifactOutputs(task, outputItems, 'background');
+  const clarificationOutputs = ticketArtifactOutputs(task, outputItems, 'clarification');
+  const implementationOutputs = ticketArtifactOutputs(task, outputItems, 'implementation');
+  const testCaseOutputs = ticketArtifactOutputs(task, outputItems, 'test-cases');
+  const testReportOutputs = ticketArtifactOutputs(task, outputItems, 'test-report');
+  const hasBackgroundDraft = backgroundOutputs.length > 0;
+  const hasBackground = hasAnalyzedTicketBackground(task);
+  const hasClarification = hasCompletedStage(task, 'refinement') || hasCompletedStage(task, 'focus') || clarificationOutputs.length > 0;
+  const hasImplementation = hasCompletedStage(task, 'coding') || !!task.prUrl || implementationOutputs.length > 0;
+  const hasTestCases = testCaseOutputs.length > 0;
+  const hasTestReport = testReportOutputs.length > 0 || task.verificationRuns.some(run => !!run.result && run.result !== 'not-run');
+  const codingRun = latestRunForStage(task, 'coding');
+  const verificationRun = latestRunForStage(task, 'verification');
+  const refinementRun = latestRunForStage(task, 'refinement') || latestRunForStage(task, 'focus');
+  const busy = (stage: ProTaskStage) => busyStage === stage;
+  const stageActive = (stage: ProTaskStage) => busyStage === stage
+    || (stage === 'coding' && codingRun && stageRunIsOpen(codingRun))
+    || (stage === 'verification' && verificationRun && stageRunIsOpen(verificationRun))
+    || ((stage === 'refinement' || stage === 'focus') && refinementRun && stageRunIsOpen(refinementRun));
+  const showClarification = hasBackground || hasClarification;
+  const showCoding = hasClarification || hasImplementation || task.status === 'coding' || task.status === 'resolved' || task.status === 'done';
+  const showSelfTest = hasImplementation || hasTestCases || hasTestReport || task.status === 'resolved' || task.status === 'done';
+  const showDone = hasTestReport || task.status === 'resolved' || task.status === 'done';
+  const selfTestTab: TicketArtifactTab = hasTestReport ? 'test-report' : 'test-cases';
+  return (
+    <section className="mb-3 space-y-2">
+      <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[12px] font-semibold text-primary">Task progress</div>
-          {compact && (
-            <div className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
-              <span className={cn(
-                'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
-                activeStep?.status === 'done' && 'border-ok bg-ok text-white',
-                activeStep?.status === 'active' && 'border-primary bg-primary text-primary-fg',
-                (!activeStep || activeStep.status === 'waiting') && 'border-edge bg-panel text-fg-5',
-              )}>
-                {activeStep?.status === 'done' ? (
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="m5 12 4 4L19 6" />
-                  </svg>
-                ) : activeStep?.status === 'active' ? (
-                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                ) : null}
-              </span>
-              <span className="truncate">
-                <span className="font-semibold text-fg-3">{activeStep?.label || 'Current'}</span>
-                <span className="text-fg-5"> · {activeStatusText}</span>
-              </span>
-            </div>
-          )}
+          <div className="truncate text-[12px] font-semibold text-fg-2">Ticket workflow</div>
+          <div className="mt-0.5 truncate text-[11px] text-fg-5">{taskDisplayKey(task) || task.localKey || 'Task'} · {STATUS_LABEL[displayTaskStatus(task.status)]}</div>
         </div>
-        <span className="shrink-0 text-[10px] font-medium text-fg-5">{completed}/{steps.length} Complete</span>
+        <Badge variant={task.status === 'done' ? 'ok' : task.status === 'coding' ? 'accent' : task.status === 'resolved' ? 'warn' : 'muted'}>
+          {outputItems.length} outputs
+        </Badge>
       </div>
-      <div className={cn('h-1.5 overflow-hidden rounded-full bg-inset', compact ? 'mt-2' : 'mb-3 mt-3')}>
-        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(8, (completed / steps.length) * 100)}%` }} />
-      </div>
-      {!compact && (
-        <div className="space-y-1.5">
-          {steps.map(step => (
-            <div
-              key={step.key}
-              className={cn(
-                'flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors',
-                step.status === 'done' && 'border-ok/20 bg-ok/10 text-ok',
-                step.status === 'active' && 'border-primary/35 bg-primary/10 text-primary',
-                step.status === 'waiting' && 'border-edge/55 bg-panel-alt/48 text-fg-5',
-              )}
-            >
-              <span
-                className={cn(
-                  'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px]',
-                  step.status === 'done' && 'border-ok bg-ok text-white',
-                  step.status === 'active' && 'border-primary bg-primary text-primary-fg',
-                  step.status === 'waiting' && 'border-edge bg-panel text-fg-5',
-                )}
-              >
-                {step.status === 'done' ? (
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="m5 12 4 4L19 6" />
-                  </svg>
-                ) : step.status === 'active' ? (
-                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                ) : null}
-              </span>
-              <span className="min-w-0 truncate">{step.label}</span>
-            </div>
-          ))}
-        </div>
+      <div className="rounded-lg border border-edge/55 bg-panel-alt/35 p-1.5">
+        <TicketWorkflowNodeRow
+          title="Desc"
+          label="Raw"
+          status={hasRaw ? 'done' : 'waiting'}
+          outputCount={hasRaw ? 1 : 0}
+          active={activeTab === 'raw'}
+          onOpen={hasRaw ? () => onOpenArtifact('raw') : undefined}
+        />
+        <TicketWorkflowNodeRow
+          title="Background"
+          label={hasBackground ? 'Report' : hasBackgroundDraft ? 'Draft' : undefined}
+          status={hasBackground ? 'done' : stageActive('refinement') ? 'active' : 'waiting'}
+          outputCount={backgroundOutputs.length}
+          active={activeTab === 'background'}
+          busy={busy('refinement') && !hasBackground}
+          onOpen={backgroundOutputs.length ? () => onOpenArtifact('background') : undefined}
+        />
+      {showClarification && (
+        <TicketWorkflowNodeRow
+          title="Clarification"
+          label={hasClarification ? 'Doc' : undefined}
+          status={hasClarification ? 'done' : stageActive('refinement') ? 'active' : 'waiting'}
+          outputCount={clarificationOutputs.length}
+          active={activeTab === 'clarification'}
+          busy={busy('refinement') && hasBackground && !hasClarification}
+          onOpen={clarificationOutputs.length ? () => onOpenArtifact('clarification') : undefined}
+        />
       )}
+      {showCoding && (
+        <TicketWorkflowNodeRow
+          title="Coding / MR"
+          label={hasImplementation ? (task.prUrl ? 'MR' : 'Output') : undefined}
+          status={hasImplementation ? 'done' : stageActive('coding') ? 'active' : 'waiting'}
+          outputCount={implementationOutputs.length + (task.prUrl ? 1 : 0)}
+          active={activeTab === 'implementation'}
+          busy={busy('coding') && !hasImplementation}
+          onOpen={hasImplementation ? () => onOpenArtifact('implementation') : undefined}
+        />
+      )}
+      {showSelfTest && (
+        <TicketWorkflowNodeRow
+          title="Self Test"
+          label={hasTestReport ? 'Report' : hasTestCases ? 'Cases' : undefined}
+          status={hasTestReport ? 'done' : stageActive('verification') || hasTestCases ? 'active' : 'waiting'}
+          outputCount={testCaseOutputs.length + testReportOutputs.length}
+          active={activeTab === 'test-cases' || activeTab === 'test-report'}
+          busy={busy('verification') && !hasTestReport}
+          onOpen={(hasTestCases || hasTestReport) ? () => onOpenArtifact(selfTestTab) : undefined}
+        />
+      )}
+      {showDone && (
+        <TicketWorkflowNodeRow
+          title="Done"
+          status={task.status === 'done' ? 'done' : 'waiting'}
+          label={task.status === 'done' ? 'Closed' : undefined}
+          active={false}
+          onOpen={hasTestReport ? () => onOpenArtifact('test-report') : undefined}
+        />
+      )}
+      </div>
+    </section>
+  );
+}
+
+function TicketCurrentWorkflowAction({
+  task,
+  outputItems,
+  busyStage,
+  onAnalyzeBackground,
+  onConfirmOutput,
+}: {
+  task: ProTask;
+  outputItems: TicketOutputItem[];
+  busyStage?: ProTaskStage | null;
+  onAnalyzeBackground: () => void;
+  onConfirmOutput: () => void;
+}) {
+  const backgroundOutputs = ticketArtifactOutputs(task, outputItems, 'background');
+  const clarificationOutputs = ticketArtifactOutputs(task, outputItems, 'clarification');
+  const implementationOutputs = ticketArtifactOutputs(task, outputItems, 'implementation');
+  const testCaseOutputs = ticketArtifactOutputs(task, outputItems, 'test-cases');
+  const testReportOutputs = ticketArtifactOutputs(task, outputItems, 'test-report');
+  const confirmableRun = latestConfirmableStageRun(task);
+  const workflowSteps = deriveTaskWorkflowSteps(task, outputItems, busyStage);
+  const completedSteps = workflowSteps.filter(step => step.status === 'done').length;
+  const activeStep = workflowSteps.find(step => step.status === 'active') || workflowSteps[0];
+  const hasBackgroundDraft = backgroundOutputs.length > 0 || !!confirmableRun?.prompt.match(/\[pikiclaw-ticket-background\]/i);
+  const hasBackground = hasAnalyzedTicketBackground(task);
+  const hasClarification = hasCompletedStage(task, 'refinement') || hasCompletedStage(task, 'focus') || clarificationOutputs.length > 0;
+  const hasImplementation = hasCompletedStage(task, 'coding') || !!task.prUrl || implementationOutputs.length > 0;
+  const hasTestCases = testCaseOutputs.length > 0;
+  const hasTestReport = testReportOutputs.length > 0 || task.verificationRuns.some(run => !!run.result && run.result !== 'not-run');
+  const codingRun = latestRunForStage(task, 'coding');
+  const verificationRun = latestRunForStage(task, 'verification');
+  const refinementRun = latestRunForStage(task, 'refinement') || latestRunForStage(task, 'focus');
+  const busy = (stage: ProTaskStage) => busyStage === stage;
+  const stageActive = (stage: ProTaskStage) => busyStage === stage
+    || (stage === 'coding' && codingRun && stageRunIsOpen(codingRun))
+    || (stage === 'verification' && verificationRun && stageRunIsOpen(verificationRun))
+    || ((stage === 'refinement' || stage === 'focus') && refinementRun && stageRunIsOpen(refinementRun));
+  const actionButtonClass = 'h-7 px-2.5 text-[11px]';
+  const showStartBackground = !confirmableRun && activeStep?.key === 'background';
+  const activeLabel = confirmableRun
+    ? 'Review draft'
+    : activeStep?.label || (!hasBackground
+    ? 'Background'
+    : !hasClarification
+      ? 'Clarification'
+      : !hasImplementation
+        ? 'Coding / MR'
+        : !hasTestReport
+          ? 'Self Test'
+          : 'Done');
+  const activeSummary = confirmableRun
+    ? 'A draft output is ready. Continue asking questions in chat, or confirm it as the phase output.'
+    : !hasBackground
+    ? (hasBackgroundDraft ? 'Draft exists. Run background again to refresh the readable report.' : 'Create a readable understanding before planning.')
+    : !hasClarification
+      ? 'Clarify questions, decisions, boundaries, and acceptance criteria.'
+      : !hasImplementation
+        ? 'Start coding, or skip if work already exists on a branch/MR.'
+        : !hasTestCases && !hasTestReport
+          ? 'Plan test cases before manual self-test.'
+          : !hasTestReport
+            ? 'Test cases are ready; write the final report after evidence is provided.'
+            : task.status === 'done'
+              ? 'This ticket is complete.'
+              : 'Finish the ticket when implementation and evidence are acceptable.';
+  const activeStage: ProTaskStage = !hasImplementation && hasClarification ? 'coding' : !hasTestReport && hasImplementation ? 'verification' : 'refinement';
+  const active = stageActive(activeStage);
+
+  return (
+    <div className="mx-auto w-full max-w-[920px]">
+      <div className="rounded-lg border border-edge/65 bg-panel/86 px-3 py-2 shadow-sm backdrop-blur-xl">
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[12px] font-semibold text-fg-2">Current workflow action</span>
+            <Badge variant={task.status === 'done' ? 'ok' : confirmableRun ? 'warn' : task.status === 'coding' ? 'accent' : task.status === 'resolved' ? 'warn' : 'muted'}>
+              {activeLabel}
+            </Badge>
+            <span className="ml-auto shrink-0 text-[10px] font-medium text-fg-5">{completedSteps}/{workflowSteps.length} complete</span>
+          </div>
+          <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-center lg:gap-3">
+          <span
+            className={cn(
+              'hidden h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] lg:inline-flex',
+              active ? 'border-primary bg-primary text-primary-fg' : 'border-edge bg-panel text-fg-5',
+            )}
+          >
+            {active ? <Spinner className="h-3 w-3" /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[11px] text-fg-5">{activeSummary}</div>
+          </div>
+          <div className="flex w-full shrink-0 flex-wrap gap-1.5 lg:w-auto lg:justify-end">
+            {confirmableRun && (
+              <Button variant="primary" size="sm" className={actionButtonClass} disabled={!!busyStage} onClick={onConfirmOutput}>
+                Confirm output
+              </Button>
+            )}
+            {showStartBackground && (
+              <Button variant={!hasBackground ? 'secondary' : 'ghost'} size="sm" className={actionButtonClass} disabled={!!busyStage} onClick={onAnalyzeBackground}>
+                {busy('refinement') && !hasBackground ? <Spinner /> : null}
+                Start background
+              </Button>
+            )}
+          </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2637,14 +3711,17 @@ function TaskChatWindow({
   busyStage,
   agents,
   defaultAgent,
-  showProgress,
   onStartStatusChat,
   onOpenArtifacts,
   artifactCount,
+  workflowAction,
   onCreateSideChatFromSelection,
   onCreateTodoFromSelection,
   onOpenFileLink,
   onChatWorkdirChange,
+  onTaskUpdated,
+  buildChatPrompt,
+  buildChatContext,
   t,
 }: {
   task: ProTask;
@@ -2652,14 +3729,17 @@ function TaskChatWindow({
   busyStage?: ProTaskStage | null;
   agents: AgentRuntimeStatus[];
   defaultAgent: string;
-  showProgress?: boolean;
-  onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
+  onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string, displayPrompt?: string | null) => Promise<void>;
   onOpenArtifacts: () => void;
   artifactCount: number;
+  workflowAction?: ReactNode;
   onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
   onCreateTodoFromSelection?: TaskSelectionSessionHandler;
   onOpenFileLink?: OpenFileLinkHandler;
   onChatWorkdirChange?: (workdir: string) => void;
+  onTaskUpdated?: (task: ProTask) => void;
+  buildChatPrompt: (task: ProTask, status: ProTaskStatus, prompt?: string) => string;
+  buildChatContext: (task: ProTask, status: ProTaskStatus) => string;
   t: (key: string) => string;
 }) {
   const currentDefaultAgent = taskAssignee(task, defaultAgent);
@@ -2668,10 +3748,13 @@ function TaskChatWindow({
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [confirmingOutput, setConfirmingOutput] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedAgent, setSelectedAgent] = useState(currentDefaultAgent);
   const [chatStatus, setChatStatus] = useState<ProTaskStatus>(displayTaskStatus(task.status));
   const [sessionOverrides, setSessionOverrides] = useState<Record<string, StageSessionRef>>({});
+  const [ticketDetailOpen, setTicketDetailOpen] = useState(false);
+  const [taskTopScrolled, setTaskTopScrolled] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const agentOptions = useMemo(() => {
     const options = new Map<string, string>();
@@ -2687,6 +3770,7 @@ function TaskChatWindow({
   }, [agents, currentDefaultAgent, task.defaultAgent, task.execution?.agent]);
   useEffect(() => {
     setChatStatus(displayTaskStatus(task.status));
+    setSelectedAgent(taskAssignee(task, defaultAgent));
   }, [task.id, task.status]);
 
   useEffect(() => {
@@ -2713,18 +3797,28 @@ function TaskChatWindow({
   const activeRuns = runsByStatus.get(activeStatus) || [];
   const run = activeRuns[0] || null;
   const runSession = run ? sessionOverrides[run.id] || run.session : null;
+  const runIsStale = run ? isStaleStageRun(run) : false;
   const activeStage = STATUS_CHAT_STAGE[activeStatus];
   const agentDiffersFromRun = !!runSession && !!selectedAgent && runSession.agent !== selectedAgent;
   const missingSessionHistory = !!run && !!error && /session history file not found/i.test(error);
-  const canSendToRun = !!run && !agentDiffersFromRun && !missingSessionHistory;
+  const canSendToRun = !!run && !runIsStale && !agentDiffersFromRun && !missingSessionHistory;
   const fields = task.jiraFields || {};
   const brief = taskBriefSummary(task);
   const summaryFallback = 'No ticket description yet. Ask the agent to inspect the task and create a plan.';
   const ticketSummary = brief || summaryFallback;
+  const taskReferenceContext = useMemo(() => {
+    if (typeof buildChatContext === 'function') return buildChatContext(task, activeStatus);
+    return buildTicketChatContext(task, activeStatus);
+  }, [activeStatus, buildChatContext, task]);
   const meaningfulMessages = messages.filter(message => !!compactMessageText(message));
   const lastMeaningfulMessage = meaningfulMessages[meaningfulMessages.length - 1] || null;
-  const showOutputActions = !!lastMeaningfulMessage && lastMeaningfulMessage.role !== 'user';
   const chatWorkdir = runSession?.workdir || task.workdir || '';
+  const runDraftSummary = run
+    ? (run.output?.summary || run.output?.diffSummary || run.output?.branch || estimateSummary(run) || '').trim()
+    : '';
+  const runHasConfirmedOutput = !!run?.outputIds?.length;
+  const showOutputActions = runHasConfirmedOutput && !!lastMeaningfulMessage && lastMeaningfulMessage.role !== 'user';
+  const showConfirmOutput = !!run && run.status === 'completed' && !!runDraftSummary && !runHasConfirmedOutput;
 
   useEffect(() => {
     onChatWorkdirChange?.(chatWorkdir);
@@ -2737,7 +3831,26 @@ function TaskChatWindow({
     setReloadKey(0);
     setSelectedAgent(currentDefaultAgent);
     setChatStatus(displayTaskStatus(task.status));
+    setTicketDetailOpen(false);
+    setTaskTopScrolled(false);
   }, [currentDefaultAgent, task.id, task.status]);
+
+  const saveRuntimeSelection = useCallback((next: { agent?: string | null; model?: string | null; effort?: string | null }) => {
+    const agent = Object.prototype.hasOwnProperty.call(next, 'agent') ? next.agent || null : task.execution?.agent || null;
+    const model = Object.prototype.hasOwnProperty.call(next, 'model') ? next.model || null : task.execution?.model || null;
+    const effort = Object.prototype.hasOwnProperty.call(next, 'effort') ? next.effort || null : task.execution?.effort || null;
+    void api.updateProTaskExecution(task.id, {
+      ownerMode: agent ? 'agent' : task.execution?.ownerMode || 'status',
+      agent,
+      assistantId: task.execution?.assistantId || null,
+      defaultAssistantId: task.defaultAssistantId || null,
+      mode: task.execution?.mode,
+      model,
+      effort,
+    }).then(result => {
+      if (result.ok && result.task) onTaskUpdated?.(result.task);
+    }).catch(() => {});
+  }, [onTaskUpdated, task.defaultAssistantId, task.execution?.agent, task.execution?.assistantId, task.execution?.effort, task.execution?.mode, task.execution?.model, task.execution?.ownerMode, task.id]);
 
   useEffect(() => {
     if (!run) {
@@ -2772,12 +3885,12 @@ function TaskChatWindow({
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   };
 
-  const startChat = async (status: ProTaskStatus = activeStatus, prompt?: string) => {
+  const startChat = async (status: ProTaskStatus = activeStatus, prompt?: string, displayPrompt?: string | null) => {
     setError(null);
     setSending(true);
     setChatStatus(status);
     try {
-      await onStartStatusChat(task, status, prompt, selectedAgent);
+      await onStartStatusChat(task, status, prompt, selectedAgent, displayPrompt ?? prompt ?? null);
       setDraft('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start chat');
@@ -2797,7 +3910,12 @@ function TaskChatWindow({
     setSending(true);
     try {
       const session = runSession || run.session;
-      const result = await api.sendSessionMessage(session.workdir, session.agent, session.sessionId, prompt);
+      const messagePrompt = typeof buildChatPrompt === 'function'
+        ? buildChatPrompt(task, activeStatus, prompt)
+        : buildStatusChatPrompt(task, activeStatus, prompt);
+      const result = await api.sendSessionMessage(session.workdir, session.agent, session.sessionId, messagePrompt, {
+        displayPrompt: prompt,
+      });
       if (!result.ok) throw new Error(result.error || 'Failed to send message');
       setDraft('');
       setReloadKey(value => value + 1);
@@ -2821,6 +3939,22 @@ function TaskChatWindow({
     }
   }, [run, task.id]);
 
+  const confirmStageOutput = async () => {
+    if (!run || confirmingOutput) return;
+    setError(null);
+    setConfirmingOutput(true);
+    try {
+      const result = await api.confirmProTaskStageOutput(task.id, run.id);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to confirm output');
+      onTaskUpdated?.(result.task);
+      onOpenArtifacts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to confirm output');
+    } finally {
+      setConfirmingOutput(false);
+    }
+  };
+
   const taskHeader = (
     <div className="relative w-full overflow-hidden rounded-xl border border-edge/70 bg-panel/78 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur-xl">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_55%)]" />
@@ -2831,10 +3965,16 @@ function TaskChatWindow({
           </span>
           <span className="min-w-0 truncate text-[11px] text-fg-5">Ticket brief and current task context</span>
         </div>
-        <div className="line-clamp-3 border-t border-edge/45 pt-2 text-[12px] leading-relaxed text-fg-4">
-          {ticketSummary}
+        <div className={cn(
+          'border-t border-edge/45 pt-2 text-[12px] leading-relaxed text-fg-4',
+          ticketDetailOpen ? 'max-h-[260px] overflow-y-auto pr-1' : 'line-clamp-3',
+        )}>
+          {ticketDetailOpen ? <TaskDescriptionMarkdown task={task} /> : ticketSummary}
         </div>
         <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-edge/45 pt-2 text-[11px] text-fg-5">
+          <button type="button" onClick={() => setTicketDetailOpen(open => !open)} className="rounded-md px-1.5 py-1 font-medium text-primary transition hover:bg-panel-h hover:text-primary/80">
+            {ticketDetailOpen ? 'Collapse detail' : 'Full detail'}
+          </button>
           <button type="button" onClick={onOpenArtifacts} className="rounded-md px-1.5 py-1 transition hover:bg-panel-h hover:text-fg-3">
             {artifactCount ? `${artifactCount} output${artifactCount === 1 ? '' : 's'}` : 'Outputs open in the sidebar'}
           </button>
@@ -2843,13 +3983,9 @@ function TaskChatWindow({
     </div>
   );
   const taskTop = (
-    <div className="relative z-10 mx-auto w-full max-w-[920px] space-y-4">
-      <div className="min-w-0">{taskHeader}</div>
-      {showProgress && (
-        <div className="ml-auto w-full max-w-[360px]">
-          <TaskFlowMap task={task} busyStage={busyStage} />
-        </div>
-      )}
+    <div className={cn('relative z-10 mx-auto w-full max-w-[920px]', taskTopScrolled ? 'space-y-2' : 'space-y-3')}>
+      {!taskTopScrolled && <div className="min-w-0">{taskHeader}</div>}
+      <div className="sticky top-0 z-30">{workflowAction}</div>
     </div>
   );
 
@@ -2861,11 +3997,14 @@ function TaskChatWindow({
       ? 'incomplete'
       : run.status === 'completed'
         ? 'completed'
-        : 'running',
+        : runIsStale
+          ? 'incomplete'
+          : 'running',
+    runDetail: runIsStale ? 'This task run is stale; no active runtime is attached.' : null,
     runStartedAt: run.startedAt,
     runUpdatedAt: run.completedAt || run.startedAt,
     title: task.title,
-    lastQuestion: run.prompt,
+    lastQuestion: run.displayPrompt || run.prompt,
   } satisfies SessionInfo) : null;
 
   if (run && runSession && panelSession) {
@@ -2891,9 +4030,20 @@ function TaskChatWindow({
                 </div>
               </>
             )}
-            initialPendingPrompt={isPendingSession ? run.prompt : null}
+            initialPendingPrompt={isPendingSession ? run.displayPrompt || run.prompt : null}
             initialPendingCreatedAt={isPendingSession ? run.startedAt || null : null}
+            referenceContextPrompt={taskReferenceContext}
+            initialRuntimeSelection={{
+              agent: selectedAgent || task.execution?.agent || null,
+              model: task.execution?.model || null,
+              effort: task.execution?.effort || null,
+            }}
+            suppressLiveStreamState={runIsStale}
             onSessionChange={handleRunSessionChange}
+            onTranscriptScroll={({ scrollTop }) => setTaskTopScrolled(scrollTop > 24)}
+            onRuntimeSelectionChange={(next) => {
+              saveRuntimeSelection(next);
+            }}
             onOpenFileLink={onOpenFileLink}
             onCreateSideChatFromSelection={(request) => onCreateSideChatFromSelection?.(runSession, request)}
             onCreateTodoFromSelection={(request) => onCreateTodoFromSelection?.(runSession, request)}
@@ -2905,7 +4055,10 @@ function TaskChatWindow({
 
   return (
     <div className="relative h-full min-h-0 overflow-hidden bg-[var(--th-session-bg)]">
-      <div className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-[130px]">
+      <div
+        className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-[130px]"
+        onScroll={event => setTaskTopScrolled(event.currentTarget.scrollTop > 24)}
+      >
         <div className="pb-5">
           <div className="sticky top-0 z-20 -mx-5 mb-5 px-5 pb-3 pt-3">
             <div className="absolute inset-x-0 top-0 h-[calc(100%+28px)] bg-gradient-to-b from-[var(--th-session-bg)] via-[var(--th-session-bg)]/92 to-transparent" />
@@ -2973,6 +4126,29 @@ function TaskChatWindow({
                   </div>
                 );
               })}
+              {showConfirmOutput && (
+                <div className="flex justify-start">
+                  <div className="max-w-[min(100%,720px)] rounded-lg border border-primary/25 bg-primary/[0.055] px-3 py-2 shadow-sm">
+                    <div className="flex min-w-0 items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[12px] font-semibold text-fg-2">Draft output ready</div>
+                        <div className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-fg-5">{runDraftSummary}</div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="sm"
+                        className="h-7 shrink-0 px-2.5 text-[11px]"
+                        disabled={confirmingOutput}
+                        onClick={() => { void confirmStageOutput(); }}
+                      >
+                        {confirmingOutput ? <Spinner /> : null}
+                        Confirm output
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
               {showOutputActions && (
                 <div className="flex justify-start">
                   <div className="max-w-[78%] rounded-lg border border-edge/60 bg-panel-alt/68 px-3 py-2 shadow-sm">
@@ -2981,7 +4157,7 @@ function TaskChatWindow({
                       <button
                         type="button"
                         disabled={sending || busyStage === STATUS_CHAT_STAGE.coding}
-                        onClick={() => { void startChat('coding', START_CODING_PROMPT); }}
+                        onClick={() => { void startChat('coding', START_CODING_PROMPT, 'Start coding'); }}
                         className="inline-flex h-7 items-center rounded-md bg-primary px-2.5 text-[11px] font-semibold text-primary-fg transition hover:brightness-110 disabled:pointer-events-none disabled:opacity-45"
                       >
                         {busyStage === STATUS_CHAT_STAGE.coding ? <Spinner className="mr-1 h-3 w-3" /> : null}
@@ -2990,7 +4166,7 @@ function TaskChatWindow({
                       <button
                         type="button"
                         disabled={sending || busyStage === STATUS_CHAT_STAGE.refinement}
-                        onClick={() => { void startChat('refinement', REVISE_PLAN_PROMPT); }}
+                        onClick={() => { void startChat('refinement', REVISE_PLAN_PROMPT, 'Revise plan'); }}
                         className="inline-flex h-7 items-center rounded-md border border-edge/70 bg-panel px-2.5 text-[11px] font-medium text-fg-3 transition hover:border-primary/35 hover:bg-primary/[0.07] hover:text-fg disabled:pointer-events-none disabled:opacity-45"
                       >
                         Revise plan
@@ -3040,7 +4216,11 @@ function TaskChatWindow({
                 <span>Agent</span>
                 <select
                   value={selectedAgent}
-                  onChange={event => setSelectedAgent(event.target.value)}
+                  onChange={event => {
+                    const agent = event.target.value;
+                    setSelectedAgent(agent);
+                    saveRuntimeSelection({ agent });
+                  }}
                   className="max-w-[150px] appearance-none bg-transparent text-[11px] font-medium text-fg-3 outline-none"
                 >
                   {agentOptions.map(agent => <option key={agent.value} value={agent.value}>{agent.label}</option>)}
@@ -3052,7 +4232,7 @@ function TaskChatWindow({
                 disabled={sending || busyStage === activeStage || (!draft.trim() && canSendToRun)}
                 onClick={() => {
                   if (draft.trim()) void sendMessage();
-                  else void startChat(activeStatus);
+                  else void startChat(activeStatus, undefined, 'Start workflow');
                 }}
                 className={cn(
                   'inline-flex h-[30px] shrink-0 items-center justify-center gap-1 rounded-lg px-2 text-[11px] font-medium leading-none transition-all duration-200',
@@ -3158,6 +4338,7 @@ function TaskPropertiesPanel({
     updatedAt: jiraRemoteSyncField(task.description, 'Updated'),
   };
   const prs = linkedPullRequests(task);
+  const fixVersions = jiraTaskFixVersions(task);
   return (
     <div className="space-y-6">
       <section>
@@ -3172,6 +4353,11 @@ function TaskPropertiesPanel({
             >
               {VISIBLE_STATUSES.map(status => <option key={status} value={status}>{STATUS_LABEL[status]}</option>)}
             </select>
+          </TaskPropertyRow>
+          <TaskPropertyRow label="Jira status">
+            <span className={cn('truncate', fields.status || fallback.status ? 'text-fg-2' : 'text-fg-5')}>
+              {fields.status || fallback.status || '--'}
+            </span>
           </TaskPropertyRow>
           <TaskPropertyRow label="Priority">
             <span className={cn('truncate', fields.priority || fallback.priority ? 'text-fg-2' : 'text-fg-5')}>
@@ -3190,6 +4376,15 @@ function TaskPropertiesPanel({
             <span className={fields.dueDate || fallback.dueDate ? 'text-primary' : 'text-fg-5'}>
               {formatDateOnly(fields.dueDate || fallback.dueDate)}
             </span>
+          </TaskPropertyRow>
+          <TaskPropertyRow label="Fix version">
+            {fixVersions.length ? (
+              <span className="flex min-w-0 flex-wrap gap-1">
+                {fixVersions.slice(0, 3).map(version => <Badge key={version} variant="muted">{version}</Badge>)}
+              </span>
+            ) : (
+              <span className="text-fg-5">--</span>
+            )}
           </TaskPropertyRow>
           <TaskPropertyRow label="Project">
             <span className="truncate">{taskProjectName(task)}</span>
@@ -3316,6 +4511,7 @@ function JiraMetadataPanel({ task }: { task: ProTask }) {
     updatedAt: jiraRemoteSyncField(task.description, 'Updated'),
   };
   const labels = fields.labels || [];
+  const fixVersions = jiraTaskFixVersions(task);
   return (
     <section className="rounded-md border border-edge bg-panel-alt px-3 py-3">
       <div className="mb-3 text-[13px] font-semibold text-fg-2">Jira metadata</div>
@@ -3323,6 +4519,7 @@ function JiraMetadataPanel({ task }: { task: ProTask }) {
         <TaskMetaItem label="Key" value={taskDisplayKey(task)} mono />
         <TaskMetaItem label="Ticket type" value={fields.issueType || ticketType.label} />
         <TaskMetaItem label="Sprint" value={task.sprint} />
+        <TaskMetaItem label="Fix version" value={fixVersions.join(', ')} />
         <TaskMetaItem label="Status" value={fields.status || fallback.status} />
         <TaskMetaItem label="Assignee" value={fields.assignee || fallback.assignee} />
         <TaskMetaItem label="Reporter" value={fields.reporter || fallback.reporter} />
@@ -3338,6 +4535,286 @@ function JiraMetadataPanel({ task }: { task: ProTask }) {
             </div>
           </div>
         )}
+      </div>
+    </section>
+  );
+}
+
+function JiraRemoteUpdatePanel({
+  task,
+  onTaskUpdated,
+}: {
+  task: ProTask;
+  onTaskUpdated?: (task: ProTask) => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [draft, setDraft] = useState<JiraRemoteUpdateDraft>(() => remoteUpdateDraftFromTask(task));
+  const [runs, setRuns] = useState<JiraRemoteUpdateRun[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [busyRunId, setBusyRunId] = useState<string | null>(null);
+  const taskVersionKey = jiraTaskFixVersions(task).join('\u0000');
+  const fields = useMemo(() => remoteUpdateFieldsFromDraft(task, draft), [draft, task, taskVersionKey]);
+  const changedFields = Object.keys(fields) as Array<keyof JiraRemoteUpdateFields>;
+  const hasChanges = changedFields.length > 0;
+
+  const replaceRun = useCallback((run: JiraRemoteUpdateRun) => {
+    setRuns(prev => [run, ...prev.filter(item => item.id !== run.id)].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+  }, []);
+
+  const loadRuns = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await api.getJiraRemoteUpdates(task.id);
+      if (!result.ok) throw new Error(result.error || 'Failed to load Jira updates');
+      setRuns(result.runs || []);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to load Jira updates', false);
+    } finally {
+      setLoading(false);
+    }
+  }, [task.id, toast]);
+
+  useEffect(() => {
+    setDraft(remoteUpdateDraftFromTask(task));
+  }, [task.id, task.jiraFields?.status, task.jiraFields?.dueDate, task.sprint, taskVersionKey]);
+
+  useEffect(() => {
+    void loadRuns();
+  }, [loadRuns]);
+
+  const createDraft = async () => {
+    if (!task.jiraKey || !hasChanges || creating) return;
+    setCreating(true);
+    try {
+      const result = await api.createJiraRemoteUpdate(task.id, fields);
+      if (!result.ok || !result.run) throw new Error(result.error || 'Failed to create Jira update draft');
+      replaceRun(result.run);
+      toast('Jira update draft created');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to create Jira update draft', false);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const applyRun = async (run: JiraRemoteUpdateRun) => {
+    if (busyRunId) return;
+    setBusyRunId(run.id);
+    try {
+      const result = await api.applyJiraRemoteUpdate(run.id);
+      if (result.run) replaceRun(result.run);
+      if (result.task) {
+        onTaskUpdated?.(result.task);
+        setDraft(remoteUpdateDraftFromTask(result.task));
+      }
+      if (!result.ok) throw new Error(result.error || 'Jira update failed');
+      toast('Jira update applied');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Jira update failed', false);
+      void loadRuns();
+    } finally {
+      setBusyRunId(null);
+    }
+  };
+
+  const cancelRun = async (run: JiraRemoteUpdateRun) => {
+    if (busyRunId) return;
+    setBusyRunId(run.id);
+    try {
+      const result = await api.cancelJiraRemoteUpdate(run.id);
+      if (!result.ok || !result.run) throw new Error(result.error || 'Failed to cancel Jira update');
+      replaceRun(result.run);
+      toast('Jira update cancelled');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to cancel Jira update', false);
+    } finally {
+      setBusyRunId(null);
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
+      <div className="mb-3 flex min-w-0 items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[12px] font-semibold text-fg-3">Jira write-back</div>
+          <div className="mt-0.5 truncate text-[10.5px] text-fg-5">Remote changes require a draft confirmation.</div>
+        </div>
+        <Badge variant={task.jiraKey ? 'muted' : 'warn'}>{task.jiraKey || 'No Jira'}</Badge>
+      </div>
+      <div className="grid gap-2">
+        <label className="grid gap-1">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Status</span>
+          <Input
+            value={draft.status}
+            onChange={event => setDraft(prev => ({ ...prev, status: event.target.value }))}
+            placeholder="In Progress"
+            className="h-8 text-[12px]"
+            disabled={!task.jiraKey}
+          />
+        </label>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className="grid gap-1">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Sprint</span>
+            <Input
+              value={draft.sprint}
+              onChange={event => setDraft(prev => ({ ...prev, sprint: event.target.value }))}
+              placeholder="Sprint name"
+              className="h-8 text-[12px]"
+              disabled={!task.jiraKey}
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Due date</span>
+            <input
+              type="date"
+              value={draft.dueDate}
+              onChange={event => setDraft(prev => ({ ...prev, dueDate: event.target.value }))}
+              className="h-8 rounded-md border border-control-border bg-control px-2 text-[12px] text-fg outline-none transition hover:border-control-border-h focus:border-primary/50 disabled:opacity-45"
+              disabled={!task.jiraKey}
+            />
+          </label>
+        </div>
+        <label className="grid gap-1">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">Fix version</span>
+          <Input
+            value={draft.fixVersionsText}
+            onChange={event => setDraft(prev => ({ ...prev, fixVersionsText: event.target.value }))}
+            placeholder="version-a, version-b"
+            className="h-8 text-[12px]"
+            disabled={!task.jiraKey}
+          />
+        </label>
+      </div>
+      {hasChanges ? (
+        <div className="mt-3 rounded-md border border-primary/20 bg-primary/[0.045] px-2.5 py-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-primary">Pending diff</div>
+          <div className="space-y-1">
+            {changedFields.map(field => (
+              <div key={field} className="grid grid-cols-[74px_minmax(0,1fr)] gap-2 text-[11px]">
+                <span className="text-fg-5">{jiraRemoteFieldLabel(field as JiraRemoteUpdateRun['diff'][number]['field'])}</span>
+                <span className="min-w-0 truncate text-fg-3">{jiraRemoteValueLabel(fields[field] as any)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 rounded-md border border-edge/50 bg-inset/25 px-2.5 py-2 text-[11px] text-fg-5">
+          No remote field changes.
+        </div>
+      )}
+      <div className="mt-3 flex justify-end">
+        <Button variant="primary" size="sm" className="h-7 px-2 text-[11px]" disabled={!task.jiraKey || !hasChanges || creating} onClick={() => { void createDraft(); }}>
+          {creating ? <Spinner /> : null}
+          Draft update
+        </Button>
+      </div>
+      <div className="mt-4 border-t border-edge/55 pt-3">
+        <div className="mb-2 flex items-center justify-between text-[11px]">
+          <span className="font-semibold text-fg-4">Update history</span>
+          {loading && <Spinner />}
+        </div>
+        {runs.length === 0 ? (
+          <div className="rounded-md border border-dashed border-edge/60 px-2.5 py-3 text-[11px] text-fg-5">No Jira write-back runs yet.</div>
+        ) : (
+          <div className="space-y-2">
+            {runs.slice(0, 4).map(run => {
+              const busy = busyRunId === run.id;
+              const actionable = run.status === 'draft' || run.status === 'failed';
+              return (
+                <div key={run.id} className="rounded-md border border-edge/55 bg-panel/70 px-2.5 py-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Badge variant={jiraRemoteUpdateStatusTone(run.status)} className="h-4 px-1.5 text-[9.5px]">{run.status}</Badge>
+                    <span className="min-w-0 flex-1 truncate text-[10.5px] text-fg-5">{formatTime(run.updatedAt)}</span>
+                    {busy && <Spinner />}
+                  </div>
+                  <div className="mt-1 space-y-1">
+                    {(run.diff || []).slice(0, 4).map(item => (
+                      <div key={`${run.id}:${item.field}`} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 text-[11px]">
+                        <span className="text-fg-5">{jiraRemoteFieldLabel(item.field)}</span>
+                        <span className="min-w-0 truncate text-fg-3">{jiraRemoteValueLabel(item.from)} → {jiraRemoteValueLabel(item.to)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {run.error && <div className="mt-1 line-clamp-2 text-[11px] text-warn">{run.error}</div>}
+                  {actionable && (
+                    <div className="mt-2 flex justify-end gap-1.5">
+                      <Button variant="outline" size="sm" className="h-6 px-2 text-[10.5px]" disabled={!!busyRunId} onClick={() => { void cancelRun(run); }}>
+                        Cancel
+                      </Button>
+                      <Button variant="secondary" size="sm" className="h-6 px-2 text-[10.5px]" disabled={!!busyRunId} onClick={() => { void applyRun(run); }}>
+                        Apply
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TicketBackgroundEditor({
+  task,
+  output,
+  value,
+  dirty,
+  saving,
+  error,
+  onChange,
+  onSave,
+  onImproveWithAgent,
+}: {
+  task: ProTask;
+  output?: ProOutput | null;
+  value: string;
+  dirty: boolean;
+  saving: boolean;
+  error?: string | null;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  onImproveWithAgent: () => void;
+}) {
+  return (
+    <section className="rounded-lg border border-primary/20 bg-primary/[0.045] px-3 py-3">
+      <div className="mb-2 flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[12px] font-semibold text-fg-2">Ticket background</div>
+          <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">
+            Your working understanding of what this ticket asks you to do.
+          </div>
+        </div>
+        <Badge variant={dirty ? 'warn' : 'accent'}>{dirty ? 'Edited' : 'Saved'}</Badge>
+      </div>
+      <textarea
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        className="min-h-[220px] w-full resize-y rounded-md border border-edge bg-inset/55 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg outline-none transition focus:border-primary/45"
+        placeholder="Write your understanding of this ticket..."
+      />
+      {output?.path && (
+        <div className="mt-2 truncate font-mono text-[10px] text-fg-5" title={output.path}>
+          {output.path}
+        </div>
+      )}
+      {error && <div className="mt-2 text-[11px] text-err">{error}</div>}
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={onImproveWithAgent}>
+          Improve with agent
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          className="h-7 px-2 text-[11px]"
+          disabled={saving || !value.trim()}
+          onClick={onSave}
+        >
+          {saving ? <Spinner /> : null}
+          Save
+        </Button>
       </div>
     </section>
   );
@@ -3363,10 +4840,13 @@ function TaskDetail({
   onCreateSubtask,
   onUpdateSubtaskStatus,
   onStartSubtask,
+  onTaskUpdated,
   onReopen,
   onOpenLinkedTask,
   onCreateSideChatFromSelection,
   onCreateTodoFromSelection,
+  buildChatPrompt,
+  buildChatContext,
 }: {
   task: ProTask | null;
   linkCandidates: ProTask[];
@@ -3382,31 +4862,40 @@ function TaskDetail({
   subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
   onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void;
   onAssignAssistant: (task: ProTask, assistantId: string) => void;
-  onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
+  onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string, displayPrompt?: string | null) => Promise<void>;
   onSubtaskDraftChange: (draft: { title: string; description: string; assignedAgent: string; assistantId: string }) => void;
   onCreateSubtask: (task: ProTask) => void;
   onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
+  onTaskUpdated?: (task: ProTask) => void;
   onReopen?: (task: ProTask) => void;
   onOpenLinkedTask?: (task: ProTask) => void;
   onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
   onCreateTodoFromSelection?: TaskSelectionSessionHandler;
+  buildChatPrompt: (task: ProTask, status: ProTaskStatus, prompt?: string) => string;
+  buildChatContext: (task: ProTask, status: ProTaskStatus) => string;
 }) {
   const locale = useStore(s => s.locale);
+  const toast = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
-  const [shelfTab, setShelfTab] = useState<'outputs' | 'files' | 'status'>('outputs');
-  const [contextOpen, setContextOpen] = useState(false);
+  const [shelfTab, setShelfTab] = useState<TicketDetailShelfTab>('workflow');
+  const [contextOpen, setContextOpen] = useState(true);
   const [fileBrowserPath, setFileBrowserPath] = useState('');
   const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
   const [activeChatWorkdir, setActiveChatWorkdir] = useState('');
+  const [backgroundDraft, setBackgroundDraft] = useState('');
+  const [backgroundDirty, setBackgroundDirty] = useState(false);
+  const [backgroundSaving, setBackgroundSaving] = useState(false);
+  const [backgroundError, setBackgroundError] = useState<string | null>(null);
+  const [confirmingStageOutput, setConfirmingStageOutput] = useState(false);
   const sortedRuns = useMemo(() => [...(task?.stageRuns || [])].sort((a, b) => {
     const bTime = Date.parse(b.startedAt || b.completedAt || '');
     const aTime = Date.parse(a.startedAt || a.completedAt || '');
     return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
   }), [task?.stageRuns]);
-  const outputItems = useMemo(() => {
+  const outputItems = useMemo<TicketOutputItem[]>(() => {
     if (!task) return [];
-    const explicit = (task.outputs || []).map(output => ({
+    return (task.outputs || []).map(output => ({
       id: output.id,
       kind: output.kind,
       title: output.title,
@@ -3414,29 +4903,15 @@ function TaskDetail({
       path: output.path,
       time: output.createdAt,
       stage: output.stageRunId ? sortedRuns.find(run => run.id === output.stageRunId)?.stage : undefined,
-    }));
-    const fromRuns = sortedRuns
-      .filter(run => run.output?.summary || run.output?.diffSummary || run.output?.branch || run.output?.estimate)
-      .map(run => ({
-        id: run.id,
-        kind: 'stage' as const,
-        title: run.stage === 'refinement'
-          ? (task.plannedDate ? 'Goal' : 'Goal & Plan')
-          : run.stage === 'coding'
-            ? (task.plannedDate ? 'Working output' : 'Implementation notes')
-            : run.stage === 'verification'
-              ? (task.plannedDate ? 'Review result' : 'Verification result')
-              : `${STAGE_LABEL[run.stage]} summary`,
-        summary: run.output?.summary || run.output?.diffSummary || run.output?.branch || estimateSummary(run) || '',
-        time: run.completedAt || run.startedAt || '',
-        stage: run.stage,
-      }));
-    return [...explicit, ...fromRuns].sort((a, b) => {
+    })).sort((a, b) => {
       const bTime = Date.parse(b.time || '');
       const aTime = Date.parse(a.time || '');
       return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
     });
   }, [sortedRuns, task]);
+  const backgroundOutput = useMemo(() => {
+    return (task?.outputs || []).find(output => output.kind === 'background') || null;
+  }, [task?.outputs]);
   const fileItems = useMemo(() => {
     if (!task) return [];
     const seen = new Set<string>();
@@ -3458,10 +4933,14 @@ function TaskDetail({
   const latestRunWorkdir = sortedRuns.find(run => run.session?.workdir)?.session.workdir || '';
   const inferredWorkdir = latestRunWorkdir || task?.workdir || fallbackWorkdir || '';
   const previewWorkdir = activeChatWorkdir || inferredWorkdir;
+  const artifactOutputItems = useMemo(() => {
+    if (!task || !isTicketArtifactTab(shelfTab)) return outputItems;
+    return ticketArtifactOutputs(task, outputItems, shelfTab);
+  }, [outputItems, shelfTab, task]);
   const selectedOutput = useMemo(() => {
-    if (!outputItems.length) return null;
-    return outputItems.find(output => output.id === selectedOutputId) || outputItems[0];
-  }, [outputItems, selectedOutputId]);
+    if (!artifactOutputItems.length) return null;
+    return artifactOutputItems.find(output => output.id === selectedOutputId) || artifactOutputItems[0];
+  }, [artifactOutputItems, selectedOutputId]);
   const selectedOutputMarkdownPath = selectedOutput ? outputMarkdownPath(selectedOutput) : null;
   const handleOpenFileLink = useCallback((target: FileLinkTarget) => {
     const workdir = previewWorkdir.trim();
@@ -3471,13 +4950,126 @@ function TaskDetail({
     if (workdir) setFileBrowserPath(resolvedPath);
     void api.openInEditor(resolvedPath).catch(() => {});
   }, [previewWorkdir]);
-  useEffect(() => {
+  const saveBackground = useCallback(async () => {
+    if (!task || backgroundSaving) return;
+    setBackgroundSaving(true);
+    setBackgroundError(null);
+    try {
+      const result = await api.updateProTaskBackground(task.id, backgroundDraft);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to save background');
+      onTaskUpdated?.(result.task);
+      setBackgroundDirty(false);
+    } catch (err) {
+      setBackgroundError(err instanceof Error ? err.message : 'Failed to save background');
+    } finally {
+      setBackgroundSaving(false);
+    }
+  }, [backgroundDraft, backgroundSaving, onTaskUpdated, task]);
+  const improveBackgroundWithAgent = useCallback(() => {
+    if (!task) return;
     setContextOpen(false);
-    setShelfTab('outputs');
+    void onStartStatusChat(task, 'refinement', [
+      IMPROVE_TICKET_BACKGROUND_PROMPT,
+      backgroundDraft.trim() ? `\n\nCurrent Background:\n${backgroundDraft.trim()}` : '',
+    ].join(''), undefined, 'Improve background');
+  }, [backgroundDraft, onStartStatusChat, task]);
+  const openArtifactTab = useCallback((tab: TicketArtifactTab) => {
+    setContextOpen(true);
+    setShelfTab(tab);
+    setSelectedOutputId(null);
+  }, []);
+  const updateStatusThenStartChat = useCallback(async (status: ProTaskStatus, prompt: string, displayPrompt: string) => {
+    if (!task) return;
+    let nextTask = task;
+    if (task.status !== status) {
+      const result = await api.updateProTaskStatus(task.id, status);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to update task status');
+      nextTask = result.task;
+      onTaskUpdated?.(nextTask);
+    }
+    await onStartStatusChat(nextTask, status, prompt, undefined, displayPrompt);
+  }, [onStartStatusChat, onTaskUpdated, task]);
+  const analyzeBackground = useCallback(() => {
+    if (!task) return;
+    void updateStatusThenStartChat('refinement', CREATE_TICKET_BACKGROUND_PROMPT, 'Start background').catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to start background analysis', false);
+    });
+  }, [task, toast, updateStatusThenStartChat]);
+  const createClarificationDoc = useCallback(() => {
+    openArtifactTab('clarification');
+    void updateStatusThenStartChat('refinement', CREATE_CLARIFICATION_DOC_PROMPT, 'Start clarification').catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to start clarification', false);
+    });
+  }, [openArtifactTab, toast, updateStatusThenStartChat]);
+  const startCodingFromLifecycle = useCallback(() => {
+    openArtifactTab('implementation');
+    void updateStatusThenStartChat('coding', START_CODING_PROMPT, 'Start coding').catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to start coding', false);
+    });
+  }, [openArtifactTab, toast, updateStatusThenStartChat]);
+  const skipCodingAndAnalyze = useCallback(() => {
+    openArtifactTab('implementation');
+    void updateStatusThenStartChat('resolved', SKIP_CODING_ANALYZE_MR_PROMPT, 'Skip coding and analyze MR').catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to start MR analysis', false);
+    });
+  }, [openArtifactTab, toast, updateStatusThenStartChat]);
+  const planSelfTest = useCallback(() => {
+    openArtifactTab('test-cases');
+    void updateStatusThenStartChat('resolved', SELF_TEST_CASES_PROMPT, 'Plan self test').catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to start self-test planning', false);
+    });
+  }, [openArtifactTab, toast, updateStatusThenStartChat]);
+  const writeTestReport = useCallback(() => {
+    openArtifactTab('test-report');
+    void updateStatusThenStartChat('resolved', SELF_TEST_REPORT_PROMPT, 'Write test report').catch(err => {
+      toast(err instanceof Error ? err.message : 'Failed to start test report', false);
+    });
+  }, [openArtifactTab, toast, updateStatusThenStartChat]);
+  const markTaskDone = useCallback(async () => {
+    if (!task || task.status === 'done') return;
+    try {
+      const result = await api.updateProTaskStatus(task.id, 'done');
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to complete task');
+      onTaskUpdated?.(result.task);
+      toast('Task completed');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to complete task', false);
+    }
+  }, [onTaskUpdated, task, toast]);
+  const confirmLatestStageOutput = useCallback(async () => {
+    if (!task || confirmingStageOutput) return;
+    const run = latestConfirmableStageRun(task);
+    if (!run) {
+      toast('No draft output to confirm', false);
+      return;
+    }
+    setConfirmingStageOutput(true);
+    try {
+      const result = await api.confirmProTaskStageOutput(task.id, run.id);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to confirm output');
+      onTaskUpdated?.(result.task);
+      setContextOpen(true);
+      setShelfTab(run.stage === 'coding' ? 'implementation' : run.stage === 'verification' ? 'test-report' : 'background');
+      toast('Output confirmed');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to confirm output', false);
+    } finally {
+      setConfirmingStageOutput(false);
+    }
+  }, [confirmingStageOutput, onTaskUpdated, task, toast]);
+  useEffect(() => {
+    setContextOpen(true);
+    setShelfTab('workflow');
     setFileBrowserPath(inferredWorkdir);
     setSelectedOutputId(null);
     setActiveChatWorkdir('');
+    setBackgroundError(null);
   }, [inferredWorkdir, task?.id]);
+  useEffect(() => {
+    setBackgroundDraft(backgroundOutput?.summary || '');
+    setBackgroundDirty(false);
+    setBackgroundError(null);
+  }, [backgroundOutput?.id, backgroundOutput?.summary, task?.id]);
   if (!task) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 bg-panel px-6 text-center">
@@ -3496,6 +5088,7 @@ function TaskDetail({
   const assignedAssistantId = task.execution?.assistantId || task.defaultAssistantId || '';
   const assignAssistantOptions = taskAssistantOptions(assistants, assignedAssistantId);
   const displayKey = taskDisplayKey(task);
+  const jiraUrl = jiraTaskUrl(task);
   const workspaceOptions = new Map<string, string>();
   const addWorkspace = (path?: string | null, label?: string | null) => {
     const cleanPath = path?.trim();
@@ -3507,11 +5100,20 @@ function TaskDetail({
   addWorkspace(task.workdir);
   addWorkspace(fallbackWorkdir, 'Current workspace');
   const currentWorkdir = inferredWorkdir;
-  const shelfTabs: Array<{ id: 'outputs' | 'files' | 'status'; label: string; count?: number }> = [
-    { id: 'outputs', label: 'Output', count: outputItems.length },
-    { id: 'files', label: 'File', count: fileItems.length },
+  const shelfTabs: Array<{ id: TicketDetailShelfTab; label: string; count?: number }> = [
+    { id: 'workflow', label: 'Task workflow' },
+    { id: 'files', label: 'Files', count: fileItems.length },
     { id: 'status', label: 'Overview' },
   ];
+  const workflowAction = (
+    <TicketCurrentWorkflowAction
+      task={task}
+      outputItems={outputItems}
+      busyStage={busy?.taskId === task.id ? busy.stage : null}
+      onAnalyzeBackground={analyzeBackground}
+      onConfirmOutput={() => { void confirmLatestStageOutput(); }}
+    />
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg bg-[var(--th-session-bg)]">
@@ -3519,7 +5121,20 @@ function TaskDetail({
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <TicketTypeIcon task={task} />
           {displayKey && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{displayKey}</span>}
-          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg" title={task.title}>{task.title}</span>
+          {jiraUrl ? (
+            <a
+              className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg transition-colors hover:text-primary hover:underline"
+              href={jiraUrl}
+              target="_blank"
+              rel="noreferrer"
+              title={`Open in Jira: ${jiraUrl}`}
+              aria-label={`Open ${displayKey || task.title} in Jira`}
+            >
+              {task.title}
+            </a>
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg" title={task.title}>{task.title}</span>
+          )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <Button
@@ -3545,23 +5160,31 @@ function TaskDetail({
           : 'grid-cols-1',
       )}>
         <main className="min-h-0 min-w-0 overflow-hidden">
-          <div className="h-full min-h-0 w-full">
+          <div className="flex h-full min-h-0 w-full flex-col">
+            <div className="min-h-0 flex-1">
             <TaskChatWindow
               task={task}
               actions={actions}
               agents={agents}
               defaultAgent={defaultAgent}
               busyStage={busy?.taskId === task.id ? busy.stage : null}
-              showProgress={!contextOpen}
               onStartStatusChat={onStartStatusChat}
-              onOpenArtifacts={() => setShelfTab('outputs')}
+              onOpenArtifacts={() => {
+                setContextOpen(true);
+                setShelfTab('workflow');
+              }}
               artifactCount={outputItems.length}
+              workflowAction={workflowAction}
               onCreateSideChatFromSelection={onCreateSideChatFromSelection}
               onCreateTodoFromSelection={onCreateTodoFromSelection}
               onOpenFileLink={handleOpenFileLink}
               onChatWorkdirChange={setActiveChatWorkdir}
+              onTaskUpdated={onTaskUpdated}
+              buildChatPrompt={buildChatPrompt}
+              buildChatContext={buildChatContext}
               t={t}
             />
+            </div>
           </div>
         </main>
 
@@ -3587,6 +5210,22 @@ function TaskDetail({
                   );
                 })}
               </div>
+              {shelfTab === 'workflow' && (
+                <TicketSidebarWorkflow
+                  task={task}
+                  outputItems={outputItems}
+                  activeTab={shelfTab}
+                  busyStage={busy?.taskId === task.id ? busy.stage : null}
+                  onOpenArtifact={openArtifactTab}
+                  onAnalyzeBackground={analyzeBackground}
+                  onClarify={createClarificationDoc}
+                  onStartCoding={startCodingFromLifecycle}
+                  onSkipCoding={skipCodingAndAnalyze}
+                  onPlanSelfTest={planSelfTest}
+                  onWriteTestReport={writeTestReport}
+                  onMarkDone={() => { void markTaskDone(); }}
+                />
+              )}
               {shelfTab === 'status' && (
                 <div className="space-y-4">
                   <section className="rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
@@ -3670,6 +5309,7 @@ function TaskDetail({
                       <dd className="min-w-0"><TaskPrField task={task} onMetaChange={onMetaChange} /></dd>
                     </dl>
                   </section>
+                  <JiraRemoteUpdatePanel task={task} onTaskUpdated={onTaskUpdated} />
                 </div>
               )}
 
@@ -3734,18 +5374,72 @@ function TaskDetail({
                 </div>
               )}
 
-              {shelfTab === 'outputs' && (
+              {isTicketArtifactTab(shelfTab) && (
                 <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-3">
-                  {outputItems.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center text-[12px] text-fg-5">
-                      {task.plannedDate
-                        ? 'Goal, working output, review results, diffs, and linked artifacts will appear here.'
-                        : 'Goal & Plan, implementation notes, diffs, links, and verification results will appear here.'}
+                  {shelfTab === 'raw' ? (
+                    <section className="min-h-0 overflow-y-auto rounded-lg border border-edge/65 bg-panel-alt/55 px-3 py-3">
+                      <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                        <div className="text-[12px] font-semibold text-fg-2">Raw ticket description</div>
+                        {jiraUrl && (
+                          <a className="text-[11px] font-semibold text-primary hover:underline" href={jiraUrl} target="_blank" rel="noreferrer">
+                            Jira
+                          </a>
+                        )}
+                      </div>
+                      <div className="prose prose-sm max-w-none text-[12px] leading-relaxed text-fg-3 prose-p:my-2 prose-li:my-1 prose-strong:text-fg">
+                        {cleanTaskDescription(task) ? <TaskDescriptionMarkdown task={task} /> : TICKET_ARTIFACT_EMPTY.raw}
+                      </div>
+                    </section>
+                  ) : shelfTab === 'background' ? (
+                    <TicketBackgroundEditor
+                      task={task}
+                      output={backgroundOutput}
+                      value={backgroundDraft}
+                      dirty={backgroundDirty}
+                      saving={backgroundSaving}
+                      error={backgroundError}
+                      onChange={(value) => {
+                        setBackgroundDraft(value);
+                        setBackgroundDirty(true);
+                      }}
+                      onSave={() => { void saveBackground(); }}
+                      onImproveWithAgent={improveBackgroundWithAgent}
+                    />
+                  ) : artifactOutputItems.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-edge/70 px-3 py-8 text-center">
+                      <div className="text-[12px] font-semibold text-fg-4">{TICKET_ARTIFACT_EMPTY[shelfTab]}</div>
+                      <div className="mt-3 flex flex-wrap justify-center gap-2">
+                        {shelfTab === 'clarification' && (
+                          <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={!!busy} onClick={createClarificationDoc}>
+                            Start
+                          </Button>
+                        )}
+                        {shelfTab === 'implementation' && (
+                          <>
+                            <Button variant="secondary" size="sm" className="h-7 px-2 text-[11px]" disabled={!!busy} onClick={startCodingFromLifecycle}>
+                              Code
+                            </Button>
+                            <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={!!busy} onClick={skipCodingAndAnalyze}>
+                              Skip
+                            </Button>
+                          </>
+                        )}
+                        {shelfTab === 'test-cases' && (
+                          <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={!!busy} onClick={planSelfTest}>
+                            Plan
+                          </Button>
+                        )}
+                        {shelfTab === 'test-report' && (
+                          <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" disabled={!!busy} onClick={writeTestReport}>
+                            Report
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     <>
                       <div className="min-h-0 space-y-2 overflow-y-auto">
-                        {outputItems.map(output => {
+                        {artifactOutputItems.map(output => {
                           const active = selectedOutput?.id === output.id;
                           return (
                             <button
@@ -3823,13 +5517,20 @@ function TaskInlineWorkbench({
   onCreateSubtask,
   onUpdateSubtaskStatus,
   onStartSubtask,
+  onTaskUpdated,
   onReopen,
+  onSyncJira,
+  syncingJira,
+  onResetTask,
+  resetting,
   onOpenFull,
   dailyItem,
   onBackToAction,
   onOpenLinkedTask,
   onCreateSideChatFromSelection,
   onCreateTodoFromSelection,
+  buildChatPrompt,
+  buildChatContext,
 }: {
   task: ProTask | null;
   linkCandidates: ProTask[];
@@ -3844,19 +5545,32 @@ function TaskInlineWorkbench({
   subtaskDraft: { title: string; description: string; assignedAgent: string; assistantId: string };
   onMetaChange: (task: ProTask, patch: TaskMetaPatch) => void;
   onAssignAssistant: (task: ProTask, assistantId: string) => void;
-  onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string) => Promise<void>;
+  onStartStatusChat: (task: ProTask, status: ProTaskStatus, prompt?: string, agent?: string, displayPrompt?: string | null) => Promise<void>;
   onSubtaskDraftChange: (draft: { title: string; description: string; assignedAgent: string; assistantId: string }) => void;
   onCreateSubtask: (task: ProTask) => void;
   onUpdateSubtaskStatus: (task: ProTask, subtaskId: string, status: ProSubtaskStatus) => void;
   onStartSubtask: (task: ProTask, subtaskId: string) => void;
+  onTaskUpdated?: (task: ProTask) => void;
   onReopen?: (task: ProTask) => void;
+  onSyncJira?: (task: ProTask) => void;
+  syncingJira?: boolean;
+  onResetTask?: (task: ProTask) => void;
+  resetting?: boolean;
   onOpenFull: () => void;
   dailyItem?: DailyItem | null;
   onBackToAction?: (item: DailyItem) => void;
   onOpenLinkedTask?: (task: ProTask) => void;
   onCreateSideChatFromSelection?: TaskSelectionSessionHandler<SelectionSideChatRequest>;
   onCreateTodoFromSelection?: TaskSelectionSessionHandler;
+  buildChatPrompt: (task: ProTask, status: ProTaskStatus, prompt?: string) => string;
+  buildChatContext: (task: ProTask, status: ProTaskStatus) => string;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [task?.id]);
+
   if (!task) {
     return (
       <aside className="hidden min-h-0 border-l border-edge/55 bg-[var(--th-session-bg)] 2xl:flex 2xl:flex-col">
@@ -3892,10 +5606,13 @@ function TaskInlineWorkbench({
         onCreateSubtask={onCreateSubtask}
         onUpdateSubtaskStatus={onUpdateSubtaskStatus}
         onStartSubtask={onStartSubtask}
-        onReopen={onReopen}
-        onOpenLinkedTask={onOpenLinkedTask}
+	        onTaskUpdated={onTaskUpdated}
+		        onReopen={onReopen}
+		        onOpenLinkedTask={onOpenLinkedTask}
         onCreateSideChatFromSelection={onCreateSideChatFromSelection}
         onCreateTodoFromSelection={onCreateTodoFromSelection}
+        buildChatPrompt={buildChatPrompt}
+        buildChatContext={buildChatContext}
         actions={(
           <>
             {dailyItem && onBackToAction && (
@@ -3903,13 +5620,142 @@ function TaskInlineWorkbench({
                 Back to action
               </Button>
             )}
-            <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={onOpenFull}>
-              Open
-            </Button>
-          </>
-        )}
-      />
+	            <Button variant="outline" size="sm" className="h-7 shrink-0 px-2 text-[11px]" onClick={onOpenFull}>
+	              Open
+	            </Button>
+            {((onSyncJira && task.jiraKey) || onResetTask) && (
+              <div className="relative z-[60]">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="!h-7 !w-7 text-[12px]"
+                  aria-label="Task actions"
+                  aria-expanded={menuOpen}
+                  onClick={event => {
+                    event.stopPropagation();
+                    setMenuOpen(open => !open);
+                  }}
+                >
+                  ...
+                </Button>
+                {menuOpen && (
+                  <div
+                    className="absolute right-0 top-[calc(100%+8px)] z-[120] w-40 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
+                    role="menu"
+                    onClick={event => event.stopPropagation()}
+                  >
+                    {onSyncJira && task.jiraKey && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={!!syncingJira}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          onSyncJira(task);
+                        }}
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-fg-3 transition-colors hover:bg-panel-h hover:text-fg disabled:pointer-events-none disabled:opacity-50"
+                      >
+                        {syncingJira ? (
+                          <Spinner />
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M21 12a9 9 0 0 1-15 6.7" />
+                            <path d="M3 12a9 9 0 0 1 15-6.7" />
+                            <path d="M18 3v5h-5" />
+                            <path d="M6 21v-5h5" />
+                          </svg>
+                        )}
+                        <span>Sync Jira</span>
+                      </button>
+                    )}
+                    {onResetTask && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={!!resetting}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          onResetTask(task);
+                        }}
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-warn transition-colors hover:bg-warn/[0.10] disabled:pointer-events-none disabled:opacity-50"
+                      >
+                        {resetting ? (
+                          <Spinner />
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M3 12a9 9 0 1 0 3-6.7" />
+                            <path d="M3 4v6h6" />
+                          </svg>
+                        )}
+                        <span>Reset task</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+	          </>
+	        )}
+	      />
     </aside>
+  );
+}
+
+function ClosedJiraTasksSection({
+  tasks,
+  selectedTask,
+  reopeningTaskId,
+  onOpenTask,
+  onReopen,
+}: {
+  tasks: ProTask[];
+  selectedTask: ProTask | null;
+  reopeningTaskId: string | null;
+  onOpenTask: (task: ProTask) => void;
+  onReopen: (task: ProTask) => void;
+}) {
+  if (tasks.length === 0) return null;
+  return (
+    <section className="mt-3 rounded-xl border border-edge/50 bg-panel-alt/35 px-3 py-3">
+      <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-[12px] font-semibold text-fg-2">Closed</div>
+          <div className="truncate text-[10px] text-fg-5">Remote status is closed</div>
+        </div>
+        <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{tasks.length}</Badge>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {tasks.slice(0, 12).map(task => (
+          <div
+            key={task.id}
+            className={cn(
+              'min-w-0 rounded-lg border border-edge/55 bg-panel/62 px-3 py-2 text-left transition hover:border-edge-h hover:bg-panel-h',
+              selectedTask?.id === task.id && 'border-primary/35 bg-primary/[0.055]',
+            )}
+          >
+            <button type="button" onClick={() => onOpenTask(task)} className="block w-full min-w-0 text-left">
+              <div className="mb-1 flex min-w-0 items-center gap-2">
+                {taskDisplayKey(task) && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{taskDisplayKey(task)}</span>}
+                <Badge variant="muted">{taskRemoteStatus(task) || 'Closed'}</Badge>
+              </div>
+              <div className="truncate text-[12px] font-semibold text-fg-2">{task.title}</div>
+            </button>
+            <div className="mt-2 flex justify-end">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-6 px-2 text-[10.5px]"
+                disabled={reopeningTaskId === task.id}
+                onClick={() => { onReopen(task); }}
+              >
+                {reopeningTaskId === task.id ? <Spinner /> : null}
+                Reopen
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -3919,6 +5765,7 @@ function JiraSyncMonitor({
   detailsOpen,
   syncing,
   onSync,
+  onSyncTicket,
   onStop,
   stopping,
   onSelectRun,
@@ -3931,6 +5778,7 @@ function JiraSyncMonitor({
   detailsOpen: boolean;
   syncing: boolean;
   onSync: () => void;
+  onSyncTicket: () => void;
   onStop: (runId: string) => void;
   stopping: boolean;
   onSelectRun: (runId: string) => void;
@@ -3939,35 +5787,94 @@ function JiraSyncMonitor({
   applying: boolean;
 }) {
   const activeRun = syncRunActive(selectedRun) ? selectedRun : null;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const closeMenuSoonRef = useRef<number | null>(null);
+  const scheduleMenuClose = () => {
+    closeMenuSoonRef.current = window.setTimeout(() => setMenuOpen(false), 120);
+  };
+  const cancelMenuClose = () => {
+    if (closeMenuSoonRef.current != null) {
+      window.clearTimeout(closeMenuSoonRef.current);
+      closeMenuSoonRef.current = null;
+    }
+  };
+  useEffect(() => () => {
+    if (closeMenuSoonRef.current != null) window.clearTimeout(closeMenuSoonRef.current);
+  }, []);
   return (
     <>
       <div className="flex min-w-0 flex-1 items-center gap-2 border-l border-edge/60 pl-3">
         <span className="shrink-0 text-[12px] font-semibold text-fg-3">Jira sync</span>
-        <button
-          type="button"
-          onClick={onSync}
-          disabled={syncing}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg disabled:pointer-events-none disabled:opacity-55"
-          title={syncing ? 'Syncing Jira' : 'Sync Jira'}
-          aria-label={syncing ? 'Syncing Jira' : 'Sync Jira'}
+        <div
+          className="relative inline-flex shrink-0"
+          onBlur={scheduleMenuClose}
+          onFocus={cancelMenuClose}
+          onMouseEnter={cancelMenuClose}
+          onMouseLeave={scheduleMenuClose}
         >
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={syncing ? 'animate-spin' : ''}
+          <button
+            type="button"
+            onClick={onSync}
+            disabled={syncing}
+            className="inline-flex h-6 w-7 items-center justify-center rounded-l-md border border-edge bg-panel-alt text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg disabled:pointer-events-none disabled:opacity-55"
+            title={syncing ? 'Syncing Jira' : 'Sync all Jira tickets'}
+            aria-label={syncing ? 'Syncing Jira' : 'Sync all Jira tickets'}
           >
-            <path d="M21 12a9 9 0 0 1-15.3 6.4" />
-            <path d="M3 12a9 9 0 0 1 15.3-6.4" />
-            <path d="M18 2v4h4" />
-            <path d="M6 22v-4H2" />
-          </svg>
-        </button>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={syncing ? 'animate-spin' : ''}
+            >
+              <path d="M21 12a9 9 0 0 1-15.3 6.4" />
+              <path d="M3 12a9 9 0 0 1 15.3-6.4" />
+              <path d="M18 2v4h4" />
+              <path d="M6 22v-4H2" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMenuOpen(open => !open)}
+            className="inline-flex h-6 w-5 items-center justify-center rounded-r-md border border-l-0 border-edge bg-panel-alt text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+            title="Jira sync options"
+            aria-label="Jira sync options"
+            aria-expanded={menuOpen}
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+          {menuOpen && (
+            <div className="absolute left-0 top-7 z-50 min-w-[158px] rounded-md border border-edge bg-popover p-1 shadow-lg">
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onSync();
+                }}
+                disabled={syncing}
+                className="flex h-8 w-full items-center rounded px-2 text-left text-[12px] text-fg-3 hover:bg-panel-h disabled:pointer-events-none disabled:opacity-55"
+              >
+                Sync all tickets
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onSyncTicket();
+                }}
+                className="flex h-8 w-full items-center rounded px-2 text-left text-[12px] text-fg-3 hover:bg-panel-h"
+              >
+                Sync one ticket
+              </button>
+            </div>
+          )}
+        </div>
         {activeRun && (
           <button
             type="button"
@@ -4187,18 +6094,282 @@ function JiraSyncDetailsContent({
   );
 }
 
+function parsePromptEditSessionKey(value: string | null | undefined): { agent: string; sessionId: string } | null {
+  if (!value) return null;
+  const idx = value.indexOf(':');
+  if (idx <= 0 || idx >= value.length - 1) return null;
+  return { agent: value.slice(0, idx), sessionId: value.slice(idx + 1) };
+}
+
+function promptForAssistant(assistant: AgentAssistant): string {
+  return assistant.prompt || assistant.defaultPrompt || assistant.responsibility || '';
+}
+
+function buildJiraPromptEditRequest(assistant: AgentAssistant, currentPrompt: string, idea: string): string {
+  return [
+    `You are helping edit the prompt for ${assistant.name}.`,
+    `Assistant responsibility:\n${assistant.responsibility || 'Own the Jira dashboard workflow.'}`,
+    '',
+    'Act as a senior prompt architect. Convert the user request into a complete, production-ready replacement prompt.',
+    'Use prompt best practices: clear role, scope, inputs, workflow, decision rules, constraints, safety guardrails, output expectations, and failure handling.',
+    'Ask a concise clarifying question only if the request is impossible to satisfy safely without more information. Otherwise, generate the new prompt directly.',
+    'Keep the prompt specific to the Jira dashboard owner assistant. Do not produce a short note, a partial diff, or commentary-only output.',
+    '',
+    'Current prompt:',
+    '<CurrentPrompt>',
+    currentPrompt,
+    '</CurrentPrompt>',
+    '',
+    'User change request:',
+    idea,
+    '',
+    'When ready, output the complete replacement prompt exactly once using this block:',
+    '<PikiclawPromptPatch>',
+    'Full replacement prompt goes here.',
+    '</PikiclawPromptPatch>',
+  ].join('\n');
+}
+
+function JiraAssistantPromptModal({
+  open,
+  assistant,
+  workdir,
+  defaultAgent,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  assistant: AgentAssistant | null;
+  workdir?: string;
+  defaultAgent: string;
+  onClose: () => void;
+  onSaved: (assistant: AgentAssistant) => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [prompt, setPrompt] = useState('');
+  const [defaultPrompt, setDefaultPrompt] = useState('');
+  const [customized, setCustomized] = useState(false);
+  const [idea, setIdea] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [activeSession, setActiveSession] = useState<{ agent: string; sessionId: string } | null>(null);
+  const [lastAppliedPatch, setLastAppliedPatch] = useState('');
+  const runtimeWorkdir = workdir || '';
+  const agent = assistant?.preferredAgents?.[0] || defaultAgent || 'codex';
+  const generated = useAssistantGeneratedOutput({
+    active: open && !!activeSession && !!runtimeWorkdir,
+    workdir: runtimeWorkdir,
+    agent: activeSession?.agent,
+    sessionId: activeSession?.sessionId,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!open || !assistant) return undefined;
+    setLoading(true);
+    setPrompt('');
+    setDefaultPrompt('');
+    setIdea('');
+    setActiveSession(null);
+    setLastAppliedPatch('');
+    void api.getProAssistantPrompt(assistant.id)
+      .then(res => {
+        if (cancelled) return;
+        if (res.ok) {
+          setPrompt(res.prompt || promptForAssistant(assistant));
+          setDefaultPrompt(res.defaultPrompt || assistant.defaultPrompt || '');
+          setCustomized(!!res.customized);
+        } else {
+          toast(res.error || 'Failed to load prompt', false);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) toast(err instanceof Error ? err.message : 'Failed to load prompt', false);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [assistant, open, toast]);
+
+  useEffect(() => {
+    const nextPrompt = generated.promptPatch?.trim();
+    if (!nextPrompt || nextPrompt === lastAppliedPatch) return;
+    setPrompt(nextPrompt);
+    setLastAppliedPatch(nextPrompt);
+    toast('Prompt draft updated. Review it, then save when ready.', true);
+  }, [generated.promptPatch, lastAppliedPatch, toast]);
+
+  const changedFromDefault = prompt.trim() !== defaultPrompt.trim();
+  const statusText = working
+    ? 'Working on the prompt...'
+    : generated.loading && activeSession
+      ? 'Reading assistant output...'
+      : generated.error
+        ? generated.error
+        : lastAppliedPatch
+          ? 'Generated prompt is loaded above. You can edit it before saving.'
+          : 'Type the change you want. The assistant will rewrite the prompt above.';
+
+  const startPromptEdit = async () => {
+    const request = idea.trim();
+    if (!assistant || !request || !runtimeWorkdir || working) return;
+    setWorking(true);
+    try {
+      const result = await api.sendSessionMessage(
+        runtimeWorkdir,
+        activeSession?.agent || agent,
+        activeSession?.sessionId || '',
+        buildJiraPromptEditRequest(assistant, prompt, request),
+        { timeoutMs: 30_000, displayPrompt: request },
+      );
+      if (!result.ok) throw new Error(result.error || 'Failed to start prompt edit');
+      const nextSession = parsePromptEditSessionKey(result.sessionKey);
+      if (nextSession) setActiveSession(nextSession);
+      setIdea('');
+      toast('Assistant is working on the prompt.', true);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to start prompt edit', false);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const save = async () => {
+    if (!assistant || saving) return;
+    setSaving(true);
+    try {
+      const res = await api.updateProAssistantPrompt(assistant.id, { prompt });
+      if (!res.ok || !res.assistant) throw new Error(res.error || 'Failed to save prompt');
+      setCustomized(!!res.customized);
+      onSaved(res.assistant);
+      toast('Prompt saved', true);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to save prompt', false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    if (!assistant || saving) return;
+    setSaving(true);
+    try {
+      const res = await api.resetProAssistantPrompt(assistant.id);
+      if (!res.ok || !res.assistant) throw new Error(res.error || 'Failed to reset prompt');
+      setPrompt(res.prompt || '');
+      setDefaultPrompt(res.defaultPrompt || '');
+      setCustomized(false);
+      setLastAppliedPatch('');
+      onSaved(res.assistant);
+      toast('Prompt reset', true);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to reset prompt', false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open && !!assistant}
+      onClose={onClose}
+      wide
+      panelStyle={{ maxWidth: 'min(980px, calc(100vw - 32px))', maxHeight: 'min(92vh, 900px)' }}
+    >
+      <ModalHeader
+        title={assistant ? `${assistant.name} prompt` : 'Jira Assistant prompt'}
+        description={assistant?.responsibility}
+        onClose={onClose}
+      />
+      <div className="space-y-4">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Badge variant="accent">{assistant?.surfaceId || 'dashboard'}</Badge>
+          <Badge variant="muted">{assistant?.kind || 'page-owner'}</Badge>
+          {customized ? <Badge variant="warn">Customized</Badge> : <Badge variant="ok">Default</Badge>}
+          {changedFromDefault && <Badge variant="muted">edited draft</Badge>}
+        </div>
+        <textarea
+          autoFocus
+          value={prompt}
+          disabled={loading}
+          onChange={event => setPrompt(event.target.value)}
+          spellCheck={false}
+          className="min-h-[430px] w-full resize-y rounded-md border border-control-border bg-control px-3 py-2 font-mono text-[13px] leading-relaxed text-fg outline-none transition placeholder:text-fg-5/65 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)] disabled:opacity-60"
+          placeholder={loading ? 'Loading prompt...' : 'Prompt'}
+        />
+        <form
+          className="rounded-lg border border-edge bg-panel-alt p-3"
+          onSubmit={event => {
+            event.preventDefault();
+            void startPromptEdit();
+          }}
+        >
+          <div className="relative">
+            <input
+              value={idea}
+              onChange={event => setIdea(event.target.value)}
+              disabled={loading || working || !runtimeWorkdir}
+              placeholder="Tell the assistant how to improve this prompt..."
+              className="h-10 w-full rounded-md border border-control-border bg-control px-3 pr-12 text-[13px] text-fg outline-none transition placeholder:text-fg-5/65 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)] disabled:opacity-60"
+            />
+            <Button
+              type="submit"
+              variant="primary"
+              size="icon"
+              aria-label="Generate prompt"
+              className="absolute right-1 top-1 h-8 w-8"
+              disabled={!idea.trim() || loading || working || !runtimeWorkdir}
+            >
+              {working ? <Spinner /> : null}
+              {!working && (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M5 12h14" />
+                  <path d="m13 6 6 6-6 6" />
+                </svg>
+              )}
+            </Button>
+          </div>
+          <div className={cn('mt-2 text-[11px] leading-relaxed', generated.error ? 'text-err' : 'text-fg-5')}>
+            {runtimeWorkdir ? statusText : 'Select a workspace before generating prompt changes.'}
+          </div>
+        </form>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 truncate text-[11px] text-fg-5">{runtimeWorkdir || 'No workspace selected'}</div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" disabled={saving} onClick={onClose}>Close</Button>
+            <Button variant="secondary" disabled={saving || loading} onClick={() => void reset()}>
+              {saving ? <Spinner /> : null}
+              Reset
+            </Button>
+            <Button variant="primary" disabled={saving || loading || !prompt.trim()} onClick={() => void save()}>
+              {saving ? <Spinner /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function JiraDashboardSettingsMenu({
+  canOpenAssistantPrompt,
   canOpenSyncDetails,
   fixVersion,
   fixVersionOptions,
+  onOpenAssistantPrompt,
   onOpenSyncDetails,
   onRefreshSync,
   onOpenWorkflowSettings,
   onFixVersionChange,
 }: {
+  canOpenAssistantPrompt: boolean;
   canOpenSyncDetails: boolean;
   fixVersion: string;
   fixVersionOptions: string[];
+  onOpenAssistantPrompt: () => void;
   onOpenSyncDetails: () => void;
   onRefreshSync: () => void;
   onOpenWorkflowSettings: () => void;
@@ -4269,6 +6440,14 @@ function JiraDashboardSettingsMenu({
           <div className="my-1 border-t border-edge/60" />
           <button
             type="button"
+            disabled={!canOpenAssistantPrompt}
+            className="flex w-full items-center px-3 py-2 text-left text-fg-3 transition hover:bg-panel-h disabled:pointer-events-none disabled:opacity-45"
+            onClick={() => runAction(onOpenAssistantPrompt)}
+          >
+            Jira Assistant prompt
+          </button>
+          <button
+            type="button"
             className="flex w-full items-center px-3 py-2 text-left text-fg-3 transition hover:bg-panel-h"
             onClick={() => runAction(onOpenWorkflowSettings)}
           >
@@ -4304,6 +6483,112 @@ function JiraColumnSortIcon({ mode }: { mode: JiraColumnSortMode }) {
         <path d="m16 17-4 4-4-4" className={cn('stroke-current transition', isDesc ? 'text-primary' : 'text-fg-5/45')} />
       </svg>
     </span>
+  );
+}
+
+function JiraAssistantCoordinator({
+  tasks,
+  selectedTask,
+  selectedDate,
+  busy,
+  onOpenTask,
+  onClarifyTask,
+  onCodeTask,
+  onReviewTask,
+}: {
+  tasks: ProTask[];
+  selectedTask: ProTask | null;
+  selectedDate: string;
+  busy?: { taskId: string; stage: ProTaskStage } | null;
+  onOpenTask: (task: ProTask) => void;
+  onClarifyTask: (task: ProTask) => void;
+  onCodeTask: (task: ProTask) => void;
+  onReviewTask: (task: ProTask) => void;
+}) {
+  const activeTasks = tasks.filter(task => !isClosedRemoteTask(task));
+  const readyTasks = activeTasks.filter(task => task.status === 'backlog' || task.status === 'refinement');
+  const workingTasks = activeTasks.filter(task => task.status === 'coding');
+  const reviewTasks = activeTasks.filter(task => task.status === 'resolved');
+  const blockedTasks = activeTasks.filter(task => {
+    const latest = latestTaskStageRun(task);
+    return latest?.status === 'failed' || latest?.status === 'waiting-user' || task.subTasks.some(item => item.status === 'blocked');
+  });
+  const todayTasks = activeTasks.filter(task => task.plannedDate === selectedDate);
+  const nextReady = readyTasks[0] || workingTasks[0] || reviewTasks[0] || null;
+  const nextBlocked = blockedTasks[0] || null;
+  const selectedBusy = !!selectedTask && busy?.taskId === selectedTask.id;
+  const selectedLabel = selectedTask
+    ? `${taskDisplayKey(selectedTask) ? `${taskDisplayKey(selectedTask)} · ` : ''}${selectedTask.title}`
+    : 'Select a task to coordinate';
+  const stats = [
+    { label: 'Today', value: todayTasks.length, tone: 'muted' as const },
+    { label: 'Ready', value: readyTasks.length, tone: 'accent' as const },
+    { label: 'Working', value: workingTasks.length, tone: 'warn' as const },
+    { label: 'Review', value: reviewTasks.length, tone: 'accent' as const },
+    { label: 'Blocked', value: blockedTasks.length, tone: blockedTasks.length ? 'warn' as const : 'muted' as const },
+  ];
+
+  return (
+    <section className="mb-3 rounded-xl border border-edge/55 bg-panel-alt/45 px-3 py-3">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <Badge variant="accent">Jira Assistant</Badge>
+            <span className="min-w-0 truncate text-[12px] font-semibold text-fg-3" title={selectedLabel}>{selectedLabel}</span>
+          </div>
+          <div className="mt-1 flex min-w-0 flex-wrap gap-1.5">
+            {stats.map(item => (
+              <span key={item.label} className="inline-flex h-6 items-center gap-1.5 rounded-md border border-edge/55 bg-panel/65 px-2 text-[11px] text-fg-4">
+                <span>{item.label}</span>
+                <Badge variant={item.tone} className="h-4 px-1.5 text-[9.5px]">{item.value}</Badge>
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="flex min-w-0 flex-wrap justify-end gap-1.5">
+          {nextBlocked && (
+            <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => onOpenTask(nextBlocked)}>
+              Open blocker
+            </Button>
+          )}
+          {nextReady && (
+            <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => onOpenTask(nextReady)}>
+              Next task
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            disabled={!selectedTask || selectedBusy}
+            onClick={() => selectedTask && onClarifyTask(selectedTask)}
+          >
+            {selectedBusy && busy?.stage === 'refinement' ? <Spinner /> : null}
+            Clarify
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            disabled={!selectedTask || selectedBusy}
+            onClick={() => selectedTask && onCodeTask(selectedTask)}
+          >
+            {selectedBusy && busy?.stage === 'coding' ? <Spinner /> : null}
+            Code
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            disabled={!selectedTask || selectedBusy}
+            onClick={() => selectedTask && onReviewTask(selectedTask)}
+          >
+            {selectedBusy && busy?.stage === 'verification' ? <Spinner /> : null}
+            Review
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -4435,6 +6720,14 @@ export function TasksTab() {
   const [todoModalOpen, setTodoModalOpen] = useState(false);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [quickTodoText, setQuickTodoText] = useState('');
+  const [analyzeTicketOpen, setAnalyzeTicketOpen] = useState(false);
+  const [analyzeTicketPromptOpen, setAnalyzeTicketPromptOpen] = useState(false);
+  const [analyzeTicketInitialQuery, setAnalyzeTicketInitialQuery] = useState('');
+  const [analyzeTicketBusy, setAnalyzeTicketBusy] = useState(false);
+  const [syncTicketOpen, setSyncTicketOpen] = useState(false);
+  const [syncTicketInitialQuery, setSyncTicketInitialQuery] = useState('');
+  const [syncTicketBusy, setSyncTicketBusy] = useState(false);
+  const [syncTicketProgress, setSyncTicketProgress] = useState<SyncTicketProgress>({ status: 'idle' });
   const [taskSpaces, setTaskSpaces] = useState<TaskSpace[]>([]);
   const [selectedSpaceId, setSelectedSpaceId] = useState<string>(standaloneDailyRoute ? DAILY_VIEW_ID : readStoredTaskSelectedSpace());
   const [dailyDateAuto, setDailyDateAuto] = useState<boolean>(() => !normalizeDailyDateParam(new URLSearchParams(location.search).get('date')));
@@ -4457,11 +6750,15 @@ export function TasksTab() {
   const [spaceCreateOpen, setSpaceCreateOpen] = useState(false);
   const [spaceCreateBusy, setSpaceCreateBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [jiraAssistantPromptOpen, setJiraAssistantPromptOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailMenuOpen, setDetailMenuOpen] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [taskDeleteTarget, setTaskDeleteTarget] = useState<ProTask | null>(null);
+  const [resettingTaskId, setResettingTaskId] = useState<string | null>(null);
+  const [taskResetTarget, setTaskResetTarget] = useState<ProTask | null>(null);
   const [savingJiraFieldsTaskId, setSavingJiraFieldsTaskId] = useState<string | null>(null);
+  const [syncingJiraTaskId, setSyncingJiraTaskId] = useState<string | null>(null);
   const [reopeningTaskId, setReopeningTaskId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [busy, setBusy] = useState<{ taskId: string; stage: ProTaskStage } | null>(null);
@@ -4472,6 +6769,7 @@ export function TasksTab() {
   const [activeSprint, setActiveSprint] = useState<string>(() => readStoredJiraActiveSprint());
   const [selectedSprint, setSelectedSprint] = useState<string>(() => readStoredJiraActiveSprint());
   const [selectedFixVersion, setSelectedFixVersion] = useState<string>('all');
+  const [selectedJiraStatus, setSelectedJiraStatus] = useState<string>('all');
   const [ticketQuery, setTicketQuery] = useState('');
   const [syncRuns, setSyncRuns] = useState<JiraSyncRun[]>([]);
   const [selectedSyncRunId, setSelectedSyncRunId] = useState<string | null>(null);
@@ -4479,7 +6777,6 @@ export function TasksTab() {
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncStopBusy, setSyncStopBusy] = useState(false);
   const [syncApplyBusy, setSyncApplyBusy] = useState(false);
-  const [analyzeBusy, setAnalyzeBusy] = useState(false);
   const [cycles, setCycles] = useState<JiraCycle[]>([]);
   const [cycleBusy, setCycleBusy] = useState(false);
   const [cycleKickoffOpen, setCycleKickoffOpen] = useState(false);
@@ -4502,6 +6799,7 @@ export function TasksTab() {
   const activeFocusSessionRef = useRef<{ taskId: string; focusSessionId: string } | null>(null);
   const syncRunsLoadedRef = useRef(false);
   const terminalSyncRunIdsRef = useRef<Set<string>>(new Set());
+  const focusOpenTaskNonceRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (standaloneDailyRoute) {
@@ -4520,7 +6818,7 @@ export function TasksTab() {
 
   useEffect(() => {
     if (loading || standaloneDailyRoute || selectedSpaceId === DAILY_VIEW_ID) return;
-    const builtIn = selectedSpaceId === ALL_TASKS_SPACE_ID || selectedSpaceId === JIRA_TASK_SPACE_ID || selectedSpaceId === PERSONAL_TASK_SPACE_ID;
+    const builtIn = selectedSpaceId === ALL_TASKS_SPACE_ID || selectedSpaceId === JIRA_TASK_SPACE_ID || selectedSpaceId === PERSONAL_TASK_SPACE_ID || selectedSpaceId === ANALYZE_TASK_SPACE_ID;
     if (!builtIn && !taskSpaces.some(space => space.id === selectedSpaceId)) {
       setSelectedSpaceId(JIRA_TASK_SPACE_ID);
     }
@@ -4571,6 +6869,18 @@ export function TasksTab() {
   const dailyView = selectedSpaceId === DAILY_VIEW_ID;
   const activeTaskSpace = useMemo(() => taskSpaces.find(space => space.id === selectedSpaceId) || null, [selectedSpaceId, taskSpaces]);
   const activeSpaceIsJira = selectedSpaceId === JIRA_TASK_SPACE_ID || activeTaskSpace?.kind === 'jira';
+  const jiraOwnerAssistant = useMemo(
+    () => assistants.find(assistant => assistant.id === 'assistant_dashboard_owner')
+      || assistants.find(assistant => assistant.kind === 'page-owner' && assistant.surfaceId === 'dashboard')
+      || null,
+    [assistants],
+  );
+  const jiraOwnerAssistantPrompt = useMemo(() => (
+    jiraOwnerAssistant?.prompt
+    || jiraOwnerAssistant?.defaultPrompt
+    || jiraOwnerAssistant?.responsibility
+    || ''
+  ), [jiraOwnerAssistant]);
   const activeSpaceTasks = useMemo(() => {
     if (selectedSpaceId === DAILY_VIEW_ID) {
       return tasks.filter(task => task.plannedDate === selectedDailyDate);
@@ -4584,9 +6894,10 @@ export function TasksTab() {
     if (!dailyView && activeSpaceIsJira) {
       return activeSpaceTasks.filter(task => jiraTaskMatchesFilters(task, {
         ticketType: selectedTicketType === 'all' ? '' : selectedTicketType,
-        ticketName: ticketQuery,
+        query: ticketQuery,
         sprint: selectedSprint === 'all' ? '' : selectedSprint,
         fixVersion: selectedFixVersion === 'all' ? '' : selectedFixVersion,
+        status: selectedJiraStatus === 'all' ? '' : selectedJiraStatus,
       }));
     }
     if (!normalizedQuery) return activeSpaceTasks;
@@ -4599,7 +6910,7 @@ export function TasksTab() {
       task.jiraFields?.reporter,
       task.sprint,
     ].filter(Boolean).join(' ').toLowerCase().includes(normalizedQuery));
-  }, [activeSpaceIsJira, activeSpaceTasks, dailyView, selectedFixVersion, selectedSprint, selectedTicketType, ticketQuery]);
+  }, [activeSpaceIsJira, activeSpaceTasks, dailyView, selectedFixVersion, selectedJiraStatus, selectedSprint, selectedTicketType, ticketQuery]);
   const dailySourceTasks = useMemo(() => {
     const normalizedQuery = ticketQuery.trim().toLowerCase();
     return tasks
@@ -4660,6 +6971,15 @@ export function TasksTab() {
     return grouped;
   }, [boardTasks, columnManualOrder, columnSortModes]);
   const selectedTask = useMemo(() => tasks.find(task => task.id === selectedId) || null, [selectedId, tasks]);
+  const jiraProjectKeyHint = useMemo(() => {
+    const selectedProject = jiraProjectKeyFromIssueKey(selectedTask?.jiraKey);
+    if (selectedProject) return selectedProject;
+    for (const task of activeSpaceTasks) {
+      const project = jiraProjectKeyFromIssueKey(task.jiraKey);
+      if (project) return project;
+    }
+    return '';
+  }, [activeSpaceTasks, selectedTask?.jiraKey]);
   const selectedTaskDailyItem = useMemo(
     () => (selectedTask ? dailyItems.find(item => item.taskId === selectedTask.id) || null : null),
     [dailyItems, selectedTask],
@@ -4750,7 +7070,8 @@ export function TasksTab() {
       writeStoredJiraActiveSprint('all');
     }
     if (selectedFixVersion !== 'all' && !jiraFilterOptions.fixVersions.includes(selectedFixVersion)) setSelectedFixVersion('all');
-  }, [activeSprint, jiraFilterOptions, selectedFixVersion, selectedSprint, selectedTicketType]);
+    if (selectedJiraStatus !== 'all' && !jiraFilterOptions.statuses.includes(selectedJiraStatus)) setSelectedJiraStatus('all');
+  }, [activeSprint, jiraFilterOptions, selectedFixVersion, selectedJiraStatus, selectedSprint, selectedTicketType]);
 
   useEffect(() => {
     if (selectedId && visibleTasks.some(task => task.id === selectedId)) return;
@@ -4939,6 +7260,17 @@ export function TasksTab() {
       && window.matchMedia('(min-width: 1536px)').matches;
     setDetailOpen(!sideDetailVisible);
   }, [taskDetailLayout]);
+
+  useEffect(() => {
+    const navState = location.state as { openTaskId?: string; openTaskNonce?: number } | null;
+    const openTaskId = typeof navState?.openTaskId === 'string' ? navState.openTaskId : '';
+    const nonce = typeof navState?.openTaskNonce === 'number' ? navState.openTaskNonce : null;
+    if (!openTaskId || nonce == null || focusOpenTaskNonceRef.current === nonce) return;
+    const task = tasks.find(item => item.id === openTaskId);
+    if (!task) return;
+    focusOpenTaskNonceRef.current = nonce;
+    openTaskDetail(task);
+  }, [location.state, openTaskDetail, tasks]);
 
   useEffect(() => {
     if (!detailOpen || !selectedId) {
@@ -5263,6 +7595,87 @@ export function TasksTab() {
     }
   }, [state?.runtimeWorkdir, toast]);
 
+  const openSyncTicket = useCallback(() => {
+    setSyncTicketInitialQuery(selectedTask?.jiraKey || ticketQuery.trim());
+    setSyncTicketProgress({ status: 'idle' });
+    setSyncTicketOpen(true);
+  }, [selectedTask?.jiraKey, ticketQuery]);
+
+  const closeSyncTicket = useCallback(() => {
+    if (syncTicketBusy) return;
+    setSyncTicketOpen(false);
+    setSyncTicketProgress({ status: 'idle' });
+  }, [syncTicketBusy]);
+
+  const openSyncedTicketTask = useCallback((task: ProTask) => {
+    setSelectedSpaceId(task.spaceId || JIRA_TASK_SPACE_ID);
+    setSyncTicketOpen(false);
+    setSyncTicketProgress({ status: 'idle' });
+    openTaskDetail(task);
+  }, [openTaskDetail]);
+
+  const syncJiraTicket = useCallback(async (draft: { query: string }) => {
+    const query = draft.query.trim();
+    if (!query || syncTicketBusy) return;
+    setSyncTicketBusy(true);
+    setSyncTicketProgress({ status: 'running', query });
+    try {
+      const result = await api.syncJiraTicket({
+        query,
+        projectKey: jiraProjectKeyHint || undefined,
+        workdir: activeTaskSpace?.defaultWorkdir || state?.runtimeWorkdir,
+        spaceId: activeSpaceIsJira && selectedSpaceId !== ALL_TASKS_SPACE_ID ? selectedSpaceId : JIRA_TASK_SPACE_ID,
+      });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to sync Jira ticket');
+      upsertTask(result.task);
+      setSelectedSpaceId(result.task.spaceId || JIRA_TASK_SPACE_ID);
+      setSyncTicketProgress({
+        status: 'completed',
+        query,
+        issueKey: result.issueKey || result.task.jiraKey,
+        action: result.action || 'updated',
+        task: result.task,
+      });
+      toast(`${result.issueKey || result.task.jiraKey || 'Ticket'} ${result.action === 'created' ? 'created' : 'updated'}`);
+    } catch (err) {
+      setSyncTicketProgress({
+        status: 'failed',
+        query,
+        error: err instanceof Error ? err.message : 'Failed to sync Jira ticket',
+      });
+      toast(err instanceof Error ? err.message : 'Failed to sync Jira ticket', false);
+    } finally {
+      setSyncTicketBusy(false);
+    }
+  }, [activeSpaceIsJira, activeTaskSpace?.defaultWorkdir, jiraProjectKeyHint, openTaskDetail, selectedSpaceId, state?.runtimeWorkdir, syncTicketBusy, toast, upsertTask]);
+
+  const openAnalyzeTicket = useCallback(() => {
+    setAnalyzeTicketInitialQuery(selectedTask?.jiraKey || ticketQuery.trim());
+    setAnalyzeTicketOpen(true);
+  }, [selectedTask?.jiraKey, ticketQuery]);
+
+  const analyzeJiraTicket = useCallback(async (draft: { query: string }) => {
+    const query = draft.query.trim();
+    if (!query || analyzeTicketBusy) return;
+    setAnalyzeTicketBusy(true);
+    try {
+      const result = await api.analyzeJiraTicket({ query });
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to start ticket analysis');
+      upsertTask(result.task);
+      setSelectedSpaceId(ANALYZE_TASK_SPACE_ID);
+      setAnalyzeTicketOpen(false);
+      openTaskDetail(result.task);
+      const workspaceNote = result.workdirResolution?.reason || 'Workspace selected automatically.';
+      toast(result.issueLookupError
+        ? `Analysis started (${workspaceNote}). Jira prefetch failed: ${result.issueLookupError}`
+        : `Analysis started. ${workspaceNote}`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to start ticket analysis', false);
+    } finally {
+      setAnalyzeTicketBusy(false);
+    }
+  }, [analyzeTicketBusy, openTaskDetail, toast, upsertTask]);
+
   const stopJiraSync = useCallback(async (runId: string) => {
     setSyncStopBusy(true);
     try {
@@ -5296,52 +7709,6 @@ export function TasksTab() {
     }
   }, [toast]);
 
-  const analyzeTicket = useCallback(async () => {
-    const query = ticketQuery.trim() || selectedTask?.jiraKey || selectedTask?.title || '';
-    if (!query) return;
-    setAnalyzeBusy(true);
-    try {
-      if (selectedTask) {
-        setBusy({ taskId: selectedTask.id, stage: 'refinement' });
-        const workflow = jiraConfig.statusWorkflows?.refinement || {};
-        const execution = resolveTaskExecution(selectedTask, jiraConfig);
-        const ownerMode = execution.ownerMode;
-        const assistantId = ownerMode === 'assistant'
-          ? execution.assistantId
-          : ownerMode === 'agent'
-            ? undefined
-            : workflow.assistantId || selectedTask.defaultAssistantId || undefined;
-        const agent = ownerMode === 'agent'
-          ? execution.agent
-          : selectedTask.defaultAgent || state?.bot?.defaultAgent || state?.config?.defaultAgent || undefined;
-        const result = await api.startProTaskStage(selectedTask.id, 'refinement', {
-          workdir: selectedTask.workdir || state?.runtimeWorkdir,
-          assistantId,
-          agent,
-          prompt: buildStatusChatPrompt(selectedTask, 'refinement', ANALYZE_TICKET_PROMPT, workflow.instruction, execution.mode),
-          model: pickRandomModel(workflow.modelPool),
-          executionMode: execution.mode,
-        });
-        if (!result.ok || !result.task) throw new Error(result.error || 'Failed to start task analysis');
-        upsertTask(result.task);
-        const sideDetailVisible = taskDetailLayout === 'side'
-          && typeof window !== 'undefined'
-          && window.matchMedia('(min-width: 1536px)').matches;
-        setDetailOpen(!sideDetailVisible);
-        toast('Analyze queued on this task');
-        return;
-      }
-      const result = await api.analyzeJiraTicket({ query, workdir: selectedTask?.workdir || state?.runtimeWorkdir });
-      if (!result.ok) throw new Error(result.error || 'Failed to start ticket analysis');
-      toast('Ticket analysis chat queued');
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Failed to start ticket analysis', false);
-    } finally {
-      setBusy(current => current?.stage === 'refinement' ? null : current);
-      setAnalyzeBusy(false);
-    }
-  }, [jiraConfig, selectedTask, state?.bot?.defaultAgent, state?.config?.defaultAgent, state?.runtimeWorkdir, taskDetailLayout, ticketQuery, toast, upsertTask]);
-
   const updateStatus = useCallback(async (task: ProTask, status: ProTaskStatus): Promise<ProTask | null> => {
     try {
       const result = await api.updateProTaskStatus(task.id, status);
@@ -5374,6 +7741,24 @@ export function TasksTab() {
       setDeletingTaskId(null);
     }
   }, [deletingTaskId, taskDeleteTarget, toast]);
+
+  const resetTask = useCallback(async () => {
+    const task = taskResetTarget;
+    if (!task || resettingTaskId) return;
+    setResettingTaskId(task.id);
+    try {
+      const result = await api.resetProTask(task.id);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to reset task');
+      upsertTask(result.task);
+      setDetailMenuOpen(false);
+      setTaskResetTarget(null);
+      toast('Task reset');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to reset task', false);
+    } finally {
+      setResettingTaskId(null);
+    }
+  }, [resettingTaskId, taskResetTarget, toast, upsertTask]);
 
   const createTodoFromTaskSelection = useCallback(async (session: StageSessionRef, request: SelectionActionRequest) => {
     if (!request.quote.trim() || !request.note.trim()) return;
@@ -5420,6 +7805,21 @@ export function TasksTab() {
       setSavingJiraFieldsTaskId(null);
     }
   }, [toast, upsertTask]);
+
+  const syncSingleJiraTask = useCallback(async (task: ProTask) => {
+    if (!task.jiraKey || syncingJiraTaskId) return;
+    setSyncingJiraTaskId(task.id);
+    try {
+      const result = await api.syncProTaskJiraFromRemote(task.id);
+      if (!result.ok || !result.task) throw new Error(result.error || 'Failed to sync Jira ticket');
+      upsertTask(result.task);
+      toast(`Synced ${result.task.jiraKey || task.jiraKey}`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to sync Jira ticket', false);
+    } finally {
+      setSyncingJiraTaskId(null);
+    }
+  }, [syncingJiraTaskId, toast, upsertTask]);
 
   const reopenClosedTask = useCallback(async (task: ProTask) => {
     if (reopeningTaskId) return;
@@ -5472,7 +7872,7 @@ export function TasksTab() {
   const startStage = useCallback(async (
     task: ProTask,
     stage: ProTaskStage,
-    options: { assistantId?: string; agent?: string | null; prompt?: string; model?: string | null; executionMode?: 'direct' | 'interactive'; subtaskId?: string | null } = {},
+    options: { assistantId?: string; agent?: string | null; prompt?: string; displayPrompt?: string | null; model?: string | null; effort?: string | null; executionMode?: 'direct' | 'interactive'; subtaskId?: string | null } = {},
   ): Promise<ProTask | null> => {
     setBusy({ taskId: task.id, stage });
     try {
@@ -5481,7 +7881,9 @@ export function TasksTab() {
         assistantId: options.assistantId || undefined,
         agent: options.agent || undefined,
         prompt: options.prompt,
+        displayPrompt: options.displayPrompt,
         model: options.model,
+        effort: options.effort,
         executionMode: options.executionMode || undefined,
         subtaskId: options.subtaskId || undefined,
       });
@@ -5497,7 +7899,27 @@ export function TasksTab() {
     }
   }, [state?.runtimeWorkdir, toast, upsertTask]);
 
-  const startStatusChat = useCallback(async (task: ProTask, status: ProTaskStatus, prompt?: string, agentOverride?: string) => {
+  const buildTaskChatContextForTask = useCallback((task: ProTask, status: ProTaskStatus) => {
+    const workflow = jiraConfig.statusWorkflows?.[status] || {};
+    const workflowInstruction = [workflow.instruction, linkedTaskContext(task)].filter(Boolean).join('\n\n');
+    return buildTicketChatContext(task, status, workflowInstruction || undefined, jiraOwnerAssistantPrompt);
+  }, [jiraConfig, jiraOwnerAssistantPrompt, linkedTaskContext]);
+
+  const buildTaskChatPromptForTask = useCallback((task: ProTask, status: ProTaskStatus, prompt?: string) => {
+    const workflow = jiraConfig.statusWorkflows?.[status] || {};
+    const execution = resolveTaskExecution(task, jiraConfig);
+    const workflowInstruction = [workflow.instruction, linkedTaskContext(task)].filter(Boolean).join('\n\n');
+    return buildTicketChatPrompt(
+      task,
+      status,
+      prompt,
+      workflowInstruction || undefined,
+      execution.mode,
+      jiraOwnerAssistantPrompt,
+    );
+  }, [jiraConfig, jiraOwnerAssistantPrompt, linkedTaskContext]);
+
+  const startStatusChat = useCallback(async (task: ProTask, status: ProTaskStatus, prompt?: string, agentOverride?: string, displayPrompt?: string | null) => {
     const stage = STATUS_CHAT_STAGE[status];
     const workflow = jiraConfig.statusWorkflows?.[status] || {};
     const execution = resolveTaskExecution(task, jiraConfig);
@@ -5511,16 +7933,16 @@ export function TasksTab() {
       ? execution.agent
       : task.defaultAgent || state?.bot?.defaultAgent || state?.config?.defaultAgent || undefined;
     const agent = agentOverride || configuredAgent;
-    const promptWithLink = [prompt, linkedTaskContext(task)].filter(Boolean).join('\n\n');
-    const workflowInstruction = [workflow.instruction, linkedTaskContext(task)].filter(Boolean).join('\n\n');
     await startStage(task, stage, {
       assistantId,
       agent,
-      prompt: buildStatusChatPrompt(task, status, promptWithLink || undefined, workflowInstruction || undefined, execution.mode),
-      model: pickRandomModel(workflow.modelPool),
+      prompt: buildTaskChatPromptForTask(task, status, prompt),
+      displayPrompt: displayPrompt ?? prompt ?? null,
+      model: task.execution?.model || pickRandomModel(workflow.modelPool),
+      effort: task.execution?.effort || null,
       executionMode: execution.mode,
     });
-  }, [jiraConfig, linkedTaskContext, startStage, state?.bot?.defaultAgent, state?.config?.defaultAgent]);
+  }, [buildTaskChatPromptForTask, jiraConfig, startStage, state?.bot?.defaultAgent, state?.config?.defaultAgent]);
 
   const saveJiraConfig = useCallback(async (nextConfig: JiraWorkflowConfig) => {
     setSavingConfig(true);
@@ -5565,7 +7987,8 @@ export function TasksTab() {
       assistantId: stageAssistantId,
       agent: stageAgent,
       prompt: [dailyPrompt || buildStatusWorkflowPrompt(task, status, workflow.instruction, execution.mode), linkedContext].filter(Boolean).join('\n\n') || undefined,
-      model: pickRandomModel(workflow.modelPool),
+      model: task.execution?.model || pickRandomModel(workflow.modelPool),
+      effort: task.execution?.effort || null,
       executionMode: execution.mode,
     });
     const taskAfterStage = stagedTask || task;
@@ -5590,9 +8013,7 @@ export function TasksTab() {
     setDraggingTaskId(null);
     const task = tasks.find(item => item.id === taskId);
     if (!task) return;
-    const targetStatus = dailyView && column === 'done'
-      ? (task.status === 'resolved' ? 'done' : 'resolved')
-      : jiraStatusForColumn(column);
+    const targetStatus = jiraStatusForColumn(column);
     await moveTaskToStatus(task, targetStatus);
   }, [dailyView, moveTaskToStatus, tasks]);
 
@@ -5907,27 +8328,34 @@ export function TasksTab() {
               {activeSpaceIsJira && (
                 <>
                   <div className="hidden h-5 w-px bg-edge/60 lg:block" />
-                  <JiraSyncMonitor
-                    runs={syncRuns}
-                    selectedRun={selectedSyncRun}
+	                  <JiraSyncMonitor
+	                    runs={syncRuns}
+	                    selectedRun={selectedSyncRun}
                     detailsOpen={syncDetailsOpen}
                     syncing={syncBusy || syncRunActive(latestSyncRun)}
                     onSync={() => { void runJiraSync(); }}
+                    onSyncTicket={openSyncTicket}
                     onStop={(runId) => { void stopJiraSync(runId); }}
                     stopping={syncStopBusy}
                     onSelectRun={setSelectedSyncRunId}
                     onCloseDetails={() => setSyncDetailsOpen(false)}
-                    onApplyItems={(runId, itemIds) => { void applyJiraSyncItems(runId, itemIds); }}
-                    applying={syncApplyBusy}
-                  />
-                  <Button variant="outline" size="sm" disabled={analyzeBusy || !(ticketQuery.trim() || selectedTask)} onClick={() => { void analyzeTicket(); }}>
-                    {analyzeBusy ? <Spinner /> : null}
+	                    onApplyItems={(runId, itemIds) => { void applyJiraSyncItems(runId, itemIds); }}
+	                    applying={syncApplyBusy}
+	                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    disabled={analyzeTicketBusy}
+                    onClick={openAnalyzeTicket}
+                  >
+                    {analyzeTicketBusy ? <Spinner /> : null}
                     Analyze ticket
                   </Button>
-                  <input
-                    value={ticketQuery}
+	                  <input
+	                    value={ticketQuery}
                     onChange={event => setTicketQuery(event.target.value)}
-                    placeholder="Ticket name"
+                    placeholder="Search Jira"
                     className="h-8 min-w-[170px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors placeholder:text-fg-5/55 hover:border-control-border-h focus:border-primary/50"
                   />
                   <select
@@ -5938,6 +8366,16 @@ export function TasksTab() {
                     <option value="all">All ticket types</option>
                     {jiraFilterOptions.ticketTypes.map(ticketType => (
                       <option key={ticketType} value={ticketType}>{ticketType}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={selectedJiraStatus}
+                    onChange={event => setSelectedJiraStatus(event.target.value || 'all')}
+                    className="h-8 min-w-[132px] rounded-md border border-control-border bg-control px-2.5 text-[12px] text-fg outline-none transition-colors hover:border-control-border-h focus:border-primary/50"
+                  >
+                    <option value="all">All Jira status</option>
+                    {jiraFilterOptions.statuses.map(status => (
+                      <option key={status} value={status}>{status}</option>
                     ))}
                   </select>
                   <select
@@ -5990,9 +8428,11 @@ export function TasksTab() {
                     </Button>
                   ))}
                   <JiraDashboardSettingsMenu
+                    canOpenAssistantPrompt={!!jiraOwnerAssistant}
                     canOpenSyncDetails={syncRuns.length > 0}
                     fixVersion={selectedFixVersion}
                     fixVersionOptions={jiraFilterOptions.fixVersions}
+                    onOpenAssistantPrompt={() => setJiraAssistantPromptOpen(true)}
                     onOpenSyncDetails={() => setSyncDetailsOpen(true)}
                     onRefreshSync={() => { void loadSyncRuns({ refreshTasksOnCompletion: true }); }}
                     onOpenWorkflowSettings={() => setSettingsOpen(true)}
@@ -6008,7 +8448,28 @@ export function TasksTab() {
                 )}
               >
               <div className="min-h-0 overflow-y-auto p-3">
-                <div className="dashboard-board-grid grid min-h-[calc(100vh-220px)] gap-3">
+                {activeSpaceIsJira && (
+	                  <JiraAssistantCoordinator
+	                    tasks={visibleTasks}
+                    selectedTask={selectedTask}
+                    selectedDate={selectedDailyDate}
+                    busy={busy}
+                    onOpenTask={openTaskDetail}
+                    onClarifyTask={(task) => {
+                      if (task.status === 'backlog') void moveTaskToStatus(task, 'refinement');
+                      else void startStatusChat(task, 'refinement', ANALYZE_TICKET_PROMPT, undefined, 'Clarify task');
+                    }}
+                    onCodeTask={(task) => {
+                      if (task.status === 'coding') void startStatusChat(task, 'coding', START_CODING_PROMPT, undefined, 'Start coding');
+                      else void moveTaskToStatus(task, 'coding');
+                    }}
+                    onReviewTask={(task) => {
+                      if (task.status === 'resolved') void startStatusChat(task, 'resolved', REVIEW_TICKET_PROMPT, undefined, 'Review task');
+                      else void moveTaskToStatus(task, 'resolved');
+                    }}
+	                  />
+	                )}
+		                <div className="dashboard-board-grid grid min-h-[calc(100vh-220px)] gap-3">
                   {JIRA_COLUMNS.map(column => (
                     <section
                       key={column.key}
@@ -6147,11 +8608,11 @@ export function TasksTab() {
                                       return;
                                     }
                                     if (nextTask.status === 'refinement') {
-                                      void startStatusChat(nextTask, 'refinement', DAILY_CLARIFY_PROMPT);
+                                      void startStatusChat(nextTask, 'refinement', DAILY_CLARIFY_PROMPT, undefined, 'Daily clarify');
                                       return;
                                     }
                                     if (nextTask.status === 'coding') {
-                                      void startStatusChat(nextTask, 'coding', DAILY_WORKING_PROMPT);
+                                      void startStatusChat(nextTask, 'coding', DAILY_WORKING_PROMPT, undefined, 'Daily work');
                                       return;
                                     }
                                     if (nextTask.status === 'resolved') {
@@ -6177,48 +8638,13 @@ export function TasksTab() {
                   ))}
                 </div>
 
-                {closedTasks.length > 0 && (
-                  <section className="mt-3 rounded-xl border border-edge/50 bg-panel-alt/35 px-3 py-3">
-                    <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-[12px] font-semibold text-fg-2">Closed</div>
-                        <div className="truncate text-[10px] text-fg-5">Remote status is closed</div>
-                      </div>
-                      <Badge variant="muted" className="h-5 px-2 text-[10px] tabular-nums">{closedTasks.length}</Badge>
-                    </div>
-                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                      {closedTasks.slice(0, 12).map(task => (
-                        <div
-                          key={task.id}
-                          className={cn(
-                            'min-w-0 rounded-lg border border-edge/55 bg-panel/62 px-3 py-2 text-left transition hover:border-edge-h hover:bg-panel-h',
-                            selectedTask?.id === task.id && 'border-primary/35 bg-primary/[0.055]',
-                          )}
-                        >
-                          <button type="button" onClick={() => openTaskDetail(task)} className="block w-full min-w-0 text-left">
-                            <div className="mb-1 flex min-w-0 items-center gap-2">
-                              {taskDisplayKey(task) && <span className="shrink-0 font-mono text-[11px] font-semibold text-primary">{taskDisplayKey(task)}</span>}
-                              <Badge variant="muted">{taskRemoteStatus(task) || 'Closed'}</Badge>
-                            </div>
-                            <div className="truncate text-[12px] font-semibold text-fg-2">{task.title}</div>
-                          </button>
-                          <div className="mt-2 flex justify-end">
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              className="h-6 px-2 text-[10.5px]"
-                              disabled={reopeningTaskId === task.id}
-                              onClick={() => { void reopenClosedTask(task); }}
-                            >
-                              {reopeningTaskId === task.id ? <Spinner /> : null}
-                              Reopen
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
+                <ClosedJiraTasksSection
+                  tasks={closedTasks}
+                  selectedTask={selectedTask}
+                  reopeningTaskId={reopeningTaskId}
+                  onOpenTask={openTaskDetail}
+                  onReopen={(task) => { void reopenClosedTask(task); }}
+                />
 
                 {SHOW_JIRA_CYCLE_FEATURE && activeSpaceIsJira && (
                   <div className="mt-3">
@@ -6254,12 +8680,19 @@ export function TasksTab() {
                   onCreateSubtask={(task) => { void createSubtask(task); }}
                   onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
                   onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
+                  onTaskUpdated={upsertTask}
                   onReopen={(task) => { void reopenClosedTask(task); }}
+                  onSyncJira={(task) => { void syncSingleJiraTask(task); }}
+                  syncingJira={selectedTask ? syncingJiraTaskId === selectedTask.id : false}
+                  onResetTask={setTaskResetTarget}
+                  resetting={selectedTask ? resettingTaskId === selectedTask.id : false}
                   dailyItem={selectedTaskDailyItem}
                   onBackToAction={(item) => { void revertDailyItemTask(item); }}
                   onOpenLinkedTask={openTaskDetail}
                   onCreateSideChatFromSelection={createSideChatFromTaskSelection}
                   onCreateTodoFromSelection={createTodoFromTaskSelection}
+                  buildChatPrompt={buildTaskChatPromptForTask}
+                  buildChatContext={buildTaskChatContextForTask}
                   onOpenFull={() => setDetailOpen(true)}
 	                />
 	              )}
@@ -6290,15 +8723,39 @@ export function TasksTab() {
         onCreateTask={(item) => { void createTaskFromTodoListItem(item); }}
         onCreateDaily={(item) => { void createTaskFromTodoItem(item); }}
       />
-      <TodoQuickAddModal
-        open={quickTodoOpen}
-        saving={todoCreating}
+	      <TodoQuickAddModal
+	        open={quickTodoOpen}
+	        saving={todoCreating}
         value={quickTodoText}
         onChange={setQuickTodoText}
-        onClose={closeQuickTodo}
-        onSave={() => { void saveQuickTodo(); }}
+		        onClose={closeQuickTodo}
+		        onSave={() => { void saveQuickTodo(); }}
+		      />
+      <SyncJiraTicketModal
+        open={syncTicketOpen}
+        initialQuery={syncTicketInitialQuery}
+        busy={syncTicketBusy}
+        progress={syncTicketProgress}
+        onClose={closeSyncTicket}
+        onSync={(draft) => { void syncJiraTicket(draft); }}
+        onOpenTask={openSyncedTicketTask}
       />
-      <DailyIntakeModal
+      <AnalyzeJiraTicketModal
+        open={analyzeTicketOpen}
+        initialQuery={analyzeTicketInitialQuery}
+        busy={analyzeTicketBusy}
+        onClose={() => setAnalyzeTicketOpen(false)}
+        onOpenPrompt={() => {
+          setAnalyzeTicketOpen(false);
+          setAnalyzeTicketPromptOpen(true);
+        }}
+        onAnalyze={(draft) => { void analyzeJiraTicket(draft); }}
+      />
+      <AnalyzeTicketPromptModal
+        open={analyzeTicketPromptOpen}
+        onClose={() => setAnalyzeTicketPromptOpen(false)}
+      />
+	      <DailyIntakeModal
         open={dailyCreateOpen}
         creating={creating}
         selectedDate={selectedDailyDate}
@@ -6368,6 +8825,18 @@ export function TasksTab() {
         onClose={() => setSettingsOpen(false)}
         onSave={saveJiraConfig}
       />
+      <JiraAssistantPromptModal
+        open={jiraAssistantPromptOpen}
+        assistant={jiraOwnerAssistant}
+        workdir={state?.runtimeWorkdir}
+        defaultAgent={state?.bot?.defaultAgent || state?.config?.defaultAgent || 'codex'}
+        onClose={() => setJiraAssistantPromptOpen(false)}
+        onSaved={(assistant) => {
+          setAssistants(prev => prev.some(item => item.id === assistant.id)
+            ? prev.map(item => item.id === assistant.id ? assistant : item)
+            : [assistant, ...prev]);
+        }}
+      />
       <Modal
         open={detailOpen && !!selectedTask}
         onClose={() => {
@@ -6407,10 +8876,13 @@ export function TasksTab() {
             onCreateSubtask={(task) => { void createSubtask(task); }}
             onUpdateSubtaskStatus={(task, subtaskId, status) => { void updateSubtaskStatus(task, subtaskId, status); }}
             onStartSubtask={(task, subtaskId) => { void startSubtask(task, subtaskId); }}
+            onTaskUpdated={upsertTask}
             onReopen={(task) => { void reopenClosedTask(task); }}
             onOpenLinkedTask={openTaskDetail}
             onCreateSideChatFromSelection={createSideChatFromTaskSelection}
             onCreateTodoFromSelection={createTodoFromTaskSelection}
+            buildChatPrompt={buildTaskChatPromptForTask}
+            buildChatContext={buildTaskChatContextForTask}
             actions={selectedTask ? (
               <>
                 {selectedTaskDailyItem && (
@@ -6435,13 +8907,37 @@ export function TasksTab() {
                     ...
                   </Button>
                   {detailMenuOpen && selectedTask && (
-                    <div
-                      className="absolute right-0 top-[calc(100%+8px)] z-[120] w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
-                      role="menu"
-                    >
-                      <button
-                        type="button"
-                        role="menuitem"
+	                    <div
+	                      className="absolute right-0 top-[calc(100%+8px)] z-[120] w-44 overflow-hidden rounded-xl border border-edge-h/70 bg-dropdown p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18),0_4px_12px_rgba(15,23,42,0.10)] ring-1 ring-black/[0.03] backdrop-blur-md"
+	                      role="menu"
+	                    >
+                      {selectedTask.jiraKey && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={syncingJiraTaskId === selectedTask.id}
+                          onClick={() => {
+                            setDetailMenuOpen(false);
+                            void syncSingleJiraTask(selectedTask);
+                          }}
+                          className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-fg-3 transition-colors hover:bg-panel-h hover:text-fg disabled:pointer-events-none disabled:opacity-50"
+                        >
+                          {syncingJiraTaskId === selectedTask.id ? (
+                            <Spinner />
+                          ) : (
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M21 12a9 9 0 0 1-15 6.7" />
+                              <path d="M3 12a9 9 0 0 1 15-6.7" />
+                              <path d="M18 3v5h-5" />
+                              <path d="M6 21v-5h5" />
+                            </svg>
+                          )}
+                          <span>Sync Jira</span>
+                        </button>
+                      )}
+	                      <button
+	                        type="button"
+	                        role="menuitem"
                         onClick={() => {
                           setDetailMenuOpen(false);
                           void addExistingTaskToDaily(selectedTask);
@@ -6469,6 +8965,26 @@ export function TasksTab() {
                           <path d="M5 12h14" />
                         </svg>
                         <span>Create task</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={resettingTaskId === selectedTask.id}
+                        onClick={() => {
+                          setDetailMenuOpen(false);
+                          setTaskResetTarget(selectedTask);
+                        }}
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-semibold text-warn transition-colors hover:bg-warn/[0.10] disabled:pointer-events-none disabled:opacity-50"
+                      >
+                        {resettingTaskId === selectedTask.id ? (
+                          <Spinner />
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M3 12a9 9 0 1 0 3-6.7" />
+                            <path d="M3 4v6h6" />
+                          </svg>
+                        )}
+                        <span>Reset task</span>
                       </button>
                       <button
                         type="button"
@@ -6529,6 +9045,27 @@ export function TasksTab() {
             <Button variant="primary" size="sm" disabled={!!deletingTaskId} onClick={() => { void deleteTask(); }}>
               {deletingTaskId ? <Spinner /> : null}
               Delete
+            </Button>
+          </div>
+        </div>
+      </Modal>
+      <Modal open={!!taskResetTarget} onClose={() => setTaskResetTarget(null)}>
+        <ModalHeader title="Reset task" onClose={() => setTaskResetTarget(null)} />
+        <div className="space-y-4">
+          <div className="text-[13px] leading-relaxed text-fg-3">
+            Reset <span className="font-semibold text-fg">{taskDisplayKey(taskResetTarget) || taskResetTarget?.title}</span>?
+            This keeps the ticket and Jira metadata, but clears generated outputs, stage runs, subtasks, verification records, PR link, and returns the task to Backlog.
+          </div>
+          <div className="rounded-lg border border-warn/25 bg-warn/[0.08] px-3 py-2 text-[12px] leading-relaxed text-warn">
+            This only resets Pikiclaw local progress. External Jira tickets are not changed.
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" disabled={!!resettingTaskId} onClick={() => setTaskResetTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="sm" disabled={!!resettingTaskId} onClick={() => { void resetTask(); }}>
+              {resettingTaskId ? <Spinner /> : null}
+              Reset
             </Button>
           </div>
         </div>

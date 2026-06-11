@@ -427,6 +427,8 @@ export function stripInjectedPrompts(text: string): string {
     return '';
   }
   text = stripHandoverSeed(text);
+  const generatedTaskAction = summarizeGeneratedTaskActionPrompt(text);
+  if (generatedTaskAction) return generatedTaskAction;
   const markers = ['\n[Session Workspace]'];
   for (const m of markers) {
     const idx = text.indexOf(m);
@@ -440,6 +442,18 @@ export function stripInjectedPrompts(text: string): string {
     return '';
   }
   return text;
+}
+
+function summarizeGeneratedTaskActionPrompt(text: string): string | null {
+  const trimmed = text.trim();
+  if (!/^Execution mode:/i.test(trimmed)) return null;
+  if (trimmed.includes('[pikiclaw-ticket-background]')) return 'Start background';
+  if (/Start coding this ticket/i.test(trimmed)) return 'Start coding';
+  if (/Use the ticket description and our conversation so far to produce the clarification document/i.test(trimmed)) return 'Start clarification';
+  if (/Coding was completed outside this Pikiclaw coding stage/i.test(trimmed)) return 'Skip coding and analyze MR';
+  if (/Help me plan self-test for this ticket/i.test(trimmed)) return 'Plan self test';
+  if (/produce the final Test Report/i.test(trimmed)) return 'Write test report';
+  return null;
 }
 
 function stripHandoverSeed(text: string): string {

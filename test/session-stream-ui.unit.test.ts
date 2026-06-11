@@ -184,6 +184,20 @@ describe('session stream UI helpers', () => {
         previewMeta: { lastEvent: 'Working...' },
       });
     });
+
+    it('does not synthesize a shell after an empty stream-state check', () => {
+      expect(resolveEffectiveLiveStream({
+        liveStream: null,
+        pendingPrompt: null,
+        pendingTaskId: null,
+        streamSnapshotActive: false,
+        streamTaskId: 'task-1',
+        displayModel: 'gpt',
+        displayEffort: 'medium',
+        sessionRunning: true,
+        streamStateChecked: true,
+      })).toBeNull();
+    });
   });
 
   describe('shouldSkipEmptyStreamingHandoff', () => {
@@ -252,6 +266,32 @@ describe('session stream UI helpers', () => {
   });
 
   describe('isLiveStreamActive', () => {
+    it('treats unchecked persisted running state as temporarily active', () => {
+      expect(isLiveStreamActive({
+        streaming: false,
+        streamPhase: null,
+        liveStreamPhase: null,
+        pendingPrompt: null,
+        pendingTaskId: null,
+        pendingImageCount: 0,
+        sessionRunning: true,
+        streamStateChecked: false,
+      })).toBe(true);
+    });
+
+    it('does not keep stale persisted running state active after stream-state is checked', () => {
+      expect(isLiveStreamActive({
+        streaming: false,
+        streamPhase: null,
+        liveStreamPhase: null,
+        pendingPrompt: null,
+        pendingTaskId: null,
+        pendingImageCount: 0,
+        sessionRunning: true,
+        streamStateChecked: true,
+      })).toBe(false);
+    });
+
     it('treats a local send without task id as active before the server accepts it', () => {
       expect(isLiveStreamActive({
         streaming: false,

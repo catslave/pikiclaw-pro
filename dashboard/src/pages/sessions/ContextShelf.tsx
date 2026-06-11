@@ -19,6 +19,7 @@ const TAB_LABEL: Record<ContextShelfTab, string> = {
 };
 
 const OUTPUT_KIND_LABEL: Record<ProOutput['kind'], string> = {
+  background: 'Background',
   final: 'Final',
   document: 'Doc',
   image: 'Image',
@@ -661,6 +662,23 @@ export function ContextShelf({
               aria-label={createSideCardLabel}
             >
               +
+            </button>
+          )}
+          {minimalHeader && (
+            <button
+              type="button"
+              onClick={event => {
+                event.stopPropagation();
+                onClose();
+              }}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-5 transition hover:bg-panel-h hover:text-fg active:translate-y-px"
+              aria-label="Close context shelf"
+              title="Close"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                <path d="M18 6 6 18" />
+                <path d="M6 6l12 12" />
+              </svg>
             </button>
           )}
         </div>

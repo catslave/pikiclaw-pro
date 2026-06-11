@@ -18,11 +18,17 @@ export interface LogTraceResult {
 
 interface ParsedLogTraceArgs {
   id: string;
+  idField: string;
   env: string;
   last: string;
   size: string;
+  mode: 'trace' | 'search' | 'stats';
   loaders: string[];
   symptom: string;
+  query: string;
+  index: string;
+  groupBy: string;
+  limit: string;
 }
 
 interface CommandSpec {
@@ -34,9 +40,18 @@ interface CommandSpec {
 const SHARE_LIBS_LOGTRACER = '/Users/michael.yang/Codes/RC/AIR/iva-share-tool-libs/packages/iva-logtracer';
 const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_CAPTURE_CHARS = 80_000;
+const DEFAULT_TRACE_SIZE = '10000';
+const DEFAULT_LOG_SEARCH_SIZE = '200';
+const DEFAULT_STATS_LIMIT = '20';
+const DEFAULT_STATS_GROUP_BY = 'kubernetes.container.name';
+const LOG_TRACE_SLASH_RE = /^\/(?:logtrace|logstrace)(?:\s|$)/;
 
 export function isLogTraceSlash(prompt: string): boolean {
-  return /^\/logtrace(?:\s|$)/.test(prompt.trim());
+  return LOG_TRACE_SLASH_RE.test(prompt.trim());
+}
+
+export function stripLogTraceSlash(prompt: string): string {
+  return prompt.trim().replace(LOG_TRACE_SLASH_RE, '').trimStart();
 }
 
 function tokenize(input: string): string[] {
@@ -52,25 +67,82 @@ function tokenize(input: string): string[] {
 export function parseLogTraceArgs(rawArgs: string): ParsedLogTraceArgs {
   const parsed: ParsedLogTraceArgs = {
     id: '',
+    idField: 'conversationId',
     env: 'lab',
     last: '24h',
-    size: '10000',
+    size: '',
+    mode: 'trace',
     loaders: [],
     symptom: '',
+    query: '',
+    index: '',
+    groupBy: DEFAULT_STATS_GROUP_BY,
+    limit: DEFAULT_STATS_LIMIT,
   };
+  let explicitMode = false;
+  let explicitIdField = false;
+  let statsHint = false;
 
   for (const token of tokenize(rawArgs)) {
     const eq = token.indexOf('=');
     if (eq > 0) {
       const key = token.slice(0, eq).trim().toLowerCase();
-      const value = token.slice(eq + 1).trim();
+      const value = unquoteTokenValue(token.slice(eq + 1).trim());
       if (!value) continue;
-      if (['id', 'sessionid', 'session', 'conversationid', 'conversation'].includes(key)) parsed.id = value;
+      if (key === 'id') {
+        parsed.id = value;
+        if (!explicitIdField) parsed.idField = 'conversationId';
+      }
+      else if (['conversationid', 'converstaionid', 'conversation'].includes(key)) {
+        parsed.id = value;
+        parsed.idField = 'conversationId';
+        explicitIdField = true;
+      }
+      else if (['traceid', 'trace_id', 'trace'].includes(key)) {
+        parsed.id = value;
+        parsed.idField = 'trace_id';
+        explicitIdField = true;
+      }
+      else if (['sessionid', 'session'].includes(key)) {
+        parsed.id = value;
+        parsed.idField = 'sessionId';
+        explicitIdField = true;
+      }
+      else if (['requestid', 'request_id', 'request', 'taskid', 'task_id', 'task', 'turnid', 'turn_id', 'turn'].includes(key)) {
+        parsed.id = value;
+        parsed.idField = normalizeLogField(key);
+        explicitIdField = true;
+      }
       else if (key === 'env') parsed.env = value;
       else if (key === 'last') parsed.last = value;
       else if (key === 'size') parsed.size = value;
+      else if (['mode', 'action', 'type'].includes(key)) {
+        parsed.mode = normalizeMode(value);
+        explicitMode = true;
+      }
+      else if (['field', 'idfield', 'id_field', 'filterfield'].includes(key)) {
+        parsed.idField = normalizeLogField(value);
+        explicitIdField = true;
+      }
+      else if (['query', 'q', 'kql', 'lucene', 'filter', 'condition', 'where'].includes(key)) parsed.query = value;
+      else if (key === 'index') parsed.index = value;
+      else if (['by', 'groupby', 'group_by', 'group'].includes(key)) {
+        parsed.groupBy = value;
+        statsHint = true;
+      }
+      else if (key === 'limit') {
+        parsed.limit = value;
+        statsHint = true;
+      }
       else if (['loader', 'loaders', 'component', 'components'].includes(key)) parsed.loaders.push(...value.split(',').map(s => s.trim()).filter(Boolean));
       else if (['symptom', 'question', 'issue'].includes(key)) parsed.symptom = value;
+      continue;
+    }
+
+    const mode = normalizeMode(token);
+    if (mode !== 'trace' || ['trace', 'search', 'stats', 'stat', 'count', 'agg', 'aggregate'].includes(token.toLowerCase())) {
+      parsed.mode = mode;
+      explicitMode = true;
       continue;
     }
 
@@ -79,7 +151,48 @@ export function parseLogTraceArgs(rawArgs: string): ParsedLogTraceArgs {
     }
   }
 
+  if (!explicitMode) {
+    if (statsHint) parsed.mode = 'stats';
+    else if (isLogSearchField(parsed.idField)) {
+      parsed.mode = statsHint ? 'stats' : 'search';
+    }
+    else if (parsed.query || parsed.index) parsed.mode = 'search';
+  }
+
   return parsed;
+}
+
+function unquoteTokenValue(value: string): string {
+  if (value.length >= 2) {
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value[value.length - 1] === quote) {
+      return value.slice(1, -1).replace(/\\(["'])/g, '$1');
+    }
+  }
+  return value;
+}
+
+function normalizeMode(value: string): ParsedLogTraceArgs['mode'] {
+  const mode = value.trim().toLowerCase();
+  if (['search', 'query', 'find', 'grep', 'logs', 'log'].includes(mode)) return 'search';
+  if (['stats', 'stat', 'count', 'agg', 'aggregate', 'classify', 'classification'].includes(mode)) return 'stats';
+  return 'trace';
+}
+
+function normalizeLogField(value: string): string {
+  const field = value.trim();
+  const compact = field.toLowerCase().replace(/[-_\s]/g, '');
+  if (compact === 'conversationid' || compact === 'conversation') return 'conversationId';
+  if (compact === 'sessionid' || compact === 'session') return 'sessionId';
+  if (compact === 'traceid' || compact === 'trace') return 'trace_id';
+  if (compact === 'requestid' || compact === 'request') return 'requestId';
+  if (compact === 'taskid' || compact === 'task') return 'taskId';
+  if (compact === 'turnid' || compact === 'turn') return 'turnId';
+  return field;
+}
+
+function isLogSearchField(field: string): boolean {
+  return field !== 'conversationId' && field !== 'sessionId';
 }
 
 function summarizeTraceFailure(trace: { code: number | null; stderr: string; timedOut: boolean }): string | undefined {
@@ -128,6 +241,18 @@ function resolveLogTracerCommand(): CommandSpec | null {
       args: ['run', '--project', SHARE_LIBS_LOGTRACER, 'iva-logtracer'],
       label: `uv run --project ${SHARE_LIBS_LOGTRACER} iva-logtracer`,
     };
+  }
+  return null;
+}
+
+function resolveKibanaQueryCommand(): CommandSpec | null {
+  const configured = process.env.PIKICLAW_KIBANA_QUERY_BIN?.trim();
+  if (configured) {
+    const parts = splitCommandLine(configured);
+    if (parts.length) return { cmd: parts[0], args: parts.slice(1), label: configured };
+  }
+  if (hasExecutableOnPath('kibana-query')) {
+    return { cmd: 'kibana-query', args: [], label: 'kibana-query' };
   }
   return null;
 }
@@ -182,6 +307,54 @@ function readTextIfSmall(filePath: string, maxChars: number): string {
 
 function safeFileSlug(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'logtrace';
+}
+
+function envArgs(env: string): string[] {
+  const envFile = path.join(os.homedir(), '.config', 'iva-logtracer', `.env.${env}`);
+  if (fs.existsSync(envFile)) return ['--env-file', envFile];
+  return ['--env', env];
+}
+
+function boundedIntString(value: string, fallback: string, max: number): string {
+  const parsed = Number.parseInt(value || fallback, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return String(Math.min(parsed, max));
+}
+
+function escapeQueryValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function buildKibanaQuery(args: ParsedLogTraceArgs): string {
+  const filters: string[] = [];
+  if (args.id) filters.push(`${args.idField}:"${escapeQueryValue(args.id)}"`);
+  if (args.query) filters.push(filters.length ? `(${args.query})` : args.query);
+  return filters.join(' AND ');
+}
+
+function buildTraceCommandArgs(args: ParsedLogTraceArgs, legacy = false): string[] {
+  const traceArgs = [
+    ...(legacy ? [] : ['trace']),
+    args.id,
+    '--env',
+    args.env,
+    '--last',
+    args.last,
+    '--size',
+    boundedIntString(args.size, DEFAULT_TRACE_SIZE, 50_000),
+    '--format',
+    'json',
+    '--save-json',
+    '--explain-components',
+  ];
+  if (args.loaders.length) traceArgs.push('--loaders', ...args.loaders);
+  return traceArgs;
+}
+
+function shouldRetryLegacyTrace(trace: { code: number | null; stdout: string; stderr: string; timedOut: boolean }): boolean {
+  if (trace.timedOut || trace.code === 0) return false;
+  const output = `${trace.stderr}\n${trace.stdout}`;
+  return /usage:\s*iva-logtracer\s+\[-h\]/.test(output) && !/usage:\s*iva-logtracer\s+trace\s+\[-h\]/.test(output);
 }
 
 function buildAnalysisPrompt(args: ParsedLogTraceArgs, opts: {
@@ -240,16 +413,7 @@ function buildAnalysisPrompt(args: ParsedLogTraceArgs, opts: {
   ].filter(Boolean).join('\n');
 }
 
-export async function runLogTraceSkill(req: LogTraceRequest): Promise<LogTraceResult> {
-  const args = parseLogTraceArgs(req.rawArgs);
-  if (!args.id) {
-    return {
-      ok: false,
-      error: 'logtrace id is required',
-      prompt: 'The /logtrace command needs an id. Ask the user for a sessionId or conversationId, plus env and time range if needed.',
-    };
-  }
-
+async function runTraceMode(req: LogTraceRequest, args: ParsedLogTraceArgs): Promise<LogTraceResult> {
   const command = resolveLogTracerCommand();
   if (!command) {
     return {
@@ -259,23 +423,12 @@ export async function runLogTraceSkill(req: LogTraceRequest): Promise<LogTraceRe
     };
   }
 
-  const traceArgs = [
-    'trace',
-    args.id,
-    '--env',
-    args.env,
-    '--last',
-    args.last,
-    '--size',
-    args.size,
-    '--format',
-    'json',
-    '--save-json',
-    '--explain-components',
-  ];
-  if (args.loaders.length) traceArgs.push('--loaders', ...args.loaders);
-
-  const trace = await runCommand(command, traceArgs);
+  let traceArgs = buildTraceCommandArgs(args);
+  let trace = await runCommand(command, traceArgs);
+  if (shouldRetryLegacyTrace(trace)) {
+    traceArgs = buildTraceCommandArgs(args, true);
+    trace = await runCommand(command, traceArgs);
+  }
   const outputDir = findOutputDir(trace.stdout);
 
   let reportStdout = '';
@@ -315,4 +468,149 @@ export async function runLogTraceSkill(req: LogTraceRequest): Promise<LogTraceRe
       ? undefined
       : `iva-logtracer exited with ${trace.code ?? 'unknown'}${trace.timedOut ? ' after timeout' : ''}${failureSummary ? `: ${failureSummary}` : ''}`,
   };
+}
+
+function buildKibanaPrompt(args: ParsedLogTraceArgs, opts: {
+  commandLabel: string;
+  commandArgs: string[];
+  code: number | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  artifactPath: string;
+  query: string;
+}): string {
+  const requiredShape = args.mode === 'stats'
+    ? [
+        'Required response shape:',
+        '1. Start with the statistics scope: environment, query, time range, index, grouping field, and whether the result is complete enough.',
+        '2. Summarize the top buckets or categories with counts/percentages when visible.',
+        '3. Classify notable error clusters, noisy components, repeated messages, or missing categories. Distinguish raw bucket evidence from inference.',
+        '4. Suggest one or two tighter follow-up searches if the aggregation is too coarse.',
+      ]
+    : [
+        'Required response shape:',
+        '1. Start with the log lookup scope: environment, query, time range, index, sample size, and whether the result is complete enough.',
+        '2. Summarize the matching logs by time, service/component, severity, and repeated messages.',
+        '3. Analyze abnormalities such as errors, exceptions, timeouts, retries, missing events, or suspicious gaps.',
+        '4. If no confirmed abnormality is visible, say so and list residual uncertainty.',
+      ];
+
+  return [
+    `Analyze this controlled ${args.mode === 'stats' ? 'Kibana log statistics' : 'Kibana log search'} result from Pikiclaw.`,
+    '',
+    ...requiredShape,
+    '5. Keep full IDs visible. Do not invent evidence beyond the command output below.',
+    '',
+    'Log request:',
+    JSON.stringify({
+      mode: args.mode,
+      env: args.env,
+      id: args.id || null,
+      idField: args.id ? args.idField : null,
+      query: opts.query,
+      last: args.last,
+      size: args.size || null,
+      index: args.index || null,
+      groupBy: args.mode === 'stats' ? args.groupBy : null,
+      limit: args.mode === 'stats' ? args.limit : null,
+    }, null, 2),
+    '',
+    `Command runner: ${opts.commandLabel}`,
+    `Command args: ${opts.commandArgs.join(' ')}`,
+    `Exit code: ${opts.code ?? 'unknown'}${opts.timedOut ? ' (timed out)' : ''}`,
+    `Pikiclaw artifact: ${opts.artifactPath}`,
+    '',
+    'Command stdout:',
+    '```text',
+    opts.stdout || '(empty)',
+    '```',
+    '',
+    'Command stderr:',
+    '```text',
+    opts.stderr || '(empty)',
+    '```',
+  ].join('\n');
+}
+
+async function runKibanaMode(req: LogTraceRequest, args: ParsedLogTraceArgs): Promise<LogTraceResult> {
+  const query = buildKibanaQuery(args);
+  if (!query) {
+    return {
+      ok: false,
+      error: 'log query is required',
+      prompt: 'The /logtrace search/stats command needs a conversationId, sessionId, id, or query/filter condition. Ask the user for the missing log condition.',
+    };
+  }
+
+  const command = resolveKibanaQueryCommand();
+  if (!command) {
+    return {
+      ok: false,
+      error: 'kibana-query is not available',
+      prompt: 'The controlled /logtrace search/stats workflow could not find kibana-query. Ask the user to install kibana-query or set PIKICLAW_KIBANA_QUERY_BIN.',
+    };
+  }
+
+  const commonArgs = [...envArgs(args.env), '--last', args.last, '--format', 'json'];
+  if (args.index) commonArgs.push('--index', args.index);
+  const commandArgs = args.mode === 'stats'
+    ? [
+        'agg',
+        '--preset',
+        'top_terms',
+        '--field',
+        args.groupBy || DEFAULT_STATS_GROUP_BY,
+        '--limit',
+        boundedIntString(args.limit, DEFAULT_STATS_LIMIT, 100),
+        '--query',
+        query,
+        ...commonArgs,
+      ]
+    : [
+        'search',
+        query,
+        ...commonArgs,
+        '--size',
+        boundedIntString(args.size, DEFAULT_LOG_SEARCH_SIZE, 10_000),
+      ];
+
+  const result = await runCommand(command, commandArgs);
+  const artifactDir = path.join(req.sessionWorkspace || os.tmpdir(), 'platform-skills');
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const artifactPath = path.join(artifactDir, `${safeFileSlug(args.id || args.query || args.mode)}-logtrace-${args.mode}.md`);
+  const prompt = buildKibanaPrompt(args, {
+    commandLabel: command.label,
+    commandArgs,
+    code: result.code,
+    timedOut: result.timedOut,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    artifactPath,
+    query,
+  });
+  fs.writeFileSync(artifactPath, prompt, 'utf-8');
+
+  const stderr = result.stderr.trim();
+  return {
+    ok: result.code === 0 && !result.timedOut,
+    prompt,
+    artifactPath,
+    error: result.code === 0 && !result.timedOut
+      ? undefined
+      : `kibana-query exited with ${result.code ?? 'unknown'}${result.timedOut ? ' after timeout' : ''}${stderr ? `: ${stderr.split(/\r?\n/).find(Boolean)}` : ''}`,
+  };
+}
+
+export async function runLogTraceSkill(req: LogTraceRequest): Promise<LogTraceResult> {
+  const args = parseLogTraceArgs(req.rawArgs);
+  if (args.mode === 'trace' && !args.id) {
+    return {
+      ok: false,
+      error: 'logtrace id is required',
+      prompt: 'The /logtrace command needs an id. Ask the user for a sessionId or conversationId, plus env and time range if needed.',
+    };
+  }
+  if (args.mode === 'trace') return runTraceMode(req, args);
+  return runKibanaMode(req, args);
 }

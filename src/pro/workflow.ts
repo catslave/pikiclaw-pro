@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DEFAULT_ANALYZE_TICKET_PROMPT } from './jira-analyze.js';
 import { syncJiraTask } from './tasks.js';
 
 export interface AgentAssistant {
@@ -115,10 +116,74 @@ export interface JiraSyncRun {
   events: JiraSyncRunEvent[];
 }
 
+export type JiraRemoteUpdateField = 'status' | 'fixVersions' | 'sprint' | 'dueDate';
+export type JiraRemoteUpdateStatus = 'draft' | 'applying' | 'applied' | 'failed' | 'cancelled';
+
+export interface JiraRemoteUpdateFields {
+  status?: string;
+  fixVersions?: string[];
+  sprint?: string;
+  dueDate?: string;
+}
+
+export interface JiraRemoteUpdateDiff {
+  field: JiraRemoteUpdateField;
+  from?: string | string[];
+  to?: string | string[];
+}
+
+export interface JiraRemoteUpdateRun {
+  id: string;
+  taskId: string;
+  jiraKey?: string;
+  jiraUrl?: string;
+  status: JiraRemoteUpdateStatus;
+  fields: JiraRemoteUpdateFields;
+  diff: JiraRemoteUpdateDiff[];
+  error?: string;
+  remoteTool?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  events: JiraSyncRunEvent[];
+}
+
+export type KnowledgeEntryKind = 'knowledge-card' | 'session-digest';
+export type KnowledgeEntryStatus = 'published' | 'hidden';
+export type KnowledgeEntryConfidence = 'low' | 'medium' | 'high';
+export type KnowledgeEntryCreatedBy = 'auto' | 'manual' | 'agent';
+
+export interface KnowledgeSourceRef {
+  type: 'manual' | 'chat' | 'task' | 'output' | 'file' | 'link';
+  workdir?: string;
+  agent?: string;
+  sessionId?: string;
+  taskId?: string;
+  outputId?: string;
+  path?: string;
+  url?: string;
+  title?: string;
+}
+
+export interface KnowledgeArtifactRef {
+  kind?: string;
+  title?: string;
+  outputId?: string;
+  workdir?: string;
+  agent?: string;
+  sessionId?: string;
+  path?: string;
+  url?: string;
+}
+
 export interface KnowledgeEntry {
   id: string;
   title: string;
   body: string;
+  kind: KnowledgeEntryKind;
+  status: KnowledgeEntryStatus;
+  summary?: string;
   source?: {
     type: 'manual' | 'chat' | 'task';
     workdir?: string;
@@ -126,9 +191,30 @@ export interface KnowledgeEntry {
     sessionId?: string;
     taskId?: string;
   };
+  sourceRefs: KnowledgeSourceRef[];
+  artifactRefs: KnowledgeArtifactRef[];
+  confidence: KnowledgeEntryConfidence;
+  createdBy: KnowledgeEntryCreatedBy;
   tags: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface KnowledgeEntryFilters {
+  query?: unknown;
+  tag?: unknown;
+  sourceType?: unknown;
+  workspace?: unknown;
+  status?: unknown;
+  kind?: unknown;
+}
+
+export type JiraWorkspaceRouteMatchType = 'project' | 'component' | 'label' | 'text';
+
+export interface JiraWorkspaceRoute {
+  match: string;
+  matchType: JiraWorkspaceRouteMatchType;
+  workdir: string;
 }
 
 export interface JiraWorkflowConfig {
@@ -140,8 +226,12 @@ export interface JiraWorkflowConfig {
   codingAssistantId?: string;
   ticketSyncAssistantId?: string;
   knowledgeAssistantId?: string;
+  chiefOfStaffAssistantId?: string;
+  focusAdvancedSensorsEnabled?: boolean;
   runKnowledgeOnRefinement?: boolean;
   runKnowledgeOnCoding?: boolean;
+  analyzeTicketPrompt?: string;
+  jiraWorkspaceRoutes?: JiraWorkspaceRoute[];
   statusWorkflows?: Partial<Record<'backlog' | 'refinement' | 'coding' | 'resolved' | 'done', {
     instruction?: string;
     assistantId?: string;
@@ -155,6 +245,7 @@ interface WorkflowFile {
   deletedAssistantIds?: string[];
   automations: AutomationRule[];
   jiraSyncRuns?: JiraSyncRun[];
+  jiraRemoteUpdateRuns?: JiraRemoteUpdateRun[];
   knowledge: KnowledgeEntry[];
   jira?: JiraWorkflowConfig;
 }
@@ -166,11 +257,13 @@ const DEFAULT_JIRA_CONFIG: JiraWorkflowConfig = {
   codingAssistantId: 'assistant_coding',
   ticketSyncAssistantId: 'assistant_ticket_sync',
   knowledgeAssistantId: 'assistant_knowledge',
+  chiefOfStaffAssistantId: 'assistant_chief_of_staff',
   runKnowledgeOnRefinement: true,
   runKnowledgeOnCoding: true,
   statusWorkflows: {
-    refinement: { assistantId: 'assistant_refinement', instruction: 'Analyze goal, scope, risks, dependencies, acceptance criteria, and estimate.' },
-    coding: { assistantId: 'assistant_coding', instruction: 'Implement the task with minimal changes, then summarize files, tests, and remaining risk.' },
+    refinement: { assistantId: 'assistant_refinement', instruction: 'Explain what the Jira task is, what needs to be done, retrieve relevant local/context material, state your understanding, open questions, risks, acceptance criteria, and a recommended plan. Do not code until the user confirms the goal and plan.' },
+    coding: { assistantId: 'assistant_coding', instruction: 'Implement only after the confirmed Goal & Plan. Keep changes minimal, inspect relevant code paths first, summarize changed files, why each change was made, verification run, and remaining risk. Stop in Review; do not commit, create an MR, update Jira remotely, or mark Done until user approval.' },
+    resolved: { assistantId: 'assistant_coding', instruction: 'Review the implementation with the user. Compare against the confirmed Goal & Plan, explain changed files and tradeoffs, collect user approval, and prepare the Verification plan. Do not write Jira remotely or submit an MR without explicit confirmation.' },
   },
 };
 
@@ -314,6 +407,74 @@ const DEFAULT_ASSISTANTS: AgentAssistant[] = [
     updatedAt: '2026-05-27T00:00:00.000Z',
   },
   {
+    id: 'assistant_mr_review',
+    name: 'MR Review Assistant',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['merge-request', 'pull-request', 'code-review'],
+    responsibility: 'Review merge requests and pull requests for correctness, regressions, missing tests, maintainability risks, and follow-up questions before the user responds or merges.',
+    prompt: 'Review the provided MR/PR link, diff, branch, or pasted context. Prioritize concrete bugs, regressions, missing tests, risky behavior changes, and unclear requirements. Lead with findings ordered by severity, cite files or changed areas when available, then summarize residual risk and recommended next action. Do not make code changes unless explicitly asked.',
+    defaultPrompt: 'Review the provided MR/PR link, diff, branch, or pasted context. Prioritize concrete bugs, regressions, missing tests, risky behavior changes, and unclear requirements. Lead with findings ordered by severity, cite files or changed areas when available, then summarize residual risk and recommended next action. Do not make code changes unless explicitly asked.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'review-mr', 'inspect-diff', 'run-tests', 'edit-prompt', 'history'],
+    labels: ['builtin', 'quick-assistant'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-06-09T00:00:00.000Z',
+    updatedAt: '2026-06-09T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_log_analysis',
+    name: 'Log Analysis Assistant',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['log', 'trace', 'session-id', 'incident'],
+    responsibility: 'Investigate logs, trace IDs, session IDs, and incident snippets; reconstruct likely timelines, root causes, affected components, and next diagnostic steps.',
+    prompt: 'Analyze the provided log keyword, trace ID, session ID, pasted log snippet, or incident description. First identify the target system and time window when possible, then gather relevant evidence with available tools, build a concise timeline, explain likely root cause and confidence, and list concrete next checks. Keep assumptions explicit.',
+    defaultPrompt: 'Analyze the provided log keyword, trace ID, session ID, pasted log snippet, or incident description. First identify the target system and time window when possible, then gather relevant evidence with available tools, build a concise timeline, explain likely root cause and confidence, and list concrete next checks. Keep assumptions explicit.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'trace-logs', 'summarize-evidence', 'diagnose', 'edit-prompt', 'history'],
+    labels: ['builtin', 'quick-assistant'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-06-09T00:00:00.000Z',
+    updatedAt: '2026-06-09T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_bug_analysis',
+    name: 'Bug Analysis Assistant',
+    kind: 'task-stage',
+    surfaceId: 'dashboard',
+    objectTypes: ['bug', 'ticket', 'jira-bug', 'reproducer'],
+    responsibility: 'Analyze bug tickets or rough bug descriptions, clarify reproduction, isolate likely causes, propose verification, and prepare a focused fix plan before implementation.',
+    prompt: 'Analyze the provided bug ticket, Jira link/key, reproduction note, or free-form bug description. Extract expected versus actual behavior, impacted users, scope, likely code areas, reproduction plan, evidence gaps, and a minimal fix strategy. Ask only blocking clarification questions; otherwise continue with evidence gathering and a concise analysis.',
+    defaultPrompt: 'Analyze the provided bug ticket, Jira link/key, reproduction note, or free-form bug description. Extract expected versus actual behavior, impacted users, scope, likely code areas, reproduction plan, evidence gaps, and a minimal fix strategy. Ask only blocking clarification questions; otherwise continue with evidence gathering and a concise analysis.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'analyze-bug', 'reproduce', 'inspect-code', 'plan-fix', 'edit-prompt', 'history'],
+    labels: ['builtin', 'quick-assistant'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-06-09T00:00:00.000Z',
+    updatedAt: '2026-06-09T00:00:00.000Z',
+  },
+  {
+    id: 'assistant_chief_of_staff',
+    name: 'Chief of Staff',
+    kind: 'automation',
+    surfaceId: 'dashboard',
+    objectTypes: ['task', 'standup', 'checkout'],
+    responsibility: 'Synthesize git, Jira, sandbox, and session signals into a concise daily command-center plan with prioritized recommendations.',
+    prompt: 'Synthesize git, Jira, sandbox, and session signals into a concise daily command-center plan. Output structured JSON only: headline plus prioritized recommendations. No long prose.',
+    defaultPrompt: 'Synthesize git, Jira, sandbox, and session signals into a concise daily command-center plan. Output structured JSON only: headline plus prioritized recommendations. No long prose.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'orchestrate', 'edit-prompt', 'history'],
+    labels: ['builtin', 'focus'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-06-06T00:00:00.000Z',
+    updatedAt: '2026-06-06T00:00:00.000Z',
+  },
+  {
     id: 'assistant_knowledge',
     name: 'Knowledge Assistant',
     kind: 'task-stage',
@@ -434,6 +595,11 @@ function normalizeText(value: unknown, max = 16_000): string {
   return text.length > max ? text.slice(0, max).trimEnd() : text;
 }
 
+function jiraBrowseUrlForKey(value: unknown): string | undefined {
+  const key = normalizeText(value, 80);
+  return key ? `https://jira.ringcentral.com/browse/${encodeURIComponent(key)}` : undefined;
+}
+
 function issueField(issue: Record<string, unknown>, ...keys: string[]): unknown {
   for (const key of keys) {
     const value = issue[key];
@@ -458,6 +624,40 @@ function namedValue(value: unknown): string {
   return '';
 }
 
+function sprintNameFromText(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  const match = raw.match(/\bname=([^,\]]+)/);
+  return normalizeText(match?.[1] || raw, 240);
+}
+
+function collectSprintNames(value: unknown, output: string[] = []): string[] {
+  if (value == null) return output;
+  if (typeof value === 'string') {
+    const name = sprintNameFromText(value);
+    if (name) output.push(name);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectSprintNames(item, output);
+    return output;
+  }
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    if (typeof object.name === 'string') {
+      const name = sprintNameFromText(object.name);
+      if (name) output.push(name);
+    }
+    if (object.value != null) collectSprintNames(object.value, output);
+    if (object.values != null) collectSprintNames(object.values, output);
+  }
+  return output;
+}
+
+function sprintValue(value: unknown): string {
+  return [...new Set(collectSprintNames(value))].join(', ');
+}
+
 function arrayText(value: unknown, max = 120): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const items = value.map(item => namedValue(item) || normalizeText(item, max)).filter(Boolean);
@@ -475,7 +675,7 @@ function normalizeJiraSyncItem(issue: Record<string, unknown>): JiraSyncRunItem 
   const jiraStatus = namedValue(issueField(issue, 'ticketStatus', 'status', 'jiraStatus'));
   if (isClosedJiraStatus(jiraStatus)) return null;
   const fixVersions = arrayText(issueField(issue, 'fixVersions', 'fix_versions', 'fixVersion', 'fixversion'));
-  const jiraUrl = normalizeText(issueField(issue, 'jiraUrl', 'url', 'browseUrl', 'webUrl'), 2048) || undefined;
+  const jiraUrl = normalizeText(issueField(issue, 'jiraUrl', 'url', 'browseUrl', 'webUrl'), 2048) || jiraBrowseUrlForKey(jiraKey);
   return {
     id: newId('jira_item'),
     jiraKey: jiraKey || undefined,
@@ -486,7 +686,7 @@ function normalizeJiraSyncItem(issue: Record<string, unknown>): JiraSyncRunItem 
     issueType: namedValue(issueField(issue, 'issueType', 'type', 'issuetype', 'issue_type')) || undefined,
     jiraUrl,
     url: jiraUrl,
-    sprint: normalizeText(issueField(issue, 'sprint', 'sprintName'), 120) || undefined,
+    sprint: sprintValue(issueField(issue, 'sprint', 'sprintName', 'customfield_10652')) || undefined,
     fixVersions,
     fixVersion: fixVersions?.join(', '),
     reporter: namedValue(issueField(issue, 'reporter')) || undefined,
@@ -502,6 +702,122 @@ function normalizeJiraSyncItem(issue: Record<string, unknown>): JiraSyncRunItem 
   };
 }
 
+function normalizeKnowledgeKind(value: unknown): KnowledgeEntryKind {
+  return value === 'session-digest' ? 'session-digest' : 'knowledge-card';
+}
+
+function normalizeKnowledgeStatus(value: unknown): KnowledgeEntryStatus {
+  return value === 'hidden' ? 'hidden' : 'published';
+}
+
+function normalizeKnowledgeConfidence(value: unknown): KnowledgeEntryConfidence {
+  return value === 'low' || value === 'high' ? value : 'medium';
+}
+
+function normalizeKnowledgeCreatedBy(value: unknown): KnowledgeEntryCreatedBy {
+  return value === 'auto' || value === 'agent' ? value : 'manual';
+}
+
+function normalizeKnowledgeSourceRef(value: unknown): KnowledgeSourceRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const type = raw.type === 'chat' || raw.type === 'task' || raw.type === 'output' || raw.type === 'file' || raw.type === 'link'
+    ? raw.type
+    : 'manual';
+  const ref: KnowledgeSourceRef = { type };
+  const workdir = normalizeText(raw.workdir, 1_000);
+  const agent = normalizeText(raw.agent, 120);
+  const sessionId = normalizeText(raw.sessionId, 260);
+  const taskId = normalizeText(raw.taskId, 260);
+  const outputId = normalizeText(raw.outputId, 260);
+  const filePath = normalizeText(raw.path, 2_000);
+  const url = normalizeText(raw.url, 2_000);
+  const title = normalizeText(raw.title, 240);
+  if (workdir) ref.workdir = workdir;
+  if (agent) ref.agent = agent;
+  if (sessionId) ref.sessionId = sessionId;
+  if (taskId) ref.taskId = taskId;
+  if (outputId) ref.outputId = outputId;
+  if (filePath) ref.path = filePath;
+  if (url) ref.url = url;
+  if (title) ref.title = title;
+  return ref;
+}
+
+function normalizeKnowledgeArtifactRef(value: unknown): KnowledgeArtifactRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const ref: KnowledgeArtifactRef = {};
+  const kind = normalizeText(raw.kind, 80);
+  const title = normalizeText(raw.title, 240);
+  const outputId = normalizeText(raw.outputId, 260);
+  const workdir = normalizeText(raw.workdir, 1_000);
+  const agent = normalizeText(raw.agent, 120);
+  const sessionId = normalizeText(raw.sessionId, 260);
+  const filePath = normalizeText(raw.path, 2_000);
+  const url = normalizeText(raw.url, 2_000);
+  if (kind) ref.kind = kind;
+  if (title) ref.title = title;
+  if (outputId) ref.outputId = outputId;
+  if (workdir) ref.workdir = workdir;
+  if (agent) ref.agent = agent;
+  if (sessionId) ref.sessionId = sessionId;
+  if (filePath) ref.path = filePath;
+  if (url) ref.url = url;
+  return Object.keys(ref).length ? ref : null;
+}
+
+function normalizeKnowledgeRefs<T>(
+  value: unknown,
+  normalize: (item: unknown) => T | null,
+  maxItems = 12,
+): T[] {
+  return Array.isArray(value)
+    ? value.map(normalize).filter((item: T | null): item is T => !!item).slice(0, maxItems)
+    : [];
+}
+
+function sourceRefFromLegacySource(source: KnowledgeEntry['source'] | undefined): KnowledgeSourceRef[] {
+  if (!source) return [];
+  return [{ ...source }];
+}
+
+function normalizeKnowledgeEntry(raw: any): KnowledgeEntry | null {
+  const id = normalizeText(raw?.id, 160);
+  const title = normalizeText(raw?.title, 200);
+  if (!id || !title) return null;
+  const body = normalizeText(raw?.body, 48_000);
+  const legacySource = normalizeKnowledgeSourceRef(raw?.source);
+  const source = legacySource && (legacySource.type === 'manual' || legacySource.type === 'chat' || legacySource.type === 'task')
+    ? {
+      type: legacySource.type,
+      workdir: legacySource.workdir,
+      agent: legacySource.agent,
+      sessionId: legacySource.sessionId,
+      taskId: legacySource.taskId,
+    }
+    : undefined;
+  const sourceRefs = normalizeKnowledgeRefs(raw?.sourceRefs, normalizeKnowledgeSourceRef);
+  const artifactRefs = normalizeKnowledgeRefs(raw?.artifactRefs, normalizeKnowledgeArtifactRef);
+  const now = new Date().toISOString();
+  return {
+    id,
+    title,
+    body,
+    kind: normalizeKnowledgeKind(raw?.kind),
+    status: normalizeKnowledgeStatus(raw?.status),
+    summary: normalizeText(raw?.summary, 1_000) || undefined,
+    source,
+    sourceRefs: sourceRefs.length ? sourceRefs : sourceRefFromLegacySource(source),
+    artifactRefs,
+    confidence: normalizeKnowledgeConfidence(raw?.confidence),
+    createdBy: normalizeKnowledgeCreatedBy(raw?.createdBy),
+    tags: normalizeStringList(raw?.tags, 20, 60),
+    createdAt: typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : now,
+    updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : now,
+  };
+}
+
 function readFile(): WorkflowFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(workflowFilePath(), 'utf-8')) as WorkflowFile;
@@ -511,11 +827,14 @@ function readFile(): WorkflowFile {
       deletedAssistantIds: Array.isArray(parsed?.deletedAssistantIds) ? parsed.deletedAssistantIds.map(String).filter(Boolean) : [],
       automations: Array.isArray(parsed?.automations) ? parsed.automations.filter(item => item?.id && item?.name) : [],
       jiraSyncRuns: Array.isArray(parsed?.jiraSyncRuns) ? parsed.jiraSyncRuns.filter(item => item?.id) : [],
-      knowledge: Array.isArray(parsed?.knowledge) ? parsed.knowledge.filter(item => item?.id && item?.title) : [],
+      jiraRemoteUpdateRuns: Array.isArray(parsed?.jiraRemoteUpdateRuns) ? parsed.jiraRemoteUpdateRuns.filter(item => item?.id && item?.taskId) : [],
+      knowledge: Array.isArray(parsed?.knowledge)
+        ? parsed.knowledge.map(normalizeKnowledgeEntry).filter((item): item is KnowledgeEntry => !!item)
+        : [],
       jira: parsed?.jira && typeof parsed.jira === 'object' ? parsed.jira : undefined,
     };
   } catch {
-    return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], jiraSyncRuns: [], knowledge: [] };
+    return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], jiraSyncRuns: [], jiraRemoteUpdateRuns: [], knowledge: [] };
   }
 }
 
@@ -599,6 +918,52 @@ export function getJiraWorkflowConfig(): JiraWorkflowConfig {
   return { ...DEFAULT_JIRA_CONFIG, ...(readFile().jira || {}) };
 }
 
+export function getAnalyzeTicketPrompt(): { prompt: string; defaultPrompt: string; customized: boolean } {
+  const config = getJiraWorkflowConfig();
+  const defaultPrompt = DEFAULT_ANALYZE_TICKET_PROMPT;
+  const prompt = normalizeText(config.analyzeTicketPrompt, 48_000) || defaultPrompt;
+  return {
+    prompt,
+    defaultPrompt,
+    customized: prompt.trim() !== defaultPrompt.trim(),
+  };
+}
+
+export function updateAnalyzeTicketPrompt(input: { prompt?: unknown }): { prompt: string; defaultPrompt: string; customized: boolean } {
+  const nextPrompt = normalizeText(input.prompt, 48_000);
+  if (!nextPrompt) throw new Error('prompt is required');
+  updateJiraWorkflowConfig({ analyzeTicketPrompt: nextPrompt });
+  return getAnalyzeTicketPrompt();
+}
+
+export function resetAnalyzeTicketPrompt(): { prompt: string; defaultPrompt: string; customized: boolean } {
+  const file = readFile();
+  const current = { ...DEFAULT_JIRA_CONFIG, ...(file.jira || {}) };
+  delete current.analyzeTicketPrompt;
+  file.jira = current;
+  writeFile(file);
+  return getAnalyzeTicketPrompt();
+}
+
+function normalizeJiraWorkspaceRoutes(value: unknown): JiraWorkspaceRoute[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const routes = value
+    .map(item => {
+      if (!item || typeof item !== 'object') return null;
+      const raw = item as Partial<JiraWorkspaceRoute>;
+      const match = normalizeText(raw.match, 160);
+      const workdir = normalizeText(raw.workdir, 2048);
+      const matchType = raw.matchType === 'project' || raw.matchType === 'component' || raw.matchType === 'label' || raw.matchType === 'text'
+        ? raw.matchType
+        : 'text';
+      if (!match || !workdir) return null;
+      return { match, matchType, workdir };
+    })
+    .filter((item): item is JiraWorkspaceRoute => !!item)
+    .slice(0, 32);
+  return routes.length ? routes : undefined;
+}
+
 export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): JiraWorkflowConfig {
   const file = readFile();
   const current = { ...DEFAULT_JIRA_CONFIG, ...(file.jira || {}) };
@@ -627,8 +992,18 @@ export function updateJiraWorkflowConfig(input: Partial<JiraWorkflowConfig>): Ji
     codingAssistantId: normalizeText(input.codingAssistantId, 160) || current.codingAssistantId,
     ticketSyncAssistantId: normalizeText(input.ticketSyncAssistantId, 160) || current.ticketSyncAssistantId,
     knowledgeAssistantId: normalizeText(input.knowledgeAssistantId, 160) || current.knowledgeAssistantId,
+    chiefOfStaffAssistantId: normalizeText(input.chiefOfStaffAssistantId, 160) || current.chiefOfStaffAssistantId,
+    focusAdvancedSensorsEnabled: typeof input.focusAdvancedSensorsEnabled === 'boolean'
+      ? input.focusAdvancedSensorsEnabled
+      : current.focusAdvancedSensorsEnabled,
     runKnowledgeOnRefinement: typeof input.runKnowledgeOnRefinement === 'boolean' ? input.runKnowledgeOnRefinement : current.runKnowledgeOnRefinement,
     runKnowledgeOnCoding: typeof input.runKnowledgeOnCoding === 'boolean' ? input.runKnowledgeOnCoding : current.runKnowledgeOnCoding,
+    analyzeTicketPrompt: input.analyzeTicketPrompt !== undefined
+      ? normalizeText(input.analyzeTicketPrompt, 48_000) || undefined
+      : current.analyzeTicketPrompt,
+    jiraWorkspaceRoutes: input.jiraWorkspaceRoutes !== undefined
+      ? normalizeJiraWorkspaceRoutes(input.jiraWorkspaceRoutes)
+      : current.jiraWorkspaceRoutes,
     statusWorkflows,
   };
   file.jira = next;
@@ -940,6 +1315,7 @@ export function applyJiraSyncRunItems(runId: string, itemIds: unknown[]): JiraSy
       jiraKey: item.jiraKey,
       jiraUrl: item.jiraUrl || item.url,
       sprint: item.sprint,
+      fixVersions: item.fixVersions,
       reporter: item.reporter,
       assignee: item.assignee,
       ticketStatus: item.ticketStatus || item.jiraStatus,
@@ -987,22 +1363,203 @@ export function applyJiraSyncRunItems(runId: string, itemIds: unknown[]): JiraSy
   } as any);
 }
 
-export function listKnowledgeEntries(): KnowledgeEntry[] {
-  return readFile().knowledge.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+function normalizeRemoteFixVersions(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return value.map(item => namedValue(item) || normalizeText(item, 120)).filter(Boolean).slice(0, 20);
+  const text = normalizeText(value, 1000);
+  if (!text) return undefined;
+  return text.split(/[,，;；\n]+/).map(item => normalizeText(item, 120)).filter(Boolean).slice(0, 20);
 }
 
-export function createKnowledgeEntry(input: { title: unknown; body?: unknown; source?: KnowledgeEntry['source']; tags?: unknown }): KnowledgeEntry {
+function normalizeRemoteUpdateFields(input: unknown): JiraRemoteUpdateFields {
+  const raw = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const fields: JiraRemoteUpdateFields = {};
+  if (Object.prototype.hasOwnProperty.call(raw, 'status')) {
+    const status = normalizeText(raw.status, 120);
+    if (status) fields.status = status;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'sprint')) fields.sprint = normalizeText(raw.sprint, 120);
+  if (Object.prototype.hasOwnProperty.call(raw, 'dueDate')) fields.dueDate = normalizeText(raw.dueDate, 80);
+  if (Object.prototype.hasOwnProperty.call(raw, 'fixVersions') || Object.prototype.hasOwnProperty.call(raw, 'fixVersion')) {
+    fields.fixVersions = normalizeRemoteFixVersions(raw.fixVersions ?? raw.fixVersion) || [];
+  }
+  return fields;
+}
+
+function sameRemoteValue(a: string | string[] | undefined, b: string | string[] | undefined): boolean {
+  const normalize = (value: string | string[] | undefined) => Array.isArray(value)
+    ? value.map(item => item.trim()).filter(Boolean).join('\u0000')
+    : normalizeText(value, 1000);
+  return normalize(a) === normalize(b);
+}
+
+function remoteUpdateDiff(current: JiraRemoteUpdateFields, fields: JiraRemoteUpdateFields): JiraRemoteUpdateDiff[] {
+  const diff: JiraRemoteUpdateDiff[] = [];
+  for (const field of ['status', 'fixVersions', 'sprint', 'dueDate'] as JiraRemoteUpdateField[]) {
+    const to = fields[field];
+    if (to === undefined) continue;
+    const from = current[field];
+    if (!sameRemoteValue(from, to)) diff.push({ field, from, to });
+  }
+  return diff;
+}
+
+export function listJiraRemoteUpdateRuns(taskId?: unknown): JiraRemoteUpdateRun[] {
+  const normalizedTaskId = normalizeText(taskId, 160);
+  return [...(readFile().jiraRemoteUpdateRuns || [])]
+    .filter(run => !normalizedTaskId || run.taskId === normalizedTaskId)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function getJiraRemoteUpdateRun(id: string): JiraRemoteUpdateRun | undefined {
+  const runId = normalizeText(id, 160);
+  return (readFile().jiraRemoteUpdateRuns || []).find(run => run.id === runId);
+}
+
+export function createJiraRemoteUpdateRun(input: {
+  taskId: unknown;
+  jiraKey?: unknown;
+  jiraUrl?: unknown;
+  currentFields?: JiraRemoteUpdateFields;
+  fields?: unknown;
+}): JiraRemoteUpdateRun {
+  const taskId = normalizeText(input.taskId, 160);
+  if (!taskId) throw new Error('taskId is required');
+  const fields = normalizeRemoteUpdateFields(input.fields);
+  const diff = remoteUpdateDiff(input.currentFields || {}, fields);
+  if (!diff.length) throw new Error('no jira field changes');
+  const now = new Date().toISOString();
+  const run: JiraRemoteUpdateRun = {
+    id: newId('jira_remote_update'),
+    taskId,
+    jiraKey: normalizeText(input.jiraKey, 80) || undefined,
+    jiraUrl: normalizeText(input.jiraUrl, 2048) || undefined,
+    status: 'draft',
+    fields,
+    diff,
+    createdAt: now,
+    updatedAt: now,
+    events: [{ id: newId('event'), at: now, label: 'Jira update drafted', detail: diff.map(item => item.field).join(', ') }],
+  };
+  const file = readFile();
+  file.jiraRemoteUpdateRuns = [run, ...(file.jiraRemoteUpdateRuns || [])].slice(0, 100);
+  writeFile(file);
+  return run;
+}
+
+export function updateJiraRemoteUpdateRun(id: string, patch: {
+  status?: JiraRemoteUpdateStatus;
+  error?: unknown;
+  remoteTool?: unknown;
+  event?: { label: unknown; detail?: unknown };
+}): JiraRemoteUpdateRun {
+  const runId = normalizeText(id, 160);
+  const file = readFile();
+  const run = (file.jiraRemoteUpdateRuns || []).find(item => item.id === runId);
+  if (!run) throw new Error('jira remote update run not found');
+  const now = new Date().toISOString();
+  if (patch.status) {
+    run.status = patch.status;
+    if (patch.status === 'applying' && !run.startedAt) run.startedAt = now;
+    if (patch.status === 'applied' || patch.status === 'failed' || patch.status === 'cancelled') run.completedAt = now;
+  }
+  if (patch.error !== undefined) run.error = normalizeText(patch.error, 2000) || undefined;
+  if (patch.remoteTool !== undefined) run.remoteTool = normalizeText(patch.remoteTool, 240) || undefined;
+  const label = normalizeText(patch.event?.label, 240);
+  if (label) {
+    run.events.push({
+      id: newId('event'),
+      at: now,
+      label,
+      detail: normalizeText(patch.event?.detail, 2000) || undefined,
+    });
+  }
+  run.updatedAt = now;
+  file.jiraRemoteUpdateRuns = [run, ...(file.jiraRemoteUpdateRuns || []).filter(item => item.id !== run.id)].slice(0, 100);
+  writeFile(file);
+  return run;
+}
+
+export function cancelJiraRemoteUpdateRun(id: string): JiraRemoteUpdateRun {
+  const run = getJiraRemoteUpdateRun(id);
+  if (!run) throw new Error('jira remote update run not found');
+  if (run.status === 'applied') throw new Error('applied jira update cannot be cancelled');
+  return updateJiraRemoteUpdateRun(id, {
+    status: 'cancelled',
+    event: { label: 'Jira update cancelled', detail: 'Cancelled before remote apply.' },
+  });
+}
+
+function knowledgeEntryMatches(entry: KnowledgeEntry, filters: KnowledgeEntryFilters = {}): boolean {
+  const query = normalizeText(filters.query, 200).toLowerCase();
+  const tag = normalizeText(filters.tag, 80).toLowerCase();
+  const sourceType = normalizeText(filters.sourceType, 80);
+  const workspace = normalizeText(filters.workspace, 1_000);
+  const status = normalizeText(filters.status, 80);
+  const kind = normalizeText(filters.kind, 80);
+  if (query) {
+    const haystack = [
+      entry.title,
+      entry.summary || '',
+      entry.body,
+      ...(entry.tags || []),
+      ...(entry.sourceRefs || []).map(ref => [ref.title, ref.workdir, ref.agent, ref.sessionId, ref.taskId, ref.path, ref.url].filter(Boolean).join(' ')),
+    ].join('\n').toLowerCase();
+    if (!haystack.includes(query)) return false;
+  }
+  if (tag && !(entry.tags || []).some(item => item.toLowerCase() === tag)) return false;
+  if (sourceType && !(entry.sourceRefs || []).some(ref => ref.type === sourceType) && entry.source?.type !== sourceType) return false;
+  if (workspace && !(entry.sourceRefs || []).some(ref => ref.workdir === workspace) && entry.source?.workdir !== workspace) return false;
+  if (status && entry.status !== status) return false;
+  if (kind && entry.kind !== kind) return false;
+  return true;
+}
+
+export function listKnowledgeEntries(filters: KnowledgeEntryFilters = {}): KnowledgeEntry[] {
+  return readFile().knowledge
+    .filter(entry => knowledgeEntryMatches(entry, filters))
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function getKnowledgeEntry(id: string): KnowledgeEntry | undefined {
+  const entryId = normalizeText(id, 160);
+  if (!entryId) return undefined;
+  return readFile().knowledge.find(entry => entry.id === entryId);
+}
+
+export function createKnowledgeEntry(input: {
+  title: unknown;
+  body?: unknown;
+  kind?: unknown;
+  status?: unknown;
+  summary?: unknown;
+  source?: KnowledgeEntry['source'];
+  sourceRefs?: unknown;
+  artifactRefs?: unknown;
+  confidence?: unknown;
+  createdBy?: unknown;
+  tags?: unknown;
+}): KnowledgeEntry {
   const title = normalizeText(input.title, 200);
   const body = normalizeText(input.body, 48_000);
   if (!title) throw new Error('title is required');
   if (!body) throw new Error('body is required');
+  const source = input.source ? normalizeKnowledgeEntry({ id: 'tmp', title, body, source: input.source })?.source : undefined;
+  const sourceRefs = normalizeKnowledgeRefs(input.sourceRefs, normalizeKnowledgeSourceRef);
+  const artifactRefs = normalizeKnowledgeRefs(input.artifactRefs, normalizeKnowledgeArtifactRef);
   const now = new Date().toISOString();
   const entry: KnowledgeEntry = {
     id: newId('knowledge'),
     title,
     body,
-    source: input.source,
-    tags: Array.isArray(input.tags) ? input.tags.map(tag => normalizeText(tag, 60)).filter(Boolean).slice(0, 12) : [],
+    kind: normalizeKnowledgeKind(input.kind),
+    status: normalizeKnowledgeStatus(input.status),
+    summary: normalizeText(input.summary, 1_000) || undefined,
+    source,
+    sourceRefs: sourceRefs.length ? sourceRefs : sourceRefFromLegacySource(source),
+    artifactRefs,
+    confidence: normalizeKnowledgeConfidence(input.confidence),
+    createdBy: normalizeKnowledgeCreatedBy(input.createdBy),
+    tags: normalizeStringList(input.tags, 20, 60),
     createdAt: now,
     updatedAt: now,
   };
@@ -1010,4 +1567,65 @@ export function createKnowledgeEntry(input: { title: unknown; body?: unknown; so
   file.knowledge.unshift(entry);
   writeFile(file);
   return entry;
+}
+
+export function updateKnowledgeEntry(
+  id: string,
+  patch: Partial<{
+    title: unknown;
+    body: unknown;
+    kind: unknown;
+    status: unknown;
+    summary: unknown;
+    tags: unknown;
+    confidence: unknown;
+    sourceRefs: unknown;
+    artifactRefs: unknown;
+  }>,
+): KnowledgeEntry {
+  const entryId = normalizeText(id, 160);
+  if (!entryId) throw new Error('knowledge id is required');
+  const file = readFile();
+  const index = file.knowledge.findIndex(entry => entry.id === entryId);
+  if (index < 0) throw new Error('knowledge entry not found');
+  const current = file.knowledge[index];
+  const next: KnowledgeEntry = {
+    ...current,
+    title: patch.title !== undefined ? normalizeText(patch.title, 200) : current.title,
+    body: patch.body !== undefined ? normalizeText(patch.body, 48_000) : current.body,
+    kind: patch.kind !== undefined ? normalizeKnowledgeKind(patch.kind) : current.kind,
+    status: patch.status !== undefined ? normalizeKnowledgeStatus(patch.status) : current.status,
+    summary: patch.summary !== undefined ? normalizeText(patch.summary, 1_000) || undefined : current.summary,
+    tags: patch.tags !== undefined ? normalizeStringList(patch.tags, 20, 60) : current.tags,
+    confidence: patch.confidence !== undefined ? normalizeKnowledgeConfidence(patch.confidence) : current.confidence,
+    sourceRefs: patch.sourceRefs !== undefined ? normalizeKnowledgeRefs(patch.sourceRefs, normalizeKnowledgeSourceRef) : current.sourceRefs,
+    artifactRefs: patch.artifactRefs !== undefined ? normalizeKnowledgeRefs(patch.artifactRefs, normalizeKnowledgeArtifactRef) : current.artifactRefs,
+    updatedAt: new Date().toISOString(),
+  };
+  if (!next.title) throw new Error('title is required');
+  if (!next.body) throw new Error('body is required');
+  file.knowledge[index] = next;
+  writeFile(file);
+  return next;
+}
+
+export function deleteKnowledgeEntry(id: string, options: { hard?: boolean } = {}): KnowledgeEntry | null {
+  const entryId = normalizeText(id, 160);
+  if (!entryId) throw new Error('knowledge id is required');
+  const file = readFile();
+  const index = file.knowledge.findIndex(entry => entry.id === entryId);
+  if (index < 0) return null;
+  if (options.hard) {
+    const [removed] = file.knowledge.splice(index, 1);
+    writeFile(file);
+    return removed || null;
+  }
+  const hidden = {
+    ...file.knowledge[index],
+    status: 'hidden' as const,
+    updatedAt: new Date().toISOString(),
+  };
+  file.knowledge[index] = hidden;
+  writeFile(file);
+  return hidden;
 }

@@ -170,6 +170,8 @@ export interface StreamSubAgent {
 export interface StreamOpts {
   agent: Agent;
   prompt: string;
+  /** UI-facing user message for generated/internal prompts. The full prompt still reaches the agent through system/developer context. */
+  displayPrompt?: string | null;
   workdir: string;
   timeout: number;
   sessionId: string | null;
@@ -474,6 +476,7 @@ export interface ManagedSessionRecord {
   autoResumeLastError: string | null;
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
+  userStatusUpdatedAt: string | null;
   userNote: string | null;
   pinned: boolean;
   archived: boolean;
@@ -611,6 +614,7 @@ export interface SessionInfo {
   autoResumeLastError?: string | null;
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
+  userStatusUpdatedAt?: string | null;
   userNote: string | null;
   pinned?: boolean;
   archived?: boolean;
@@ -618,6 +622,7 @@ export interface SessionInfo {
   lastQuestion: string | null;
   lastAnswer: string | null;
   lastMessageText: string | null;
+  lastPlan?: StreamPreviewPlan | null;
   outputs?: SessionOutput[];
   migratedFrom: SessionLineageRef | null;
   migratedTo: SessionLineageRef | null;

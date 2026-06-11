@@ -2,15 +2,17 @@ import type { ProTask } from '../../types';
 
 export type JiraTaskFilters = {
   ticketType: string;
-  ticketName: string;
+  query: string;
   sprint: string;
   fixVersion: string;
+  status?: string;
 };
 
 export type JiraTaskFilterOptions = {
   ticketTypes: string[];
   sprints: string[];
   fixVersions: string[];
+  statuses: string[];
   sprintGroups: Array<{ sprint: string; tasks: ProTask[] }>;
 };
 
@@ -32,6 +34,75 @@ function namedValue(value: unknown): string {
   return '';
 }
 
+function collectSearchParts(value: unknown, parts: string[], seen: WeakSet<object>, depth = 0) {
+  if (value == null || depth > 5) return;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text) parts.push(text);
+    return;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    parts.push(String(value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectSearchParts(item, parts, seen, depth + 1);
+    return;
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return;
+    seen.add(value);
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key) parts.push(key);
+      collectSearchParts(item, parts, seen, depth + 1);
+    }
+  }
+}
+
+export function jiraTaskSearchText(task: ProTask): string {
+  const parts: string[] = [];
+  const seen = new WeakSet<object>();
+  collectSearchParts([
+    task.jiraKey,
+    task.jiraUrl,
+    task.localKey,
+    task.title,
+    task.description,
+    task.kind,
+    task.status,
+    task.sprint,
+    task.workdir,
+    task.prUrl,
+    task.origin,
+    task.execution,
+    task.jiraFields?.reporter,
+    task.jiraFields?.assignee,
+    task.jiraFields?.status,
+    task.jiraFields?.dueDate,
+    task.jiraFields?.fixVersions,
+    task.jiraFields?.priority,
+    task.jiraFields?.labels,
+    task.jiraFields?.issueType,
+    task.jiraFields?.updatedAt,
+    task.jiraFields?.raw,
+    jiraTaskFixVersions(task),
+    task.subTasks,
+    task.events,
+    task.outputs,
+    task.verificationRuns,
+    (task.stageRuns || []).map(run => ({
+      stage: run.stage,
+      status: run.status,
+      assistantId: run.assistantId,
+      selectedAgent: run.selectedAgent,
+      selectedAgentReason: run.selectedAgentReason,
+      focus: run.focus,
+      output: run.output,
+    })),
+  ], parts, seen);
+  return parts.join(' ');
+}
+
 export function jiraTaskTicketType(task: ProTask): string {
   const raw = task.jiraFields?.issueType || (task.kind.startsWith('jira-') ? task.kind.replace(/^jira-/, '') : task.kind);
   const normalized = normalize(raw);
@@ -46,6 +117,7 @@ export function jiraTaskTicketType(task: ProTask): string {
 export function jiraTaskFixVersions(task: ProTask): string[] {
   const raw = task.jiraFields?.raw || {};
   const candidates = [
+    task.jiraFields?.fixVersions,
     raw.fixVersion,
     raw.fixVersions,
     raw.fixversion,
@@ -71,14 +143,22 @@ export function jiraTaskSprints(task: ProTask): string[] {
   return [...new Set(sprint.split(/[,，;；\n]+/).map(item => item.trim()).filter(Boolean))];
 }
 
+export function jiraTaskRemoteStatus(task: ProTask): string {
+  const raw = task.jiraFields?.status || task.jiraFields?.raw?.status;
+  return namedValue(raw) || '';
+}
+
 export function buildJiraFilterOptions(tasks: ProTask[]): JiraTaskFilterOptions {
   const ticketTypes = new Set<string>();
   const fixVersions = new Set<string>();
+  const statuses = new Set<string>();
   const sprintGroups = new Map<string, ProTask[]>();
 
   for (const task of tasks) {
     const ticketType = jiraTaskTicketType(task);
     if (ticketType) ticketTypes.add(ticketType);
+    const status = jiraTaskRemoteStatus(task);
+    if (status) statuses.add(status);
     for (const fixVersion of jiraTaskFixVersions(task)) fixVersions.add(fixVersion);
     for (const sprint of jiraTaskSprints(task)) {
       const group = sprintGroups.get(sprint) || [];
@@ -100,6 +180,7 @@ export function buildJiraFilterOptions(tasks: ProTask[]): JiraTaskFilterOptions 
     ticketTypes: sortTicketTypes(ticketTypes),
     sprints: sort(new Set(sprintGroups.keys())),
     fixVersions: sort(fixVersions),
+    statuses: sort(statuses),
     sprintGroups: [...sprintGroups.entries()]
       .sort(([a], [b]) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
       .map(([sprint, sprintTasks]) => ({ sprint, tasks: sprintTasks })),
@@ -116,10 +197,13 @@ export function jiraTaskMatchesFilters(task: ProTask, filters: JiraTaskFilters):
   const fixVersion = normalize(filters.fixVersion);
   if (fixVersion && !jiraTaskFixVersions(task).some(value => normalize(value) === fixVersion)) return false;
 
-  const ticketName = normalize(filters.ticketName);
-  if (ticketName) {
-    const haystack = normalize([task.title, task.jiraKey, task.localKey].filter(Boolean).join(' '));
-    const tokens = ticketName.split(/\s+/).filter(Boolean);
+  const status = normalize(filters.status);
+  if (status && normalize(jiraTaskRemoteStatus(task)) !== status) return false;
+
+  const query = normalize(filters.query);
+  if (query) {
+    const haystack = normalize(jiraTaskSearchText(task));
+    const tokens = query.split(/\s+/).filter(Boolean);
     if (!tokens.every(token => haystack.includes(token))) return false;
   }
 
