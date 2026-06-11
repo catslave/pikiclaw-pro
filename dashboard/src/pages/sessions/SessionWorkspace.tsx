@@ -475,8 +475,8 @@ function SideChatCollapseIcon({ className }: { className?: string }) {
 }
 
 type SessionWithDepth = SessionInfo & { __forkDepth: number };
-type SessionSlot = { agent: string; sessionId: string; workdir: string; mountKey: string; archiveOnly?: boolean };
-type OpenSessionRequestDetail = Pick<SessionSlot, 'agent' | 'sessionId' | 'workdir'> & { archiveOnly?: boolean };
+type SessionSlot = { agent: string; sessionId: string; workdir: string; mountKey: string; archiveOnly?: boolean; assistantId?: string; assistantName?: string };
+type OpenSessionRequestDetail = Pick<SessionSlot, 'agent' | 'sessionId' | 'workdir'> & { archiveOnly?: boolean; assistantId?: string; assistantName?: string };
 type MarkSessionReadRequestDetail = Pick<SessionSlot, 'agent' | 'sessionId' | 'workdir'> & { readAt?: number };
 type ChatWorkspaceBetaItem = {
   key: string;
@@ -1610,6 +1610,8 @@ function readStoredOpenSessions(): SessionSlot[] {
         workdir: s.workdir,
         mountKey: typeof s.mountKey === 'string' && s.mountKey ? s.mountKey : nextMountKey(),
         archiveOnly: s.archiveOnly === true,
+        assistantId: typeof s.assistantId === 'string' && s.assistantId ? s.assistantId : undefined,
+        assistantName: typeof s.assistantName === 'string' && s.assistantName ? s.assistantName : undefined,
       }));
   } catch {
     return [];
@@ -3019,6 +3021,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         sessionId: detail.sessionId,
         mountKey: nextMountKey(),
         archiveOnly,
+        assistantId: typeof detail.assistantId === 'string' && detail.assistantId ? detail.assistantId : undefined,
+        assistantName: typeof detail.assistantName === 'string' && detail.assistantName ? detail.assistantName : undefined,
       };
       setShowNewSession(null);
       setOpenSessions(prev => {
@@ -3029,7 +3033,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         ));
         if (existingIdx >= 0) {
           setActiveSlotIndex(existingIdx);
-          return prev.map((slot, index) => index === existingIdx ? { ...slot, archiveOnly } : slot);
+          return prev.map((slot, index) => index === existingIdx ? {
+            ...slot,
+            archiveOnly,
+            assistantId: nextSlot.assistantId || slot.assistantId,
+            assistantName: nextSlot.assistantName || slot.assistantName,
+          } : slot);
         }
         setActiveSlotIndex(0);
         return [nextSlot, ...prev];
@@ -3938,6 +3947,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     sessionId: string;
     title: string;
     prompt?: string;
+    assistantId?: string;
+    assistantName?: string;
     pinned?: boolean;
     archived?: boolean;
     unread?: boolean;
@@ -4021,6 +4032,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         sessionId: slot.sessionId,
         title: sessionListDisplayText(info).slice(0, 120) || slot.sessionId.slice(0, 16),
         prompt: info.lastQuestion || sessionListContextText(info, sessionListDisplayText(info)) || sessionListDisplayText(info),
+        assistantId: slot.assistantId,
+        assistantName: slot.assistantName,
         pinned: info.pinned === true,
         archived: info.archived === true,
         unread: shouldMarkSessionReadOnOpen(info),
@@ -4075,6 +4088,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     return draft.scheduleType === 'custom' ? draft.customSchedule.trim() : draft.scheduleType;
   }, []);
 
+  const scheduleTargetLabel = useCallback((target?: SessionActionTarget | null) => {
+    if (!target) return '';
+    if (target.assistantId) {
+      const assistant = chatAssistants.find(item => item.id === target.assistantId);
+      return `${t('chatWorkspace.targetAssistant')} · ${assistant?.name || target.assistantName || target.assistantId}`;
+    }
+    return `${t('chatWorkspace.targetAgent')} · ${getAgentMeta(target.agent || '').shortLabel || target.agent}`;
+  }, [chatAssistants, t]);
+
   const openCreateScheduleModal = useCallback((target: SessionActionTarget) => {
     setSessionMenu(null);
     setSlotMenu(null);
@@ -4119,6 +4141,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         prompt,
         workdir: draft.target.workdir,
         agent: draft.target.agent || null,
+        assistantId: draft.target.assistantId || null,
       });
       if (!res.ok || !res.automation) throw new Error(res.error || t('session.scheduleCreateFailed'));
       setScheduleDraft(null);
@@ -4591,7 +4614,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (active) void refreshTodos();
   }, [active, refreshTodos]);
 
-  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => {
+  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string; assistantId?: string; assistantName?: string }, pendingPrompt?: string, pendingImageUrls?: string[], pendingCreatedAt?: string | null) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
     const createdAt = pendingCreatedAt || new Date().toISOString();
     setSessionsMap(prev => {
@@ -4640,6 +4663,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       agent: run.session.agent,
       sessionId: run.session.sessionId,
       mountKey: nextMountKey(),
+      assistantId: run.assistantId || undefined,
     };
     warmSession({ agent: slot.agent, sessionId: slot.sessionId }, slot.workdir);
     setShowNewSession(null);
@@ -7024,6 +7048,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         agent: parsed.agent,
         sessionId: parsed.sessionId,
         workdir: 'workdir' in parsed && parsed.workdir ? parsed.workdir : workdir,
+        assistantId: assistant.id,
+        assistantName: assistant.name,
       }, prompt, undefined, createdAt);
       return;
     }
@@ -7051,7 +7077,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       const nextSession = parseSessionKeyValue(res.queued?.sessionKey);
       const workdir = automation.workdir || runtimeWorkdir || workspaces[0]?.path || '';
       if (nextSession && workdir) {
-        handleNewSessionCreated({ ...nextSession, workdir });
+        handleNewSessionCreated({ ...nextSession, workdir, assistantId: automation.assistantId || undefined });
       }
     } catch (err: any) {
       toastSession(err?.message || t('chatWorkspace.scheduleRunFailed'), false);
@@ -7626,6 +7652,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                           prompt: entry.item.session.lastQuestion
                             || sessionListContextText(entry.item.session, sessionListDisplayText(entry.item.session))
                             || sessionListDisplayText(entry.item.session),
+                          assistantId: entry.slot.assistantId,
+                          assistantName: entry.slot.assistantName,
                           pinned: entry.item.session.pinned === true,
                           archived: entry.item.session.archived === true,
                           unread: shouldMarkSessionReadOnOpen(entry.item.session),
@@ -7893,6 +7921,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 sessionId: slot.sessionId,
                 title: sessionListDisplayText(info).slice(0, 120) || slot.sessionId.slice(0, 16),
                 prompt: info.lastQuestion || sessionListContextText(info, sessionListDisplayText(info)) || sessionListDisplayText(info),
+                assistantId: slot.assistantId,
+                assistantName: slot.assistantName,
                 pinned: info.pinned === true,
                 archived: info.archived === true,
               };
@@ -9662,9 +9692,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </select>
             </label>
             <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('sessions.agent')}</span>
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('chatWorkspace.target')}</span>
               <input
-                value={scheduleDraft?.target.agent || ''}
+                value={scheduleTargetLabel(scheduleDraft?.target)}
                 disabled
                 className="h-9 w-full rounded-md border border-edge bg-inset px-2 text-[13px] text-fg-4 outline-none"
               />
@@ -9695,6 +9725,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           </label>
           {scheduleDraft && (
             <div className="truncate text-[11px] text-fg-5">
+              {scheduleDraft.target.assistantId ? `${scheduleTargetLabel(scheduleDraft.target)} · ` : ''}
               {scheduleDraft.target.agent}:{scheduleDraft.target.sessionId}
             </div>
           )}
