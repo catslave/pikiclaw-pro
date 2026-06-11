@@ -1050,6 +1050,11 @@ function ChatWorkspaceLauncher({
   const selectedTargetLabel = selectedAssistant?.name
     || (selectedModel ? `${selectedModel.label} · ${selectedModel.detail || getAgentMeta(selectedModel.agent).shortLabel}` : '')
     || (selectedAgent ? getAgentMeta(selectedAgent).shortLabel : t('chatWorkspace.noAgent'));
+  const selectedTargetTypeLabel = selectedTarget?.kind === 'assistant'
+    ? t('chatWorkspace.targetAssistant')
+    : selectedTarget?.kind === 'model'
+      ? t('chatWorkspace.targetModel')
+      : t('chatWorkspace.targetAgent');
   const canSend = !!input.trim() && !!selectedWorkspace && !!selectedTarget && !sending && !workspaceMenuOpen;
   const selectedWorkspaceHasProjectContext = workspaceHasProjectContext(selectedWorkspace);
   const projectContextItems = selectedWorkspace
@@ -1100,15 +1105,21 @@ function ChatWorkspaceLauncher({
           </Button>
         </div>
         <label
-          className="flex min-w-[132px] max-w-[240px] flex-1 items-center gap-1.5 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5 sm:flex-none"
+          className="relative flex min-w-[220px] max-w-[360px] flex-1 cursor-pointer items-center gap-2 rounded-lg border border-edge/60 bg-inset px-2 py-1.5 text-left transition-[border-color,background,box-shadow] hover:border-edge-h hover:bg-panel/65 focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-[color:var(--th-selection-ring)] sm:flex-none"
           title={selectedTargetLabel}
         >
-          <span className="shrink-0 uppercase tracking-[0.08em]">{t('chatWorkspace.target')}</span>
+          <span className="shrink-0 rounded-md border border-edge/55 bg-panel/80 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.08em] text-fg-5">
+            {selectedTargetTypeLabel}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[12px] font-semibold text-fg-2">{selectedTargetLabel}</span>
+            <span className="block truncate text-[9.5px] font-semibold uppercase tracking-[0.08em] text-fg-5">{t('chatWorkspace.target')}</span>
+          </span>
           <select
             value={selectedTargetValue}
             disabled={sending || targetValues.size === 0}
             onChange={event => setSelectedTargetValue(event.target.value)}
-            className="min-w-0 max-w-[158px] appearance-none bg-transparent text-[10px] font-semibold text-fg-3 outline-none disabled:cursor-not-allowed"
+            className="absolute inset-0 cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
             aria-label={t('chatWorkspace.target')}
           >
             {launchAgentOptions.length > 0 && (
@@ -1139,6 +1150,9 @@ function ChatWorkspaceLauncher({
               </optgroup>
             )}
           </select>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-fg-5" aria-hidden="true">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
         </label>
       </div>
       <div className="flex min-w-0 items-end gap-2 rounded-xl border border-control-border bg-control px-2 py-2 shadow-sm transition-colors focus-within:border-control-border-h focus-within:bg-control-h">
