@@ -876,6 +876,7 @@ function ChatWorkspaceLauncher({
   onOpenMemory,
   onOpenTeam,
   onOpenWorkflows,
+  targetAssistantRequest,
   projectPickerNonce,
   t,
 }: {
@@ -893,6 +894,7 @@ function ChatWorkspaceLauncher({
   onOpenMemory: () => void;
   onOpenTeam: () => void;
   onOpenWorkflows: () => void;
+  targetAssistantRequest?: ChatTargetAssistantRequest | null;
   projectPickerNonce?: number;
   t: (key: string) => string;
 }) {
@@ -948,6 +950,13 @@ function ChatWorkspaceLauncher({
     setInput('/');
     window.requestAnimationFrame(() => textareaRef.current?.focus());
   }, [projectPickerNonce]);
+
+  useEffect(() => {
+    if (!targetAssistantRequest?.assistantId) return;
+    const nextValue = `assistant:${targetAssistantRequest.assistantId}`;
+    if (targetValues.has(nextValue)) setSelectedTargetValue(nextValue);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [targetAssistantRequest?.assistantId, targetAssistantRequest?.nonce, targetValues]);
 
   const workspaceChoices = useMemo(() => {
     const byPath = new Map<string, WorkspaceEntry>();
@@ -2042,6 +2051,7 @@ function readStoredChatRecallCollapsed(): boolean {
 type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'chat-workspace' | 'dashboard' | 'settings';
 type ChatWorkspacePanelTarget = 'assistants' | 'memory' | 'team' | 'workflows';
+type ChatTargetAssistantRequest = { assistantId: string; nonce: number };
 
 type OpenAgentTestChatState = {
   newSessionAgent?: string;
@@ -3187,6 +3197,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [memoryLibraryOpen, setMemoryLibraryOpen] = useState(false);
   const [memoryLibraryInitialNodeId, setMemoryLibraryInitialNodeId] = useState<string | null>(null);
   const [chatProjectPickerNonce, setChatProjectPickerNonce] = useState(0);
+  const [chatTargetAssistantRequest, setChatTargetAssistantRequest] = useState<ChatTargetAssistantRequest | null>(null);
   const [chatLauncherWorkdir, setChatLauncherWorkdir] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
@@ -7602,6 +7613,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onOpenMemory={() => openMemoryLibrary()}
               onOpenTeam={() => setTeamLibraryOpen(true)}
               onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
+              targetAssistantRequest={chatTargetAssistantRequest}
               projectPickerNonce={chatProjectPickerNonce}
               t={t}
             />
@@ -9904,6 +9916,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         />
         <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
           <TeamTab
+            onChatAssistant={(assistant) => {
+              setTeamLibraryOpen(false);
+              setChatTargetAssistantRequest({ assistantId: assistant.id, nonce: Date.now() });
+            }}
             onEditAssistant={(assistant) => {
               setTeamLibraryOpen(false);
               openAssistantLibrary(assistant.id);

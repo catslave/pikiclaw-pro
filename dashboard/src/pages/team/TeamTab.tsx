@@ -29,6 +29,7 @@ type Copy = {
   assistantsMetric: string;
   agentsMetric: string;
   bindingsMetric: string;
+  chatAssistant: string;
   manageAssistant: string;
 };
 
@@ -55,6 +56,7 @@ function copyFor(locale: Locale): Copy {
       assistantsMetric: '员工',
       agentsMetric: '可用 Agent',
       bindingsMetric: '绑定',
+      chatAssistant: 'Chat',
       manageAssistant: '管理 Assistant',
     };
   }
@@ -79,6 +81,7 @@ function copyFor(locale: Locale): Copy {
     assistantsMetric: 'Employees',
     agentsMetric: 'Available agents',
     bindingsMetric: 'Bindings',
+    chatAssistant: 'Chat',
     manageAssistant: 'Manage Assistant',
   };
 }
@@ -95,10 +98,12 @@ function assistantInitials(name: string) {
 function AssistantCard({
   assistant,
   copy,
+  onChat,
   onManage,
 }: {
   assistant: AgentAssistant;
   copy: Copy;
+  onChat?: (assistant: AgentAssistant) => void;
   onManage?: (assistant: AgentAssistant) => void;
 }) {
   const agents = assistant.preferredAgents || [];
@@ -132,11 +137,18 @@ function AssistantCard({
               <div className="text-[11px] text-fg-5">{copy.noPreferredAgents}</div>
             )}
           </div>
-          {onManage && (
-            <div className="mt-3 flex justify-end">
-              <Button variant="secondary" size="sm" onClick={() => onManage(assistant)}>
-                {copy.manageAssistant}
-              </Button>
+          {(onChat || onManage) && (
+            <div className="mt-3 flex justify-end gap-2">
+              {onChat && (
+                <Button variant="primary" size="sm" onClick={() => onChat(assistant)}>
+                  {copy.chatAssistant}
+                </Button>
+              )}
+              {onManage && (
+                <Button variant="secondary" size="sm" onClick={() => onManage(assistant)}>
+                  {copy.manageAssistant}
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -146,8 +158,10 @@ function AssistantCard({
 }
 
 export function TeamTab({
+  onChatAssistant,
   onEditAssistant,
 }: {
+  onChatAssistant?: (assistant: AgentAssistant) => void;
   onEditAssistant?: (assistant: AgentAssistant) => void;
 } = {}) {
   const locale = useStore(s => s.locale);
@@ -210,6 +224,7 @@ export function TeamTab({
                 key={assistant.id}
                 assistant={assistant}
                 copy={copy}
+                onChat={onChatAssistant}
                 onManage={onEditAssistant}
               />
             ))}
