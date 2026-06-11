@@ -848,6 +848,7 @@ function ChatWorkspaceLauncher({
   onSubmit,
   onError,
   onProjectContext,
+  onKnowledge,
   onOpenAssistants,
   t,
 }: {
@@ -860,6 +861,7 @@ function ChatWorkspaceLauncher({
   onSubmit: (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => Promise<void>;
   onError: (message: string) => void;
   onProjectContext: (workspace: WorkspaceEntry) => void;
+  onKnowledge: (workdir: string) => void;
   onOpenAssistants: () => void;
   t: (key: string) => string;
 }) {
@@ -1127,6 +1129,14 @@ function ChatWorkspaceLauncher({
             <span className="min-w-0 flex-1 truncate text-[11px] text-fg-5" title={selectedWorkspace.path}>
               {selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}
             </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onKnowledge(selectedWorkspace.path)}
+              className="h-7 shrink-0 px-2 text-[11px]"
+            >
+              {t('chatWorkspace.openProjectMemory')}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -7369,6 +7379,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onSubmit={handleChatWorkspaceLaunch}
               onError={(message) => toastSession(message, false)}
               onProjectContext={openProjectContextModal}
+              onKnowledge={openWorkspaceKnowledgeModal}
               onOpenAssistants={() => navigate('/assistants')}
               t={t}
             />
