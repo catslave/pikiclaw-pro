@@ -847,6 +847,7 @@ function ChatWorkspaceLauncher({
   assistants,
   onSubmit,
   onError,
+  onProjectContext,
   t,
 }: {
   workspaces: WorkspaceEntry[];
@@ -857,6 +858,7 @@ function ChatWorkspaceLauncher({
   assistants: AgentAssistant[];
   onSubmit: (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => Promise<void>;
   onError: (message: string) => void;
+  onProjectContext: (workspace: WorkspaceEntry) => void;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(defaultWorkdir);
@@ -1003,6 +1005,14 @@ function ChatWorkspaceLauncher({
     || (selectedModel ? `${selectedModel.label} · ${selectedModel.detail || getAgentMeta(selectedModel.agent).shortLabel}` : '')
     || (selectedAgent ? getAgentMeta(selectedAgent).shortLabel : t('chatWorkspace.noAgent'));
   const canSend = !!input.trim() && !!selectedWorkspace && !!selectedTarget && !sending && !workspaceMenuOpen;
+  const selectedWorkspaceHasProjectContext = workspaceHasProjectContext(selectedWorkspace);
+  const projectContextItems = selectedWorkspace
+    ? ([
+        ['rules', t('hub.projectRules'), selectedWorkspace.rules || ''],
+        ['instructions', t('hub.projectInstructions'), selectedWorkspace.instructions || ''],
+        ['memory', t('hub.projectMemory'), selectedWorkspace.memory || ''],
+      ] as const).filter(([, , value]) => String(value || '').trim())
+    : [];
 
   return (
     <section className="relative shrink-0 rounded-xl border border-edge/65 bg-panel/76 p-3 shadow-sm backdrop-blur-md">
@@ -1098,6 +1108,46 @@ function ChatWorkspaceLauncher({
           {sending ? <Spinner className="h-3.5 w-3.5" /> : t('chatWorkspace.send')}
         </Button>
       </div>
+      {selectedWorkspace && (
+        <div className="mt-2 border-t border-edge/45 pt-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-fg-5">
+              {t('chatWorkspace.projectBrief')}
+            </span>
+            <span className={cn(
+              'shrink-0 rounded border px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em]',
+              selectedWorkspaceHasProjectContext
+                ? 'border-primary/25 bg-primary/[0.08] text-primary'
+                : 'border-edge/55 bg-inset text-fg-5',
+            )}>
+              {selectedWorkspaceHasProjectContext ? t('chatWorkspace.projectContextReady') : t('chatWorkspace.projectContextEmpty')}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[11px] text-fg-5" title={selectedWorkspace.path}>
+              {selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onProjectContext(selectedWorkspace)}
+              className="h-7 shrink-0 px-2 text-[11px]"
+            >
+              {t('chatWorkspace.editProjectContext')}
+            </Button>
+          </div>
+          {projectContextItems.length > 0 && (
+            <div className="mt-2 grid gap-1.5 md:grid-cols-3">
+              {projectContextItems.map(([key, label, value]) => (
+                <div key={key} className="min-w-0 border-l border-edge/60 pl-2">
+                  <div className="text-[10px] font-semibold text-fg-5">{label}</div>
+                  <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-fg-3" title={String(value).trim()}>
+                    {String(value).trim()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {workspaceMenuOpen && (
         <div className="absolute left-3 right-3 top-[calc(100%-0.25rem)] z-50 max-h-[240px] overflow-y-auto rounded-xl border border-edge/75 bg-dropdown p-1 shadow-xl backdrop-blur-md">
           {filteredWorkspaces.length ? filteredWorkspaces.map((ws, index) => (
@@ -7281,6 +7331,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               assistants={chatAssistants}
               onSubmit={handleChatWorkspaceLaunch}
               onError={(message) => toastSession(message, false)}
+              onProjectContext={openProjectContextModal}
               t={t}
             />
             <ChatWorkspaceSchedulesStrip
