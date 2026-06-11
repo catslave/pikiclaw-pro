@@ -848,6 +848,7 @@ function ChatWorkspaceLauncher({
   onSubmit,
   onError,
   onProjectContext,
+  onOpenAssistants,
   t,
 }: {
   workspaces: WorkspaceEntry[];
@@ -859,6 +860,7 @@ function ChatWorkspaceLauncher({
   onSubmit: (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => Promise<void>;
   onError: (message: string) => void;
   onProjectContext: (workspace: WorkspaceEntry) => void;
+  onOpenAssistants: () => void;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(defaultWorkdir);
@@ -1146,6 +1148,41 @@ function ChatWorkspaceLauncher({
               ))}
             </div>
           )}
+        </div>
+      )}
+      {selectedAssistant && (
+        <div className="mt-2 rounded-lg border border-edge/55 bg-inset/45 px-3 py-2">
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-fg-5">
+                  {t('chatWorkspace.assistantBrief')}
+                </span>
+                <span className="min-w-0 truncate text-[12px] font-semibold text-fg">{selectedAssistant.name}</span>
+              </div>
+              <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg-4">
+                {selectedAssistant.responsibility || t('chatWorkspace.assistantNoResponsibility')}
+              </div>
+              {selectedAssistant.preferredAgents?.length ? (
+                <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+                  {selectedAssistant.preferredAgents.slice(0, 4).map(preferredAgent => (
+                    <span key={preferredAgent} className="inline-flex h-6 items-center gap-1.5 rounded-md border border-edge/55 bg-panel/70 px-1.5 text-[10px] font-semibold text-fg-5">
+                      <BrandIcon brand={preferredAgent} size={12} />
+                      <span>{getAgentMeta(preferredAgent).shortLabel}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onOpenAssistants}
+              className="h-7 shrink-0 px-2 text-[11px]"
+            >
+              {t('chatWorkspace.manageAssistant')}
+            </Button>
+          </div>
         </div>
       )}
       {workspaceMenuOpen && (
@@ -7332,6 +7369,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onSubmit={handleChatWorkspaceLaunch}
               onError={(message) => toastSession(message, false)}
               onProjectContext={openProjectContextModal}
+              onOpenAssistants={() => navigate('/assistants')}
               t={t}
             />
             <ChatWorkspaceSchedulesStrip
