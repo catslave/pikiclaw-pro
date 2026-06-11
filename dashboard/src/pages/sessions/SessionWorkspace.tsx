@@ -4060,6 +4060,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, [t]);
 
+  const openCreateScheduleForSession = useCallback((session: SessionInfo, wsPath: string) => {
+    openCreateScheduleModal({
+      workdir: wsPath,
+      agent: session.agent || '',
+      sessionId: session.sessionId,
+      title: sessionListDisplayText(session).slice(0, 120) || session.sessionId.slice(0, 16),
+      prompt: session.lastQuestion || sessionListContextText(session, sessionListDisplayText(session)) || sessionListDisplayText(session),
+      pinned: session.pinned === true,
+      archived: session.archived === true,
+      unread: shouldMarkSessionReadOnOpen(session),
+    });
+  }, [openCreateScheduleModal]);
+
   const submitCreateScheduleFromChat = useCallback(async () => {
     const draft = scheduleDraft;
     if (!draft || creatingSchedule) return;
@@ -7454,6 +7467,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   onWarmSession={scheduleSessionWarmup}
                   onCancelWarmSession={cancelScheduledWarmup}
                   onSessionMenuOpen={handleSessionMenuOpen}
+                  onCreateSchedule={openCreateScheduleForSession}
                   t={t}
                 />
               )}
@@ -10966,6 +10980,7 @@ const RecentConversationSection = memo(function RecentConversationSection({
   onWarmSession,
   onCancelWarmSession,
   onSessionMenuOpen,
+  onCreateSchedule,
   t,
 }: {
   groups: RecentConversationGroup[];
@@ -10976,6 +10991,7 @@ const RecentConversationSection = memo(function RecentConversationSection({
   onWarmSession: (s: SessionInfo, wsPath: string) => void;
   onCancelWarmSession: (s: SessionInfo, wsPath: string) => void;
   onSessionMenuOpen: (anchor: DOMRect, s: SessionInfo, wsPath: string) => void;
+  onCreateSchedule: (s: SessionInfo, wsPath: string) => void;
   t: (key: string) => string;
 }) {
   return (
@@ -11007,6 +11023,7 @@ const RecentConversationSection = memo(function RecentConversationSection({
                     onWarm={() => onWarmSession(item.session, item.workdir)}
                     onCancelWarm={() => onCancelWarmSession(item.session, item.workdir)}
                     onShowMenu={anchor => onSessionMenuOpen(anchor, item.session, item.workdir)}
+                    onCreateSchedule={() => onCreateSchedule(item.session, item.workdir)}
                     t={t}
                   />
                 );
@@ -11027,6 +11044,7 @@ function RecentConversationCard({
   onWarm,
   onCancelWarm,
   onShowMenu,
+  onCreateSchedule,
   t,
 }: {
   item: ChatWorkspaceBetaItem;
@@ -11036,6 +11054,7 @@ function RecentConversationCard({
   onWarm: () => void;
   onCancelWarm: () => void;
   onShowMenu: (anchor: DOMRect) => void;
+  onCreateSchedule: () => void;
   t: (key: string) => string;
 }) {
   const session = item.session;
@@ -11056,7 +11075,7 @@ function RecentConversationCard({
         onMouseLeave={onCancelWarm}
         onBlur={onCancelWarm}
         className={cn(
-          'flex w-full min-w-0 items-start gap-2 rounded-lg border px-2 py-2 text-left transition-[background,border-color,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+          'flex w-full min-w-0 items-start gap-2 rounded-lg border py-2 pl-2 pr-14 text-left transition-[background,border-color,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
           selected
             ? 'border-primary/55 bg-primary/[0.08] text-fg'
             : open
@@ -11088,6 +11107,22 @@ function RecentConversationCard({
           </span>
           {detail && <span className="mt-1 block truncate text-[10px] text-fg-5/80">{detail}</span>}
         </span>
+      </button>
+      <button
+        type="button"
+        onClick={event => {
+          event.stopPropagation();
+          onCreateSchedule();
+        }}
+        onMouseDown={event => event.stopPropagation()}
+        className="absolute right-8 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-fg-5 opacity-0 transition-[background,color,opacity] hover:bg-primary/[0.10] hover:text-primary group-hover/recent:opacity-100 focus-visible:opacity-100"
+        title={t('session.createSchedule')}
+        aria-label={t('session.createSchedule')}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
       </button>
       <button
         type="button"
