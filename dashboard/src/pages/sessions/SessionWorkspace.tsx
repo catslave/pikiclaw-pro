@@ -768,12 +768,14 @@ function ChatWorkspaceWorkingItemCard({
   active,
   live,
   onSelect,
+  onCreateSchedule,
   t,
 }: {
   item: ChatWorkspaceBetaItem;
   active?: boolean;
   live?: LiveSessionState | null;
   onSelect: () => void;
+  onCreateSchedule?: () => void;
   t: (key: string) => string;
 }) {
   const session = item.session;
@@ -792,52 +794,70 @@ function ChatWorkspaceWorkingItemCard({
   const running = live?.phase === 'queued' || live?.phase === 'streaming' || state === 'running';
 
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      onMouseEnter={() => {
-        if (session.agent && session.sessionId) {
-          prefetchSessionMessages({
-            workdir: item.workdir,
-            agent: session.agent,
-            sessionId: session.sessionId,
-            rich: true,
-            turnOffset: 0,
-            turnLimit: SESSION_PREFETCH_TURNS,
-          });
-        }
-      }}
+    <div
       className={cn(
-        'group flex min-h-[112px] w-full flex-col rounded-xl border bg-panel/72 p-3 text-left shadow-sm transition-[border-color,background,box-shadow,transform] hover:-translate-y-0.5 hover:border-edge-h hover:bg-panel-h focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] active:translate-y-0',
+        'group relative min-h-[112px] rounded-xl border bg-panel/72 shadow-sm transition-[border-color,background,box-shadow,transform] hover:-translate-y-0.5 hover:border-edge-h hover:bg-panel-h',
         active ? 'border-primary/50 shadow-[0_14px_36px_rgba(59,130,246,0.13)]' : 'border-edge/60',
       )}
     >
-      <div className="flex min-w-0 items-start gap-2.5">
-        <span className="relative grid h-8 w-8 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
-          <BrandIcon brand={session.agent || ''} size={16} />
-          {running && <SessionAttentionDot kind="running" compact className="absolute -right-0.5 -top-0.5 border-2 border-panel" />}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2">{title}</span>
-            <span className={cn('shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold', chatWorkspaceProgressClass(session, live))}>
-              {statusLabel}
+      <button
+        type="button"
+        onClick={onSelect}
+        onMouseEnter={() => {
+          if (session.agent && session.sessionId) {
+            prefetchSessionMessages({
+              workdir: item.workdir,
+              agent: session.agent,
+              sessionId: session.sessionId,
+              rich: true,
+              turnOffset: 0,
+              turnLimit: SESSION_PREFETCH_TURNS,
+            });
+          }
+        }}
+        className="flex min-h-[112px] w-full flex-col rounded-xl p-3 pr-10 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)] active:translate-y-0"
+      >
+        <span className="flex min-w-0 items-start gap-2.5">
+          <span className="relative grid h-8 w-8 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
+            <BrandIcon brand={session.agent || ''} size={16} />
+            {running && <SessionAttentionDot kind="running" compact className="absolute -right-0.5 -top-0.5 border-2 border-panel" />}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-fg-2">{title}</span>
+              <span className={cn('shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold', chatWorkspaceProgressClass(session, live))}>
+                {statusLabel}
+              </span>
+            </span>
+            <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
+              <span className="truncate">{item.workspaceName}</span>
+              <span className="shrink-0">·</span>
+              <span className="shrink-0">{getAgentMeta(session.agent || '').shortLabel}</span>
+              {updated && <span className="shrink-0">{fmtRelative(updated)}</span>}
             </span>
           </span>
-          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
-            <span className="truncate">{item.workspaceName}</span>
-            <span className="shrink-0">·</span>
-            <span className="shrink-0">{getAgentMeta(session.agent || '').shortLabel}</span>
-            {updated && <span className="shrink-0">{fmtRelative(updated)}</span>}
-          </span>
         </span>
-      </div>
-      {detail && (
-        <div className="mt-2 line-clamp-3 min-h-[34px] overflow-hidden text-[11px] leading-relaxed text-fg-4">
-          {detail}
-        </div>
+        {detail && (
+          <span className="mt-2 line-clamp-3 min-h-[34px] overflow-hidden text-[11px] leading-relaxed text-fg-4">
+            {detail}
+          </span>
+        )}
+      </button>
+      {onCreateSchedule && (
+        <button
+          type="button"
+          onClick={onCreateSchedule}
+          title={t('session.createSchedule')}
+          aria-label={t('session.createSchedule')}
+          className="absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-md border border-edge/50 bg-panel/75 text-fg-5 opacity-0 shadow-sm transition-[opacity,background,color,border-color] hover:border-primary/35 hover:bg-primary/[0.10] hover:text-primary group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+        </button>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -7555,6 +7575,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                           setShowNewSession(null);
                           setActiveSlotIndex(entry.slotIdx);
                         }}
+                        onCreateSchedule={() => openCreateScheduleModal({
+                          workdir: entry.slot.workdir,
+                          agent: entry.slot.agent,
+                          sessionId: entry.slot.sessionId,
+                          title: sessionListDisplayText(entry.item.session).slice(0, 120) || entry.slot.sessionId.slice(0, 16),
+                          prompt: entry.item.session.lastQuestion
+                            || sessionListContextText(entry.item.session, sessionListDisplayText(entry.item.session))
+                            || sessionListDisplayText(entry.item.session),
+                          pinned: entry.item.session.pinned === true,
+                          archived: entry.item.session.archived === true,
+                          unread: shouldMarkSessionReadOnOpen(entry.item.session),
+                        })}
                         t={t}
                       />
                     );
