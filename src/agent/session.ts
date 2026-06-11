@@ -721,6 +721,87 @@ export function updateSessionMeta(
   return true;
 }
 
+export interface MoveManagedSessionWorkspaceOpts {
+  sourceWorkdir: string;
+  targetWorkdir: string;
+  agent: Agent;
+  sessionId: string;
+}
+
+export interface MoveManagedSessionWorkspaceResult {
+  ok: boolean;
+  moved: boolean;
+  sourceWorkdir: string;
+  targetWorkdir: string;
+  session?: SessionInfo;
+  refusedReason?: 'session-running' | null;
+  error?: string;
+}
+
+export function moveManagedSessionToWorkspace(opts: MoveManagedSessionWorkspaceOpts): MoveManagedSessionWorkspaceResult {
+  const sourceWorkdir = path.resolve(opts.sourceWorkdir);
+  const targetWorkdir = path.resolve(opts.targetWorkdir);
+  const { agent, sessionId } = opts;
+  if (sourceWorkdir === targetWorkdir) {
+    const existing = findPikiclawSessionInfo(sourceWorkdir, agent, sessionId);
+    return {
+      ok: !!existing,
+      moved: false,
+      sourceWorkdir,
+      targetWorkdir,
+      session: existing || undefined,
+      error: existing ? undefined : 'Session not found',
+    };
+  }
+
+  const sourceIndex = loadSessionIndex(sourceWorkdir);
+  const sourcePos = sourceIndex.sessions.findIndex(record => record.agent === agent && record.sessionId === sessionId);
+  const sourceRecord = sourcePos >= 0 ? sourceIndex.sessions[sourcePos] : null;
+  if (!sourceRecord) {
+    return { ok: false, moved: false, sourceWorkdir, targetWorkdir, refusedReason: null, error: 'Session not found' };
+  }
+  if (sourceRecord.runState === 'running' && !isRunningSessionStale(sourceRecord, SESSION_RUNNING_THRESHOLD_MS)) {
+    return { ok: false, moved: false, sourceWorkdir, targetWorkdir, refusedReason: 'session-running', error: 'Session is still running' };
+  }
+
+  const nextRecord: ManagedSessionRecord = {
+    ...sourceRecord,
+    workdir: targetWorkdir,
+    workspacePath: sessionWorkspacePath(targetWorkdir, agent, sessionId),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const sourceSessionDir = sessionDirPath(sourceWorkdir, agent, sessionId);
+  const targetSessionDir = sessionDirPath(targetWorkdir, agent, sessionId);
+  if (fs.existsSync(sourceSessionDir)) {
+    try {
+      ensureDir(path.dirname(targetSessionDir));
+      fs.cpSync(sourceSessionDir, targetSessionDir, { recursive: true, force: true });
+    } catch (err) {
+      return {
+        ok: false,
+        moved: false,
+        sourceWorkdir,
+        targetWorkdir,
+        refusedReason: null,
+        error: `Failed to copy session workspace: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  const saved = saveSessionRecord(targetWorkdir, nextRecord);
+  sourceIndex.sessions.splice(sourcePos, 1);
+  writeSessionIndex(sourceWorkdir, sourceIndex.sessions);
+  return {
+    ok: true,
+    moved: true,
+    sourceWorkdir,
+    targetWorkdir,
+    session: managedRecordToSessionInfo(saved),
+    refusedReason: null,
+  };
+}
+
 export function adoptAgentSessionTitle(workdir: string, agent: Agent, sessionId: string, title: string | null | undefined): boolean {
   const nextTitle = promptDerivedTitle(title);
   if (!nextTitle) return false;

@@ -15,7 +15,7 @@ import {
 } from '../../agent/index.js';
 import { normalizeSessionContextSources } from '../../agent/context-sources.js';
 import { getSessionStatusForBot } from '../../bot/session-status.js';
-import { findPikiclawSession } from '../../agent/session.js';
+import { findPikiclawSession, moveManagedSessionToWorkspace } from '../../agent/session.js';
 import {
   cancelSessionTask,
   stopSessionTasks,
@@ -539,6 +539,25 @@ app.post('/api/session-hub/session/archive', async (c) => {
     }
     const updated = updateSession(workdir, agent, sessionId, { archived });
     return c.json({ ok: true, updated });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/workspace', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, targetWorkdir, agent, sessionId } = body || {};
+    if (!workdir || !targetWorkdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, targetWorkdir, agent, and sessionId are required' }, 400);
+    }
+    const result = moveManagedSessionToWorkspace({
+      sourceWorkdir: workdir,
+      targetWorkdir,
+      agent: agent as Agent,
+      sessionId,
+    });
+    return c.json(result, result.ok ? 200 : result.refusedReason === 'session-running' ? 409 : 400);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }

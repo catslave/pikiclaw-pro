@@ -3544,6 +3544,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     scheduleType: string;
     customSchedule: string;
   };
+  type SessionProjectAssignmentDraft = {
+    target: SessionActionTarget;
+    targetWorkdir: string;
+  };
   const [deletingSession, setDeletingSession] = useState(false);
   const [deleteConfirmKey, setDeleteConfirmKey] = useState<string | null>(null);
   const [renameSessionTarget, setRenameSessionTarget] = useState<SessionActionTarget | null>(null);
@@ -3562,6 +3566,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [creatingTask, setCreatingTask] = useState(false);
   const [scheduleDraft, setScheduleDraft] = useState<SessionScheduleDraft | null>(null);
   const [creatingSchedule, setCreatingSchedule] = useState(false);
+  const [assignProjectDraft, setAssignProjectDraft] = useState<SessionProjectAssignmentDraft | null>(null);
+  const [assigningProject, setAssigningProject] = useState(false);
 
   /* ── Session row actions popover (anchored to kebab button) ─── */
   const [sessionMenu, setSessionMenu] = useState<{
@@ -3705,6 +3711,83 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setCreatingSchedule(false);
     }
   }, [creatingSchedule, scheduleDraft, scheduleValueFromDraft, t, toastSession]);
+
+  const openAssignProjectModal = useCallback((target: SessionActionTarget) => {
+    setSessionMenu(null);
+    setSlotMenu(null);
+    setDeleteConfirmKey(null);
+    setAssignProjectDraft({ target, targetWorkdir: target.workdir });
+  }, []);
+
+  const submitAssignProject = useCallback(async () => {
+    const draft = assignProjectDraft;
+    if (!draft || assigningProject) return;
+    const targetWorkdir = draft.targetWorkdir.trim();
+    if (!targetWorkdir) {
+      toastSession(t('session.assignProjectFailed'), false);
+      return;
+    }
+    if (normalizeLocalPathForCompare(targetWorkdir) === normalizeLocalPathForCompare(draft.target.workdir)) {
+      setAssignProjectDraft(null);
+      return;
+    }
+    setAssigningProject(true);
+    try {
+      const res = await api.moveSessionWorkspace(
+        draft.target.workdir,
+        targetWorkdir,
+        draft.target.agent,
+        draft.target.sessionId,
+      );
+      if (!res.ok) throw new Error(res.error || t('session.assignProjectFailed'));
+      const nextSession = res.session || null;
+      setSessionsMap(prev => {
+        const sourceList = (prev[draft.target.workdir] || []).filter(
+          session => !(session.agent === draft.target.agent && session.sessionId === draft.target.sessionId),
+        );
+        const targetList = prev[targetWorkdir] || [];
+        const nextTargetList = nextSession
+          ? [nextSession, ...targetList.filter(session => !(session.agent === draft.target.agent && session.sessionId === draft.target.sessionId))]
+          : targetList;
+        return {
+          ...prev,
+          [draft.target.workdir]: sourceList,
+          [targetWorkdir]: nextTargetList,
+        };
+      });
+      setOpenSessions(prev => prev.map(slot => (
+        slot.workdir === draft.target.workdir
+          && slot.agent === draft.target.agent
+          && slot.sessionId === draft.target.sessionId
+          ? { ...slot, workdir: targetWorkdir }
+          : slot
+      )));
+      setOpenSideChatsByParent(prev => {
+        const oldParentKey = `${draft.target.workdir}:${draft.target.agent}:${draft.target.sessionId}`;
+        const newParentKey = `${targetWorkdir}:${draft.target.agent}:${draft.target.sessionId}`;
+        const next: OpenSideChatsMap = {};
+        for (const [parentKey, slots] of Object.entries(prev)) {
+          const mappedSlots = slots.map(slot => (
+            slot.workdir === draft.target.workdir
+              && slot.agent === draft.target.agent
+              && slot.sessionId === draft.target.sessionId
+              ? { ...slot, workdir: targetWorkdir }
+              : slot
+          ));
+          next[parentKey === oldParentKey ? newParentKey : parentKey] = mappedSlots;
+        }
+        return next;
+      });
+      setAssignProjectDraft(null);
+      toastSession(t('session.assignProjectMoved'));
+      void loadSessionsForWorkspace(draft.target.workdir, { background: true, force: true });
+      void loadSessionsForWorkspace(targetWorkdir, { background: true, force: true });
+    } catch (err: any) {
+      toastSession(err?.message || t('session.assignProjectFailed'), false);
+    } finally {
+      setAssigningProject(false);
+    }
+  }, [assignProjectDraft, assigningProject, loadSessionsForWorkspace, setOpenSessions, setOpenSideChatsByParent, t, toastSession]);
 
   // Close popover on outside click, scroll, resize, or Escape.
   useEffect(() => {
@@ -8686,6 +8769,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
             <button
               type="button"
               role="menuitem"
+              onClick={() => openAssignProjectModal(sessionMenu.target)}
+              className={menuItemClass('primary')}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v7A2.5 2.5 0 0 1 18.5 18h-13A2.5 2.5 0 0 1 3 15.5z" />
+                <path d="M12 10v5" />
+                <path d="M9.5 12.5h5" />
+              </svg>
+              {t('session.assignProject')}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               onClick={() => openCreateScheduleModal(sessionMenu.target)}
               className={menuItemClass('primary')}
             >
@@ -8827,6 +8923,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {t('session.createSchedule')}
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => runSlotAction(() => openAssignProjectModal(slotMenu.target))}
+              className={menuItemClass('primary')}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v7A2.5 2.5 0 0 1 18.5 18h-13A2.5 2.5 0 0 1 3 15.5z" />
+                <path d="M12 10v5" />
+                <path d="M9.5 12.5h5" />
+              </svg>
+              {t('session.assignProject')}
+            </button>
             {!isMultiSlotMenu && !hideDuplicateSlotMenuActions && (
               <button
                 type="button"
@@ -8861,6 +8970,48 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           </div>
         );
       })()}
+
+      {/* Assign chat to project */}
+      <Modal open={!!assignProjectDraft} onClose={() => !assigningProject && setAssignProjectDraft(null)}>
+        <ModalHeader title={t('session.assignProjectTitle')} onClose={() => !assigningProject && setAssignProjectDraft(null)} />
+        <div className="space-y-3">
+          <div className="text-[12px] leading-relaxed text-fg-5">{t('session.assignProjectHint')}</div>
+          {assignProjectDraft && (
+            <div className="rounded-md border border-edge/60 bg-inset px-3 py-2">
+              <div className="truncate text-[12px] font-semibold text-fg-2">{assignProjectDraft.target.title}</div>
+              <div className="mt-1 truncate font-mono text-[10px] text-fg-5">
+                {assignProjectDraft.target.agent}:{assignProjectDraft.target.sessionId}
+              </div>
+            </div>
+          )}
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('session.assignProjectTarget')}</span>
+            <select
+              value={assignProjectDraft?.targetWorkdir || ''}
+              onChange={event => setAssignProjectDraft(prev => prev ? { ...prev, targetWorkdir: event.target.value } : prev)}
+              disabled={assigningProject}
+              className="h-9 w-full rounded-md border border-edge bg-inset px-2 text-[13px] text-fg outline-none focus:border-primary/40"
+            >
+              {workspaces.map(workspace => (
+                <option key={workspace.path} value={workspace.path}>
+                  {workspace.name || workspaceBaseName(workspace.path)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setAssignProjectDraft(null)} disabled={assigningProject}>{t('modal.cancel')}</Button>
+          <Button
+            variant="primary"
+            onClick={() => void submitAssignProject()}
+            disabled={assigningProject || !assignProjectDraft || !assignProjectDraft.targetWorkdir}
+          >
+            {assigningProject ? <Spinner className="h-3 w-3" /> : null}
+            {assigningProject ? t('session.assigningProject') : t('modal.save')}
+          </Button>
+        </div>
+      </Modal>
 
       {/* Create local task from chat */}
       <Modal open={!!createTaskTarget} onClose={() => !creatingTask && setCreateTaskTarget(null)}>

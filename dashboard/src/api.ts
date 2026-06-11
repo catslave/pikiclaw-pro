@@ -519,6 +519,18 @@ export const api = {
       { workdir, agent, sessionId, archived },
       opts,
     ),
+  moveSessionWorkspace: (
+    workdir: string,
+    targetWorkdir: string,
+    agent: string,
+    sessionId: string,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; moved?: boolean; session?: SessionInfo; sourceWorkdir?: string; targetWorkdir?: string; refusedReason?: string | null; error?: string }>(
+      '/api/session-hub/session/workspace',
+      { workdir, targetWorkdir, agent, sessionId },
+      opts,
+    ),
   deleteSession: (
     workdir: string,
     agent: string,
