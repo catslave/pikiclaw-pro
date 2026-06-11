@@ -305,7 +305,17 @@ function sourceLabel(item: AssistantHistoryItem, copy: ProCopy) {
   return copy.sourceJob;
 }
 
-function openSessionsFromStorage(): Array<{ agent: string; sessionId: string; workdir: string; mountKey: string; archiveOnly?: boolean }> {
+type StoredOpenSession = {
+  agent: string;
+  sessionId: string;
+  workdir: string;
+  mountKey: string;
+  archiveOnly?: boolean;
+  assistantId?: string;
+  assistantName?: string;
+};
+
+function openSessionsFromStorage(): StoredOpenSession[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_SESSIONS_STORAGE_KEY) || '[]');
     return Array.isArray(parsed)
@@ -897,25 +907,13 @@ export function ProAutomationSection({
     }
   }, [assistants, busy, draft, onChange, runtimeWorkdir, toast]);
 
-  const runJob = useCallback(async (job: AutomationRule) => {
-    setBusy(job.id);
-    try {
-      const res = await api.runProAutomation(job.id);
-      if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to run job');
-      setJobs(prev => prev.map(item => item.id === job.id ? res.automation! : item));
-      onChange?.();
-      toast(copy.queued);
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Failed to run job', false);
-    } finally {
-      setBusy(null);
-    }
-  }, [copy.queued, onChange, toast]);
-
   const openRunChat = useCallback((job: AutomationRule, sessionKey: string | undefined) => {
     const parsed = parseSessionKey(sessionKey);
     const workdir = job.workdir || runtimeWorkdir;
     if (!parsed || !workdir) return;
+    const assistantName = job.assistantId
+      ? assistants.find(item => item.id === job.assistantId)?.name
+      : undefined;
     const existing = openSessionsFromStorage();
     const exactIndex = existing.findIndex(slot => (
       slot.workdir === workdir
@@ -923,8 +921,21 @@ export function ProAutomationSection({
       && slot.sessionId === parsed.sessionId
     ));
     const next = exactIndex >= 0
-      ? existing.map((slot, index) => index === exactIndex ? { ...slot, archiveOnly: false } : slot)
-      : [{ workdir, agent: parsed.agent, sessionId: parsed.sessionId, mountKey: mountKey(), archiveOnly: false }, ...existing];
+      ? existing.map((slot, index) => index === exactIndex ? {
+          ...slot,
+          archiveOnly: false,
+          assistantId: job.assistantId || slot.assistantId,
+          assistantName: assistantName || slot.assistantName,
+        } : slot)
+      : [{
+          workdir,
+          agent: parsed.agent,
+          sessionId: parsed.sessionId,
+          mountKey: mountKey(),
+          archiveOnly: false,
+          assistantId: job.assistantId,
+          assistantName,
+        }, ...existing];
     try {
       localStorage.setItem(OPEN_SESSIONS_STORAGE_KEY, JSON.stringify(next));
       localStorage.setItem(ACTIVE_SLOT_STORAGE_KEY, String(exactIndex >= 0 ? exactIndex : 0));
@@ -939,7 +950,23 @@ export function ProAutomationSection({
         openSessionNonce: Date.now(),
       },
     });
-  }, [navigate, runtimeWorkdir]);
+  }, [assistants, navigate, runtimeWorkdir]);
+
+  const runJob = useCallback(async (job: AutomationRule) => {
+    setBusy(job.id);
+    try {
+      const res = await api.runProAutomation(job.id);
+      if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to run job');
+      setJobs(prev => prev.map(item => item.id === job.id ? res.automation! : item));
+      onChange?.();
+      toast(copy.queued);
+      openRunChat(res.automation, res.queued?.sessionKey || res.automation.lastSessionKey);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to run job', false);
+    } finally {
+      setBusy(null);
+    }
+  }, [copy.queued, onChange, openRunChat, toast]);
 
   return (
     <section className={cn('space-y-4', standalone || embedded ? '' : 'border-t border-edge pt-4')}>
