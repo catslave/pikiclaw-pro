@@ -2725,7 +2725,7 @@ function TaskFocusEmptyWorkbench({
    ══════════════════════════════════════════════════════ */
 export const SessionWorkspace = memo(function SessionWorkspace({
   active = true,
-  mode = 'workspace',
+  mode = 'chat-workspace',
   settingsContent = null,
   dashboardJiraContent = null,
 }: {
