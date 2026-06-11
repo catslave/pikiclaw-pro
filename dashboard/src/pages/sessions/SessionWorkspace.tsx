@@ -34,7 +34,7 @@ import { InputComposer, buildReferenceContextEnvelope } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
-import { ProAssistantsSection } from '../agents/ProAgentWorkflowSection';
+import { ProAssistantsSection, ProAutomationSection } from '../agents/ProAgentWorkflowSection';
 import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
 import type { SessionPanelChange, SessionPanelScrollRequest } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
@@ -3047,6 +3047,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatWorkspaceAutomations, setChatWorkspaceAutomations] = useState<AutomationRule[]>([]);
   const [chatWorkspaceAutomationsLoading, setChatWorkspaceAutomationsLoading] = useState(false);
   const [chatWorkspaceAutomationRunningId, setChatWorkspaceAutomationRunningId] = useState<string | null>(null);
+  const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
@@ -3069,6 +3070,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (!active || mode !== 'chat-workspace') return;
     void refreshChatWorkspaceAutomations();
   }, [active, mode, refreshChatWorkspaceAutomations]);
+  const closeWorkflowLibrary = useCallback(() => {
+    setWorkflowLibraryOpen(false);
+    void refreshChatWorkspaceAutomations();
+  }, [refreshChatWorkspaceAutomations]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
   const [quickTodoText, setQuickTodoText] = useState('');
@@ -7395,7 +7400,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               loading={chatWorkspaceAutomationsLoading}
               runningId={chatWorkspaceAutomationRunningId}
               onRun={handleChatWorkspaceRunAutomation}
-              onOpenWorkflows={() => navigate('/workflows')}
+              onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
               t={t}
             />
             <section className="shrink-0 rounded-xl border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md">
@@ -9633,6 +9638,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         />
         <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
           <ProAssistantsSection embedded onChange={loadChatAssistants} />
+        </div>
+      </Modal>
+
+      {/* Chat workflow library modal */}
+      <Modal
+        open={workflowLibraryOpen}
+        onClose={closeWorkflowLibrary}
+        wide
+        panelClassName="max-w-[980px]"
+      >
+        <ModalHeader
+          title={t('chatWorkspace.workflowLibraryTitle')}
+          description={t('chatWorkspace.workflowLibraryDescription')}
+          onClose={closeWorkflowLibrary}
+        />
+        <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
+          <ProAutomationSection embedded onChange={refreshChatWorkspaceAutomations} />
         </div>
       </Modal>
 

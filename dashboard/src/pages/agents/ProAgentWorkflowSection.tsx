@@ -815,7 +815,15 @@ export function ProAssistantsSection({ embedded = false, onChange }: { embedded?
   );
 }
 
-export function ProAutomationSection({ standalone = false }: { standalone?: boolean } = {}) {
+export function ProAutomationSection({
+  standalone = false,
+  embedded = false,
+  onChange,
+}: {
+  standalone?: boolean;
+  embedded?: boolean;
+  onChange?: () => void;
+} = {}) {
   const navigate = useNavigate();
   const toast = useStore(s => s.toast);
   const locale = useStore(s => s.locale);
@@ -862,6 +870,7 @@ export function ProAutomationSection({ standalone = false }: { standalone?: bool
       });
       if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to create job');
       setJobs(prev => [res.automation!, ...prev]);
+      onChange?.();
       setDraft({ ...defaultJobDraft, assistantId: assistants[0]?.id || '' });
       setCreateOpen(false);
     } catch (err) {
@@ -869,7 +878,7 @@ export function ProAutomationSection({ standalone = false }: { standalone?: bool
     } finally {
       setBusy(null);
     }
-  }, [assistants, busy, draft, runtimeWorkdir, toast]);
+  }, [assistants, busy, draft, onChange, runtimeWorkdir, toast]);
 
   const runJob = useCallback(async (job: AutomationRule) => {
     setBusy(job.id);
@@ -877,13 +886,14 @@ export function ProAutomationSection({ standalone = false }: { standalone?: bool
       const res = await api.runProAutomation(job.id);
       if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to run job');
       setJobs(prev => prev.map(item => item.id === job.id ? res.automation! : item));
+      onChange?.();
       toast(copy.queued);
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to run job', false);
     } finally {
       setBusy(null);
     }
-  }, [copy.queued, toast]);
+  }, [copy.queued, onChange, toast]);
 
   const openRunChat = useCallback((job: AutomationRule, sessionKey: string | undefined) => {
     const parsed = parseSessionKey(sessionKey);
@@ -915,7 +925,7 @@ export function ProAutomationSection({ standalone = false }: { standalone?: bool
   }, [navigate, runtimeWorkdir]);
 
   return (
-    <section className={cn('space-y-4', standalone ? '' : 'border-t border-edge pt-4')}>
+    <section className={cn('space-y-4', standalone || embedded ? '' : 'border-t border-edge pt-4')}>
       {standalone && (
         <div className="grid gap-3 md:grid-cols-4">
           {stats.map(item => (
