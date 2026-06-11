@@ -66,6 +66,7 @@ const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 const SESSION_COMPLETION_CELEBRATION_MS = 1800;
 const STATUS_SUMMARY_RECENT_MS = 24 * 60 * 60 * 1000;
 const VISIBLE_WORKSPACE_REFRESH_MIN_INTERVAL_MS = 15_000;
+const RECENT_CONVERSATION_LIMIT = 18;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
 const isPikiclawMetaPath = (value: string) => value === '.pikiclaw' || value.startsWith('.pikiclaw/');
 const MENU_ITEM_BASE_CLASS = 'mx-1 flex h-8 w-[calc(100%-0.5rem)] items-center gap-2 rounded px-2 text-left text-[12px] font-medium text-fg-3 transition-[background,color] duration-150 focus-visible:outline-none';
@@ -416,6 +417,12 @@ type ChatWorkspaceBetaItem = {
   session: SessionInfo;
   workdir: string;
   workspaceName: string;
+};
+type RecentConversationGroupKey = 'today' | 'yesterday' | 'thisWeek' | 'older';
+type RecentConversationGroup = {
+  key: RecentConversationGroupKey;
+  labelKey: string;
+  items: ChatWorkspaceBetaItem[];
 };
 type FocusFloatingSession = {
   id: string;
@@ -810,9 +817,14 @@ function ChatWorkspaceLauncher({
               setInput('/');
               window.requestAnimationFrame(() => textareaRef.current?.focus());
             }}
-            className="mb-0.5 flex max-w-[180px] shrink-0 items-center gap-1 rounded-md border border-edge/55 bg-panel-alt px-2 py-1 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
+            className="mb-0.5 flex max-w-[230px] shrink-0 items-center gap-1.5 rounded-md border border-edge/55 bg-panel-alt px-2 py-1 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
             title={selectedWorkspace.path}
+            aria-label={t('chatWorkspace.projectContext')}
           >
+            <span className="shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-fg-5">
+              {t('chatWorkspace.projectContext')}
+            </span>
+            <span className="h-3 w-px shrink-0 bg-edge/65" aria-hidden="true" />
             <span className="min-w-0 truncate">{selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}</span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="m6 9 6 6 6-6" />
@@ -1542,6 +1554,29 @@ function statusTimestampMs(session: SessionInfo): number | null {
   const parsed = Date.parse(raw);
   return Number.isFinite(parsed) ? parsed : null;
 }
+
+function startOfLocalDayMs(date = new Date()): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function recentConversationGroupKey(timestampMs: number, now = new Date()): RecentConversationGroupKey {
+  const today = startOfLocalDayMs(now);
+  const yesterday = today - 24 * 60 * 60 * 1000;
+  const week = today - 6 * 24 * 60 * 60 * 1000;
+  if (timestampMs >= today) return 'today';
+  if (timestampMs >= yesterday) return 'yesterday';
+  if (timestampMs >= week) return 'thisWeek';
+  return 'older';
+}
+
+const RECENT_CONVERSATION_GROUP_LABELS: Record<RecentConversationGroupKey, string> = {
+  today: 'chatWorkspace.recentToday',
+  yesterday: 'chatWorkspace.recentYesterday',
+  thisWeek: 'chatWorkspace.recentThisWeek',
+  older: 'chatWorkspace.recentOlder',
+};
+
+const RECENT_CONVERSATION_GROUP_ORDER: RecentConversationGroupKey[] = ['today', 'yesterday', 'thisWeek', 'older'];
 
 type LocalReadSessionMarkers = Record<string, number>;
 
@@ -5130,6 +5165,46 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     return out;
   }, [workspaces, sessionsMap, liveSessionStates, filterFn, hydrateSession]);
 
+  const recentConversationGroups = useMemo<RecentConversationGroup[]>(() => {
+    const items: ChatWorkspaceBetaItem[] = [];
+    for (const ws of workspaces) {
+      const workspaceName = ws.name || workspaceBaseName(ws.path);
+      for (const session of filteredByWs[ws.path] || []) {
+        if (!session.agent || !session.sessionId) continue;
+        const timestamp = statusTimestampMs(session);
+        if (!timestamp) continue;
+        items.push({
+          key: `${ws.path}:${sKey(session.agent, session.sessionId)}`,
+          session,
+          workdir: ws.path,
+          workspaceName,
+        });
+      }
+    }
+
+    const now = new Date();
+    const byGroup = new Map<RecentConversationGroupKey, ChatWorkspaceBetaItem[]>();
+    const recentItems = items
+      .sort((a, b) => (statusTimestampMs(b.session) || 0) - (statusTimestampMs(a.session) || 0))
+      .slice(0, RECENT_CONVERSATION_LIMIT);
+    for (const item of recentItems) {
+      const timestamp = statusTimestampMs(item.session);
+      if (!timestamp) continue;
+      const groupKey = recentConversationGroupKey(timestamp, now);
+      const groupItems = byGroup.get(groupKey) || [];
+      groupItems.push(item);
+      byGroup.set(groupKey, groupItems);
+    }
+
+    return RECENT_CONVERSATION_GROUP_ORDER
+      .map(key => ({
+        key,
+        labelKey: RECENT_CONVERSATION_GROUP_LABELS[key],
+        items: byGroup.get(key) || [],
+      }))
+      .filter(group => group.items.length > 0);
+  }, [filteredByWs, workspaces]);
+
   /* ── Derived: resolve SessionInfo for each open slot ── */
   const resolveSlotInfo = useCallback((slot: SessionSlot): SessionInfo => {
     const resolved = (sessionsMap[slot.workdir] || []).find(
@@ -6437,41 +6512,56 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           ) : workspaces.length === 0 && !showAddDialog ? (
             <div className="py-12 text-center text-[13px] text-fg-5">{t('hub.noWorkspaces')}</div>
           ) : (
-            workspaces.map(ws => (
-              <Fragment key={ws.path}>
-                <WorkspaceGroup
-                  workspace={ws}
-                  sessions={filteredByWs[ws.path] || []}
-                  loading={!!loadingMap[ws.path] || !(ws.path in sessionsMap)}
-                  isActive={ws.path === runtimeWorkdir}
+            <>
+              {recentConversationGroups.length > 0 && (
+                <RecentConversationSection
+                  groups={recentConversationGroups}
                   selectedKey={selectedKey}
                   selectedWorkdir={selectedSlotWorkdir}
                   openSessionKeys={sidebarOpenSessionKeys}
                   onSelectSession={handleSelectSession}
-                  canOpenFloatingSession={canOpenSidebarSessionFloating}
-                  onOpenFloatingSession={openSidebarSessionFloating}
-                  onNewSession={handleNewSessionRequest}
-	                  onRefresh={handleRefreshWorkspace}
-	                  onMarkAllRead={handleMarkWorkspaceInboxRead}
-                    inboxUnreadCount={dashboardItems.filter(item => item.workdir === ws.path).length}
-                  onRemove={handleRemoveWorkspace}
-                  onRename={openRenameWorkspaceModal}
-                  onExtensions={setExtensionsWorkdir}
-                  onKnowledge={openWorkspaceKnowledgeModal}
                   onWarmSession={scheduleSessionWarmup}
                   onCancelWarmSession={cancelScheduledWarmup}
                   onSessionMenuOpen={handleSessionMenuOpen}
-                  draggingPath={draggingWorkspacePath}
-                  dragOverPath={dragOverWorkspacePath}
-                  onWorkspaceDragStart={handleWorkspaceDragStart}
-                  onWorkspaceDragOver={handleWorkspaceDragOver}
-                  onWorkspaceDragLeave={handleWorkspaceDragLeave}
-                  onWorkspaceDrop={handleWorkspaceDrop}
-                  onWorkspaceDragEnd={handleWorkspaceDragEnd}
                   t={t}
                 />
-              </Fragment>
-            ))
+              )}
+              {workspaces.map(ws => (
+                <Fragment key={ws.path}>
+                  <WorkspaceGroup
+                    workspace={ws}
+                    sessions={filteredByWs[ws.path] || []}
+                    loading={!!loadingMap[ws.path] || !(ws.path in sessionsMap)}
+                    isActive={ws.path === runtimeWorkdir}
+                    selectedKey={selectedKey}
+                    selectedWorkdir={selectedSlotWorkdir}
+                    openSessionKeys={sidebarOpenSessionKeys}
+                    onSelectSession={handleSelectSession}
+                    canOpenFloatingSession={canOpenSidebarSessionFloating}
+                    onOpenFloatingSession={openSidebarSessionFloating}
+                    onNewSession={handleNewSessionRequest}
+                    onRefresh={handleRefreshWorkspace}
+                    onMarkAllRead={handleMarkWorkspaceInboxRead}
+                    inboxUnreadCount={dashboardItems.filter(item => item.workdir === ws.path).length}
+                    onRemove={handleRemoveWorkspace}
+                    onRename={openRenameWorkspaceModal}
+                    onExtensions={setExtensionsWorkdir}
+                    onKnowledge={openWorkspaceKnowledgeModal}
+                    onWarmSession={scheduleSessionWarmup}
+                    onCancelWarmSession={cancelScheduledWarmup}
+                    onSessionMenuOpen={handleSessionMenuOpen}
+                    draggingPath={draggingWorkspacePath}
+                    dragOverPath={dragOverWorkspacePath}
+                    onWorkspaceDragStart={handleWorkspaceDragStart}
+                    onWorkspaceDragOver={handleWorkspaceDragOver}
+                    onWorkspaceDragLeave={handleWorkspaceDragLeave}
+                    onWorkspaceDrop={handleWorkspaceDrop}
+                    onWorkspaceDragEnd={handleWorkspaceDragEnd}
+                    t={t}
+                  />
+                </Fragment>
+              ))}
+            </>
           )}
         </div>
 
@@ -9540,16 +9630,165 @@ function DashboardTaskCard({
           <span className="min-w-0 truncate">{item.workspaceName}</span>
           <span className="ml-auto shrink-0 tabular-nums">{time}</span>
         </div>
-	        <div className="mt-1.5 flex items-start gap-2">
-		          {!selected && <Dot variant={displayState === 'running' ? 'running' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
-	          <div className="min-w-0 flex-1">
-	            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
-	            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
-	          </div>
-	        </div>
-	      </button>
-	    </div>
-	  );
+        <div className="mt-1.5 flex items-start gap-2">
+          {!selected && <Dot variant={displayState === 'running' ? 'running' : displayState === 'incomplete' ? 'err' : 'idle'} pulse={displayState === 'running'} />}
+          <div className="min-w-0 flex-1">
+            <div className="line-clamp-2 text-[12px] font-medium leading-snug text-fg-2" title={title}>{title}</div>
+            {detail && <div className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-fg-5">{detail}</div>}
+          </div>
+        </div>
+      </button>
+    </div>
+  );
+}
+
+const RecentConversationSection = memo(function RecentConversationSection({
+  groups,
+  selectedKey,
+  selectedWorkdir,
+  openSessionKeys,
+  onSelectSession,
+  onWarmSession,
+  onCancelWarmSession,
+  onSessionMenuOpen,
+  t,
+}: {
+  groups: RecentConversationGroup[];
+  selectedKey: string | null;
+  selectedWorkdir: string | null;
+  openSessionKeys?: Set<string>;
+  onSelectSession: (s: SessionInfo, wsPath: string) => void;
+  onWarmSession: (s: SessionInfo, wsPath: string) => void;
+  onCancelWarmSession: (s: SessionInfo, wsPath: string) => void;
+  onSessionMenuOpen: (anchor: DOMRect, s: SessionInfo, wsPath: string) => void;
+  t: (key: string) => string;
+}) {
+  return (
+    <section className="border-b border-edge/25 px-2 py-3">
+      <div className="mb-2 flex items-center justify-between gap-2 px-1">
+        <div className="min-w-0 truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-5">
+          {t('chatWorkspace.recentConversations')}
+        </div>
+        <span className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 text-[9px] font-semibold text-fg-5">
+          {groups.reduce((sum, group) => sum + group.items.length, 0)}
+        </span>
+      </div>
+      <div className="space-y-3">
+        {groups.map(group => (
+          <div key={group.key} className="space-y-1">
+            <div className="px-1 text-[10px] font-semibold text-fg-5/75">
+              {t(group.labelKey)}
+            </div>
+            <div className="space-y-1">
+              {group.items.map(item => {
+                const itemKey = sKey(item.session.agent || '', item.session.sessionId);
+                return (
+                  <RecentConversationCard
+                    key={item.key}
+                    item={item}
+                    selected={selectedWorkdir === item.workdir && selectedKey === itemKey}
+                    open={openSessionKeys?.has(itemKey) ?? false}
+                    onSelect={() => onSelectSession(item.session, item.workdir)}
+                    onWarm={() => onWarmSession(item.session, item.workdir)}
+                    onCancelWarm={() => onCancelWarmSession(item.session, item.workdir)}
+                    onShowMenu={anchor => onSessionMenuOpen(anchor, item.session, item.workdir)}
+                    t={t}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+});
+
+function RecentConversationCard({
+  item,
+  selected,
+  open,
+  onSelect,
+  onWarm,
+  onCancelWarm,
+  onShowMenu,
+  t,
+}: {
+  item: ChatWorkspaceBetaItem;
+  selected: boolean;
+  open: boolean;
+  onSelect: () => void;
+  onWarm: () => void;
+  onCancelWarm: () => void;
+  onShowMenu: (anchor: DOMRect) => void;
+  t: (key: string) => string;
+}) {
+  const session = item.session;
+  const title = sessionListDisplayText(session).slice(0, 160) || session.sessionId.slice(0, 16);
+  const detail = sessionListContextText(session, title).slice(0, 140);
+  const meta = getAgentMeta(session.agent || '');
+  const attentionVariant = sessionAttentionVariant(session);
+  const updatedAt = session.runUpdatedAt || session.createdAt || undefined;
+  const state = sessionDisplayState(session);
+
+  return (
+    <div className="group/recent relative">
+      <button
+        type="button"
+        onClick={onSelect}
+        onMouseEnter={onWarm}
+        onFocus={onWarm}
+        onMouseLeave={onCancelWarm}
+        onBlur={onCancelWarm}
+        className={cn(
+          'flex w-full min-w-0 items-start gap-2 rounded-lg border px-2 py-2 text-left transition-[background,border-color,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+          selected
+            ? 'border-primary/55 bg-primary/[0.08] text-fg'
+            : open
+              ? 'border-primary/24 bg-primary/[0.045] text-fg-2 hover:bg-primary/[0.065]'
+              : 'border-transparent bg-transparent text-fg-3 hover:translate-x-0.5 hover:border-edge/45 hover:bg-panel-h/52',
+        )}
+      >
+        <span className="relative mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border border-edge/45 bg-inset/80 shadow-sm">
+          <BrandIcon brand={session.agent || ''} size={13} />
+          {attentionVariant && (
+            <SessionAttentionDot kind={attentionVariant} compact className="absolute -right-0.5 -top-0.5 border-2 border-panel" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className={cn('min-w-0 flex-1 truncate text-[11.5px] font-semibold', (selected || open || state === 'running') && 'text-fg')}>
+              {title}
+            </span>
+            {updatedAt && (
+              <span className="shrink-0 text-[9.5px] font-medium tabular-nums text-fg-5">
+                {fmtSidebarSessionTime(updatedAt)}
+              </span>
+            )}
+          </span>
+          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
+            <span className="min-w-0 truncate">{item.workspaceName}</span>
+            <span className="shrink-0">·</span>
+            <span className="shrink-0" style={{ color: meta.color }}>{meta.shortLabel}</span>
+          </span>
+          {detail && <span className="mt-1 block truncate text-[10px] text-fg-5/80">{detail}</span>}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={event => {
+          event.stopPropagation();
+          onShowMenu(event.currentTarget.getBoundingClientRect());
+        }}
+        onMouseDown={event => event.stopPropagation()}
+        className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-[13px] font-semibold leading-none text-fg-5 opacity-0 transition-[background,color,opacity] hover:bg-panel-h hover:text-fg group-hover/recent:opacity-100 focus-visible:opacity-100"
+        title={t('session.openActions')}
+        aria-label={t('session.openActions')}
+      >
+        ...
+      </button>
+    </div>
+  );
 }
 
 /* ══════════════════════════════════════════════════════
