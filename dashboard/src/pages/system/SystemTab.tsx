@@ -24,11 +24,9 @@ export function SystemTab({
   const t = useMemo(() => createT(locale), [locale]);
   const [searchParams, setSearchParams] = useSearchParams();
   const [savingRecallIndex, setSavingRecallIndex] = useState(false);
-  const [savingChatWorkspaceBeta, setSavingChatWorkspaceBeta] = useState(false);
   const activeView: SystemView = searchParams.get('view') === 'archive' ? 'archive' : 'overview';
   const currentWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || state?.config.workdir || '';
   const chatRecallIndexEnabled = state?.config.chatRecallIndexEnabled === true;
-  const chatWorkspaceBetaEnabled = state?.config.chatWorkspaceBetaEnabled === true;
   const hostSummary = formatHostSummary(host);
   const switchView = (view: SystemView) => {
     setSearchParams(view === 'archive' ? { view: 'archive' } : {}, { replace: true });
@@ -44,19 +42,6 @@ export function SystemTab({
       toast(err instanceof Error ? err.message : t('system.chatRecallSaveFailed'), false);
     } finally {
       setSavingRecallIndex(false);
-    }
-  };
-  const toggleChatWorkspaceBeta = async () => {
-    const nextEnabled = !chatWorkspaceBetaEnabled;
-    setSavingChatWorkspaceBeta(true);
-    try {
-      await api.saveConfig({ chatWorkspaceBetaEnabled: nextEnabled });
-      await reload();
-      toast(nextEnabled ? t('system.chatWorkspaceBetaEnabled') : t('system.chatWorkspaceBetaDisabled'));
-    } catch (err) {
-      toast(err instanceof Error ? err.message : t('system.chatWorkspaceBetaSaveFailed'), false);
-    } finally {
-      setSavingChatWorkspaceBeta(false);
     }
   };
 
@@ -141,22 +126,6 @@ export function SystemTab({
                 >
                   {savingRecallIndex && <Spinner className="h-3 w-3" />}
                   <span>{chatRecallIndexEnabled ? t('system.featureOn') : t('system.featureOff')}</span>
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-edge/60 bg-panel-alt/70 px-3 py-2.5">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-semibold text-fg-2">{t('system.chatWorkspaceBetaTitle')}</div>
-                  <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">{t('system.chatWorkspaceBetaDesc')}</div>
-                </div>
-                <Button
-                  variant={chatWorkspaceBetaEnabled ? 'secondary' : 'outline'}
-                  size="sm"
-                  onClick={() => void toggleChatWorkspaceBeta()}
-                  disabled={savingChatWorkspaceBeta}
-                  aria-pressed={chatWorkspaceBetaEnabled}
-                >
-                  {savingChatWorkspaceBeta && <Spinner className="h-3 w-3" />}
-                  <span>{chatWorkspaceBetaEnabled ? t('system.featureOn') : t('system.featureOff')}</span>
                 </Button>
               </div>
             </div>

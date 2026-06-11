@@ -478,7 +478,6 @@ export function FrequentAssistantDock({ className }: { className?: string }) {
     setDetailTarget(null);
     navigate('/chat', {
       state: {
-        forceWorkspace: true,
         openSessionWorkdir: session.workdir,
         openSessionAgent: session.agent,
         openSessionId: session.sessionId,

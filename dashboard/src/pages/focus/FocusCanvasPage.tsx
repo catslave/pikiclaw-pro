@@ -35,9 +35,8 @@ export function FocusCanvasPage() {
   const submitChat = useCallback(() => {
     const prompt = draft.trim();
     if (!prompt) return;
-    navigate('/', {
+    navigate('/chat', {
       state: {
-        forceWorkspace: true,
         newSessionAgent: defaultAgent,
         newSessionPrompt: prompt,
         newSessionAutoSend: true,

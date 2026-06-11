@@ -35,9 +35,8 @@ export function useFocusActions(toast: (message: string, ok?: boolean) => void, 
   ) => {
     const source = contextSource(ref, title);
     if (!source) return;
-    navigate('/', {
+    navigate('/chat', {
       state: {
-        forceWorkspace: true,
         newSessionAgent: ref.agent,
         newSessionPrompt: prompt,
         newSessionAutoSend: false,
@@ -50,9 +49,8 @@ export function useFocusActions(toast: (message: string, ok?: boolean) => void, 
   }, [navigate]);
 
   const openSource = useCallback((ref: KnowledgeSourceRef) => {
-    navigate('/', {
+    navigate('/chat', {
       state: {
-        forceWorkspace: true,
         openSessionWorkdir: ref.workdir,
         openSessionAgent: ref.agent,
         openSessionId: ref.sessionId,

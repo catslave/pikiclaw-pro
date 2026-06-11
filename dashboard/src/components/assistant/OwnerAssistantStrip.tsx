@@ -842,7 +842,7 @@ function AssistantHistoryDialog({
       // Storage can be unavailable in restricted browser contexts.
     }
     onClose();
-    navigate('/');
+    navigate('/chat');
   }, [navigate, onClose]);
 
   return (

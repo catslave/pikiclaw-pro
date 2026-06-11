@@ -60,8 +60,8 @@ function MenuTooltip({ label }: { label: string }) {
 }
 
 const TAB_ROUTES: Record<string, string> = {
-  sessions: '/',
-  focus: '/chat',
+  chat: '/chat',
+  sessions: '/workspace',
   dashboard: '/tasks',
   daily: '/daily',
   notes: '/notes',
@@ -94,8 +94,8 @@ export function Sidebar({
   const t = useMemo(() => createT(locale), [locale]);
   const location = useLocation();
   const primaryNavItems = useMemo(() => [
-    { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, state: { forceWorkspace: true } },
-    { key: 'focus', to: TAB_ROUTES.focus, label: t('nav.focus'), state: undefined },
+    { key: 'chat', to: TAB_ROUTES.chat, label: t('nav.chat'), state: undefined },
+    { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, state: undefined },
     { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('nav.dashboard'), state: undefined },
     { key: 'daily', to: TAB_ROUTES.daily, label: t('nav.daily'), state: undefined },
     { key: 'notes', to: TAB_ROUTES.notes, label: t('nav.notes'), state: undefined },
@@ -126,8 +126,22 @@ export function Sidebar({
         <div className="pointer-events-auto flex h-full w-14 flex-col items-center border-r border-edge/65 bg-panel/82 py-2 shadow-[8px_0_24px_rgba(2,6,23,0.08)] backdrop-blur-md">
           <div className="relative h-10 w-10">
             <NavLink
-              to="/"
-              state={{ forceWorkspace: true }}
+              to="/chat"
+              title={t('nav.chat')}
+              aria-label={t('nav.chat')}
+              end
+              className={({ isActive }) => cn(
+                'group absolute inset-1 inline-flex items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+                (isActive || location.pathname === '/focus' || location.pathname === '/chat-workspace') && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+              )}
+            >
+              {IconChatWorkspace}
+              <MenuTooltip label={t('nav.chat')} />
+            </NavLink>
+          </div>
+          <div className="relative h-10 w-10">
+            <NavLink
+              to="/workspace"
               title={t('nav.workspace')}
               aria-label={t('nav.workspace')}
               end
@@ -191,18 +205,6 @@ export function Sidebar({
           >
             {IconKnowledge}
             <MenuTooltip label={t('nav.knowledge')} />
-          </NavLink>
-          <NavLink
-            to="/chat"
-            title={t('nav.focus')}
-            aria-label={t('nav.focus')}
-            className={({ isActive }) => cn(
-              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-              (isActive || location.pathname === '/focus' || location.pathname === '/chat-workspace') && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
-            )}
-          >
-            {IconChatWorkspace}
-            <MenuTooltip label={t('nav.focus')} />
           </NavLink>
           <div className="mt-3 h-px w-6 bg-edge/70" />
           <nav className="mt-3 flex shrink-0 flex-col items-center gap-1" aria-label="Settings navigation">

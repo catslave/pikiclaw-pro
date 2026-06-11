@@ -533,7 +533,7 @@ export function ProAssistantsSection() {
     } catch {
       // Storage may be unavailable in restricted browser contexts.
     }
-    navigate('/');
+    navigate('/chat');
   }, [navigate]);
 
   const openHistory = useCallback((assistant: AgentAssistant) => {

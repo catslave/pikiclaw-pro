@@ -41,8 +41,6 @@ type ModalState =
   | { type: 'workdir' }
   | { type: 'browser-setup' };
 
-const LAST_DASHBOARD_PATH_KEY = 'pikiclaw:last-dashboard-path:v1';
-
 type HoveredLinkState = {
   href: string;
   x: number;
@@ -54,6 +52,7 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/chat': 'sessions',
+    '/workspace': 'sessions',
     '/focus': 'sessions',
     '/chat-workspace': 'sessions',
     '/dashboard': 'dashboard',
@@ -76,8 +75,9 @@ function locationToTab(pathname: string): DashboardTab {
 
 function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/notes' || pathname.startsWith('/notes/')) return pathname;
-  if (pathname === '/') return '/';
+  if (pathname === '/') return '/chat';
   if (pathname === '/chat') return '/chat';
+  if (pathname === '/workspace') return '/workspace';
   if (pathname === '/focus') return '/chat';
   if (pathname === '/chat-workspace') return '/chat';
   if (pathname === '/permissions') return '/system';
@@ -85,21 +85,8 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/dashboard') return '/tasks';
   if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/chat', '/tasks', '/daily', '/notes', '/knowledge', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/chat', '/workspace', '/tasks', '/daily', '/notes', '/knowledge', '/usage', '/im', '/agents', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
-}
-
-function readLastDashboardPath(): string | null {
-  try {
-    const stored = localStorage.getItem(LAST_DASHBOARD_PATH_KEY);
-    return stored ? normalizeDashboardPath(stored) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLastDashboardPath(pathname: string) {
-  try { localStorage.setItem(LAST_DASHBOARD_PATH_KEY, pathname); } catch {}
 }
 
 function PageWrapper({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -280,17 +267,17 @@ export function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const tab = locationToTab(location.pathname);
-  const sessionShellActive = normalizeDashboardPath(location.pathname) !== null;
+  const normalizedDashboardPath = normalizeDashboardPath(location.pathname);
+  const sessionShellActive = normalizedDashboardPath !== null;
   const sessionWorkspaceMode = tab === 'dashboard'
     ? 'dashboard'
-    : location.pathname === '/chat'
+    : tab === 'sessions' && normalizedDashboardPath !== '/workspace'
       ? 'chat-workspace'
       : tab === 'sessions'
       ? 'workspace'
       : 'settings';
   const workspaceImmersive = sessionShellActive;
   const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
-  const initialPathRestoreCheckedRef = useRef(false);
   const [browserSnapshot, setBrowserSnapshot] = useState<BrowserPanelSnapshot | null>(null);
   const [browserUrlDraft, setBrowserUrlDraft] = useState('');
   const [browserTypeDraft, setBrowserTypeDraft] = useState('');
@@ -363,7 +350,10 @@ export function App() {
   }, [sessionShellActive]);
 
   useEffect(() => {
-    const navState = location.state as { forceWorkspace?: boolean } | null;
+    if (location.pathname === '/') {
+      navigate('/chat', { replace: true, state: location.state });
+      return;
+    }
     if (location.pathname === '/focus' || location.pathname === '/chat-workspace') {
       navigate('/chat', { replace: true, state: location.state });
       return;
@@ -372,27 +362,6 @@ export function App() {
       navigate('/tasks', { replace: true });
       return;
     }
-    const normalized = normalizeDashboardPath(location.pathname);
-    if (!normalized) return;
-    if (normalized === '/') {
-      if (navState?.forceWorkspace) {
-        initialPathRestoreCheckedRef.current = true;
-        writeLastDashboardPath('/');
-        return;
-      }
-      if (!initialPathRestoreCheckedRef.current) {
-        initialPathRestoreCheckedRef.current = true;
-        const lastPath = readLastDashboardPath();
-        if (lastPath && lastPath !== '/') {
-          navigate(lastPath, { replace: true });
-          return;
-        }
-      }
-      writeLastDashboardPath('/');
-      return;
-    }
-    initialPathRestoreCheckedRef.current = true;
-    writeLastDashboardPath(normalized);
   }, [location.pathname, location.state, navigate]);
 
   // Restart: phase-based overlay

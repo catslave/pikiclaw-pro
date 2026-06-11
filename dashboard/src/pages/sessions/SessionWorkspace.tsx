@@ -1459,7 +1459,6 @@ type StripBadgeVariant = 'ok' | 'warn' | 'err' | 'muted' | 'accent';
 type SessionWorkspaceMode = 'workspace' | 'chat-workspace' | 'dashboard' | 'settings';
 
 type OpenAgentTestChatState = {
-  forceWorkspace?: boolean;
   newSessionAgent?: string;
   newSessionPrompt?: string;
   newSessionAutoSend?: boolean;
@@ -2608,13 +2607,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const activeTaskFocusSessionRef = useRef<{ taskId: string; focusSessionId: string } | null>(null);
 
   useEffect(() => {
-    const navState = location.state as { forceWorkspace?: boolean } | null;
-    if (mode === 'workspace' && navState?.forceWorkspace) {
-      setWorkspaceSidebarCollapsed(false);
-    }
-  }, [location.state, mode, setWorkspaceSidebarCollapsed]);
-
-  useEffect(() => {
     if (!taskFocusId) return;
     setFocusedSlotIndex(null);
     setSideChatPanelOpenByParent({});
@@ -2762,7 +2754,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setNewSessionInitialAutoSend(navState?.newSessionAutoSend === true);
     setShowNewSession(workdir);
     setActiveSlotIndex(openSessionsRef.current.length);
-    navigate(location.pathname || '/', { replace: true, state: { forceWorkspace: true } });
+    navigate(location.pathname || '/chat', { replace: true, state: null });
   }, [active, location.pathname, location.state, navigate, runtimeWorkdir, setActiveSlotIndex, setShowNewSession, workspaces]);
 
   // Re-fetch workspace list + sessions when the active workdir changes (e.g. user switches directory)
@@ -5387,7 +5379,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const revealWorkspaceSidebar = useCallback(() => {
     setWorkspaceSidebarCollapsed(false);
-    navigate('/', { state: { forceWorkspace: true } });
+    navigate('/workspace');
   }, [navigate, setWorkspaceSidebarCollapsed]);
 
   const workspaceSidebarToggleAction = active && mode === 'workspace' && workspaceSidebarCollapsed && workspaceSidebarToggleHost
