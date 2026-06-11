@@ -1,4 +1,4 @@
-export type DashboardTab = 'im' | 'agents' | 'assistants' | 'extensions' | 'sessions' | 'dashboard' | 'notes' | 'knowledge' | 'usage' | 'system';
+export type DashboardTab = 'im' | 'agents' | 'assistants' | 'workflows' | 'team' | 'extensions' | 'sessions' | 'dashboard' | 'notes' | 'knowledge' | 'usage' | 'system';
 
 const DASHBOARD_TAB_ITEMS: ReadonlyArray<{
   key: DashboardTab;
@@ -9,10 +9,12 @@ const DASHBOARD_TAB_ITEMS: ReadonlyArray<{
   { key: 'dashboard', labelKey: 'tab.dashboard', descriptionKey: 'tabDesc.dashboard' },
   { key: 'notes', labelKey: 'tab.notes', descriptionKey: 'tabDesc.notes' },
   { key: 'knowledge', labelKey: 'tab.knowledge', descriptionKey: 'tabDesc.knowledge' },
+  { key: 'workflows', labelKey: 'tab.workflows', descriptionKey: 'tabDesc.workflows' },
   { key: 'usage', labelKey: 'tab.usage', descriptionKey: 'tabDesc.usage' },
   { key: 'im', labelKey: 'tab.im', descriptionKey: 'tabDesc.im' },
   { key: 'agents', labelKey: 'tab.agent', descriptionKey: 'tabDesc.agent' },
   { key: 'assistants', labelKey: 'tab.assistants', descriptionKey: 'tabDesc.assistants' },
+  { key: 'team', labelKey: 'tab.team', descriptionKey: 'tabDesc.team' },
   { key: 'extensions', labelKey: 'tab.extensions', descriptionKey: 'tabDesc.extensions' },
   { key: 'system', labelKey: 'tab.system', descriptionKey: 'tabDesc.system' },
 ];

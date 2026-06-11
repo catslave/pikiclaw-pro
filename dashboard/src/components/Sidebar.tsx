@@ -12,6 +12,7 @@ const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
 const IconRestart = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>;
 const IconAgents = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.8-3 2.8-4.5 5.5-4.5s4.7 1.5 5.5 4.5" /><circle cx="17" cy="10" r="2.3" /><path d="M14.8 15.2c2.9.2 4.8 1.4 5.7 3.8" /></svg>;
 const IconAssistant = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2" /><path d="M5.8 20c.9-3.6 3-5.4 6.2-5.4s5.3 1.8 6.2 5.4" /><path d="M19 4v3" /><path d="M20.5 5.5h-3" /></svg>;
+const IconTeam = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="8" cy="8.5" r="3" /><path d="M2.8 20c.7-3.2 2.5-4.8 5.2-4.8s4.5 1.6 5.2 4.8" /><circle cx="17" cy="7.5" r="2.4" /><path d="M13.8 13.8c3.2.2 5.3 1.7 6.4 4.4" /></svg>;
 const IconIM = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 4v-4A2.5 2.5 0 0 1 4 12.5z" /><path d="M8 8h8" /><path d="M8 11.5h5" /></svg>;
 const IconExtensions = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 3h6v4h2.5a2.5 2.5 0 0 1 0 5H15v3h3.5a2.5 2.5 0 0 1 0 5H9v-5H5.5a2.5 2.5 0 0 1 0-5H9V7H6.5a2.5 2.5 0 0 1 0-5H9z" /></svg>;
 const IconSystem = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z" /></svg>;
@@ -19,6 +20,7 @@ const IconTasks = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" st
 const IconDaily = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M8 2v4" /><path d="M16 2v4" /><path d="M3 10h18" /><path d="m9 15 2 2 4-4" /></svg>;
 const IconNotes = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M14 3v4h4" /><path d="M9 12h6" /><path d="M9 16h4" /></svg>;
 const IconKnowledge = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H10l2 2h5.5A2.5 2.5 0 0 1 20 7.5v10A2.5 2.5 0 0 1 17.5 20h-11A2.5 2.5 0 0 1 4 17.5z" /><path d="M8 10h8" /><path d="M8 14h5" /><path d="M12 5v15" /></svg>;
+const IconWorkflow = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="M8.4 7.2 10.7 15" /><path d="M15.6 7.2 13.3 15" /><path d="M8.6 6h6.8" /></svg>;
 const IconChatWorkspace = <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="11" height="8" rx="2" /><path d="M7 16h10a3 3 0 0 0 3-3V9" /><path d="M8 8h1.5" /><path d="M16 16l3 3v-3" /></svg>;
 
 function PikiclawLogo() {
@@ -66,11 +68,13 @@ const TAB_ROUTES: Record<string, string> = {
   dashboard: '/tasks',
   daily: '/daily',
   notes: '/notes',
-  knowledge: '/knowledge',
+  knowledge: '/memory',
+  workflows: '/workflows',
   usage: '/usage',
   im: '/im',
   agents: '/agents',
   assistants: '/assistants',
+  team: '/team',
   extensions: '/extensions',
   system: '/system',
 };
@@ -102,11 +106,13 @@ export function Sidebar({
     { key: 'daily', to: TAB_ROUTES.daily, label: t('nav.daily'), state: undefined },
     { key: 'notes', to: TAB_ROUTES.notes, label: t('nav.notes'), state: undefined },
     { key: 'knowledge', to: TAB_ROUTES.knowledge, label: t('nav.knowledge'), state: undefined },
+    { key: 'workflows', to: TAB_ROUTES.workflows, label: t('nav.workflows'), state: undefined },
   ], [t]);
   const configNavItems = useMemo(() => [
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), state: undefined },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), state: undefined },
     { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), state: undefined },
+    { key: 'team', to: TAB_ROUTES.team, label: t('nav.team'), state: undefined },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), state: undefined },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), state: undefined },
   ], [t]);
@@ -114,6 +120,7 @@ export function Sidebar({
     { key: 'im', to: TAB_ROUTES.im, label: t('tab.im'), icon: IconIM },
     { key: 'agents', to: TAB_ROUTES.agents, label: t('nav.agent'), icon: IconAgents },
     { key: 'assistants', to: TAB_ROUTES.assistants, label: t('nav.assistants'), icon: IconAssistant },
+    { key: 'team', to: TAB_ROUTES.team, label: t('nav.team'), icon: IconTeam },
     { key: 'extensions', to: TAB_ROUTES.extensions, label: t('nav.extensions'), icon: IconExtensions },
     { key: 'system', to: TAB_ROUTES.system, label: t('nav.system'), icon: IconSystem },
   ], [t]);
@@ -199,7 +206,7 @@ export function Sidebar({
             <MenuTooltip label={t('nav.notes')} />
           </NavLink>
           <NavLink
-            to="/knowledge"
+            to="/memory"
             title={t('nav.knowledge')}
             aria-label={t('nav.knowledge')}
             className={({ isActive }) => cn(
@@ -209,6 +216,18 @@ export function Sidebar({
           >
             {IconKnowledge}
             <MenuTooltip label={t('nav.knowledge')} />
+          </NavLink>
+          <NavLink
+            to="/workflows"
+            title={t('nav.workflows')}
+            aria-label={t('nav.workflows')}
+            className={({ isActive }) => cn(
+              'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+            )}
+          >
+            {IconWorkflow}
+            <MenuTooltip label={t('nav.workflows')} />
           </NavLink>
           <div className="mt-3 h-px w-6 bg-edge/70" />
           <nav className="mt-3 flex shrink-0 flex-col items-center gap-1" aria-label="Settings navigation">

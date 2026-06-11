@@ -17,6 +17,8 @@ const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/Usage
 const TasksTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).TasksTab }));
 const NotesTab = lazy(async () => ({ default: (await import('./pages/notes')).NotesWorkspace }));
 const KnowledgeTab = lazy(async () => ({ default: (await import('./pages/knowledge/KnowledgeTab')).KnowledgeTab }));
+const WorkflowsTab = lazy(async () => ({ default: (await import('./pages/workflows/WorkflowsTab')).WorkflowsTab }));
+const TeamTab = lazy(async () => ({ default: (await import('./pages/team/TeamTab')).TeamTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
@@ -61,12 +63,15 @@ function locationToTab(pathname: string): DashboardTab {
     '/daily': 'dashboard',
     '/notes': 'notes',
     '/knowledge': 'knowledge',
+    '/memory': 'knowledge',
+    '/workflows': 'workflows',
     '/jira': 'dashboard',
     '/usage': 'usage',
     '/archive': 'system',
     '/im': 'im',
     '/agents': 'agents',
     '/assistants': 'assistants',
+    '/team': 'team',
     '/extensions': 'extensions',
     '/skills': 'extensions',
     '/permissions': 'system',
@@ -87,7 +92,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/dashboard') return '/tasks';
   if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/chat', '/workspace', '/tasks', '/daily', '/notes', '/knowledge', '/usage', '/im', '/agents', '/assistants', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/chat', '/workspace', '/tasks', '/daily', '/notes', '/knowledge', '/memory', '/workflows', '/usage', '/im', '/agents', '/assistants', '/team', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -441,6 +446,16 @@ export function App() {
             <AssistantsTab />
           </PageWrapper>
         } />
+        <Route path="/team" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <TeamTab />
+          </PageWrapper>
+        } />
+        <Route path="/workflows" element={
+          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+            <WorkflowsTab />
+          </PageWrapper>
+        } />
         <Route path="/usage" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <UsageTab />
@@ -448,7 +463,8 @@ export function App() {
         } />
         <Route path="/notes" element={<NotesTab />} />
         <Route path="/notes/:pageId" element={<NotesTab />} />
-        <Route path="/knowledge" element={<KnowledgeTab />} />
+        <Route path="/knowledge" element={<Navigate to="/memory" replace />} />
+        <Route path="/memory" element={<KnowledgeTab />} />
         <Route path="/jira" element={<Navigate to="/tasks" replace />} />
         <Route path="/dashboard" element={<Navigate to="/tasks" replace />} />
         <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />

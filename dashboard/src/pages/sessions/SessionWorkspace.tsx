@@ -28,7 +28,7 @@ import {
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
-import type { AgentAssistant, AppState, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, AppState, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
 import { FocusResumeBanner } from '../focus/components/FocusResumeBanner';
 import { InputComposer, buildReferenceContextEnvelope } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
@@ -670,13 +670,23 @@ type ChatWorkspaceAgentOption = {
   label?: string;
 };
 
+type ChatWorkspaceModelOption = {
+  agent: string;
+  model: string;
+  label: string;
+  detail?: string;
+};
+
 type ChatWorkspaceLaunchTarget =
   | { kind: 'agent'; agent: string }
-  | { kind: 'assistant'; assistantId: string };
+  | { kind: 'assistant'; assistantId: string }
+  | { kind: 'model'; agent: string; model: string };
 
 function chatWorkspaceTargetValue(target: ChatWorkspaceLaunchTarget | null): string {
   if (!target) return '';
-  return target.kind === 'assistant' ? `assistant:${target.assistantId}` : `agent:${target.agent}`;
+  if (target.kind === 'assistant') return `assistant:${target.assistantId}`;
+  if (target.kind === 'model') return `model:${target.agent}:${encodeURIComponent(target.model)}`;
+  return `agent:${target.agent}`;
 }
 
 function parseChatWorkspaceTarget(value: string): ChatWorkspaceLaunchTarget | null {
@@ -684,11 +694,57 @@ function parseChatWorkspaceTarget(value: string): ChatWorkspaceLaunchTarget | nu
     const assistantId = value.slice('assistant:'.length).trim();
     return assistantId ? { kind: 'assistant', assistantId } : null;
   }
+  if (value.startsWith('model:')) {
+    const rest = value.slice('model:'.length);
+    const splitAt = rest.indexOf(':');
+    if (splitAt <= 0) return null;
+    const agent = rest.slice(0, splitAt).trim();
+    const encodedModel = rest.slice(splitAt + 1).trim();
+    const model = encodedModel ? decodeURIComponent(encodedModel) : '';
+    return agent && model ? { kind: 'model', agent, model } : null;
+  }
   if (value.startsWith('agent:')) {
     const agent = value.slice('agent:'.length).trim();
     return agent ? { kind: 'agent', agent } : null;
   }
   return null;
+}
+
+function buildChatWorkspaceModelOptions(agents: AgentRuntimeStatus[] | undefined, defaultAgent: string): ChatWorkspaceModelOption[] {
+  const out: ChatWorkspaceModelOption[] = [];
+  const seen = new Set<string>();
+  for (const item of agents || []) {
+    const agent = String(item.agent || '').trim();
+    if (!agent || agent === 'openclaw' || item.installed === false) continue;
+    const agentLabel = item.label || getAgentMeta(agent).shortLabel;
+    const models = (item.byokModels?.length ? item.byokModels : item.models) || [];
+    const selectedModel = item.selectedModel || item.nativeSelectedModel || '';
+    const allModels = [...models];
+    if (selectedModel && !allModels.some(model => model.id === selectedModel)) {
+      allModels.unshift({ id: selectedModel, alias: null });
+    }
+    for (const model of allModels) {
+      const id = String(model.id || '').trim();
+      if (!id) continue;
+      const key = `${agent}:${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        agent,
+        model: id,
+        label: model.alias || shortenModel(id),
+        detail: item.byokProviderName ? `${agentLabel} · ${item.byokProviderName}` : agentLabel,
+      });
+    }
+  }
+  if (defaultAgent) {
+    out.sort((a, b) => {
+      if (a.agent === defaultAgent && b.agent !== defaultAgent) return -1;
+      if (a.agent !== defaultAgent && b.agent === defaultAgent) return 1;
+      return a.label.localeCompare(b.label);
+    });
+  }
+  return out.slice(0, 80);
 }
 
 function ChatWorkspaceWorkingItemCard({
@@ -774,6 +830,7 @@ function ChatWorkspaceLauncher({
   defaultWorkdir,
   agent,
   agentOptions,
+  modelOptions,
   assistants,
   onSubmit,
   onError,
@@ -783,6 +840,7 @@ function ChatWorkspaceLauncher({
   defaultWorkdir: string;
   agent: string;
   agentOptions: ChatWorkspaceAgentOption[];
+  modelOptions: ChatWorkspaceModelOption[];
   assistants: AgentAssistant[];
   onSubmit: (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => Promise<void>;
   onError: (message: string) => void;
@@ -818,12 +876,21 @@ function ChatWorkspaceLauncher({
   const targetValues = useMemo(() => new Set([
     ...launchAgentOptions.map(item => `agent:${item.agent}`),
     ...launchAssistants.map(item => `assistant:${item.id}`),
-  ]), [launchAgentOptions, launchAssistants]);
+    ...modelOptions.map(item => `model:${item.agent}:${encodeURIComponent(item.model)}`),
+  ]), [launchAgentOptions, launchAssistants, modelOptions]);
 
   useEffect(() => {
-    const fallback = agent ? `agent:${agent}` : launchAgentOptions[0] ? `agent:${launchAgentOptions[0].agent}` : launchAssistants[0] ? `assistant:${launchAssistants[0].id}` : '';
+    const fallback = agent
+      ? `agent:${agent}`
+      : launchAgentOptions[0]
+        ? `agent:${launchAgentOptions[0].agent}`
+        : launchAssistants[0]
+          ? `assistant:${launchAssistants[0].id}`
+          : modelOptions[0]
+            ? `model:${modelOptions[0].agent}:${encodeURIComponent(modelOptions[0].model)}`
+            : '';
     setSelectedTargetValue(prev => (prev && targetValues.has(prev) ? prev : fallback));
-  }, [agent, launchAgentOptions, launchAssistants, targetValues]);
+  }, [agent, launchAgentOptions, launchAssistants, modelOptions, targetValues]);
 
   const workspaceChoices = useMemo(() => {
     const byPath = new Map<string, WorkspaceEntry>();
@@ -915,8 +982,13 @@ function ChatWorkspaceLauncher({
   const selectedAssistant = selectedTarget?.kind === 'assistant'
     ? launchAssistants.find(item => item.id === selectedTarget.assistantId) || null
     : null;
+  const selectedModel = selectedTarget?.kind === 'model'
+    ? modelOptions.find(item => item.agent === selectedTarget.agent && item.model === selectedTarget.model) || null
+    : null;
   const selectedAgent = selectedTarget?.kind === 'agent' ? selectedTarget.agent : '';
-  const selectedTargetLabel = selectedAssistant?.name || (selectedAgent ? getAgentMeta(selectedAgent).shortLabel : t('chatWorkspace.noAgent'));
+  const selectedTargetLabel = selectedAssistant?.name
+    || (selectedModel ? `${selectedModel.label} · ${selectedModel.detail || getAgentMeta(selectedModel.agent).shortLabel}` : '')
+    || (selectedAgent ? getAgentMeta(selectedAgent).shortLabel : t('chatWorkspace.noAgent'));
   const canSend = !!input.trim() && !!selectedWorkspace && !!selectedTarget && !sending && !workspaceMenuOpen;
 
   return (
@@ -950,6 +1022,15 @@ function ChatWorkspaceLauncher({
                 {launchAssistants.map(item => (
                   <option key={`assistant:${item.id}`} value={`assistant:${item.id}`}>
                     {item.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {modelOptions.length > 0 && (
+              <optgroup label={t('chatWorkspace.targetModel')}>
+                {modelOptions.map(item => (
+                  <option key={`model:${item.agent}:${item.model}`} value={`model:${item.agent}:${encodeURIComponent(item.model)}`}>
+                    {item.label} · {item.detail || getAgentMeta(item.agent).shortLabel}
                   </option>
                 ))}
               </optgroup>
@@ -6369,6 +6450,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     return list;
   }, [agentStatus?.agents, chatWorkspaceDefaultAgent]);
 
+  const chatWorkspaceModelOptions = useMemo(
+    () => buildChatWorkspaceModelOptions(agentStatus?.agents, chatWorkspaceDefaultAgent),
+    [agentStatus?.agents, chatWorkspaceDefaultAgent],
+  );
+
   const handleChatWorkspaceLaunch = useCallback(async (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => {
     const createdAt = new Date().toISOString();
     const workspace = workspaces.find(ws => ws.path === workdir) || null;
@@ -6398,6 +6484,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const agent = target.agent || chatWorkspaceDefaultAgent;
     if (!agent) throw new Error(t('chatWorkspace.noAgent'));
     const res = await api.sendSessionMessage(workdir, agent, '', promptWithContext, {
+      model: target.kind === 'model' ? target.model : undefined,
       displayPrompt: promptWithContext !== prompt ? prompt : undefined,
     });
     if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
@@ -6911,6 +6998,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               defaultWorkdir={chatWorkspaceNewSessionWorkdir}
               agent={chatWorkspaceDefaultAgent}
               agentOptions={chatWorkspaceAgentOptions}
+              modelOptions={chatWorkspaceModelOptions}
               assistants={chatAssistants}
               onSubmit={handleChatWorkspaceLaunch}
               onError={(message) => toastSession(message, false)}
