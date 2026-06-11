@@ -855,6 +855,7 @@ function ChatWorkspaceLauncher({
   onOpenAssistants,
   onOpenMemory,
   onOpenTeam,
+  onOpenWorkflows,
   t,
 }: {
   workspaces: WorkspaceEntry[];
@@ -870,6 +871,7 @@ function ChatWorkspaceLauncher({
   onOpenAssistants: () => void;
   onOpenMemory: () => void;
   onOpenTeam: () => void;
+  onOpenWorkflows: () => void;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(defaultWorkdir);
@@ -1030,7 +1032,7 @@ function ChatWorkspaceLauncher({
       <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
         <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{t('chatWorkspace.launcherTitle')}</span>
         <span className="shrink-0 rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
           <Button
             variant="ghost"
             size="sm"
@@ -1038,6 +1040,22 @@ function ChatWorkspaceLauncher({
             className="h-7 shrink-0 px-2 text-[11px]"
           >
             {t('chatWorkspace.memory')}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onOpenAssistants}
+            className="h-7 shrink-0 px-2 text-[11px]"
+          >
+            {t('chatWorkspace.assistant')}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onOpenWorkflows}
+            className="h-7 shrink-0 px-2 text-[11px]"
+          >
+            {t('chatWorkspace.workflow')}
           </Button>
           <Button
             variant="ghost"
@@ -7435,6 +7453,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onOpenAssistants={() => setAssistantLibraryOpen(true)}
               onOpenMemory={() => setMemoryLibraryOpen(true)}
               onOpenTeam={() => setTeamLibraryOpen(true)}
+              onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
               t={t}
             />
             <ChatWorkspaceSchedulesStrip
