@@ -36,6 +36,7 @@ import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 import { ProAssistantsSection, ProAutomationSection } from '../agents/ProAgentWorkflowSection';
 import { TeamTab } from '../team/TeamTab';
+import { KnowledgeTab } from '../knowledge/KnowledgeTab';
 import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
 import type { SessionPanelChange, SessionPanelScrollRequest } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
@@ -852,6 +853,7 @@ function ChatWorkspaceLauncher({
   onProjectContext,
   onKnowledge,
   onOpenAssistants,
+  onOpenMemory,
   onOpenTeam,
   t,
 }: {
@@ -866,6 +868,7 @@ function ChatWorkspaceLauncher({
   onProjectContext: (workspace: WorkspaceEntry) => void;
   onKnowledge: (workdir: string) => void;
   onOpenAssistants: () => void;
+  onOpenMemory: () => void;
   onOpenTeam: () => void;
   t: (key: string) => string;
 }) {
@@ -1024,19 +1027,29 @@ function ChatWorkspaceLauncher({
 
   return (
     <section className="relative shrink-0 rounded-xl border border-edge/65 bg-panel/76 p-3 shadow-sm backdrop-blur-md">
-      <div className="mb-2 flex min-w-0 items-center gap-2">
+      <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
         <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{t('chatWorkspace.launcherTitle')}</span>
         <span className="shrink-0 rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onOpenTeam}
-          className="ml-auto h-7 shrink-0 px-2 text-[11px]"
-        >
-          {t('chatWorkspace.team')}
-        </Button>
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onOpenMemory}
+            className="h-7 shrink-0 px-2 text-[11px]"
+          >
+            {t('chatWorkspace.memory')}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onOpenTeam}
+            className="h-7 shrink-0 px-2 text-[11px]"
+          >
+            {t('chatWorkspace.team')}
+          </Button>
+        </div>
         <label
-          className="flex min-w-[108px] max-w-[240px] flex-1 items-center gap-1.5 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5"
+          className="flex min-w-[132px] max-w-[240px] flex-1 items-center gap-1.5 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5 sm:flex-none"
           title={selectedTargetLabel}
         >
           <span className="shrink-0 uppercase tracking-[0.08em]">{t('chatWorkspace.target')}</span>
@@ -3060,6 +3073,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatWorkspaceAutomationRunningId, setChatWorkspaceAutomationRunningId] = useState<string | null>(null);
   const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
   const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
+  const [memoryLibraryOpen, setMemoryLibraryOpen] = useState(false);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
@@ -7405,6 +7419,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onProjectContext={openProjectContextModal}
               onKnowledge={openWorkspaceKnowledgeModal}
               onOpenAssistants={() => setAssistantLibraryOpen(true)}
+              onOpenMemory={() => setMemoryLibraryOpen(true)}
               onOpenTeam={() => setTeamLibraryOpen(true)}
               t={t}
             />
@@ -9685,6 +9700,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         />
         <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
           <TeamTab />
+        </div>
+      </Modal>
+
+      {/* Chat memory library modal */}
+      <Modal
+        open={memoryLibraryOpen}
+        onClose={() => setMemoryLibraryOpen(false)}
+        wide
+        panelClassName="max-w-[1120px]"
+      >
+        <ModalHeader
+          title={t('chatWorkspace.memoryLibraryTitle')}
+          description={t('chatWorkspace.memoryLibraryDescription')}
+          onClose={() => setMemoryLibraryOpen(false)}
+        />
+        <div className="h-[min(68vh,720px)] min-h-[420px] overflow-hidden rounded-lg border border-edge/55 bg-panel/35">
+          <KnowledgeTab embedded />
         </div>
       </Modal>
 

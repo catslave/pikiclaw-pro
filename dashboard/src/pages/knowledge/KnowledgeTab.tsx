@@ -139,13 +139,16 @@ function KnowledgeTreeRow({
   );
 }
 
-export function KnowledgeTab() {
+export function KnowledgeTab({ embedded = false }: { embedded?: boolean } = {}) {
   const locale = useStore(s => s.locale);
   const toast = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
   const location = useLocation();
   const navigate = useNavigate();
-  const selectedIdFromUrl = useMemo(() => new URLSearchParams(location.search).get('node'), [location.search]);
+  const selectedIdFromUrl = useMemo(
+    () => embedded ? null : new URLSearchParams(location.search).get('node'),
+    [embedded, location.search],
+  );
   const [tree, setTree] = useState<KnowledgeTreeNode[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromUrl);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -162,7 +165,7 @@ export function KnowledgeTab() {
       setExpanded(new Set((result.tree || []).map(node => node.id)));
       const nextSelected = findNode(result.tree || [], selectedIdFromUrl)?.id || allNodes[0]?.id || null;
       setSelectedId(nextSelected);
-      if (nextSelected && nextSelected !== selectedIdFromUrl) {
+      if (!embedded && nextSelected && nextSelected !== selectedIdFromUrl) {
         navigate(`/knowledge?node=${encodeURIComponent(nextSelected)}`, { replace: true });
       }
     } catch (error) {
@@ -170,7 +173,7 @@ export function KnowledgeTab() {
     } finally {
       setLoading(false);
     }
-  }, [navigate, selectedIdFromUrl, t, toast]);
+  }, [embedded, navigate, selectedIdFromUrl, t, toast]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -184,8 +187,9 @@ export function KnowledgeTab() {
 
   const selectNode = useCallback((id: string) => {
     setSelectedId(id);
+    if (embedded) return;
     navigate(`/knowledge?node=${encodeURIComponent(id)}`);
-  }, [navigate]);
+  }, [embedded, navigate]);
 
   const toggleNode = useCallback((id: string) => {
     setExpanded(prev => {
