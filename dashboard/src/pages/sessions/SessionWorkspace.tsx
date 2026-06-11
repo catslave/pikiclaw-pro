@@ -28,7 +28,7 @@ import {
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
-import type { AppState, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
+import type { AgentAssistant, AppState, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
 import { FocusResumeBanner } from '../focus/components/FocusResumeBanner';
 import { InputComposer, buildReferenceContextEnvelope } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
@@ -665,6 +665,32 @@ function chatWorkspaceProgressClass(session: SessionInfo, live: LiveSessionState
   return chatWorkspaceStateClass(session);
 }
 
+type ChatWorkspaceAgentOption = {
+  agent: string;
+  label?: string;
+};
+
+type ChatWorkspaceLaunchTarget =
+  | { kind: 'agent'; agent: string }
+  | { kind: 'assistant'; assistantId: string };
+
+function chatWorkspaceTargetValue(target: ChatWorkspaceLaunchTarget | null): string {
+  if (!target) return '';
+  return target.kind === 'assistant' ? `assistant:${target.assistantId}` : `agent:${target.agent}`;
+}
+
+function parseChatWorkspaceTarget(value: string): ChatWorkspaceLaunchTarget | null {
+  if (value.startsWith('assistant:')) {
+    const assistantId = value.slice('assistant:'.length).trim();
+    return assistantId ? { kind: 'assistant', assistantId } : null;
+  }
+  if (value.startsWith('agent:')) {
+    const agent = value.slice('agent:'.length).trim();
+    return agent ? { kind: 'agent', agent } : null;
+  }
+  return null;
+}
+
 function ChatWorkspaceWorkingItemCard({
   item,
   active,
@@ -747,6 +773,8 @@ function ChatWorkspaceLauncher({
   workspaces,
   defaultWorkdir,
   agent,
+  agentOptions,
+  assistants,
   onSubmit,
   onError,
   t,
@@ -754,15 +782,48 @@ function ChatWorkspaceLauncher({
   workspaces: WorkspaceEntry[];
   defaultWorkdir: string;
   agent: string;
-  onSubmit: (workdir: string, prompt: string) => Promise<void>;
+  agentOptions: ChatWorkspaceAgentOption[];
+  assistants: AgentAssistant[];
+  onSubmit: (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => Promise<void>;
   onError: (message: string) => void;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(defaultWorkdir);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [selectedTargetValue, setSelectedTargetValue] = useState(() => (agent ? `agent:${agent}` : ''));
   const [highlightedWorkspace, setHighlightedWorkspace] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const launchAgentOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const list: ChatWorkspaceAgentOption[] = [];
+    for (const item of agentOptions) {
+      const id = String(item.agent || '').trim();
+      if (!id || seen.has(id) || id === 'openclaw') continue;
+      seen.add(id);
+      list.push({ agent: id, label: item.label || getAgentMeta(id).shortLabel });
+    }
+    if (agent && !seen.has(agent) && agent !== 'openclaw') {
+      list.unshift({ agent, label: getAgentMeta(agent).shortLabel });
+    }
+    return list;
+  }, [agent, agentOptions]);
+
+  const launchAssistants = useMemo(
+    () => assistants.filter(item => item.enabled !== false && item.kind !== 'page-owner'),
+    [assistants],
+  );
+
+  const targetValues = useMemo(() => new Set([
+    ...launchAgentOptions.map(item => `agent:${item.agent}`),
+    ...launchAssistants.map(item => `assistant:${item.id}`),
+  ]), [launchAgentOptions, launchAssistants]);
+
+  useEffect(() => {
+    const fallback = agent ? `agent:${agent}` : launchAgentOptions[0] ? `agent:${launchAgentOptions[0].agent}` : launchAssistants[0] ? `assistant:${launchAssistants[0].id}` : '';
+    setSelectedTargetValue(prev => (prev && targetValues.has(prev) ? prev : fallback));
+  }, [agent, launchAgentOptions, launchAssistants, targetValues]);
 
   const workspaceChoices = useMemo(() => {
     const byPath = new Map<string, WorkspaceEntry>();
@@ -806,18 +867,19 @@ function ChatWorkspaceLauncher({
   const submit = useCallback(async () => {
     const prompt = input.trim();
     const workdir = selectedWorkspace?.path || selectedWorkdir || defaultWorkdir || '';
-    if (!prompt || !workdir || !agent || sending || workspaceMenuOpen) return;
+    const target = parseChatWorkspaceTarget(selectedTargetValue);
+    if (!prompt || !workdir || !target || sending || workspaceMenuOpen) return;
     setSending(true);
     setInput('');
     try {
-      await onSubmit(workdir, prompt);
+      await onSubmit(workdir, prompt, target);
     } catch (err: any) {
       setInput(prompt);
       onError(err?.message || t('chatWorkspace.launchFailed'));
     } finally {
       setSending(false);
     }
-  }, [agent, defaultWorkdir, input, onError, onSubmit, selectedWorkdir, selectedWorkspace?.path, sending, t, workspaceMenuOpen]);
+  }, [defaultWorkdir, input, onError, onSubmit, selectedTargetValue, selectedWorkdir, selectedWorkspace?.path, sending, t, workspaceMenuOpen]);
 
   const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (workspaceMenuOpen) {
@@ -849,15 +911,51 @@ function ChatWorkspaceLauncher({
     }
   }, [chooseWorkspace, filteredWorkspaces, highlightedWorkspace, submit, workspaceMenuOpen]);
 
-  const agentLabel = agent ? getAgentMeta(agent).shortLabel : t('chatWorkspace.noAgent');
-  const canSend = !!input.trim() && !!selectedWorkspace && !!agent && !sending && !workspaceMenuOpen;
+  const selectedTarget = parseChatWorkspaceTarget(selectedTargetValue);
+  const selectedAssistant = selectedTarget?.kind === 'assistant'
+    ? launchAssistants.find(item => item.id === selectedTarget.assistantId) || null
+    : null;
+  const selectedAgent = selectedTarget?.kind === 'agent' ? selectedTarget.agent : '';
+  const selectedTargetLabel = selectedAssistant?.name || (selectedAgent ? getAgentMeta(selectedAgent).shortLabel : t('chatWorkspace.noAgent'));
+  const canSend = !!input.trim() && !!selectedWorkspace && !!selectedTarget && !sending && !workspaceMenuOpen;
 
   return (
     <section className="relative shrink-0 rounded-xl border border-edge/65 bg-panel/76 p-3 shadow-sm backdrop-blur-md">
       <div className="mb-2 flex min-w-0 items-center gap-2">
         <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{t('chatWorkspace.launcherTitle')}</span>
         <span className="shrink-0 rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
-        <span className="ml-auto shrink-0 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5">{agentLabel}</span>
+        <label
+          className="ml-auto flex max-w-[240px] shrink-0 items-center gap-1.5 rounded-md border border-edge/55 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5"
+          title={selectedTargetLabel}
+        >
+          <span className="shrink-0 uppercase tracking-[0.08em]">{t('chatWorkspace.target')}</span>
+          <select
+            value={selectedTargetValue}
+            disabled={sending || targetValues.size === 0}
+            onChange={event => setSelectedTargetValue(event.target.value)}
+            className="min-w-0 max-w-[158px] appearance-none bg-transparent text-[10px] font-semibold text-fg-3 outline-none disabled:cursor-not-allowed"
+            aria-label={t('chatWorkspace.target')}
+          >
+            {launchAgentOptions.length > 0 && (
+              <optgroup label={t('chatWorkspace.targetAgent')}>
+                {launchAgentOptions.map(item => (
+                  <option key={`agent:${item.agent}`} value={`agent:${item.agent}`}>
+                    {item.label || getAgentMeta(item.agent).shortLabel}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {launchAssistants.length > 0 && (
+              <optgroup label={t('chatWorkspace.targetAssistant')}>
+                {launchAssistants.map(item => (
+                  <option key={`assistant:${item.id}`} value={`assistant:${item.id}`}>
+                    {item.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+        </label>
       </div>
       <div className="flex min-w-0 items-end gap-2 rounded-xl border border-control-border bg-control px-2 py-2 shadow-sm transition-colors focus-within:border-control-border-h focus-within:bg-control-h">
         {selectedWorkspace && (
@@ -2595,6 +2693,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [renamingWorkspace, setRenamingWorkspace] = useState(false);
   const [projectContextDraft, setProjectContextDraft] = useState<WorkspaceProjectContextDraft | null>(null);
   const [savingProjectContext, setSavingProjectContext] = useState(false);
+  const [chatAssistants, setChatAssistants] = useState<AgentAssistant[]>([]);
   const [search, setSearch] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [chatLayout, setChatLayoutRaw] = useState<ChatLayoutMode>(readStoredChatLayout);
@@ -2709,7 +2808,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         // refetches (StrictMode double-mount, focus refresh, etc.).
         setWorkspaces(prev => (
           prev.length === list.length
-          && prev.every((p, i) => p.path === list[i].path && p.name === list[i].name)
+          && prev.every((p, i) => (
+            p.path === list[i].path
+            && p.name === list[i].name
+            && p.order === list[i].order
+            && p.preferredAgent === list[i].preferredAgent
+            && p.rules === list[i].rules
+            && p.instructions === list[i].instructions
+            && p.memory === list[i].memory
+          ))
             ? prev
             : list
         ));
@@ -2723,6 +2830,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, []);
 
   useEffect(() => { loadWorkspaces(); }, [loadWorkspaces]);
+
+  const loadChatAssistants = useCallback(async () => {
+    try {
+      const res = await api.getProAssistants();
+      if (res.ok) setChatAssistants(res.assistants || []);
+    } catch {
+      setChatAssistants([]);
+    }
+  }, []);
+
+  useEffect(() => { void loadChatAssistants(); }, [loadChatAssistants]);
 
   /* ── Load sessions for a workspace ── */
   const loadSessionsForWorkspace = useCallback(async (
@@ -6176,14 +6294,50 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       || '';
   }, [agentStatus?.agents, agentStatus?.defaultAgent, appState?.bot?.defaultAgent, selectedSession?.agent]);
 
-  const handleChatWorkspaceLaunch = useCallback(async (workdir: string, prompt: string) => {
-    const agent = chatWorkspaceDefaultAgent;
-    if (!agent) throw new Error(t('chatWorkspace.noAgent'));
+  const chatWorkspaceAgentOptions = useMemo<ChatWorkspaceAgentOption[]>(() => {
+    const agents = agentStatus?.agents || [];
+    const seen = new Set<string>();
+    const list: ChatWorkspaceAgentOption[] = [];
+    for (const item of agents) {
+      const id = String(item.agent || '').trim();
+      if (!id || seen.has(id) || id === 'openclaw' || item.installed === false) continue;
+      seen.add(id);
+      list.push({ agent: id, label: item.label || getAgentMeta(id).shortLabel });
+    }
+    if (chatWorkspaceDefaultAgent && !seen.has(chatWorkspaceDefaultAgent) && chatWorkspaceDefaultAgent !== 'openclaw') {
+      list.unshift({ agent: chatWorkspaceDefaultAgent, label: getAgentMeta(chatWorkspaceDefaultAgent).shortLabel });
+    }
+    return list;
+  }, [agentStatus?.agents, chatWorkspaceDefaultAgent]);
+
+  const handleChatWorkspaceLaunch = useCallback(async (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => {
     const createdAt = new Date().toISOString();
     const workspace = workspaces.find(ws => ws.path === workdir) || null;
     const projectContext = buildWorkspaceProjectContext(workspace, locale);
     const referenceContext = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
     const promptWithContext = [referenceContext, prompt].filter(Boolean).join('\n\n');
+    if (target.kind === 'assistant') {
+      const assistant = chatAssistants.find(item => item.id === target.assistantId);
+      if (!assistant) throw new Error(t('chatWorkspace.launchFailed'));
+      const assistantAgent = assistant.preferredAgents?.find(item => String(item || '').trim()) || chatWorkspaceDefaultAgent || null;
+      const res = await api.runProAssistant(assistant.id, {
+        prompt: promptWithContext,
+        displayPrompt: promptWithContext !== prompt ? prompt : undefined,
+        workdir,
+        agent: assistantAgent,
+      });
+      if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
+      const parsed = res.session || (res.queued?.sessionKey ? parseSessionKeyValue(res.queued.sessionKey) : null);
+      if (!parsed) throw new Error(t('chatWorkspace.launchFailed'));
+      handleNewSessionCreated({
+        agent: parsed.agent,
+        sessionId: parsed.sessionId,
+        workdir: 'workdir' in parsed && parsed.workdir ? parsed.workdir : workdir,
+      }, prompt, undefined, createdAt);
+      return;
+    }
+    const agent = target.agent || chatWorkspaceDefaultAgent;
+    if (!agent) throw new Error(t('chatWorkspace.noAgent'));
     const res = await api.sendSessionMessage(workdir, agent, '', promptWithContext, {
       displayPrompt: promptWithContext !== prompt ? prompt : undefined,
     });
@@ -6191,7 +6345,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const nextSession = parseSessionKeyValue(res.sessionKey);
     if (!nextSession) throw new Error(t('chatWorkspace.launchFailed'));
     handleNewSessionCreated({ ...nextSession, workdir }, prompt, undefined, createdAt);
-  }, [chatWorkspaceDefaultAgent, handleNewSessionCreated, locale, t, workspaces]);
+  }, [chatAssistants, chatWorkspaceDefaultAgent, handleNewSessionCreated, locale, t, workspaces]);
 
   const chatWorkspaceFocusSlot = selectedSession;
   const chatWorkspaceFocusInfo = chatWorkspaceFocusSlot ? resolveSlotInfo(chatWorkspaceFocusSlot) : null;
@@ -6697,6 +6851,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               workspaces={workspaces}
               defaultWorkdir={chatWorkspaceNewSessionWorkdir}
               agent={chatWorkspaceDefaultAgent}
+              agentOptions={chatWorkspaceAgentOptions}
+              assistants={chatAssistants}
               onSubmit={handleChatWorkspaceLaunch}
               onError={(message) => toastSession(message, false)}
               t={t}

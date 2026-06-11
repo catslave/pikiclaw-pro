@@ -1036,7 +1036,7 @@ export const api = {
     ),
   runProAssistant: (
     assistantId: string,
-    body: { prompt: string; workdir?: string; agent?: string | null },
+    body: { prompt: string; displayPrompt?: string | null; workdir?: string; agent?: string | null },
     opts?: ApiRequestOptions,
   ) =>
     post<{

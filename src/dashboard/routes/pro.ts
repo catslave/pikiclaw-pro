@@ -1121,6 +1121,7 @@ app.post('/api/pro/assistants/:assistantId/run', async (c) => {
     const body = await c.req.json();
     const userPrompt = readString(body?.prompt);
     if (!userPrompt) return c.json({ ok: false, error: 'prompt is required' }, 400);
+    const displayPrompt = readString(body?.displayPrompt) || userPrompt;
 
     const config = loadUserConfig();
     const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
@@ -1130,7 +1131,7 @@ app.post('/api/pro/assistants/:assistantId/run', async (c) => {
       agent,
       sessionId: '',
       prompt: buildQuickAssistantPrompt(userPrompt, assistant),
-      displayPrompt: userPrompt,
+      displayPrompt,
       attachments: [],
       origin: {
         channel: 'dashboard',
