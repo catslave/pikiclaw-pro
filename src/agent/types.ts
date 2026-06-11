@@ -451,6 +451,13 @@ export interface SessionOrigin {
   updatedAt: string;
 }
 
+export interface SessionProjectContextRef {
+  source: string;
+  hash: string;
+  appliedAt: string;
+  title?: string | null;
+}
+
 export interface ManagedSessionRecord {
   sessionId: string;
   agent: Agent;
@@ -495,6 +502,7 @@ export interface ManagedSessionRecord {
   sideChatOf: SessionSideChatParentRef | null;
   sideChats: SessionSideChatRef[];
   contextSources?: SessionContextSource[];
+  projectContext?: SessionProjectContextRef | null;
   numTurns?: number | null;
   /**
    * Set when this session was created by switching agent away from a prior session.
@@ -630,6 +638,7 @@ export interface SessionInfo {
   sideChatOf?: SessionSideChatParentRef | null;
   sideChats?: SessionSideChatRef[];
   contextSources?: SessionContextSource[];
+  projectContext?: SessionProjectContextRef | null;
   numTurns: number | null;
   handoverFrom?: HandoverRef | null;
 }

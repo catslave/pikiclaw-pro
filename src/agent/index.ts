@@ -28,6 +28,7 @@ export type {
   AgentDriverCapabilities, AgentCapabilityDescriptor, AgentCapabilityMode, AgentCapabilityAction,
   SessionLineageRef, HandoverRef,
   SessionContextSource, SessionContextSourceMode, SessionContextSessionSource, SessionContextOutputSource,
+  SessionProjectContextRef,
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
@@ -95,6 +96,7 @@ export {
 // ── Re-export: session management ───────────────────────────────────────────
 export {
   updateSessionMeta, adoptAgentSessionTitle, adoptNativeSessionTitles, promoteSessionId, recordFork, recordSideChat,
+  markSessionProjectContextApplied,
   listPikiclawSessions, findPikiclawSession, findPikiclawSessionInfo, getSessionStoredConfig,
   ensureManagedSession, findManagedThreadSession, stageSessionFiles,
   mergeManagedAndNativeSessions,

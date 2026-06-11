@@ -36,6 +36,7 @@ import type {
   SessionSideChatRef,
   SessionOrigin,
   SessionContextSource,
+  SessionProjectContextRef,
 } from './types.js';
 import {
   dedupeStrings,
@@ -352,6 +353,23 @@ function normalizeSessionOrigin(value: unknown, fallbackCreatedAt?: string | nul
   };
 }
 
+function normalizeProjectContextRef(value: unknown): SessionProjectContextRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  const source = typeof v.source === 'string' ? v.source.trim() : '';
+  const hash = typeof v.hash === 'string' ? v.hash.trim() : '';
+  const appliedAt = typeof v.appliedAt === 'string' && v.appliedAt.trim()
+    ? v.appliedAt.trim()
+    : '';
+  if (!source || !hash || !appliedAt) return null;
+  return {
+    source,
+    hash,
+    appliedAt,
+    title: typeof v.title === 'string' && v.title.trim() ? v.title.trim() : null,
+  };
+}
+
 function normalizeSideChatParentRef(value: unknown): SessionSideChatParentRef | null {
   if (!value || typeof value !== 'object') return null;
   const v = value as { agent?: unknown; sessionId?: unknown };
@@ -453,6 +471,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     sideChatOf: normalizeSideChatParentRef(raw?.sideChatOf),
     sideChats: normalizeSideChatRefs(raw?.sideChats),
     contextSources: normalizeSessionContextSources(raw?.contextSources),
+    projectContext: normalizeProjectContextRef(raw?.projectContext),
     handoverFrom: normalizeHandoverRef(raw?.handoverFrom),
   };
 }
@@ -508,6 +527,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
     contextSources: normalizeSessionContextSources(record.contextSources),
+    projectContext: normalizeProjectContextRef(record.projectContext),
     handoverFrom: record.handoverFrom ?? null,
   });
 }
@@ -676,6 +696,7 @@ export function updateSessionMeta(
       sideChatOf: null,
       sideChats: [],
       contextSources: [],
+      projectContext: null,
       handoverFrom: null,
     };
     index.sessions.unshift(record);
@@ -718,6 +739,27 @@ export function updateSessionMeta(
   }
   writeSessionIndex(resolvedWorkdir, index.sessions);
   writeSessionMeta(record);
+  return true;
+}
+
+export function markSessionProjectContextApplied(
+  workdir: string,
+  agent: Agent,
+  sessionId: string,
+  projectContext: Pick<SessionProjectContextRef, 'source' | 'hash'> & { title?: string | null; appliedAt?: string | null },
+): boolean {
+  const resolvedWorkdir = path.resolve(workdir);
+  const record = findPikiclawSession(resolvedWorkdir, agent, sessionId);
+  const source = String(projectContext.source || '').trim();
+  const hash = String(projectContext.hash || '').trim();
+  if (!record || !source || !hash) return false;
+  record.projectContext = {
+    source,
+    hash,
+    appliedAt: projectContext.appliedAt?.trim() || new Date().toISOString(),
+    title: projectContext.title?.trim() || null,
+  };
+  saveSessionRecord(resolvedWorkdir, record);
   return true;
 }
 
@@ -1079,6 +1121,7 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       migratedFrom: null, migratedTo: null, linkedSessions: [],
       sideChatOf: null, sideChats: [],
       contextSources: normalizeSessionContextSources(opts.contextSources),
+      projectContext: null,
       handoverFrom: normalizeHandoverRef(opts.handoverFrom),
     };
   }
@@ -1163,6 +1206,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     sideChatOf: record.sideChatOf ?? null,
     sideChats: record.sideChats ?? [],
     contextSources: normalizeSessionContextSources(record.contextSources),
+    projectContext: normalizeProjectContextRef(record.projectContext),
     numTurns: record.numTurns ?? null,
     handoverFrom: record.handoverFrom ?? null,
   };

@@ -510,6 +510,7 @@ export interface SessionInfo {
   sideChatOf?: SessionSideChatParentRef | null;
   sideChats?: SessionSideChatRef[];
   contextSources?: SessionContextSource[];
+  projectContext?: SessionProjectContextRef | null;
   numTurns?: number | null;
 }
 
@@ -562,6 +563,13 @@ export interface SessionContextOutputSource {
 }
 
 export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource;
+
+export interface SessionProjectContextRef {
+  source: string;
+  hash: string;
+  appliedAt: string;
+  title?: string | null;
+}
 
 export interface SessionSideChatParentRef {
   agent: Agent | string;

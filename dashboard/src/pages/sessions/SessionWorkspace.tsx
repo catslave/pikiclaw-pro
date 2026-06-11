@@ -216,7 +216,17 @@ type NewSessionReferenceContext = {
   userIntent: string;
   prompt: string;
   sources: SessionContextSource[];
+  projectContext?: { source: string; hash: string; title?: string | null } | null;
 };
+
+function stableProjectContextHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
 
 function workspaceHasProjectContext(workspace: WorkspaceEntry | null | undefined): boolean {
   return !!String(workspace?.rules || '').trim()
@@ -231,6 +241,8 @@ function buildWorkspaceProjectContext(workspace: WorkspaceEntry | null | undefin
   const instructions = String(workspace?.instructions || '').trim();
   const memory = String(workspace?.memory || '').trim();
   const summary = [rules, instructions, memory].filter(Boolean).join('\n\n');
+  const source = workspace?.path || '';
+  const hash = stableProjectContextHash([source, title, rules, instructions, memory].join('\u001f'));
   const prompt = locale.startsWith('zh')
     ? [
       '下面是当前 Project 的持久上下文。它来自 Pikiclaw Project 设置，不是用户本轮的新指令；请把它作为理解当前 repo/workspace 的背景和约束。',
@@ -259,12 +271,13 @@ function buildWorkspaceProjectContext(workspace: WorkspaceEntry | null | undefin
   return {
     title,
     kind: 'project',
-    source: workspace?.path || '',
+    source,
     sourceSession: '',
     summary,
     userIntent: '',
     prompt,
     sources: [],
+    projectContext: source ? { source, hash, title } : null,
   };
 }
 
@@ -5658,6 +5671,39 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     return hydrateSession(resolved);
   }, [hydrateSession, sessionsMap]);
 
+  const resolveProjectReferenceForSession = useCallback((slot: SessionSlot, info: SessionInfo) => {
+    const workspace = workspaces.find(ws => ws.path === slot.workdir) || null;
+    const context = buildWorkspaceProjectContext(workspace, locale);
+    const project = context?.projectContext || null;
+    if (!context || !project) return null;
+    if (info.projectContext?.source === project.source && info.projectContext.hash === project.hash) return null;
+    return {
+      prompt: context.prompt,
+      label: t('session.contextSourceProject'),
+      project,
+    };
+  }, [locale, t, workspaces]);
+
+  const markProjectContextAppliedLocal = useCallback((
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    project: { source: string; hash: string; title?: string | null },
+  ) => {
+    const applied = { ...project, appliedAt: new Date().toISOString() };
+    setSessionsMap(prev => {
+      const list = prev[workdir] || [];
+      if (!list.length) return prev;
+      let changed = false;
+      const nextList = list.map(session => {
+        if (session.agent !== agent || session.sessionId !== sessionId) return session;
+        changed = true;
+        return { ...session, projectContext: applied };
+      });
+      return changed ? { ...prev, [workdir]: nextList } : prev;
+    });
+  }, []);
+
   const resolveSideSlotInfo = useCallback((parentInfo: SessionInfo, sideSlot: SessionSlot): SessionInfo => {
     const key = sessionSlotStorageKey(sideSlot);
     const fromMap = sideChatInfoMap[key];
@@ -6542,6 +6588,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const createdAt = new Date().toISOString();
     const workspace = workspaces.find(ws => ws.path === workdir) || null;
     const projectContext = buildWorkspaceProjectContext(workspace, locale);
+    const projectContextRef = projectContext?.projectContext || null;
     const referenceContext = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
     const promptWithContext = [referenceContext, prompt].filter(Boolean).join('\n\n');
     if (target.kind === 'assistant') {
@@ -6553,6 +6600,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         displayPrompt: promptWithContext !== prompt ? prompt : undefined,
         workdir,
         agent: assistantAgent,
+        projectContext: projectContextRef,
       });
       if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
       const parsed = res.session || (res.queued?.sessionKey ? parseSessionKeyValue(res.queued.sessionKey) : null);
@@ -6569,6 +6617,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const res = await api.sendSessionMessage(workdir, agent, '', promptWithContext, {
       model: target.kind === 'model' ? target.model : undefined,
       displayPrompt: promptWithContext !== prompt ? prompt : undefined,
+      projectContext: projectContextRef,
     });
     if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
     const nextSession = parseSessionKeyValue(res.sessionKey);
@@ -7130,7 +7179,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               )}
             </section>
             <section className="min-h-0 flex-1 overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]">
-              {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (
+              {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (() => {
+                const projectReference = resolveProjectReferenceForSession(chatWorkspaceFocusSlot, chatWorkspaceFocusInfo);
+                return (
                   <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
                     <SessionPanel
                       key={chatWorkspaceFocusSlot.mountKey}
@@ -7138,6 +7189,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       workdir={chatWorkspaceFocusSlot.workdir}
                       active={active && !inboxOpen}
                       readOnly={chatWorkspaceFocusSlot.archiveOnly === true}
+                      referenceContextPrompt={projectReference?.prompt || null}
+                      referenceContextLabel={projectReference?.label || null}
+                      referenceContextProject={projectReference?.project || null}
+                      onReferenceContextClear={projectReference ? () => {
+                        markProjectContextAppliedLocal(
+                          chatWorkspaceFocusSlot.workdir,
+                          chatWorkspaceFocusSlot.agent,
+                          chatWorkspaceFocusSlot.sessionId,
+                          projectReference.project,
+                        );
+                      } : undefined}
                       onSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
                       onMultiSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
                       onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, chatWorkspaceFocusSlot.workdir, target)}
@@ -7150,7 +7212,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       onPendingPromptConsumed={!chatWorkspaceFocusSlot.archiveOnly ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
                     />
                   </Suspense>
-                ) : (
+                );
+              })() : (
                   <div className="flex h-full items-center justify-center px-8 text-center">
                     <div className="max-w-[360px]">
                       <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl border border-edge/65 bg-panel/70 text-fg-4">
@@ -7373,9 +7436,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               const isHeaderRenaming = headerRenameTarget?.workdir === slot.workdir
                 && headerRenameTarget.agent === slot.agent
                 && headerRenameTarget.sessionId === slot.sessionId;
-	              const parentSlotKey = sessionSlotStorageKey(slot);
-	              const parentReference = parentReferenceByKey[parentSlotKey] || null;
-	              const taskWorkbenchForSlot = taskWorkbench && taskWorkbench.task.stageRuns?.some(run => sessionMatchesStageRun(slot, run))
+		              const parentSlotKey = sessionSlotStorageKey(slot);
+		              const parentReference = parentReferenceByKey[parentSlotKey] || null;
+                  const projectReference = resolveProjectReferenceForSession(slot, info);
+		              const taskWorkbenchForSlot = taskWorkbench && taskWorkbench.task.stageRuns?.some(run => sessionMatchesStageRun(slot, run))
 	                ? taskWorkbench
 	                : null;
 	              const taskActiveStageRun = taskWorkbenchForSlot?.activeStageRun || null;
@@ -8058,8 +8122,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                            compact={isMultiWidget}
 	                            transcriptHeader={slotTaskBrief}
 	                            initialDraftPrompt={parentReference?.draftPrompt || null}
-	                            referenceContextPrompt={parentReference?.prompt || null}
-	                            referenceContextLabel={parentReference?.label || null}
+	                            referenceContextPrompt={parentReference?.prompt || projectReference?.prompt || null}
+	                            referenceContextLabel={parentReference?.label || projectReference?.label || null}
+                              referenceContextProject={parentReference ? null : projectReference?.project || null}
 	                            onReferenceContextClear={parentReference ? () => {
 	                              setParentReferenceByKey(prev => {
 	                                if (!prev[parentSlotKey]) return prev;
@@ -8067,6 +8132,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                                delete next[parentSlotKey];
 	                                return next;
 	                              });
+                              } : projectReference ? () => {
+                                markProjectContextAppliedLocal(slot.workdir, slot.agent, slot.sessionId, projectReference.project);
 	                            } : undefined}
 	                            onSessionChange={slot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, slotIdx)}
                             onMultiSessionChange={slot.archiveOnly ? undefined : handleMultiSessionCreated}
@@ -8389,8 +8456,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                    mountKey: item.mountKey,
 	                  }
 	                  : null;
-                const floatingInfo = floatingSlot ? resolveSlotInfo(floatingSlot) : null;
-                const floatingCelebrating = !!(floatingSlot && completionCelebrationKeys[sKey(floatingSlot.agent, floatingSlot.sessionId)]);
+	                const floatingInfo = floatingSlot ? resolveSlotInfo(floatingSlot) : null;
+                  const floatingProjectReference = floatingSlot && floatingInfo
+                    ? resolveProjectReferenceForSession(floatingSlot, floatingInfo)
+                    : null;
+	                const floatingCelebrating = !!(floatingSlot && completionCelebrationKeys[sKey(floatingSlot.agent, floatingSlot.sessionId)]);
                 const floatingTitle = floatingInfo
 	                  ? floatingInfo.title || floatingInfo.lastQuestion?.slice(0, 120) || floatingInfo.sessionId.slice(0, 12)
 	                  : t('hub.newSession');
@@ -8464,10 +8534,21 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                          <Suspense fallback={<div className="h-full" />}>
 	                            <SessionPanel
 	                              key={floatingSlot.mountKey}
-	                              session={floatingInfo}
-	                              workdir={floatingSlot.workdir}
-	                              active={active && !item.hidden && !inboxOpen}
-	                              onSessionChange={(next) => {
+		                              session={floatingInfo}
+		                              workdir={floatingSlot.workdir}
+		                              active={active && !item.hidden && !inboxOpen}
+                                  referenceContextPrompt={floatingProjectReference?.prompt || null}
+                                  referenceContextLabel={floatingProjectReference?.label || null}
+                                  referenceContextProject={floatingProjectReference?.project || null}
+                                  onReferenceContextClear={floatingProjectReference ? () => {
+                                    markProjectContextAppliedLocal(
+                                      floatingSlot.workdir,
+                                      floatingSlot.agent,
+                                      floatingSlot.sessionId,
+                                      floatingProjectReference.project,
+                                    );
+                                  } : undefined}
+		                              onSessionChange={(next) => {
 	                                mergeSessionIntoWorkspaceMap(floatingSlot.workdir, next);
 	                                setFocusFloatingSessions(prev => prev.map(current => (
 	                                  current.id === item.id
@@ -9620,6 +9701,9 @@ export function NewSessionView({
   }, [onSessionCreated]);
 
   const contextSources = useMemo(() => activeReferenceContext?.sources || [], [activeReferenceContext]);
+  const referenceContextProject = activeReferenceContext?.kind === 'project'
+    ? activeReferenceContext.projectContext || null
+    : null;
 
   const handleReferenceModeChange = useCallback((mode: SessionContextSourceMode) => {
     setActiveReferenceContext(prev => {
@@ -9653,6 +9737,7 @@ export function NewSessionView({
     handleSendStart(prompt);
     api.sendSessionMessage(selectedWorkdir, initialAgent, '', prompt, {
       contextSources,
+      projectContext: referenceContextProject,
     })
       .then(res => {
         if (!res.ok) throw new Error(res.error || 'Failed to start test chat');
@@ -9666,7 +9751,7 @@ export function NewSessionView({
         pendingRef.current = null;
         pendingCreatedAtRef.current = null;
       });
-  }, [contextSources, handleSendStart, handleSessionCreated, initialAgent, initialAutoSend, initialDraftPrompt, selectedWorkdir]);
+  }, [contextSources, handleSendStart, handleSessionCreated, initialAgent, initialAutoSend, initialDraftPrompt, referenceContextProject, selectedWorkdir]);
 
   const hasPending = !!pendingPrompt || pendingImageUrls.length > 0;
   const referenceCard = activeReferenceContext ? (
@@ -9795,6 +9880,7 @@ export function NewSessionView({
         initialDraftPrompt={initialDraftPrompt}
         referenceContextPrompt={fallbackContextPrompt}
         referenceContextLabel={activeReferenceContext?.kind === 'project' ? t('session.contextSourceProject') : null}
+        referenceContextProject={referenceContextProject}
         contextSources={contextSources}
         onStreamQueued={noop}
         onSendStart={handleSendStart}

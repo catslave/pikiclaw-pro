@@ -14,6 +14,7 @@ import {
   findPikiclawSessionInfo,
   getDriverCapabilities,
   isPendingSessionId,
+  markSessionProjectContextApplied,
   recordFork,
   recordSideChat,
   createSessionPlanView,
@@ -27,6 +28,7 @@ import {
   type HandoverRef,
   type SessionOrigin,
   type SessionContextSource,
+  type SessionProjectContextRef,
 } from '../agent/index.js';
 import { normalizeSessionContextSources } from '../agent/context-sources.js';
 import { loadUserConfig } from '../core/config/user-config.js';
@@ -176,6 +178,7 @@ export interface QueueSessionTaskRequest {
   previousSessionId?: string | null;
   origin?: Partial<SessionOrigin> | null;
   contextSources?: SessionContextSource[];
+  projectContext?: Pick<SessionProjectContextRef, 'source' | 'hash'> & { title?: string | null } | null;
 }
 
 /**
@@ -337,6 +340,14 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     if (staged.importedFiles.length) {
       attachments = staged.importedFiles.map(f => path.join(staged.workspacePath, f));
     }
+  }
+
+  if (request.projectContext?.source && request.projectContext.hash && sessionId) {
+    markSessionProjectContextApplied(request.workdir, effectiveAgent, sessionId, {
+      source: request.projectContext.source,
+      hash: request.projectContext.hash,
+      title: request.projectContext.title || null,
+    });
   }
 
   return bot.submitSessionTask({

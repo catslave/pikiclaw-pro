@@ -206,7 +206,7 @@ function PlanDecisionBar({ compact }: { compact: boolean }) {
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, initialRuntimeSelection = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, onTranscriptScroll, scrollToTurnRequest = null, initialDraftPrompt = null, suppressLiveStreamState = false, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, referenceContextProject = null, initialRuntimeSelection = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, onTranscriptScroll, scrollToTurnRequest = null, initialDraftPrompt = null, suppressLiveStreamState = false, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
@@ -217,6 +217,7 @@ export const SessionPanel = memo(function SessionPanel({
   transcriptFooter?: ReactNode;
   referenceContextPrompt?: string | null;
   referenceContextLabel?: string | null;
+  referenceContextProject?: { source: string; hash: string; title?: string | null } | null;
   initialRuntimeSelection?: { agent?: string | null; model?: string | null; effort?: string | null } | null;
   onReferenceContextClear?: () => void;
   onSessionChange?: (next: SessionPanelChange) => void;
@@ -1094,6 +1095,7 @@ export const SessionPanel = memo(function SessionPanel({
     requestStreamPolling();
     api.sendSessionMessage(workdir, session.agent || '', session.sessionId, prompt, {
       displayPrompt: prompt !== txt ? txt : undefined,
+      projectContext: referenceContextProject,
     })
       .then((res) => {
         if (!res.ok) {
@@ -1103,7 +1105,7 @@ export const SessionPanel = memo(function SessionPanel({
         if (res.taskId) handleSendTaskAssigned(res.taskId);
       })
       .catch(() => { handleSendFailed(); });
-  }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, referenceContextPrompt, requestStreamPolling, session.agent, session.sessionId, workdir]);
+  }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, referenceContextProject, referenceContextPrompt, requestStreamPolling, session.agent, session.sessionId, workdir]);
 
   const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
@@ -1884,6 +1886,7 @@ export const SessionPanel = memo(function SessionPanel({
             initialDraftPrompt={initialDraftPrompt}
             referenceContextPrompt={referenceContextPrompt}
             referenceContextLabel={referenceContextLabel}
+            referenceContextProject={referenceContextProject}
             initialRuntimeSelection={initialRuntimeSelection}
             onReferenceContextClear={onReferenceContextClear}
             onStreamQueued={requestStreamPolling}

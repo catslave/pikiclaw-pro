@@ -11,7 +11,7 @@ import {
   listAgents, listSkills,
   decodeAttachmentPathParam, resolveAllowedAttachmentPath, rewriteImageBlocksForTransport,
   readSessionPlan,
-  type Agent, type SessionInfo, type SessionMessagesResult, type RichMessage, type SessionContextSource,
+  type Agent, type SessionInfo, type SessionMessagesResult, type RichMessage, type SessionContextSource, type SessionProjectContextRef,
 } from '../../agent/index.js';
 import { normalizeSessionContextSources } from '../../agent/context-sources.js';
 import { getSessionStatusForBot } from '../../bot/session-status.js';
@@ -137,6 +137,19 @@ function parseJsonField(value: unknown): unknown {
   try { return JSON.parse(text); } catch { return null; }
 }
 
+function normalizeProjectContextField(value: unknown): (Pick<SessionProjectContextRef, 'source' | 'hash'> & { title?: string | null }) | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+  const source = readStringField(input.source);
+  const hash = readStringField(input.hash);
+  if (!source || !hash) return null;
+  return {
+    source,
+    hash,
+    title: readStringField(input.title) || null,
+  };
+}
+
 function isUploadFile(value: unknown): value is {
   name?: string;
   type?: string;
@@ -208,6 +221,7 @@ async function parseSessionSendRequest(c: any): Promise<{
   previousAgent: string;
   previousSessionId: string;
   contextSources: SessionContextSource[];
+  projectContext: (Pick<SessionProjectContextRef, 'source' | 'hash'> & { title?: string | null }) | null;
   cleanup: () => Promise<void>;
 }> {
   const contentType = String(c.req.header('content-type') || '').toLowerCase();
@@ -226,6 +240,7 @@ async function parseSessionSendRequest(c: any): Promise<{
       previousAgent: readStringField(form.get('previousAgent')),
       previousSessionId: readStringField(form.get('previousSessionId')),
       contextSources: normalizeSessionContextSources(parseJsonField(form.get('contextSources'))),
+      projectContext: normalizeProjectContextField(parseJsonField(form.get('projectContext'))),
       cleanup: uploads.cleanup,
     };
   }
@@ -243,6 +258,7 @@ async function parseSessionSendRequest(c: any): Promise<{
     previousAgent: readStringField(body?.previousAgent),
     previousSessionId: readStringField(body?.previousSessionId),
     contextSources: normalizeSessionContextSources(body?.contextSources),
+    projectContext: normalizeProjectContextField(body?.projectContext),
     cleanup: async () => {},
   };
 }
@@ -834,7 +850,7 @@ app.get('/api/session-hub/skills', (c) => {
 
 app.post('/api/session-hub/session/send', async (c) => {
   try {
-    const { workdir, agent, sessionId, prompt, displayPrompt, model, effort, attachments, previousAgent, previousSessionId, contextSources, cleanup } = await parseSessionSendRequest(c);
+    const { workdir, agent, sessionId, prompt, displayPrompt, model, effort, attachments, previousAgent, previousSessionId, contextSources, projectContext, cleanup } = await parseSessionSendRequest(c);
     const queued = await queueDashboardSessionTask({
       workdir,
       agent,
@@ -847,6 +863,7 @@ app.post('/api/session-hub/session/send', async (c) => {
       previousAgent: previousAgent || null,
       previousSessionId: previousSessionId || null,
       contextSources,
+      projectContext,
     });
     await cleanup();
     if (!queued.ok) {

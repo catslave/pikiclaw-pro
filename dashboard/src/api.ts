@@ -95,6 +95,7 @@ export interface SessionSendRequestOptions extends ApiRequestOptions {
   previousAgent?: string | null;
   previousSessionId?: string | null;
   contextSources?: SessionContextSource[];
+  projectContext?: { source: string; hash: string; title?: string | null } | null;
   displayPrompt?: string | null;
 }
 
@@ -611,6 +612,7 @@ export const api = {
       previousAgent,
       previousSessionId,
       contextSources = [],
+      projectContext = null,
       displayPrompt,
       ...opts
     } = options;
@@ -626,6 +628,7 @@ export const api = {
       ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
       ...(prevAgent && prevSessionId ? { previousAgent: prevAgent, previousSessionId: prevSessionId } : {}),
       ...(contextSources.length ? { contextSources } : {}),
+      ...(projectContext?.source && projectContext.hash ? { projectContext } : {}),
       ...(visiblePrompt ? { displayPrompt: visiblePrompt } : {}),
     };
 
@@ -650,6 +653,7 @@ export const api = {
       body.set('previousSessionId', prevSessionId);
     }
     if (contextSources.length) body.set('contextSources', JSON.stringify(contextSources));
+    if (projectContext?.source && projectContext.hash) body.set('projectContext', JSON.stringify(projectContext));
     for (const attachment of attachments) {
       body.append('attachments', attachment, attachment.name || 'image');
     }
@@ -1048,7 +1052,7 @@ export const api = {
     ),
   runProAssistant: (
     assistantId: string,
-    body: { prompt: string; displayPrompt?: string | null; workdir?: string; agent?: string | null },
+    body: { prompt: string; displayPrompt?: string | null; workdir?: string; agent?: string | null; projectContext?: { source: string; hash: string; title?: string | null } | null },
     opts?: ApiRequestOptions,
   ) =>
     post<{

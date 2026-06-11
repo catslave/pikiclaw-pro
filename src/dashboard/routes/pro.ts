@@ -145,6 +145,19 @@ function readString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function readProjectContextRef(value: unknown): { source: string; hash: string; title?: string | null } | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+  const source = readString(input.source);
+  const hash = readString(input.hash);
+  if (!source || !hash) return null;
+  return {
+    source,
+    hash,
+    title: readString(input.title) || null,
+  };
+}
+
 function firstEnvString(...names: string[]): string {
   for (const name of names) {
     const value = process.env[name]?.trim();
@@ -1122,6 +1135,7 @@ app.post('/api/pro/assistants/:assistantId/run', async (c) => {
     const userPrompt = readString(body?.prompt);
     if (!userPrompt) return c.json({ ok: false, error: 'prompt is required' }, 400);
     const displayPrompt = readString(body?.displayPrompt) || userPrompt;
+    const projectContext = readProjectContextRef(body?.projectContext);
 
     const config = loadUserConfig();
     const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
@@ -1133,6 +1147,7 @@ app.post('/api/pro/assistants/:assistantId/run', async (c) => {
       prompt: buildQuickAssistantPrompt(userPrompt, assistant),
       displayPrompt,
       attachments: [],
+      projectContext,
       origin: {
         channel: 'dashboard',
         chatId: `quick-assistant:${assistant.id}`,

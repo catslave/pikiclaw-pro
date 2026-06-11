@@ -370,7 +370,7 @@ async function waitForCrossCheckResults(
   return results.sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, initialRuntimeSelection = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onStopAll, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, compact = false, autoFocus = false, initialDraftPrompt = null, referenceContextPrompt = null, referenceContextLabel = null, referenceContextProject = null, initialRuntimeSelection = null, onReferenceContextClear, contextSources = [], onStreamQueued, onSendStart, onSendTaskAssigned, onSendFailed, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, pendingReviewComments = [], onRemovePendingReviewComment, onClearPendingReviewComments, contextMeta, onRecall, onSteer, onStopAll, onReorderQueued, onHeightChange, editDraft, editAtTurn, onEditDraftConsumed, onEditSendStart }: {
   session: SessionInfo;
   workdir: string;
   compact?: boolean;
@@ -378,6 +378,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   initialDraftPrompt?: string | null;
   referenceContextPrompt?: string | null;
   referenceContextLabel?: string | null;
+  referenceContextProject?: { source: string; hash: string; title?: string | null } | null;
   initialRuntimeSelection?: { agent?: string | null; model?: string | null; effort?: string | null } | null;
   onReferenceContextClear?: () => void;
   contextSources?: SessionContextSource[];
@@ -1015,6 +1016,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
           previousAgent: previousAgent && previousAgent !== agent ? previousAgent : null,
           previousSessionId: previousAgent && previousAgent !== agent ? previousSessionId : null,
           contextSources,
+          projectContext: referenceContextProject,
           displayPrompt: visiblePrompt,
         });
         if (!res.ok) throw new Error(res.error || `Failed to start ${agent}`);
@@ -1085,6 +1087,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       previousAgent,
       previousSessionId,
       contextSources,
+      projectContext: referenceContextProject,
       displayPrompt: prompt !== visiblePrompt ? visiblePrompt : undefined,
     })
       .then(res => {
@@ -1132,6 +1135,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     selectedModel,
     referenceContextPrompt,
     referenceContextLabel,
+    referenceContextProject,
     contextSources,
     composerMode,
     multiAgentIds,
