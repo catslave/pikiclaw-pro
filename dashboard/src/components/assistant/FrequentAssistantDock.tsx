@@ -61,7 +61,15 @@ interface QuickAssistantDetailState {
   error?: string | null;
 }
 
-type SessionSlot = { workdir: string; agent: string; sessionId: string; mountKey: string; archiveOnly?: boolean };
+type SessionSlot = {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+  mountKey: string;
+  archiveOnly?: boolean;
+  assistantId?: string;
+  assistantName?: string;
+};
 
 function L(locale: string, zh: string, en: string): string {
   return locale === 'zh-CN' ? zh : en;
@@ -129,7 +137,19 @@ function mountKey() {
 function openSessionsFromStorage(): SessionSlot[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(OPEN_SESSIONS_STORAGE_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed.filter(item => item?.workdir && item?.agent && item?.sessionId) : [];
+    return Array.isArray(parsed)
+      ? parsed
+        .filter(item => item?.workdir && item?.agent && item?.sessionId)
+        .map(item => ({
+          workdir: String(item.workdir),
+          agent: String(item.agent),
+          sessionId: String(item.sessionId),
+          mountKey: typeof item.mountKey === 'string' && item.mountKey ? item.mountKey : mountKey(),
+          archiveOnly: item.archiveOnly === true,
+          assistantId: typeof item.assistantId === 'string' && item.assistantId ? item.assistantId : undefined,
+          assistantName: typeof item.assistantName === 'string' && item.assistantName ? item.assistantName : undefined,
+        }))
+      : [];
   } catch {
     return [];
   }
@@ -458,20 +478,39 @@ export function FrequentAssistantDock({ className }: { className?: string }) {
     void api.updateSessionStatus(session.workdir, session.agent, session.sessionId, 'done').catch(() => {});
   }, []);
 
-  const openSession = useCallback((session: { workdir: string; agent: string; sessionId: string }, opts: { markRead?: boolean; runId?: string | null } = {}) => {
+  const openSession = useCallback((session: { workdir: string; agent: string; sessionId: string; assistantId?: string; assistantName?: string }, opts: { markRead?: boolean; runId?: string | null } = {}) => {
     if (!session.workdir || !session.agent || !session.sessionId) return;
     if (opts.markRead) markAssistantSessionViewed(session, opts.runId);
     const existing = openSessionsFromStorage();
     const exactIndex = existing.findIndex(slot => slot.workdir === session.workdir && slot.agent === session.agent && slot.sessionId === session.sessionId);
     const next = exactIndex >= 0
-      ? existing.map((slot, index) => index === exactIndex ? { ...slot, archiveOnly: false } : slot)
-      : [{ workdir: session.workdir, agent: session.agent, sessionId: session.sessionId, mountKey: mountKey() }, ...existing];
+      ? existing.map((slot, index) => index === exactIndex ? {
+        ...slot,
+        archiveOnly: false,
+        assistantId: session.assistantId || slot.assistantId,
+        assistantName: session.assistantName || slot.assistantName,
+      } : slot)
+      : [{
+        workdir: session.workdir,
+        agent: session.agent,
+        sessionId: session.sessionId,
+        mountKey: mountKey(),
+        assistantId: session.assistantId,
+        assistantName: session.assistantName,
+      }, ...existing];
     try {
       localStorage.setItem(OPEN_SESSIONS_STORAGE_KEY, JSON.stringify(next));
       localStorage.setItem(ACTIVE_SLOT_STORAGE_KEY, String(exactIndex >= 0 ? exactIndex : 0));
     } catch {}
     window.dispatchEvent(new CustomEvent(OPEN_SESSION_REQUEST_EVENT, {
-      detail: { workdir: session.workdir, agent: session.agent, sessionId: session.sessionId, archiveOnly: false },
+      detail: {
+        workdir: session.workdir,
+        agent: session.agent,
+        sessionId: session.sessionId,
+        archiveOnly: false,
+        assistantId: session.assistantId,
+        assistantName: session.assistantName,
+      },
     }));
     setPanelAssistantId(null);
     setPickerOpen(false);
@@ -696,6 +735,8 @@ export function FrequentAssistantDock({ className }: { className?: string }) {
     workdir: detailRun?.workdir || detailTarget.workdir,
     agent: detailRun?.agent || detailTarget.agent,
     sessionId: detailStream?.sessionId || detailRun?.sessionId || detailTarget.sessionId,
+    assistantId: detailRun?.assistantId || detailTarget.assistantId,
+    assistantName: detailRun?.assistantName || detailTarget.assistantName,
   } : null;
 	  const detailStatusMeta = useMemo(() => {
 	    if (!detailTarget) return '';
