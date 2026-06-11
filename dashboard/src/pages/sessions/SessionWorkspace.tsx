@@ -3176,6 +3176,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
   const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
   const [memoryLibraryOpen, setMemoryLibraryOpen] = useState(false);
+  const [memoryLibraryInitialNodeId, setMemoryLibraryInitialNodeId] = useState<string | null>(null);
   const [chatProjectPickerNonce, setChatProjectPickerNonce] = useState(0);
   const [chatLauncherWorkdir, setChatLauncherWorkdir] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
@@ -3208,6 +3209,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setWorkflowLibraryOpen(false);
     void refreshChatWorkspaceAutomations();
   }, [refreshChatWorkspaceAutomations]);
+  const openMemoryLibrary = useCallback((nodeId?: string | null) => {
+    setMemoryLibraryInitialNodeId(nodeId || null);
+    setMemoryLibraryOpen(true);
+  }, []);
+  const closeMemoryLibrary = useCallback(() => {
+    setMemoryLibraryInitialNodeId(null);
+    setMemoryLibraryOpen(false);
+  }, []);
   useEffect(() => {
     if (!active || mode !== 'chat-workspace') return;
     const navState = location.state as OpenAgentTestChatState | null;
@@ -3215,12 +3224,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const openProjectPicker = navState?.openChatProjectPicker;
     if (!panel && !openProjectPicker) return;
     if (panel === 'assistants') openAssistantLibrary();
-    else if (panel === 'memory') setMemoryLibraryOpen(true);
+    else if (panel === 'memory') openMemoryLibrary();
     else if (panel === 'team') setTeamLibraryOpen(true);
     else if (panel === 'workflows') setWorkflowLibraryOpen(true);
     if (openProjectPicker) setChatProjectPickerNonce(navState.openChatProjectPickerNonce || Date.now());
     navigate('/chat', { replace: true, state: null });
-  }, [active, location.state, mode, navigate, openAssistantLibrary]);
+  }, [active, location.state, mode, navigate, openAssistantLibrary, openMemoryLibrary]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
   const [quickTodoText, setQuickTodoText] = useState('');
@@ -3755,13 +3764,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       if (!res.ok || !res.node) throw new Error(res.error || t('hub.workspaceKnowledgeFailed'));
       toastSession(res.created ? t('hub.workspaceKnowledgeCreated') : t('hub.workspaceKnowledgeLinked'));
       setKnowledgeWorkdir(null);
-      navigate(`/knowledge?node=${encodeURIComponent(res.node.id)}`);
+      openMemoryLibrary(res.node.id);
     } catch (err: any) {
       toastSession(err?.message || t('hub.workspaceKnowledgeFailed'), false);
     } finally {
       setKnowledgeBusy(false);
     }
-  }, [navigate, t, toastSession]);
+  }, [openMemoryLibrary, t, toastSession]);
 
   const handleRemoveWorkspace = useCallback((wsPath: string) => {
     setConfirmRemove(wsPath);
@@ -7564,7 +7573,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onProjectContext={openProjectContextModal}
               onKnowledge={openWorkspaceKnowledgeModal}
               onOpenAssistants={openAssistantLibrary}
-              onOpenMemory={() => setMemoryLibraryOpen(true)}
+              onOpenMemory={() => openMemoryLibrary()}
               onOpenTeam={() => setTeamLibraryOpen(true)}
               onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
               projectPickerNonce={chatProjectPickerNonce}
@@ -9870,17 +9879,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       {/* Chat memory library modal */}
       <Modal
         open={memoryLibraryOpen}
-        onClose={() => setMemoryLibraryOpen(false)}
+        onClose={closeMemoryLibrary}
         wide
         panelClassName="max-w-[1120px]"
       >
         <ModalHeader
           title={t('chatWorkspace.memoryLibraryTitle')}
           description={t('chatWorkspace.memoryLibraryDescription')}
-          onClose={() => setMemoryLibraryOpen(false)}
+          onClose={closeMemoryLibrary}
         />
         <div className="h-[min(68vh,720px)] min-h-[420px] overflow-hidden rounded-lg border border-edge/55 bg-panel/35">
-          <KnowledgeTab embedded />
+          <KnowledgeTab embedded initialSelectedId={memoryLibraryInitialNodeId} />
         </div>
       </Modal>
 

@@ -139,15 +139,21 @@ function KnowledgeTreeRow({
   );
 }
 
-export function KnowledgeTab({ embedded = false }: { embedded?: boolean } = {}) {
+export function KnowledgeTab({
+  embedded = false,
+  initialSelectedId = null,
+}: {
+  embedded?: boolean;
+  initialSelectedId?: string | null;
+} = {}) {
   const locale = useStore(s => s.locale);
   const toast = useStore(s => s.toast);
   const t = useMemo(() => createT(locale), [locale]);
   const location = useLocation();
   const navigate = useNavigate();
   const selectedIdFromUrl = useMemo(
-    () => embedded ? null : new URLSearchParams(location.search).get('node'),
-    [embedded, location.search],
+    () => embedded ? initialSelectedId : new URLSearchParams(location.search).get('node'),
+    [embedded, initialSelectedId, location.search],
   );
   const [tree, setTree] = useState<KnowledgeTreeNode[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(selectedIdFromUrl);
