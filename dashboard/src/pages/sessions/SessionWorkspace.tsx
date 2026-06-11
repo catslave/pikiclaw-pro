@@ -3451,9 +3451,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     agent: string;
     sessionId: string;
     title: string;
+    prompt?: string;
     pinned?: boolean;
     archived?: boolean;
     unread?: boolean;
+  };
+  type SessionScheduleDraft = {
+    target: SessionActionTarget;
+    name: string;
+    prompt: string;
+    scheduleType: string;
+    customSchedule: string;
   };
   const [deletingSession, setDeletingSession] = useState(false);
   const [deleteConfirmKey, setDeleteConfirmKey] = useState<string | null>(null);
@@ -3471,6 +3479,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [createTaskKind, setCreateTaskKind] = useState<Extract<ProTaskKind, 'jira-ticket' | 'jira-bug'>>('jira-ticket');
   const [createTaskStatus, setCreateTaskStatus] = useState<ProTaskStatus>('backlog');
   const [creatingTask, setCreatingTask] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState<SessionScheduleDraft | null>(null);
+  const [creatingSchedule, setCreatingSchedule] = useState(false);
 
   /* ── Session row actions popover (anchored to kebab button) ─── */
   const [sessionMenu, setSessionMenu] = useState<{
@@ -3494,6 +3504,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         agent: session.agent || '',
         sessionId: session.sessionId,
         title: sessionListDisplayText(session).slice(0, 120) || session.sessionId.slice(0, 16),
+        prompt: session.lastQuestion || sessionListContextText(session, sessionListDisplayText(session)) || sessionListDisplayText(session),
         pinned: session.pinned === true,
         archived: session.archived === true,
         unread: shouldMarkSessionReadOnOpen(session),
@@ -3517,6 +3528,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         agent: slot.agent,
         sessionId: slot.sessionId,
         title: sessionListDisplayText(info).slice(0, 120) || slot.sessionId.slice(0, 16),
+        prompt: info.lastQuestion || sessionListContextText(info, sessionListDisplayText(info)) || sessionListDisplayText(info),
         pinned: info.pinned === true,
         archived: info.archived === true,
         unread: shouldMarkSessionReadOnOpen(info),
@@ -3565,6 +3577,53 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setCreatingTask(false);
     }
   }, [createTaskDescription, createTaskKind, createTaskStatus, createTaskTarget, createTaskTitle, creatingTask, t, toastSession]);
+
+  const scheduleValueFromDraft = useCallback((draft: SessionScheduleDraft | null) => {
+    if (!draft) return '';
+    return draft.scheduleType === 'custom' ? draft.customSchedule.trim() : draft.scheduleType;
+  }, []);
+
+  const openCreateScheduleModal = useCallback((target: SessionActionTarget) => {
+    setSessionMenu(null);
+    setSlotMenu(null);
+    setDeleteConfirmKey(null);
+    const title = target.title || target.sessionId.slice(0, 16);
+    setScheduleDraft({
+      target,
+      name: title ? `${t('session.scheduleNamePrefix')} ${title}` : t('session.createSchedule'),
+      prompt: target.prompt || title,
+      scheduleType: 'one-time',
+      customSchedule: '',
+    });
+  }, [t]);
+
+  const submitCreateScheduleFromChat = useCallback(async () => {
+    const draft = scheduleDraft;
+    if (!draft || creatingSchedule) return;
+    const prompt = draft.prompt.trim();
+    const schedule = scheduleValueFromDraft(draft);
+    if (!prompt || !schedule) {
+      toastSession(t('session.scheduleCreateFailed'), false);
+      return;
+    }
+    setCreatingSchedule(true);
+    try {
+      const res = await api.createProAutomation({
+        name: draft.name.trim(),
+        schedule,
+        prompt,
+        workdir: draft.target.workdir,
+        agent: draft.target.agent || null,
+      });
+      if (!res.ok || !res.automation) throw new Error(res.error || t('session.scheduleCreateFailed'));
+      setScheduleDraft(null);
+      toastSession(t('session.scheduleCreated'));
+    } catch (err: any) {
+      toastSession(err?.message || t('session.scheduleCreateFailed'), false);
+    } finally {
+      setCreatingSchedule(false);
+    }
+  }, [creatingSchedule, scheduleDraft, scheduleValueFromDraft, t, toastSession]);
 
   // Close popover on outside click, scroll, resize, or Escape.
   useEffect(() => {
@@ -7136,6 +7195,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 agent: slot.agent,
                 sessionId: slot.sessionId,
                 title: sessionListDisplayText(info).slice(0, 120) || slot.sessionId.slice(0, 16),
+                prompt: info.lastQuestion || sessionListContextText(info, sessionListDisplayText(info)) || sessionListDisplayText(info),
                 pinned: info.pinned === true,
                 archived: info.archived === true,
               };
@@ -8535,6 +8595,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               </svg>
               {t('session.newWithContext')}
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => openCreateScheduleModal(sessionMenu.target)}
+              className={menuItemClass('primary')}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+              {t('session.createSchedule')}
+            </button>
             {canResetMultiRowHeight && (
               <button
                 type="button"
@@ -8655,6 +8727,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               <TodoGlyph className="h-3 w-3 shrink-0" />
               {t('dashboard.createTask')}
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => runSlotAction(() => openCreateScheduleModal(slotMenu.target))}
+              className={menuItemClass('primary')}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+              {t('session.createSchedule')}
+            </button>
             {!isMultiSlotMenu && !hideDuplicateSlotMenuActions && (
               <button
                 type="button"
@@ -8753,6 +8837,94 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           <Button variant="ghost" onClick={() => setCreateTaskTarget(null)} disabled={creatingTask}>{t('modal.cancel')}</Button>
           <Button variant="primary" onClick={() => void submitCreateTaskFromChat()} disabled={creatingTask || !createTaskTitle.trim()}>
             {creatingTask ? t('dashboard.creatingTask') : t('dashboard.createTask')}
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Create schedule from chat modal */}
+      <Modal
+        open={!!scheduleDraft}
+        onClose={() => !creatingSchedule && setScheduleDraft(null)}
+      >
+        <ModalHeader
+          title={t('session.createScheduleTitle')}
+          onClose={() => !creatingSchedule && setScheduleDraft(null)}
+        />
+        <div className="space-y-3">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('session.scheduleName')}</span>
+            <input
+              value={scheduleDraft?.name || ''}
+              onChange={e => setScheduleDraft(prev => prev ? { ...prev, name: e.target.value } : prev)}
+              autoFocus
+              disabled={creatingSchedule}
+              placeholder={t('session.scheduleNamePlaceholder')}
+              className="w-full rounded-md border border-edge bg-inset px-3 py-2 text-[13px] text-fg outline-none placeholder:text-fg-5/40 focus:border-primary/40"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('session.schedulePreset')}</span>
+              <select
+                value={scheduleDraft?.scheduleType || 'one-time'}
+                onChange={e => setScheduleDraft(prev => prev ? { ...prev, scheduleType: e.target.value } : prev)}
+                disabled={creatingSchedule}
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2 text-[13px] text-fg outline-none focus:border-primary/40"
+              >
+                <option value="one-time">{t('session.scheduleOneTime')}</option>
+                <option value="daily">{t('session.scheduleDaily')}</option>
+                <option value="weekly">{t('session.scheduleWeekly')}</option>
+                <option value="monthly">{t('session.scheduleMonthly')}</option>
+                <option value="custom">{t('session.scheduleCustom')}</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('sessions.agent')}</span>
+              <input
+                value={scheduleDraft?.target.agent || ''}
+                disabled
+                className="h-9 w-full rounded-md border border-edge bg-inset px-2 text-[13px] text-fg-4 outline-none"
+              />
+            </label>
+          </div>
+          {scheduleDraft?.scheduleType === 'custom' && (
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('session.scheduleCustom')}</span>
+              <input
+                value={scheduleDraft.customSchedule}
+                onChange={e => setScheduleDraft(prev => prev ? { ...prev, customSchedule: e.target.value } : prev)}
+                disabled={creatingSchedule}
+                placeholder={t('session.scheduleCustomPlaceholder')}
+                className="w-full rounded-md border border-edge bg-inset px-3 py-2 text-[13px] text-fg outline-none placeholder:text-fg-5/40 focus:border-primary/40"
+              />
+            </label>
+          )}
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-fg-5">{t('session.schedulePrompt')}</span>
+            <textarea
+              value={scheduleDraft?.prompt || ''}
+              onChange={e => setScheduleDraft(prev => prev ? { ...prev, prompt: e.target.value } : prev)}
+              disabled={creatingSchedule}
+              rows={6}
+              placeholder={t('session.schedulePromptPlaceholder')}
+              className="w-full resize-y rounded-md border border-edge bg-inset px-3 py-2 text-[13px] leading-relaxed text-fg outline-none placeholder:text-fg-5/40 focus:border-primary/40"
+            />
+          </label>
+          {scheduleDraft && (
+            <div className="truncate text-[11px] text-fg-5">
+              {scheduleDraft.target.agent}:{scheduleDraft.target.sessionId}
+            </div>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setScheduleDraft(null)} disabled={creatingSchedule}>{t('modal.cancel')}</Button>
+          <Button
+            variant="primary"
+            onClick={() => void submitCreateScheduleFromChat()}
+            disabled={creatingSchedule || !scheduleDraft?.prompt.trim() || !scheduleValueFromDraft(scheduleDraft)}
+          >
+            {creatingSchedule ? <Spinner className="h-3 w-3" /> : null}
+            {creatingSchedule ? t('session.creatingSchedule') : t('session.createSchedule')}
           </Button>
         </div>
       </Modal>
