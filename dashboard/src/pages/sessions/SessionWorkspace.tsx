@@ -6221,7 +6221,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const revealWorkspaceSidebar = useCallback(() => {
     setWorkspaceSidebarCollapsed(false);
-    navigate('/workspace');
+    navigate('/chat', { state: { openChatProjectPicker: true, openChatProjectPickerNonce: Date.now() } });
   }, [navigate, setWorkspaceSidebarCollapsed]);
 
   const workspaceSidebarToggleAction = active && mode === 'workspace' && workspaceSidebarCollapsed && workspaceSidebarToggleHost

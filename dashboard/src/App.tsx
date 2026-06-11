@@ -52,6 +52,13 @@ function chatPanelRedirectState(panel: ChatPanelRedirectTarget) {
   return { openChatPanel: panel, openChatPanelNonce: Date.now() };
 }
 
+function chatProjectPickerRedirectState(previousState?: unknown) {
+  const previous = previousState && typeof previousState === 'object'
+    ? previousState as Record<string, unknown>
+    : {};
+  return { ...previous, openChatProjectPicker: true, openChatProjectPickerNonce: Date.now() };
+}
+
 function locationToTab(pathname: string): DashboardTab {
   if (pathname === '/notes' || pathname.startsWith('/notes/')) return 'notes';
   const map: Record<string, DashboardTab> = {
@@ -86,7 +93,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/notes' || pathname.startsWith('/notes/')) return pathname;
   if (pathname === '/') return '/chat';
   if (pathname === '/chat') return '/chat';
-  if (pathname === '/workspace') return '/workspace';
+  if (pathname === '/workspace') return '/chat';
   if (pathname === '/focus') return '/chat';
   if (pathname === '/chat-workspace') return '/chat';
   if (pathname === '/permissions') return '/system';
@@ -94,7 +101,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/dashboard') return '/tasks';
   if (pathname === '/jira') return '/tasks';
   if (pathname === '/skills') return '/extensions';
-  if (['/chat', '/workspace', '/tasks', '/daily', '/notes', '/knowledge', '/memory', '/workflows', '/usage', '/im', '/agents', '/assistants', '/team', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (['/chat', '/tasks', '/daily', '/notes', '/knowledge', '/memory', '/workflows', '/usage', '/im', '/agents', '/assistants', '/team', '/extensions', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -280,10 +287,8 @@ export function App() {
   const sessionShellActive = normalizedDashboardPath !== null;
   const sessionWorkspaceMode = tab === 'dashboard'
     ? 'dashboard'
-    : tab === 'sessions' && normalizedDashboardPath !== '/workspace'
+    : tab === 'sessions'
       ? 'chat-workspace'
-      : tab === 'sessions'
-      ? 'workspace'
       : 'settings';
   const workspaceImmersive = sessionShellActive;
   const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
@@ -361,6 +366,10 @@ export function App() {
   useEffect(() => {
     if (location.pathname === '/') {
       navigate('/chat', { replace: true, state: location.state });
+      return;
+    }
+    if (location.pathname === '/workspace') {
+      navigate('/chat', { replace: true, state: chatProjectPickerRedirectState(location.state) });
       return;
     }
     if (location.pathname === '/focus' || location.pathname === '/chat-workspace') {
