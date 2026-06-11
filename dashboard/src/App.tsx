@@ -12,13 +12,9 @@ import type { BrowserPanelSnapshot } from './types';
 
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
-const AssistantsTab = lazy(async () => ({ default: (await import('./pages/assistants/AssistantsTab')).AssistantsTab }));
 const UsageTab = lazy(async () => ({ default: (await import('./pages/usage/UsageTab')).UsageTab }));
 const TasksTab = lazy(async () => ({ default: (await import('./pages/jira/JiraTab')).TasksTab }));
 const NotesTab = lazy(async () => ({ default: (await import('./pages/notes')).NotesWorkspace }));
-const KnowledgeTab = lazy(async () => ({ default: (await import('./pages/knowledge/KnowledgeTab')).KnowledgeTab }));
-const WorkflowsTab = lazy(async () => ({ default: (await import('./pages/workflows/WorkflowsTab')).WorkflowsTab }));
-const TeamTab = lazy(async () => ({ default: (await import('./pages/team/TeamTab')).TeamTab }));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
@@ -49,6 +45,12 @@ type HoveredLinkState = {
   x: number;
   y: number;
 };
+
+type ChatPanelRedirectTarget = 'assistants' | 'memory' | 'team' | 'workflows';
+
+function chatPanelRedirectState(panel: ChatPanelRedirectTarget) {
+  return { openChatPanel: panel, openChatPanelNonce: Date.now() };
+}
 
 function locationToTab(pathname: string): DashboardTab {
   if (pathname === '/notes' || pathname.startsWith('/notes/')) return 'notes';
@@ -441,21 +443,9 @@ export function App() {
             <AgentTab />
           </PageWrapper>
         } />
-        <Route path="/assistants" element={
-          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-            <AssistantsTab />
-          </PageWrapper>
-        } />
-        <Route path="/team" element={
-          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-            <TeamTab />
-          </PageWrapper>
-        } />
-        <Route path="/workflows" element={
-          <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-            <WorkflowsTab />
-          </PageWrapper>
-        } />
+        <Route path="/assistants" element={<Navigate to="/chat" replace state={chatPanelRedirectState('assistants')} />} />
+        <Route path="/team" element={<Navigate to="/chat" replace state={chatPanelRedirectState('team')} />} />
+        <Route path="/workflows" element={<Navigate to="/chat" replace state={chatPanelRedirectState('workflows')} />} />
         <Route path="/usage" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <UsageTab />
@@ -463,8 +453,8 @@ export function App() {
         } />
         <Route path="/notes" element={<NotesTab />} />
         <Route path="/notes/:pageId" element={<NotesTab />} />
-        <Route path="/knowledge" element={<Navigate to="/memory" replace />} />
-        <Route path="/memory" element={<KnowledgeTab />} />
+        <Route path="/knowledge" element={<Navigate to="/chat" replace state={chatPanelRedirectState('memory')} />} />
+        <Route path="/memory" element={<Navigate to="/chat" replace state={chatPanelRedirectState('memory')} />} />
         <Route path="/jira" element={<Navigate to="/tasks" replace />} />
         <Route path="/dashboard" element={<Navigate to="/tasks" replace />} />
         <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
