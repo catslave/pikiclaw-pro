@@ -28,7 +28,7 @@ import {
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
-import type { AgentAssistant, AgentRuntimeStatus, AppState, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
+import type { AgentAssistant, AgentRuntimeStatus, AppState, AutomationRule, FocusContextPayload, KnowledgeTreeNode, SessionInfo, SessionContextSource, SessionContextSourceMode, TodoImageAttachment, TodoItem, WorkspaceEntry, DirEntry, GitChange, OpenTarget, ProOutput, ProTask, ProTaskKind, ProTaskStage, ProTaskStatus, ProTaskWorkbench, StageRun } from '../../types';
 import { FocusResumeBanner } from '../focus/components/FocusResumeBanner';
 import { InputComposer, buildReferenceContextEnvelope } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
@@ -1119,6 +1119,116 @@ function ChatWorkspaceLauncher({
           )) : (
             <div className="px-3 py-2 text-[12px] text-fg-5">{t('chatWorkspace.noWorkspaceMatch')}</div>
           )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function chatWorkspaceAutomationTitle(rule: AutomationRule, fallback: string) {
+  const name = rule.name.trim();
+  if (name) return name;
+  const prompt = rule.prompt.trim().replace(/\s+/g, ' ');
+  return prompt ? prompt.slice(0, 72) : fallback;
+}
+
+function chatWorkspaceScheduleLabel(schedule: string, t: (key: string) => string) {
+  if (schedule === 'one-time') return t('session.scheduleOneTime');
+  if (schedule === 'daily') return t('session.scheduleDaily');
+  return schedule || 'manual';
+}
+
+function chatWorkspaceAutomationTime(value: string | undefined) {
+  if (!value) return '--';
+  const time = Date.parse(value);
+  return Number.isFinite(time)
+    ? new Date(time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '--';
+}
+
+function ChatWorkspaceSchedulesStrip({
+  automations,
+  loading,
+  runningId,
+  onRun,
+  onOpenWorkflows,
+  t,
+}: {
+  automations: AutomationRule[];
+  loading: boolean;
+  runningId: string | null;
+  onRun: (automation: AutomationRule) => void;
+  onOpenWorkflows: () => void;
+  t: (key: string) => string;
+}) {
+  const visible = automations.slice(0, 3);
+
+  return (
+    <section className="shrink-0 rounded-xl border border-edge/65 bg-panel/60 p-3 shadow-sm backdrop-blur-md">
+      <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-primary/20 bg-primary/[0.08] text-primary">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="17" rx="2" />
+              <path d="M8 2v4" />
+              <path d="M16 2v4" />
+              <path d="M3 10h18" />
+              <path d="m9 16 2 2 4-5" />
+            </svg>
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-[12px] font-semibold text-fg">{t('chatWorkspace.schedules')}</div>
+            <div className="mt-0.5 truncate text-[10px] text-fg-5">{t('chatWorkspace.schedulesHint')}</div>
+          </div>
+          <span className="hidden rounded-md border border-edge/50 bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5 sm:inline">
+            {automations.length}
+          </span>
+        </div>
+        <Button variant="ghost" size="sm" onClick={onOpenWorkflows}>
+          {t('chatWorkspace.openWorkflows')}
+        </Button>
+      </div>
+      {loading ? (
+        <div className="flex h-[42px] items-center justify-center rounded-lg border border-edge/45 bg-inset/45">
+          <Spinner className="h-3.5 w-3.5 text-fg-5" />
+        </div>
+      ) : visible.length ? (
+        <div className="grid gap-2 lg:grid-cols-3">
+          {visible.map(rule => {
+            const title = chatWorkspaceAutomationTitle(rule, t('chatWorkspace.untitledSchedule'));
+            return (
+              <div key={rule.id} className="flex min-w-0 items-center gap-2 rounded-lg border border-edge/55 bg-inset/45 px-2.5 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[12px] font-semibold text-fg" title={title}>{title}</div>
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
+                    <span className="shrink-0 rounded border border-edge/55 bg-panel/70 px-1 py-0.5 font-semibold">
+                      {chatWorkspaceScheduleLabel(rule.schedule, t)}
+                    </span>
+                    <span className="min-w-0 truncate">{t('chatWorkspace.lastRun')} {chatWorkspaceAutomationTime(rule.lastRunAt)}</span>
+                  </div>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={!!runningId}
+                  onClick={() => onRun(rule)}
+                  title={t('chatWorkspace.runSchedule')}
+                  aria-label={t('chatWorkspace.runSchedule')}
+                  className="h-7 shrink-0 px-2"
+                >
+                  {runningId === rule.id ? <Spinner className="h-3 w-3" /> : (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M8 5.7v12.6c0 .7.8 1.1 1.4.7l9.5-6.3c.5-.3.5-1.1 0-1.4L9.4 5c-.6-.4-1.4 0-1.4.7z" />
+                    </svg>
+                  )}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-edge/55 bg-inset/45 px-3 py-3 text-center text-[12px] text-fg-5">
+          {t('chatWorkspace.noSchedules')}
         </div>
       )}
     </section>
@@ -2835,6 +2945,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [checkedInboxItemKeys, setCheckedInboxItemKeys] = useState<Set<string>>(() => new Set());
   const [inboxAttentionPulse, setInboxAttentionPulse] = useState(false);
   const [chatWorkspaceOverviewOpen, setChatWorkspaceOverviewOpen] = useState(true);
+  const [chatWorkspaceAutomations, setChatWorkspaceAutomations] = useState<AutomationRule[]>([]);
+  const [chatWorkspaceAutomationsLoading, setChatWorkspaceAutomationsLoading] = useState(false);
+  const [chatWorkspaceAutomationRunningId, setChatWorkspaceAutomationRunningId] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
@@ -2844,6 +2957,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setInboxOpen(false);
     setInboxFocusedSlot(null);
   }, []);
+  const refreshChatWorkspaceAutomations = useCallback(async () => {
+    setChatWorkspaceAutomationsLoading(true);
+    try {
+      const res = await api.getProAutomations({ timeoutMs: 10_000 });
+      if (res.ok) setChatWorkspaceAutomations(res.automations || []);
+    } finally {
+      setChatWorkspaceAutomationsLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (!active || mode !== 'chat-workspace') return;
+    void refreshChatWorkspaceAutomations();
+  }, [active, mode, refreshChatWorkspaceAutomations]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
   const [quickTodoText, setQuickTodoText] = useState('');
@@ -3717,6 +3843,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       });
       if (!res.ok || !res.automation) throw new Error(res.error || t('session.scheduleCreateFailed'));
       setScheduleDraft(null);
+      setChatWorkspaceAutomations(prev => [res.automation!, ...prev.filter(item => item.id !== res.automation!.id)]);
       toastSession(t('session.scheduleCreated'));
     } catch (err: any) {
       toastSession(err?.message || t('session.scheduleCreateFailed'), false);
@@ -6625,6 +6752,26 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     handleNewSessionCreated({ ...nextSession, workdir }, prompt, undefined, createdAt);
   }, [chatAssistants, chatWorkspaceDefaultAgent, handleNewSessionCreated, locale, t, workspaces]);
 
+  const handleChatWorkspaceRunAutomation = useCallback(async (automation: AutomationRule) => {
+    if (chatWorkspaceAutomationRunningId) return;
+    setChatWorkspaceAutomationRunningId(automation.id);
+    try {
+      const res = await api.runProAutomation(automation.id, { timeoutMs: 30_000 });
+      if (!res.ok || !res.automation) throw new Error(res.error || t('chatWorkspace.scheduleRunFailed'));
+      setChatWorkspaceAutomations(prev => prev.map(item => item.id === automation.id ? res.automation! : item));
+      toastSession(t('chatWorkspace.scheduleRunQueued'));
+      const nextSession = parseSessionKeyValue(res.queued?.sessionKey);
+      const workdir = automation.workdir || runtimeWorkdir || workspaces[0]?.path || '';
+      if (nextSession && workdir) {
+        handleNewSessionCreated({ ...nextSession, workdir });
+      }
+    } catch (err: any) {
+      toastSession(err?.message || t('chatWorkspace.scheduleRunFailed'), false);
+    } finally {
+      setChatWorkspaceAutomationRunningId(null);
+    }
+  }, [chatWorkspaceAutomationRunningId, handleNewSessionCreated, runtimeWorkdir, t, toastSession, workspaces]);
+
   const chatWorkspaceFocusSlot = selectedSession;
   const chatWorkspaceFocusInfo = chatWorkspaceFocusSlot ? resolveSlotInfo(chatWorkspaceFocusSlot) : null;
   const chatWorkspaceFocusWorkspaceName = chatWorkspaceFocusSlot
@@ -7134,6 +7281,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               assistants={chatAssistants}
               onSubmit={handleChatWorkspaceLaunch}
               onError={(message) => toastSession(message, false)}
+              t={t}
+            />
+            <ChatWorkspaceSchedulesStrip
+              automations={chatWorkspaceAutomations}
+              loading={chatWorkspaceAutomationsLoading}
+              runningId={chatWorkspaceAutomationRunningId}
+              onRun={handleChatWorkspaceRunAutomation}
+              onOpenWorkflows={() => navigate('/workflows')}
               t={t}
             />
             <section className="shrink-0 rounded-xl border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md">
