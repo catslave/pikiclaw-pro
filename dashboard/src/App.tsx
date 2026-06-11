@@ -64,6 +64,7 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/chat': 'sessions',
+    '/sessions': 'sessions',
     '/workspace': 'sessions',
     '/focus': 'sessions',
     '/chat-workspace': 'sessions',
@@ -93,6 +94,7 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/notes' || pathname.startsWith('/notes/')) return pathname;
   if (pathname === '/') return '/chat';
   if (pathname === '/chat') return '/chat';
+  if (pathname === '/sessions') return '/chat';
   if (pathname === '/workspace') return '/chat';
   if (pathname === '/focus') return '/chat';
   if (pathname === '/chat-workspace') return '/chat';
@@ -365,6 +367,10 @@ export function App() {
 
   useEffect(() => {
     if (location.pathname === '/') {
+      navigate('/chat', { replace: true, state: location.state });
+      return;
+    }
+    if (location.pathname === '/sessions') {
       navigate('/chat', { replace: true, state: location.state });
       return;
     }
