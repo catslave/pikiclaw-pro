@@ -856,6 +856,7 @@ function ChatWorkspaceLauncher({
   onOpenMemory,
   onOpenTeam,
   onOpenWorkflows,
+  projectPickerNonce,
   t,
 }: {
   workspaces: WorkspaceEntry[];
@@ -872,6 +873,7 @@ function ChatWorkspaceLauncher({
   onOpenMemory: () => void;
   onOpenTeam: () => void;
   onOpenWorkflows: () => void;
+  projectPickerNonce?: number;
   t: (key: string) => string;
 }) {
   const [selectedWorkdir, setSelectedWorkdir] = useState(defaultWorkdir);
@@ -920,6 +922,12 @@ function ChatWorkspaceLauncher({
             : '';
     setSelectedTargetValue(prev => (prev && targetValues.has(prev) ? prev : fallback));
   }, [agent, launchAgentOptions, launchAssistants, modelOptions, targetValues]);
+
+  useEffect(() => {
+    if (!projectPickerNonce) return;
+    setInput('/');
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [projectPickerNonce]);
 
   const workspaceChoices = useMemo(() => {
     const byPath = new Map<string, WorkspaceEntry>();
@@ -2012,6 +2020,8 @@ type OpenAgentTestChatState = {
   openSessionNonce?: number;
   openChatPanel?: ChatWorkspacePanelTarget;
   openChatPanelNonce?: number;
+  openChatProjectPicker?: boolean;
+  openChatProjectPickerNonce?: number;
   focusContext?: FocusContextPayload;
 };
 type ChatLayoutMode = 'single' | 'multi-2' | 'multi-3';
@@ -3131,6 +3141,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
   const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
   const [memoryLibraryOpen, setMemoryLibraryOpen] = useState(false);
+  const [chatProjectPickerNonce, setChatProjectPickerNonce] = useState(0);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
@@ -3161,11 +3172,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (!active || mode !== 'chat-workspace') return;
     const navState = location.state as OpenAgentTestChatState | null;
     const panel = navState?.openChatPanel;
-    if (!panel) return;
+    const openProjectPicker = navState?.openChatProjectPicker;
+    if (!panel && !openProjectPicker) return;
     if (panel === 'assistants') setAssistantLibraryOpen(true);
     else if (panel === 'memory') setMemoryLibraryOpen(true);
     else if (panel === 'team') setTeamLibraryOpen(true);
     else if (panel === 'workflows') setWorkflowLibraryOpen(true);
+    if (openProjectPicker) setChatProjectPickerNonce(navState.openChatProjectPickerNonce || Date.now());
     navigate('/chat', { replace: true, state: null });
   }, [active, location.state, mode, navigate]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
@@ -7494,6 +7507,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onOpenMemory={() => setMemoryLibraryOpen(true)}
               onOpenTeam={() => setTeamLibraryOpen(true)}
               onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
+              projectPickerNonce={chatProjectPickerNonce}
               t={t}
             />
             <ChatWorkspaceSchedulesStrip

@@ -64,7 +64,7 @@ function MenuTooltip({ label }: { label: string }) {
 
 const TAB_ROUTES: Record<string, string> = {
   chat: '/chat',
-  sessions: '/workspace',
+  sessions: '/chat',
   dashboard: '/tasks',
   daily: '/daily',
   notes: '/notes',
@@ -102,7 +102,7 @@ export function Sidebar({
   const location = useLocation();
   const primaryNavItems = useMemo(() => [
     { key: 'chat', to: TAB_ROUTES.chat, label: t('nav.chat'), state: undefined },
-    { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, state: undefined },
+    { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, chatProjectPicker: true },
     { key: 'dashboard', to: TAB_ROUTES.dashboard, label: t('nav.dashboard'), state: undefined },
     { key: 'daily', to: TAB_ROUTES.daily, label: t('nav.daily'), state: undefined },
     { key: 'notes', to: TAB_ROUTES.notes, label: t('nav.notes'), state: undefined },
@@ -134,19 +134,24 @@ export function Sidebar({
   const chatPanelState = (panel?: ChatPanelNavTarget) => panel
     ? { openChatPanel: panel, openChatPanelNonce: Date.now() }
     : undefined;
+  const chatProjectPickerState = () => ({ openChatProjectPicker: true, openChatProjectPickerNonce: Date.now() });
+  const chatNavState = (item: { chatPanel?: ChatPanelNavTarget; chatProjectPicker?: boolean }) => {
+    if (item.chatProjectPicker) return chatProjectPickerState();
+    return chatPanelState(item.chatPanel);
+  };
 
   if (immersive) {
     return (
       <header className="pointer-events-none fixed inset-y-0 left-0 z-50 w-14">
         <div className="pointer-events-auto flex h-full w-14 flex-col items-center border-r border-edge/65 bg-panel/82 py-2 shadow-[8px_0_24px_rgba(2,6,23,0.08)] backdrop-blur-md">
-          <div className="relative h-10 w-10">
+          <div className="relative h-10 w-10 shrink-0">
             <NavLink
               to="/chat"
               title={t('nav.chat')}
               aria-label={t('nav.chat')}
               end
               className={({ isActive }) => cn(
-                'group absolute inset-1 inline-flex items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
+                'group absolute inset-1 inline-flex h-8 w-8 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
                 (isActive || location.pathname === '/focus' || location.pathname === '/chat-workspace') && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
               )}
             >
@@ -154,15 +159,15 @@ export function Sidebar({
               <MenuTooltip label={t('nav.chat')} />
             </NavLink>
           </div>
-          <div className="relative h-10 w-10">
+          <div className="relative h-10 w-10 shrink-0">
             <NavLink
-              to="/workspace"
+              to="/chat"
+              state={chatProjectPickerState()}
               title={t('nav.workspace')}
               aria-label={t('nav.workspace')}
               end
-              className={({ isActive }) => cn(
-                'group absolute inset-1 inline-flex items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-                isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+              className={() => cn(
+                'group absolute inset-1 inline-flex h-8 w-8 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
               )}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -333,11 +338,11 @@ export function Sidebar({
                 key={item.key}
                 to={item.to}
                 end={item.exact}
-                state={chatPanelState('chatPanel' in item ? item.chatPanel : undefined)}
+                state={chatNavState(item)}
                 className={({ isActive }) => cn(
                   'inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-sm font-semibold transition-colors duration-200',
                   'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
-                  isActive && !('chatPanel' in item) ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
+                  isActive && !('chatPanel' in item) && !('chatProjectPicker' in item) ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
                 )}
               >
                 {item.label}
