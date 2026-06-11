@@ -3142,6 +3142,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
   const [memoryLibraryOpen, setMemoryLibraryOpen] = useState(false);
   const [chatProjectPickerNonce, setChatProjectPickerNonce] = useState(0);
+  const [chatLauncherWorkdir, setChatLauncherWorkdir] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openInboxFromTrigger = useCallback(() => {
@@ -4920,7 +4921,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const handleNewSessionRequest = useCallback((wsPath: string) => {
     if (mode === 'chat-workspace') {
-      setShowNewSession(wsPath);
+      setNewSessionInitialDraftPrompt(null);
+      setNewSessionReferenceContext(null);
+      setNewSessionInitialAutoSend(false);
+      setShowNewSession(null);
+      setChatLauncherWorkdir(wsPath);
+      setChatProjectPickerNonce(Date.now());
       return;
     }
     const shouldFloatDraft = mode === 'workspace' && chatLayout === 'single' && !taskFocusId && !isNarrowWorkbench && openSessionsRef.current.length > 0;
@@ -7010,7 +7016,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       },
     };
   });
-  const chatWorkspaceNewSessionWorkdir = showNewSession || runtimeWorkdir || workspaces[0]?.path || '';
+  const chatWorkspaceNewSessionWorkdir = chatLauncherWorkdir || showNewSession || runtimeWorkdir || workspaces[0]?.path || '';
 
   if (false && mode === 'chat-workspace') {
     const betaItems: ChatWorkspaceBetaItem[] = [];
