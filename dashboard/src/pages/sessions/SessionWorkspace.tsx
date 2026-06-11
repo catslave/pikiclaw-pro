@@ -34,6 +34,7 @@ import { InputComposer, buildReferenceContextEnvelope } from './InputComposer';
 import { UserBubble, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
+import { ProAssistantsSection } from '../agents/ProAgentWorkflowSection';
 import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
 import type { SessionPanelChange, SessionPanelScrollRequest } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
@@ -2995,6 +2996,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [projectContextDraft, setProjectContextDraft] = useState<WorkspaceProjectContextDraft | null>(null);
   const [savingProjectContext, setSavingProjectContext] = useState(false);
   const [chatAssistants, setChatAssistants] = useState<AgentAssistant[]>([]);
+  const [assistantLibraryOpen, setAssistantLibraryOpen] = useState(false);
   const [search, setSearch] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [chatLayout, setChatLayoutRaw] = useState<ChatLayoutMode>(readStoredChatLayout);
@@ -3158,6 +3160,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, []);
 
   useEffect(() => { void loadChatAssistants(); }, [loadChatAssistants]);
+
+  const closeAssistantLibrary = useCallback(() => {
+    setAssistantLibraryOpen(false);
+    void loadChatAssistants();
+  }, [loadChatAssistants]);
 
   /* ── Load sessions for a workspace ── */
   const loadSessionsForWorkspace = useCallback(async (
@@ -7380,7 +7387,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onError={(message) => toastSession(message, false)}
               onProjectContext={openProjectContextModal}
               onKnowledge={openWorkspaceKnowledgeModal}
-              onOpenAssistants={() => navigate('/assistants')}
+              onOpenAssistants={() => setAssistantLibraryOpen(true)}
               t={t}
             />
             <ChatWorkspaceSchedulesStrip
@@ -9609,6 +9616,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               {t('hub.noKnowledgeNodes')}
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* Chat assistant library modal */}
+      <Modal
+        open={assistantLibraryOpen}
+        onClose={closeAssistantLibrary}
+        wide
+        panelClassName="max-w-[960px]"
+      >
+        <ModalHeader
+          title={t('chatWorkspace.assistantLibraryTitle')}
+          description={t('chatWorkspace.assistantLibraryDescription')}
+          onClose={closeAssistantLibrary}
+        />
+        <div className="max-h-[min(68vh,680px)] overflow-y-auto pr-1">
+          <ProAssistantsSection embedded onChange={loadChatAssistants} />
         </div>
       </Modal>
 

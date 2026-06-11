@@ -405,7 +405,7 @@ function AssistantHistoryList({
   );
 }
 
-export function ProAssistantsSection() {
+export function ProAssistantsSection({ embedded = false, onChange }: { embedded?: boolean; onChange?: () => void } = {}) {
   const navigate = useNavigate();
   const toast = useStore(s => s.toast);
   const locale = useStore(s => s.locale);
@@ -513,6 +513,7 @@ export function ProAssistantsSection() {
         const next = prev.filter(item => item.id !== res.assistant!.id);
         return [res.assistant!, ...next];
       });
+      onChange?.();
       void refresh();
       setModalOpen(false);
       setEditing(null);
@@ -522,7 +523,7 @@ export function ProAssistantsSection() {
     } finally {
       setBusy(false);
     }
-  }, [busy, draft, editing, filterInstalledAgents, refresh, toast]);
+  }, [busy, draft, editing, filterInstalledAgents, onChange, refresh, toast]);
 
   const deleteAssistant = useCallback(async () => {
     if (!editing || busy) return;
@@ -531,6 +532,7 @@ export function ProAssistantsSection() {
       const res = await api.deleteProAssistant(editing.id);
       if (!res.ok) throw new Error(res.error || 'Failed to delete assistant');
       setAssistants(prev => prev.filter(item => item.id !== editing.id));
+      onChange?.();
       void refresh();
       setModalOpen(false);
       setEditing(null);
@@ -540,7 +542,7 @@ export function ProAssistantsSection() {
     } finally {
       setBusy(false);
     }
-  }, [busy, editing, refresh, toast]);
+  }, [busy, editing, onChange, refresh, toast]);
 
   const toggleDraftAgent = useCallback((agent: string) => {
     setDraft(prev => {
@@ -594,7 +596,7 @@ export function ProAssistantsSection() {
   );
 
   return (
-    <section className="space-y-3 border-t border-edge pt-4">
+    <section className={cn('space-y-3', embedded ? '' : 'border-t border-edge pt-4')}>
       <SectionHeading
         title={copy.assistantsTitle}
         description={copy.assistantsDescription}
@@ -693,6 +695,7 @@ export function ProAssistantsSection() {
         }}
         onSaved={(assistant) => {
           setAssistants(prev => prev.map(item => item.id === assistant.id ? assistant : item));
+          onChange?.();
           void refresh();
         }}
       />
@@ -708,6 +711,7 @@ export function ProAssistantsSection() {
         onOpenPrompt={(assistant) => setPromptAssistant(assistant)}
         onAssistantSaved={(assistant) => {
           setAssistants(prev => prev.map(item => item.id === assistant.id ? assistant : item));
+          onChange?.();
           void refresh();
         }}
         onClose={() => setFocusAssistant(null)}
@@ -723,6 +727,7 @@ export function ProAssistantsSection() {
         onOpenPrompt={(assistant) => setPromptAssistant(assistant)}
         onAssistantSaved={(assistant) => {
           setAssistants(prev => prev.map(item => item.id === assistant.id ? assistant : item));
+          onChange?.();
           void refresh();
         }}
         onClose={() => setTestAssistant(null)}
@@ -738,6 +743,7 @@ export function ProAssistantsSection() {
         workdir={runtimeWorkdir}
         onAssistantSaved={(assistant) => {
           setAssistants(prev => prev.map(item => item.id === assistant.id ? assistant : item));
+          onChange?.();
           void refresh();
         }}
         onClose={() => setPromptRunAssistant(null)}
@@ -753,10 +759,12 @@ export function ProAssistantsSection() {
         onOpenPrompt={(assistant) => setPromptAssistant(assistant)}
         onAssistantSaved={(assistant) => {
           setAssistants(prev => prev.map(item => item.id === assistant.id ? assistant : item));
+          onChange?.();
           void refresh();
         }}
         onClose={() => {
           setCreateRunOpen(false);
+          onChange?.();
           void refresh();
         }}
       />
