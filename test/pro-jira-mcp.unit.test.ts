@@ -328,6 +328,15 @@ describe('Jira MCP HTTP transport', () => {
           priority: { name: 'High' },
           labels: ['sync'],
           updated: '2026-06-09T01:00:00.000Z',
+          comment: {
+            comments: [
+              {
+                id: 'c1',
+                author: { displayName: 'Alice' },
+                body: 'Please inspect the linked trace before implementation.',
+              },
+            ],
+          },
         },
       },
     });
@@ -348,11 +357,20 @@ describe('Jira MCP HTTP transport', () => {
       labels: ['sync'],
       updatedAt: '2026-06-09T01:00:00.000Z',
     });
+    expect(pulled.issue.rawFields?.comment).toMatchObject({
+      comments: [
+        {
+          id: 'c1',
+          author: { displayName: 'Alice' },
+          body: 'Please inspect the linked trace before implementation.',
+        },
+      ],
+    });
     const toolCall = requests.find(request => request.body.params?.name === 'jira_get_issue');
     expect(toolCall?.body.params?.arguments).toEqual({
       issue_key: 'PRO-3',
       fields: 'summary,description,issuetype,status,assignee,reporter,fixVersions,duedate,priority,labels,updated,issuelinks,customfield_10652',
-      comment_limit: 0,
+      comment_limit: 5,
     });
   });
 

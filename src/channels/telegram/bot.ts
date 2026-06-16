@@ -135,7 +135,7 @@ export class TelegramBot extends Bot {
   private processRuntimeCleanup: (() => void) | null = null;
 
   constructor() {
-    super();
+    super('telegram');
     const config = getActiveUserConfig();
     // merge Telegram-specific allowed IDs into base
     if (config.telegramAllowedChatIds) {

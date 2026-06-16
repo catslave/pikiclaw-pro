@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, ChangeEvent, ReactNode } from 'react';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import type {
@@ -1206,6 +1206,229 @@ function CustomSkillDialog({
   );
 }
 
+type SkillMarkdownScan = {
+  name: string;
+  label: string | null;
+  description: string | null;
+  detectedType: string | null;
+  verdict: 'clean' | 'review' | 'blocked';
+  warnings: Array<{ severity: 'warning' | 'danger'; message: string }>;
+};
+
+const SKILL_IMPORT_EXAMPLE = `---
+name: repo-release-check
+label: Repo Release Check
+description: Review a repository before release and report blockers.
+type: skill
+---
+
+# Repo Release Check
+
+Use this skill when a repository needs release-readiness review.
+
+## Instructions
+
+Check tests, build status, pending changes, risky files, and user-facing behavior.
+Return a short ship / hold recommendation with evidence.
+`;
+
+function readSkillImportFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+    reader.readAsText(file);
+  });
+}
+
+function SkillMarkdownImportDialog({
+  open, onClose, locale, scope, workdir, onImported,
+}: {
+  open: boolean;
+  onClose: () => void;
+  locale: string;
+  scope: 'global' | 'workspace';
+  workdir?: string;
+  onImported: () => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [content, setContent] = useState(SKILL_IMPORT_EXAMPLE);
+  const [name, setName] = useState('');
+  const [overwrite, setOverwrite] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [scan, setScan] = useState<SkillMarkdownScan | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setContent(SKILL_IMPORT_EXAMPLE);
+    setName('');
+    setOverwrite(false);
+    setConfirmed(false);
+    setScan(null);
+  }, [open]);
+
+  const loadFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      setContent(await readSkillImportFile(file));
+      setConfirmed(false);
+      setScan(null);
+      toast(L(locale, '文件已载入', 'File loaded'), true);
+    } catch (err: any) {
+      toast(err?.message || L(locale, '文件读取失败', 'Failed to read file'), false);
+    }
+  };
+
+  const submit = async () => {
+    if (!content.trim() || importing) return;
+    setImporting(true);
+    try {
+      const res = await api.importSkillMarkdown(content, scope === 'global', workdir, {
+        name: name.trim() || undefined,
+        confirmed,
+        overwrite,
+      });
+      if (res.ok) {
+        toast(L(locale, 'Skill 已导入', 'Skill imported'), true);
+        onImported();
+        onClose();
+        return;
+      }
+      if (res.needsReview && res.scan) {
+        setScan(res.scan);
+        setConfirmed(true);
+        toast(L(locale, '请复核导入风险后再次确认', 'Review import warnings, then confirm again'), false);
+        return;
+      }
+      if (res.blocked && res.scan) {
+        setScan(res.scan);
+        setConfirmed(false);
+        onImported();
+        toast(res.quarantined
+          ? L(locale, '这个 Skill 已被安全复核阻止并隔离', 'This Skill was blocked and quarantined')
+          : L(locale, '这个 Skill 已被安全复核阻止导入', 'This Skill was blocked by the safety review'), false);
+        return;
+      }
+      if (res.scan) setScan(res.scan);
+      toast(res.error || L(locale, '导入失败', 'Import failed'), false);
+    } catch (err: any) {
+      toast(err?.message || L(locale, '导入失败', 'Import failed'), false);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => !importing && onClose()}
+      wide
+      panelClassName="max-w-[780px]"
+      contentClassName="max-h-[inherit] overflow-y-auto p-4 sm:p-6"
+    >
+      <ModalHeader
+        title={L(locale, '导入 SKILL.md', 'Import SKILL.md')}
+        description={L(locale, '从本地 Markdown 导入一个全局或项目级 Skill。导入前会做基础安全复核。', 'Import a global or workspace skill from local Markdown with a basic safety review before writing it.')}
+        onClose={() => !importing && onClose()}
+      />
+      <div className="space-y-3">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px]">
+          <div>
+            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">{L(locale, '技能名称（可选）', 'Skill name (optional)')}</label>
+            <Input value={name} onChange={event => { setName(event.target.value); setConfirmed(false); setScan(null); }} placeholder="repo-release-check" className="font-mono" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">{L(locale, '来源文件', 'Source file')}</label>
+            <label className="inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-md border border-edge bg-inset px-3 text-[12px] font-semibold text-fg-3 transition-colors hover:border-edge-h hover:bg-panel-h">
+              {L(locale, '加载文件', 'Load file')}
+              <input type="file" accept=".md,.markdown,.txt" className="hidden" onChange={loadFile} disabled={importing} />
+            </label>
+          </div>
+        </div>
+        <textarea
+          value={content}
+          onChange={event => { setContent(event.target.value); setConfirmed(false); setScan(null); }}
+          className="min-h-[220px] max-h-[34vh] w-full resize-y rounded-lg border border-control-border bg-control px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none transition focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_4px_var(--th-glow-a)] sm:min-h-[340px] sm:max-h-[48vh]"
+          spellCheck={false}
+          aria-label="SKILL.md content"
+        />
+        {scan && (
+          <div className={cn(
+            'max-h-[180px] overflow-y-auto rounded-lg border p-3 sm:max-h-none',
+            scan.verdict === 'blocked'
+              ? 'border-red-500/35 bg-red-500/10'
+              : scan.verdict === 'review'
+                ? 'border-amber-500/35 bg-amber-500/10'
+                : 'border-ok/25 bg-ok/10',
+          )}>
+            <div className="flex flex-wrap items-center gap-2 text-[12px] font-semibold text-fg">
+              <span>{L(locale, '导入复核', 'Import review')}</span>
+              <span className="rounded-md border border-edge bg-panel px-1.5 py-0.5 text-[10px] text-fg-5">{scan.name}</span>
+              <span className={cn(
+                'rounded-md border px-1.5 py-0.5 text-[10px]',
+                scan.verdict === 'blocked'
+                  ? 'border-red-500/35 bg-red-500/10 text-red-400'
+                  : scan.verdict === 'review'
+                    ? 'border-amber-500/35 bg-amber-500/10 text-amber-400'
+                    : 'border-ok/25 bg-ok/10 text-[var(--th-ok)]',
+              )}>
+                {scan.verdict === 'blocked'
+                  ? L(locale, '已阻止', 'Blocked')
+                  : scan.verdict === 'review'
+                    ? L(locale, '需复核', 'Review')
+                    : L(locale, '无问题', 'Clean')}
+              </span>
+              {scan.detectedType && <span className="rounded-md border border-edge bg-panel px-1.5 py-0.5 text-[10px] text-fg-5">type: {scan.detectedType}</span>}
+            </div>
+            <div className="mt-2 space-y-1">
+              {scan.warnings.length ? scan.warnings.map(item => (
+                <div key={`${item.severity}-${item.message}`} className="text-[12px] leading-relaxed text-fg-4">
+                  <span className={item.severity === 'danger' ? 'font-semibold text-red-400' : 'font-semibold text-amber-400'}>
+                    {item.severity === 'danger' ? L(locale, '危险', 'Danger') : L(locale, '注意', 'Warning')}:
+                  </span>{' '}
+                  {item.message}
+                </div>
+              )) : (
+                <div className="text-[12px] leading-relaxed text-fg-4">
+                  {L(locale, '没有发现明显风险。', 'No obvious risks found.')}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="inline-flex cursor-pointer items-center gap-2 text-[12px] text-fg-4">
+            <input type="checkbox" checked={overwrite} onChange={event => setOverwrite(event.target.checked)} />
+            {L(locale, '覆盖同名 Skill', 'Overwrite existing skill')}
+          </label>
+          <span className="text-[11px] text-fg-5">
+            {scope === 'global'
+              ? L(locale, '导入到全局 Skills', 'Imports into global Skills')
+              : L(locale, '导入到当前项目 Skills', 'Imports into the current workspace Skills')}
+          </span>
+        </div>
+      </div>
+      <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <Button variant="ghost" onClick={() => { setContent(SKILL_IMPORT_EXAMPLE); setConfirmed(false); setScan(null); }} disabled={importing}>
+          {L(locale, '重置示例', 'Reset example')}
+        </Button>
+        <Button variant="ghost" onClick={onClose} disabled={importing}>{L(locale, '取消', 'Cancel')}</Button>
+        <Button variant="primary" disabled={!content.trim() || importing || scan?.verdict === 'blocked'} onClick={() => void submit()}>
+          {importing ? <Spinner /> : null}
+          {scan?.verdict === 'blocked'
+            ? L(locale, '已阻止导入', 'Import blocked')
+            : confirmed
+              ? L(locale, '确认导入', 'Import after review')
+              : L(locale, '导入 Skill', 'Import skill')}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
 function LocalSkillPromptDialog({
   open, onClose, locale, name, scope, workdir, onSaved,
 }: {
@@ -2191,14 +2414,14 @@ function McpCatalogSection({
           )}
           {loading && <Spinner className="h-3 w-3" />}
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
           <Button variant="outline" size="sm" onClick={() => setAgentCreateOpen(true)}>
             + {L(locale, '用 Agent 创建 MCP', 'Create with Agent')}
           </Button>
           <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
             + {L(locale, '添加自定义 MCP', 'Add custom MCP')}
           </Button>
-          <div className="relative">
+          <div className="relative min-w-[180px] flex-1 sm:flex-none">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-5">
               <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
@@ -2207,7 +2430,7 @@ function McpCatalogSection({
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder={L(locale, '搜索...', 'Search...')}
-              className="h-7 w-52 rounded-md border border-edge bg-inset/50 pl-7 pr-2.5 text-[12px] text-fg outline-none placeholder:text-fg-5/50 focus:border-primary/30 focus:bg-inset"
+              className="h-7 w-full rounded-md border border-edge bg-inset/50 pl-7 pr-2.5 text-[12px] text-fg outline-none placeholder:text-fg-5/50 focus:border-primary/30 focus:bg-inset sm:w-52"
             />
           </div>
         </div>
@@ -2417,6 +2640,7 @@ function SkillsCatalogSection({
   );
 
   const [customOpen, setCustomOpen] = useState(false);
+  const [skillImportOpen, setSkillImportOpen] = useState(false);
   const [agentCreateOpen, setAgentCreateOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -2447,7 +2671,7 @@ function SkillsCatalogSection({
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
           <SectionLabel>Skills</SectionLabel>
           {!loading && (
@@ -2457,12 +2681,15 @@ function SkillsCatalogSection({
           )}
           {loading && <Spinner className="h-3 w-3" />}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
           <Button variant="ghost" size="sm" onClick={() => void refresh()}>
             {loading ? L(locale, '刷新中…', 'Refreshing…') : L(locale, '刷新', 'Refresh')}
           </Button>
           <Button variant="outline" size="sm" onClick={() => setAgentCreateOpen(true)}>
             + {L(locale, '用 Agent 创建 Skill', 'Create with Agent')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setSkillImportOpen(true)}>
+            + {L(locale, '导入 SKILL.md', 'Import SKILL.md')}
           </Button>
           <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
             + {L(locale, '从 GitHub 安装', 'Install from GitHub')}
@@ -2546,6 +2773,14 @@ function SkillsCatalogSection({
         scope={scope}
         workdir={workdir}
         onInstalled={refresh}
+      />
+      <SkillMarkdownImportDialog
+        open={skillImportOpen}
+        onClose={() => setSkillImportOpen(false)}
+        locale={locale}
+        scope={scope}
+        workdir={workdir}
+        onImported={refresh}
       />
       <FeatureAgentDialog
         open={agentCreateOpen}
@@ -3378,9 +3613,9 @@ function CliCatalogSection({
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <SectionLabel>{L(locale, 'CLI 工具', 'CLI Tools')}</SectionLabel>
-        <div className="flex items-center gap-3 text-[11px] text-fg-5">
+        <div className="flex flex-wrap items-center gap-3 text-[11px] text-fg-5">
           <span>{connected.length} {L(locale, '已登录', 'signed in')} · {available.length} {L(locale, '可用', 'available')}</span>
           <button
             type="button"

@@ -12,12 +12,24 @@ import { useEffect, useRef } from 'react';
 // Types (mirror of DashboardEvent from server)
 // ---------------------------------------------------------------------------
 
-export type DashboardEventType = 'stream-update' | 'sessions-changed';
+export type DashboardEventType = 'stream-update' | 'sessions-changed' | 'scheduled-task' | 'channel-message';
 
 export interface DashboardEvent {
   type: DashboardEventType;
   key?: string;
   snapshot?: unknown;
+  automationId?: string;
+  name?: string;
+  schedule?: string;
+  status?: 'queued' | 'completed' | 'failed' | 'missed';
+  sessionKey?: string;
+  scheduledFor?: string;
+  error?: string;
+  channel?: string;
+  chatId?: string;
+  taskId?: string;
+  agent?: string;
+  workdir?: string;
 }
 
 type Listener = (event: DashboardEvent) => void;

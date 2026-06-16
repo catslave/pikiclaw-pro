@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
+import { agentCompletionNotificationEnabled, resolveNotificationPreferences } from '../../notification-preferences';
 import { resolveAppStatusBadge } from '../../app-status';
 import { loadWorkspaceSessions, prefetchSessionMessages } from '../../session-preload';
 import { useDashboardEvent, useDashboardReconnect } from '../../ws';
@@ -38,10 +39,12 @@ import { ProAssistantsSection, ProAutomationSection } from '../agents/ProAgentWo
 import { TeamTab } from '../team/TeamTab';
 import { KnowledgeTab } from '../knowledge/KnowledgeTab';
 import { createMdComponents, mdPlugins, type FileLinkTarget } from './markdown';
-import type { SessionPanelChange, SessionPanelScrollRequest } from './SessionPanel';
+import type { SessionPanelChange, SessionPanelScrollRequest, SessionPanelSearchContext } from './SessionPanel';
 import { ContextShelf, type ContextShelfTab } from './ContextShelf';
 import { ChatRecallRail } from './RecallIndex';
 import { formatFileSize, isImageFile } from './utils';
+import { TodoEvidenceSummary } from '../../work-items/TodoEvidenceSummary';
+import { todoToWorkItemDescription } from '../../work-items/todoWorkItemEvidence';
 
 // Kick off SessionPanel import the moment this module loads so the lazy boundary
 // resolves before the user can compose & send a new message. The previous
@@ -1066,234 +1069,155 @@ function ChatWorkspaceLauncher({
       : t('chatWorkspace.targetAgent');
   const canSend = !!input.trim() && !!selectedWorkspace && !!selectedTarget && !sending && !workspaceMenuOpen;
   const selectedWorkspaceHasProjectContext = workspaceHasProjectContext(selectedWorkspace);
-  const projectContextItems = selectedWorkspace
-    ? ([
-        ['rules', t('hub.projectRules'), selectedWorkspace.rules || ''],
-        ['instructions', t('hub.projectInstructions'), selectedWorkspace.instructions || ''],
-        ['memory', t('hub.projectMemory'), selectedWorkspace.memory || ''],
-      ] as const).filter(([, , value]) => String(value || '').trim())
-    : [];
 
   return (
-    <section className="relative shrink-0 rounded-xl border border-edge/65 bg-panel/76 p-3 shadow-sm backdrop-blur-md">
-      <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-[13px] font-semibold text-fg">{t('chatWorkspace.launcherTitle')}</span>
-        <span className="shrink-0 rounded-md border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-primary">{t('chatWorkspace.betaBadge')}</span>
-        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onOpenMemory}
-            className="h-7 shrink-0 px-2 text-[11px]"
-          >
+    <section className="relative shrink-0 rounded-xl border border-edge/60 bg-panel/72 p-2.5 shadow-sm backdrop-blur-md">
+      <div className="mb-2 flex min-w-0 items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="shrink-0 text-[13px] font-semibold text-fg">{t('chatWorkspace.launcherTitle')}</span>
+            {selectedWorkspace && (
+              <span className="min-w-0 truncate text-[11px] text-fg-5" title={selectedWorkspace.path}>
+                {selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={onOpenMemory} className="h-7 px-2 text-[11px]">
             {t('chatWorkspace.memory')}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onOpenAssistants()}
-            className="h-7 shrink-0 px-2 text-[11px]"
-          >
+          <Button variant="ghost" size="sm" onClick={() => onOpenAssistants()} className="h-7 px-2 text-[11px]">
             {t('chatWorkspace.assistant')}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onOpenWorkflows}
-            className="h-7 shrink-0 px-2 text-[11px]"
-          >
+          <Button variant="ghost" size="sm" onClick={onOpenWorkflows} className="h-7 px-2 text-[11px]">
             {t('chatWorkspace.workflow')}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onOpenTeam}
-            className="h-7 shrink-0 px-2 text-[11px]"
-          >
+          <Button variant="ghost" size="sm" onClick={onOpenTeam} className="hidden h-7 px-2 text-[11px] sm:inline-flex">
             {t('chatWorkspace.team')}
           </Button>
         </div>
-        <label
-          className="relative flex min-w-[220px] max-w-[360px] flex-1 cursor-pointer items-center gap-2 rounded-lg border border-edge/60 bg-inset px-2 py-1.5 text-left transition-[border-color,background,box-shadow] hover:border-edge-h hover:bg-panel/65 focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-[color:var(--th-selection-ring)] sm:flex-none"
-          title={selectedTargetLabel}
-        >
-          <span className="shrink-0 rounded-md border border-edge/55 bg-panel/80 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.08em] text-fg-5">
-            {selectedTargetTypeLabel}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12px] font-semibold text-fg-2">{selectedTargetLabel}</span>
-            <span className="block truncate text-[9.5px] font-semibold uppercase tracking-[0.08em] text-fg-5">{t('chatWorkspace.target')}</span>
-          </span>
-          <select
-            value={selectedTargetValue}
-            disabled={sending || targetValues.size === 0}
-            onChange={event => setSelectedTargetValue(event.target.value)}
-            className="absolute inset-0 cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
-            aria-label={t('chatWorkspace.target')}
-          >
-            {launchAgentOptions.length > 0 && (
-              <optgroup label={t('chatWorkspace.targetAgent')}>
-                {launchAgentOptions.map(item => (
-                  <option key={`agent:${item.agent}`} value={`agent:${item.agent}`}>
-                    {item.label || getAgentMeta(item.agent).shortLabel}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {launchAssistants.length > 0 && (
-              <optgroup label={t('chatWorkspace.targetAssistant')}>
-                {launchAssistants.map(item => (
-                  <option key={`assistant:${item.id}`} value={`assistant:${item.id}`}>
-                    {item.name}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {modelOptions.length > 0 && (
-              <optgroup label={t('chatWorkspace.targetModel')}>
-                {modelOptions.map(item => (
-                  <option key={`model:${item.agent}:${item.model}`} value={`model:${item.agent}:${encodeURIComponent(item.model)}`}>
-                    {item.label} · {item.detail || getAgentMeta(item.agent).shortLabel}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-fg-5" aria-hidden="true">
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-        </label>
       </div>
-      <div className="flex min-w-0 items-end gap-2 rounded-xl border border-control-border bg-control px-2 py-2 shadow-sm transition-colors focus-within:border-control-border-h focus-within:bg-control-h">
-        {selectedWorkspace && (
-          <button
-            type="button"
-            onClick={() => {
-              setInput('/');
-              window.requestAnimationFrame(() => textareaRef.current?.focus());
-            }}
-            className="mb-0.5 flex max-w-[230px] shrink-0 items-center gap-1.5 rounded-md border border-edge/55 bg-panel-alt px-2 py-1 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
-            title={selectedWorkspace.path}
-            aria-label={t('chatWorkspace.projectContext')}
-          >
-            <span className="shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-fg-5">
-              {t('chatWorkspace.projectContext')}
-            </span>
-            <span className="h-3 w-px shrink-0 bg-edge/65" aria-hidden="true" />
-            <span className="min-w-0 truncate">{selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}</span>
-            {workspaceHasProjectContext(selectedWorkspace) && (
-              <span className="shrink-0 rounded border border-primary/20 bg-primary/[0.08] px-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-primary">
-                ctx
+
+      <div className="rounded-xl border border-control-border bg-control shadow-[var(--th-composer-shadow)] transition-[border-color,box-shadow,background-color] focus-within:border-control-border-h focus-within:bg-control-h focus-within:shadow-[var(--th-composer-shadow-focus)]">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-edge/35 px-2 py-1.5">
+          {selectedWorkspace && (
+            <button
+              type="button"
+              onClick={() => {
+                setInput('/');
+                window.requestAnimationFrame(() => textareaRef.current?.focus());
+              }}
+              className="flex h-7 max-w-[280px] shrink-0 items-center gap-1.5 rounded-md border border-edge/55 bg-panel-alt px-2 text-[11px] font-semibold text-fg-3 transition hover:border-edge-h hover:bg-panel-h"
+              title={selectedWorkspace.path}
+              aria-label={t('chatWorkspace.projectContext')}
+            >
+              <span className="shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-fg-5">
+                {t('chatWorkspace.projectContext')}
               </span>
-            )}
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <span className="h-3 w-px shrink-0 bg-edge/65" aria-hidden="true" />
+              <span className="min-w-0 truncate">{selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}</span>
+              {selectedWorkspaceHasProjectContext && (
+                <span className="shrink-0 rounded border border-primary/20 bg-primary/[0.08] px-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-primary">
+                  ctx
+                </span>
+              )}
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-fg-5" aria-hidden="true">
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+          )}
+
+          <label
+            className="relative flex h-7 min-w-[180px] max-w-[360px] flex-1 cursor-pointer items-center gap-1.5 rounded-md border border-edge/55 bg-panel-alt px-2 text-left transition-[border-color,background,box-shadow] hover:border-edge-h hover:bg-panel-h focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-[color:var(--th-selection-ring)]"
+            title={selectedTargetLabel}
+          >
+            <span className="shrink-0 rounded border border-edge/55 bg-panel/80 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.08em] text-fg-5">
+              {selectedTargetTypeLabel}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-fg-2">{selectedTargetLabel}</span>
+            <select
+              value={selectedTargetValue}
+              disabled={sending || targetValues.size === 0}
+              onChange={event => setSelectedTargetValue(event.target.value)}
+              className="absolute inset-0 cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
+              aria-label={t('chatWorkspace.target')}
+            >
+              {launchAgentOptions.length > 0 && (
+                <optgroup label={t('chatWorkspace.targetAgent')}>
+                  {launchAgentOptions.map(item => (
+                    <option key={`agent:${item.agent}`} value={`agent:${item.agent}`}>
+                      {item.label || getAgentMeta(item.agent).shortLabel}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {launchAssistants.length > 0 && (
+                <optgroup label={t('chatWorkspace.targetAssistant')}>
+                  {launchAssistants.map(item => (
+                    <option key={`assistant:${item.id}`} value={`assistant:${item.id}`}>
+                      {item.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {modelOptions.length > 0 && (
+                <optgroup label={t('chatWorkspace.targetModel')}>
+                  {modelOptions.map(item => (
+                    <option key={`model:${item.agent}:${item.model}`} value={`model:${item.agent}:${encodeURIComponent(item.model)}`}>
+                      {item.label} · {item.detail || getAgentMeta(item.agent).shortLabel}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-fg-5" aria-hidden="true">
               <path d="m6 9 6 6 6-6" />
             </svg>
-          </button>
-        )}
-        <textarea
-          ref={textareaRef}
-          value={input}
-          rows={1}
-          disabled={sending}
-          onChange={event => setInput(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={t('chatWorkspace.launchPlaceholder')}
-          className="max-h-[112px] min-h-[34px] min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-[13px] leading-relaxed text-fg outline-none placeholder:text-fg-5/45 disabled:cursor-wait disabled:opacity-70"
-        />
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={!canSend}
-          onClick={() => void submit()}
-          className="mb-0.5 shrink-0"
-        >
-          {sending ? <Spinner className="h-3.5 w-3.5" /> : t('chatWorkspace.send')}
-        </Button>
-      </div>
-      {selectedWorkspace && (
-        <div className="mt-2 border-t border-edge/45 pt-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-fg-5">
-              {t('chatWorkspace.projectBrief')}
-            </span>
-            <span className={cn(
-              'shrink-0 rounded border px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em]',
-              selectedWorkspaceHasProjectContext
-                ? 'border-primary/25 bg-primary/[0.08] text-primary'
-                : 'border-edge/55 bg-inset text-fg-5',
-            )}>
-              {selectedWorkspaceHasProjectContext ? t('chatWorkspace.projectContextReady') : t('chatWorkspace.projectContextEmpty')}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-[11px] text-fg-5" title={selectedWorkspace.path}>
-              {selectedWorkspace.name || workspaceBaseName(selectedWorkspace.path)}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onKnowledge(selectedWorkspace.path)}
-              className="h-7 shrink-0 px-2 text-[11px]"
-            >
-              {t('chatWorkspace.openProjectMemory')}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onProjectContext(selectedWorkspace)}
-              className="h-7 shrink-0 px-2 text-[11px]"
-            >
-              {t('chatWorkspace.editProjectContext')}
-            </Button>
-          </div>
-          {projectContextItems.length > 0 && (
-            <div className="mt-2 grid gap-1.5 md:grid-cols-3">
-              {projectContextItems.map(([key, label, value]) => (
-                <div key={key} className="min-w-0 border-l border-edge/60 pl-2">
-                  <div className="text-[10px] font-semibold text-fg-5">{label}</div>
-                  <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-fg-3" title={String(value).trim()}>
-                    {String(value).trim()}
-                  </div>
-                </div>
-              ))}
-            </div>
+          </label>
+
+          {selectedWorkspace && (
+            <>
+              <button
+                type="button"
+                onClick={() => onProjectContext(selectedWorkspace)}
+                className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-[11px] font-medium text-fg-5 transition hover:bg-panel-h hover:text-fg-2"
+              >
+                {t('chatWorkspace.editProjectContext')}
+              </button>
+              <button
+                type="button"
+                onClick={() => onKnowledge(selectedWorkspace.path)}
+                className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-[11px] font-medium text-fg-5 transition hover:bg-panel-h hover:text-fg-2"
+              >
+                {t('chatWorkspace.openProjectMemory')}
+              </button>
+            </>
           )}
         </div>
-      )}
-      {selectedAssistant && (
-        <div className="mt-2 rounded-lg border border-edge/55 bg-inset/45 px-3 py-2">
-          <div className="flex min-w-0 items-start gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-fg-5">
-                  {t('chatWorkspace.assistantBrief')}
-                </span>
-                <span className="min-w-0 truncate text-[12px] font-semibold text-fg">{selectedAssistant.name}</span>
-              </div>
-              <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg-4">
-                {selectedAssistant.responsibility || t('chatWorkspace.assistantNoResponsibility')}
-              </div>
-              {selectedAssistant.preferredAgents?.length ? (
-                <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
-                  {selectedAssistant.preferredAgents.slice(0, 4).map(preferredAgent => (
-                    <span key={preferredAgent} className="inline-flex h-6 items-center gap-1.5 rounded-md border border-edge/55 bg-panel/70 px-1.5 text-[10px] font-semibold text-fg-5">
-                      <BrandIcon brand={preferredAgent} size={12} />
-                      <span>{getAgentMeta(preferredAgent).shortLabel}</span>
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onOpenAssistants(selectedAssistant.id)}
-              className="h-7 shrink-0 px-2 text-[11px]"
-            >
-              {t('chatWorkspace.manageAssistant')}
-            </Button>
-          </div>
+
+        <div className="flex min-w-0 items-end gap-2 px-2 py-2">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            rows={1}
+            disabled={sending}
+            onChange={event => setInput(event.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={t('chatWorkspace.launchPlaceholder')}
+            className="max-h-[112px] min-h-[38px] min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-[13.5px] leading-relaxed text-fg outline-none placeholder:text-fg-5/45 disabled:cursor-wait disabled:opacity-70"
+          />
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!canSend}
+            onClick={() => void submit()}
+            className="mb-0.5 h-8 shrink-0 px-3"
+          >
+            {sending ? <Spinner className="h-3.5 w-3.5" /> : t('chatWorkspace.send')}
+          </Button>
         </div>
-      )}
+      </div>
       {workspaceMenuOpen && (
         <div className="absolute left-3 right-3 top-[calc(100%-0.25rem)] z-50 max-h-[240px] overflow-y-auto rounded-xl border border-edge/75 bg-dropdown p-1 shadow-xl backdrop-blur-md">
           {filteredWorkspaces.length ? filteredWorkspaces.map((ws, index) => {
@@ -2064,6 +1988,11 @@ type OpenAgentTestChatState = {
   openSessionAgent?: string;
   openSessionId?: string;
   openSessionNonce?: number;
+  openSessionSearchQuery?: string;
+  openSessionSearchSnippet?: string;
+  openSessionSearchRole?: 'user' | 'assistant';
+  openSessionSearchTurnIndex?: number;
+  openSessionSearchTotalTurns?: number;
   openChatPanel?: ChatWorkspacePanelTarget;
   openChatPanelNonce?: number;
   openChatProjectPicker?: boolean;
@@ -2672,8 +2601,8 @@ function TaskBriefCard({
             {busyStage ? <Spinner className="h-3 w-3" /> : null}
             {runButtonLabel}
           </Button>
-          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onClose} title="Back to board" aria-label="Back to board">
-            Board
+          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onClose} title="Back to Work Items" aria-label="Back to Work Items">
+            Work Items
           </Button>
         </div>
       </div>
@@ -2758,7 +2687,7 @@ function TaskFocusEmptyWorkbench({
         ) : (
           <div className="rounded-xl border border-edge/60 bg-panel/80 px-5 py-8 text-center">
             <div className="text-[13px] font-semibold text-fg-3">Task not found</div>
-            <Button className="mt-4" size="sm" variant="outline" onClick={onClose}>Back to board</Button>
+            <Button className="mt-4" size="sm" variant="outline" onClick={onClose}>Back to Work Items</Button>
           </div>
         )}
       </div>
@@ -2785,6 +2714,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const locale = useStore(s => s.locale);
   const appState = useStore(s => s.state);
   const agentStatus = useStore(s => s.agentStatus);
+  const notificationPrefs = useMemo(
+    () => resolveNotificationPreferences(appState?.config?.notifications),
+    [appState?.config?.notifications],
+  );
   const runtimeWorkdir = useStore(s => s.state?.runtimeWorkdir ?? null);
   const toastSession = useStore(s => s.toast);
   const navigate = useNavigate();
@@ -3162,9 +3095,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
   }, []);
   const [recallScrollRequestBySlotKey, setRecallScrollRequestBySlotKey] = useState<Record<string, SessionPanelScrollRequest>>({});
+  const [searchContextBySlotKey, setSearchContextBySlotKey] = useState<Record<string, SessionPanelSearchContext>>({});
   const recallScrollNonceRef = useRef(0);
-  const requestRecallTurnScroll = useCallback((slot: SessionSlot, turnIndex: number, totalTurns?: number) => {
+  const requestRecallTurnScroll = useCallback((slot: SessionSlot, turnIndex: number, totalTurns?: number, highlight = false, targetRole: SessionPanelSearchContext['role'] = null) => {
     const parentKey = sessionSlotStorageKey(slot);
+    const scrollTargetRole = targetRole === 'user' || targetRole === 'assistant' ? targetRole : null;
     recallScrollNonceRef.current += 1;
     setRecallScrollRequestBySlotKey(prev => ({
       ...prev,
@@ -3172,8 +3107,23 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         turnIndex,
         totalTurns,
         nonce: recallScrollNonceRef.current,
+        highlight,
+        targetRole: scrollTargetRole,
       },
     }));
+  }, []);
+  const searchContextForSlot = useCallback(
+    (slot: Pick<SessionSlot, 'workdir' | 'agent' | 'sessionId'>) => searchContextBySlotKey[sessionSlotStorageKey(slot)] || null,
+    [searchContextBySlotKey],
+  );
+  const clearSearchContextForSlot = useCallback((slot: Pick<SessionSlot, 'workdir' | 'agent' | 'sessionId'>) => {
+    const key = sessionSlotStorageKey(slot);
+    setSearchContextBySlotKey(prev => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   }, []);
   const [multiRowHeightPx, setMultiRowHeightPxRaw] = useState<number | null>(readStoredMultiRowHeight);
   const setMultiRowHeightPx = useCallback((updater: number | null | ((prev: number | null) => number | null)) => {
@@ -3248,7 +3198,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     else if (panel === 'team') setTeamLibraryOpen(true);
     else if (panel === 'workflows') setWorkflowLibraryOpen(true);
     if (openProjectPicker) setChatProjectPickerNonce(navState.openChatProjectPickerNonce || Date.now());
-    navigate('/chat', { replace: true, state: null });
+    navigate('/chat-workspace', { replace: true, state: null });
   }, [active, location.state, mode, navigate, openAssistantLibrary, openMemoryLibrary]);
   const [quickTodoOpen, setQuickTodoOpen] = useState(false);
   const [editingTodoItem, setEditingTodoItem] = useState<TodoItem | null>(null);
@@ -3682,9 +3632,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         }
         return next;
       });
-      if (completionToast) toastSession(completionToast.message, completionToast.ok);
+      if (completionToast && agentCompletionNotificationEnabled(notificationPrefs, !completionToast.ok)) {
+        toastSession(completionToast.message, completionToast.ok);
+      }
       if (celebrationKeys.size) triggerSessionCompletionCelebration(celebrationKeys);
-    }, [sessionCompletionToastMessage, toastSession, triggerSessionCompletionCelebration]),
+    }, [notificationPrefs, sessionCompletionToastMessage, toastSession, triggerSessionCompletionCelebration]),
   );
 
   // Refresh all workspaces after WS reconnect (covers missed events)
@@ -4695,12 +4647,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setTaskWorkbenchLoading(true);
     try {
       const res = await api.getProTaskWorkbench(taskId);
-      if (!res.ok || !res.workbench) throw new Error(res.error || 'Failed to load task workbench');
+      if (!res.ok || !res.workbench) throw new Error(res.error || 'Failed to load Work Item context');
       setTaskWorkbench(res.workbench);
       if (opts.openActiveRun && res.workbench.activeStageRun) openStageRunSession(res.workbench.activeStageRun);
       return res.workbench;
     } catch (err: any) {
-      toastSession(err?.message || 'Failed to load task workbench', false);
+      toastSession(err?.message || 'Failed to load Work Item context', false);
       setTaskWorkbench(null);
       return null;
     } finally {
@@ -4719,12 +4671,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setTaskWorkbenchLoading(true);
     void api.getProTaskWorkbench(taskFocusId).then(res => {
       if (cancelled) return;
-      if (!res.ok || !res.workbench) throw new Error(res.error || 'Failed to load task workbench');
+      if (!res.ok || !res.workbench) throw new Error(res.error || 'Failed to load Work Item context');
       setTaskWorkbench(res.workbench);
       if (res.workbench.activeStageRun) openStageRunSession(res.workbench.activeStageRun);
     }).catch((err: any) => {
       if (!cancelled) {
-        toastSession(err?.message || 'Failed to load task workbench', false);
+        toastSession(err?.message || 'Failed to load Work Item context', false);
         setTaskWorkbench(null);
       }
     }).finally(() => {
@@ -4757,7 +4709,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [taskFocusId]);
 
   const closeTaskFocusWorkbench = useCallback(() => {
-    navigate('/tasks', { replace: false });
+    navigate('/work-items', { replace: false });
   }, [navigate]);
 
   const startTaskStage = useCallback(async (stage: ProTaskStage) => {
@@ -5135,6 +5087,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setQuickTodoImages([]);
     setQuickTodoOpen(true);
   }, []);
+  const openWorkIntakeCenter = useCallback((event?: ReactMouseEvent<HTMLButtonElement>) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    setQuickTodoOpen(false);
+    setTodoModalOpen(true);
+  }, []);
 
   const closeQuickTodo = useCallback(() => {
     setQuickTodoOpen(false);
@@ -5178,7 +5136,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         todoIds: ids,
         workdir: todoItems.find(item => ids.includes(item.id) && item.source?.workdir)?.source?.workdir || runtimeWorkdir,
       });
-      if (!res.ok) throw new Error(res.error || 'Failed to create todo chat');
+      if (!res.ok) throw new Error(res.error || 'Failed to start chat from inbox item');
       setTodoItems(prev => prev.filter(item => !ids.includes(item.id)));
       setTodoModalOpen(false);
       const session = parseSessionKeyValue(res.queued?.sessionKey);
@@ -5194,7 +5152,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       toastSession(t('todo.chatCreated'));
       void refreshTodos();
     } catch (err: any) {
-      toastSession(err?.message || 'Failed to create todo chat', false);
+      toastSession(err?.message || 'Failed to start chat from inbox item', false);
     } finally {
       setTodoCreating(false);
     }
@@ -5207,29 +5165,36 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (!selectedTodos.length) return;
     setTodoCreating(true);
     try {
+      let createdTaskId = '';
       for (const item of selectedTodos) {
-        const description = item.body || item.source?.quote || item.title;
+        const description = todoToWorkItemDescription(item) || item.body || item.source?.quote || item.title;
         const result = await api.createProTask({
           title: item.title,
           description,
-          kind: 'manual',
+          kind: 'todo',
           status: 'backlog',
+          spaceId: 'personal',
+          origin: { type: 'todo', key: item.id },
           workdir: item.source?.workdir || runtimeWorkdir || undefined,
         });
-        if (!result.ok || !result.task) throw new Error(result.error || 'Failed to create task from todo');
+        if (!result.ok || !result.task) throw new Error(result.error || 'Failed to create work item from inbox item');
+        createdTaskId ||= result.task.id;
         const archive = await api.updateProTodo(item.id, { status: 'archived' });
-        if (!archive.ok) throw new Error(archive.error || 'Failed to archive todo');
+        if (!archive.ok) throw new Error(archive.error || 'Failed to archive inbox item');
       }
       setTodoItems(prev => prev.filter(item => !ids.includes(item.id)));
       setTodoModalOpen(false);
-      toastSession(selectedTodos.length === 1 ? 'Task created from todo' : `${selectedTodos.length} tasks created from todos`);
+      toastSession(selectedTodos.length === 1 ? 'Work item created from inbox item' : `${selectedTodos.length} work items created from inbox items`);
+      if (selectedTodos.length === 1 && createdTaskId) {
+        navigate(`/work-items?task=${encodeURIComponent(createdTaskId)}`);
+      }
       void refreshTodos();
     } catch (err: any) {
-      toastSession(err?.message || 'Failed to create task from todo', false);
+      toastSession(err?.message || 'Failed to create work item from inbox item', false);
     } finally {
       setTodoCreating(false);
     }
-  }, [refreshTodos, runtimeWorkdir, toastSession, todoCreating, todoItems]);
+  }, [navigate, refreshTodos, runtimeWorkdir, toastSession, todoCreating, todoItems]);
 
   const handleAddTodosToDaily = useCallback(async (todoIds: string[]) => {
     const ids = Array.from(new Set(todoIds.filter(Boolean)));
@@ -5241,14 +5206,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       const date = localDateInputValue();
       for (const item of selectedTodos) {
         const result = await api.addTodoToDaily({ date, todoId: item.id });
-        if (!result.ok || !result.item || !result.taskId) throw new Error(result.error || 'Failed to add todo to daily');
+        if (!result.ok || !result.item || !result.taskId) throw new Error(result.error || 'Failed to plan inbox item');
       }
       setTodoItems(prev => prev.filter(item => !ids.includes(item.id)));
       setTodoModalOpen(false);
-      toastSession(selectedTodos.length === 1 ? 'Todo added to daily' : `${selectedTodos.length} todos added to daily`);
+      toastSession(selectedTodos.length === 1 ? 'Inbox item planned for today' : `${selectedTodos.length} inbox items planned for today`);
       void refreshTodos();
     } catch (err: any) {
-      toastSession(err?.message || 'Failed to add todo to daily', false);
+      toastSession(err?.message || 'Failed to plan inbox item', false);
     } finally {
       setTodoCreating(false);
     }
@@ -5258,11 +5223,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     if (!todoId) return;
     try {
       const res = await api.deleteProTodo(todoId);
-      if (!res.ok) throw new Error(res.error || 'Failed to delete todo');
+      if (!res.ok) throw new Error(res.error || 'Failed to delete inbox item');
       setTodoItems(prev => prev.filter(item => item.id !== todoId));
       toastSession(t('todo.deleted'));
     } catch (err: any) {
-      toastSession(err?.message || 'Failed to delete todo', false);
+      toastSession(err?.message || 'Failed to delete inbox item', false);
     }
   }, [t, toastSession]);
 
@@ -5275,11 +5240,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     ))));
     try {
       const res = await api.updateProTodo(item.id, { status: nextStatus });
-      if (!res.ok || !res.item) throw new Error(res.error || 'Failed to update todo');
+      if (!res.ok || !res.item) throw new Error(res.error || 'Failed to update inbox item');
       setTodoItems(prev => orderTodoItems(prev.map(current => current.id === item.id ? res.item! : current)));
     } catch (err: any) {
       setTodoItems(prev => orderTodoItems(prev.map(current => current.id === item.id ? item : current)));
-      toastSession(err?.message || 'Failed to update todo', false);
+      toastSession(err?.message || 'Failed to update inbox item', false);
     }
   }, [toastSession]);
 
@@ -5366,11 +5331,21 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   useEffect(() => {
     if (!active || !initializedRef.current) return;
     const navState = location.state as OpenAgentTestChatState | null;
-    const workdir = typeof navState?.openSessionWorkdir === 'string' ? navState.openSessionWorkdir : '';
-    const agent = typeof navState?.openSessionAgent === 'string' ? navState.openSessionAgent : '';
-    const sessionId = typeof navState?.openSessionId === 'string' ? navState.openSessionId : '';
+    const navParams = new URLSearchParams(location.search);
+    const parseNavNumber = (value: unknown): number | null => {
+      if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+      if (typeof value !== 'string' || !value.trim()) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : null;
+    };
+    const paramWorkdir = navParams.get('workdir') || '';
+    const paramAgent = navParams.get('agent') || '';
+    const paramSessionId = navParams.get('session') || '';
+    const workdir = typeof navState?.openSessionWorkdir === 'string' && navState.openSessionWorkdir ? navState.openSessionWorkdir : paramWorkdir;
+    const agent = typeof navState?.openSessionAgent === 'string' && navState.openSessionAgent ? navState.openSessionAgent : paramAgent;
+    const sessionId = typeof navState?.openSessionId === 'string' && navState.openSessionId ? navState.openSessionId : paramSessionId;
     if (!workdir || !agent || !sessionId) return;
-    const key = `${workdir}:${agent}:${sessionId}:${navState?.openSessionNonce || ''}`;
+    const key = `${workdir}:${agent}:${sessionId}:${navState?.openSessionNonce || navParams.get('nonce') || location.search || ''}`;
     if (handledOpenSessionNavRef.current === key) return;
     const loaded = Object.prototype.hasOwnProperty.call(sessionsMap, workdir);
     if (!loaded) {
@@ -5379,15 +5354,69 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
     const target = (sessionsMap[workdir] || []).find(session => session.agent === agent && session.sessionId === sessionId);
     handledOpenSessionNavRef.current = key;
+    const searchQuery = typeof navState?.openSessionSearchQuery === 'string' && navState.openSessionSearchQuery.trim()
+      ? navState.openSessionSearchQuery.trim()
+      : (navParams.get('search') || '').trim();
+    const searchSnippet = typeof navState?.openSessionSearchSnippet === 'string' && navState.openSessionSearchSnippet.trim()
+      ? navState.openSessionSearchSnippet.trim()
+      : (navParams.get('snippet') || '').trim();
+    const paramRole = navParams.get('role');
+    const searchRole = navState?.openSessionSearchRole === 'user' || navState?.openSessionSearchRole === 'assistant'
+      ? navState.openSessionSearchRole
+      : paramRole === 'user' || paramRole === 'assistant'
+        ? paramRole
+      : null;
+    const searchTurnIndex = parseNavNumber(navState?.openSessionSearchTurnIndex ?? navParams.get('turn'));
+    const searchTotalTurns = parseNavNumber(navState?.openSessionSearchTotalTurns ?? navParams.get('total'));
+    const shouldFocusFromSearch = !!searchQuery;
+    const existingOpenIndex = openSessionsRef.current.findIndex(slot => (
+      slot.workdir === workdir && slot.agent === agent && slot.sessionId === sessionId
+    ));
+    const focusSlotForSearch: SessionSlot | null = shouldFocusFromSearch
+      ? existingOpenIndex >= 0
+        ? openSessionsRef.current[existingOpenIndex]
+        : { workdir, agent, sessionId, mountKey: nextMountKey() }
+      : null;
     if (target) {
-      handleSelectSession(target, workdir);
+      if (focusSlotForSearch) {
+        warmSession(target, workdir);
+        markSessionReadOnOpen(target, workdir);
+        setShowNewSession(null);
+        setSelectedSession(focusSlotForSearch);
+      } else {
+        handleSelectSession(target, workdir);
+      }
     } else {
       warmSession({ agent, sessionId, runState: 'running' }, workdir);
       setShowNewSession(null);
-      setSelectedSession({ agent, sessionId, workdir, mountKey: nextMountKey() });
+      setSelectedSession(focusSlotForSearch || { agent, sessionId, workdir, mountKey: nextMountKey() });
     }
-    navigate('/chat', { replace: true });
-  }, [active, handleSelectSession, loadSessionsForWorkspace, loadingMap, location.state, navigate, sessionsMap, setSelectedSession, setShowNewSession, warmSession]);
+    const slotKey = sessionSlotStorageKey({ workdir, agent, sessionId });
+    setSearchContextBySlotKey(prev => {
+      if (searchQuery) {
+        return {
+          ...prev,
+          [slotKey]: {
+            query: searchQuery,
+            snippet: searchSnippet || null,
+            role: searchRole,
+            nonce: Date.now(),
+            targetTurnIndex: searchTurnIndex,
+            targetTotalTurns: searchTotalTurns,
+          },
+        };
+      }
+      if (!prev[slotKey]) return prev;
+      const next = { ...prev };
+      delete next[slotKey];
+      return next;
+    });
+    if (focusSlotForSearch && searchTurnIndex !== null) {
+      requestRecallTurnScroll(focusSlotForSearch, searchTurnIndex, searchTotalTurns ?? undefined, true, searchRole);
+    }
+    if (focusSlotForSearch) setWorkspaceSidebarCollapsed(true);
+    navigate('/chat-workspace', { replace: true });
+  }, [active, handleSelectSession, loadSessionsForWorkspace, loadingMap, location.search, location.state, markSessionReadOnOpen, navigate, requestRecallTurnScroll, sessionsMap, setSelectedSession, setShowNewSession, setWorkspaceSidebarCollapsed, warmSession]);
 
   const openSidebarSessionFloating = useCallback((session: SessionInfo, workdir: string) => {
     const agent = session.agent || '';
@@ -6324,7 +6353,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const revealWorkspaceSidebar = useCallback(() => {
     setWorkspaceSidebarCollapsed(false);
-    navigate('/chat', { state: { openChatProjectPicker: true, openChatProjectPickerNonce: Date.now() } });
+    navigate('/chat-workspace', { state: { openChatProjectPicker: true, openChatProjectPickerNonce: Date.now() } });
   }, [navigate, setWorkspaceSidebarCollapsed]);
 
   const workspaceSidebarToggleAction = active && mode === 'workspace' && workspaceSidebarCollapsed && workspaceSidebarToggleHost
@@ -6362,9 +6391,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => setTodoModalOpen(true)}
+          onClick={openWorkIntakeCenter}
           title={t('todo.workspaceTitle')}
           aria-label={t('todo.workspaceTitle')}
+          data-testid="open-work-intake"
           className="group relative !h-8 !w-8 overflow-visible"
         >
           <TodoGlyph className="h-3.5 w-3.5" />
@@ -6426,6 +6456,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               onCreateChat={(ids) => void handleCreateTodoChat(ids)}
               onCreateTask={(ids) => void handleCreateTasksFromTodos(ids)}
               onCreateDaily={(ids) => void handleAddTodosToDaily(ids)}
+              onOpenLinkedChat={(item) => {
+                if (!item.linkedChat) return;
+                setTodoModalOpen(false);
+                window.dispatchEvent(new CustomEvent(OPEN_SESSION_REQUEST_EVENT, {
+                  detail: {
+                    workdir: item.linkedChat.workdir,
+                    agent: item.linkedChat.agent,
+                    sessionId: item.linkedChat.sessionId,
+                    archiveOnly: false,
+                  },
+                }));
+              }}
               onToggleDone={(item) => void handleToggleTodoDone(item)}
               onDelete={(id) => void handleDeleteTodo(id)}
               t={t}
@@ -7102,6 +7144,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const chatWorkspaceFocusWorkspaceName = chatWorkspaceFocusSlot
     ? workspaces.find(ws => ws.path === chatWorkspaceFocusSlot.workdir)?.name || workspaceBaseName(chatWorkspaceFocusSlot.workdir)
     : '';
+  const chatWorkspaceSearchFocus = mode === 'chat-workspace'
+    && !!chatWorkspaceFocusSlot
+    && !!searchContextBySlotKey[sessionSlotStorageKey(chatWorkspaceFocusSlot)];
+  const chatWorkspaceFocusScrollRequest = chatWorkspaceFocusSlot
+    ? recallScrollRequestBySlotKey[sessionSlotStorageKey(chatWorkspaceFocusSlot)] || null
+    : null;
   const chatWorkspaceOpenWindowItems = openSessions.map((slot, slotIdx) => {
     const session = resolveSlotInfo(slot);
     return {
@@ -7319,6 +7367,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     workdir={focusSlot.workdir}
                     active={active && !inboxOpen}
                     readOnly={focusSlot.archiveOnly === true}
+                    searchContext={searchContextForSlot(focusSlot)}
+                    onSearchContextClear={() => clearSearchContextForSlot(focusSlot)}
                     onSessionChange={focusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
                     onMultiSessionChange={focusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
                     onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, focusSlot.workdir, target)}
@@ -7597,35 +7647,29 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         )}
       >
         {mode === 'chat-workspace' ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-3">
-            <ChatWorkspaceLauncher
-              workspaces={workspaces}
-              defaultWorkdir={chatWorkspaceNewSessionWorkdir}
-              agent={chatWorkspaceDefaultAgent}
-              agentOptions={chatWorkspaceAgentOptions}
-              modelOptions={chatWorkspaceModelOptions}
-              assistants={chatAssistants}
-              onSubmit={handleChatWorkspaceLaunch}
-              onError={(message) => toastSession(message, false)}
-              onProjectContext={openProjectContextModal}
-              onKnowledge={openWorkspaceKnowledgeModal}
-              onOpenAssistants={openAssistantLibrary}
-              onOpenMemory={() => openMemoryLibrary()}
-              onOpenTeam={() => setTeamLibraryOpen(true)}
-              onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
-              targetAssistantRequest={chatTargetAssistantRequest}
-              projectPickerNonce={chatProjectPickerNonce}
-              t={t}
-            />
-            <ChatWorkspaceSchedulesStrip
-              automations={chatWorkspaceAutomations}
-              loading={chatWorkspaceAutomationsLoading}
-              runningId={chatWorkspaceAutomationRunningId}
-              onRun={handleChatWorkspaceRunAutomation}
-              onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
-              t={t}
-            />
-            <section className="shrink-0 rounded-xl border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md">
+          <div className={cn('flex min-h-0 flex-1 flex-col', chatWorkspaceSearchFocus ? 'gap-0' : 'gap-3')}>
+            {!chatWorkspaceSearchFocus && (
+              <ChatWorkspaceLauncher
+                workspaces={workspaces}
+                defaultWorkdir={chatWorkspaceNewSessionWorkdir}
+                agent={chatWorkspaceDefaultAgent}
+                agentOptions={chatWorkspaceAgentOptions}
+                modelOptions={chatWorkspaceModelOptions}
+                assistants={chatAssistants}
+                onSubmit={handleChatWorkspaceLaunch}
+                onError={(message) => toastSession(message, false)}
+                onProjectContext={openProjectContextModal}
+                onKnowledge={openWorkspaceKnowledgeModal}
+                onOpenAssistants={openAssistantLibrary}
+                onOpenMemory={() => openMemoryLibrary()}
+                onOpenTeam={() => setTeamLibraryOpen(true)}
+                onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
+                targetAssistantRequest={chatTargetAssistantRequest}
+                projectPickerNonce={chatProjectPickerNonce}
+                t={t}
+              />
+            )}
+            {!chatWorkspaceSearchFocus && <section className="shrink-0 rounded-xl border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md">
               <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-[12px] font-semibold text-fg">{t('chatWorkspace.workingItems')}</div>
@@ -7680,8 +7724,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                   {t('chatWorkspace.emptyItems')}
                 </div>
               )}
-            </section>
-            <section className="min-h-0 flex-1 overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]">
+            </section>}
+            <section className={cn(
+              'min-h-0 flex-1 overflow-hidden border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]',
+              chatWorkspaceSearchFocus ? 'rounded-none md:rounded-[18px]' : 'rounded-[18px]',
+            )}>
               {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (() => {
                 const projectReference = resolveProjectReferenceForSession(chatWorkspaceFocusSlot, chatWorkspaceFocusInfo);
                 return (
@@ -7692,6 +7739,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       workdir={chatWorkspaceFocusSlot.workdir}
                       active={active && !inboxOpen}
                       readOnly={chatWorkspaceFocusSlot.archiveOnly === true}
+                      searchContext={searchContextForSlot(chatWorkspaceFocusSlot)}
+                      onSearchContextClear={() => clearSearchContextForSlot(chatWorkspaceFocusSlot)}
                       referenceContextPrompt={projectReference?.prompt || null}
                       referenceContextLabel={projectReference?.label || null}
                       referenceContextProject={projectReference?.project || null}
@@ -7709,6 +7758,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       onCreateSideChatFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(activeSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, request)}
                       onCreateTodoFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(chatWorkspaceFocusSlot, request)}
                       onCreateReviewCommentFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(chatWorkspaceFocusSlot, request)}
+                      scrollToTurnRequest={chatWorkspaceFocusScrollRequest}
                       initialPendingPrompt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingPrompt : null}
                       initialPendingImageUrls={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingImageUrls : undefined}
                       initialPendingCreatedAt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingCreatedAt : null}
@@ -8620,15 +8670,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                         <Suspense fallback={<div className="h-full" />}>
                           <SessionPanel
                             key={slot.mountKey}
-	                            session={info}
-	                            workdir={slot.workdir}
-	                            active={active && isActive && !inboxOpen}
-	                            readOnly={slot.archiveOnly === true}
-	                            compact={isMultiWidget}
-	                            transcriptHeader={slotTaskBrief}
-	                            initialDraftPrompt={parentReference?.draftPrompt || null}
-	                            referenceContextPrompt={parentReference?.prompt || projectReference?.prompt || null}
-	                            referenceContextLabel={parentReference?.label || projectReference?.label || null}
+                            session={info}
+                            workdir={slot.workdir}
+                            active={active && isActive && !inboxOpen}
+                            readOnly={slot.archiveOnly === true}
+                            compact={isMultiWidget}
+                            transcriptHeader={slotTaskBrief}
+                            searchContext={searchContextForSlot(slot)}
+                            onSearchContextClear={() => clearSearchContextForSlot(slot)}
+                            initialDraftPrompt={parentReference?.draftPrompt || null}
+                            referenceContextPrompt={parentReference?.prompt || projectReference?.prompt || null}
+                            referenceContextLabel={parentReference?.label || projectReference?.label || null}
                               referenceContextProject={parentReference ? null : projectReference?.project || null}
 	                            onReferenceContextClear={parentReference ? () => {
 	                              setParentReferenceByKey(prev => {
@@ -9039,13 +9091,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 	                          <Suspense fallback={<div className="h-full" />}>
 	                            <SessionPanel
 	                              key={floatingSlot.mountKey}
-		                              session={floatingInfo}
-		                              workdir={floatingSlot.workdir}
-		                              active={active && !item.hidden && !inboxOpen}
-                                  referenceContextPrompt={floatingProjectReference?.prompt || null}
-                                  referenceContextLabel={floatingProjectReference?.label || null}
-                                  referenceContextProject={floatingProjectReference?.project || null}
-                                  onReferenceContextClear={floatingProjectReference ? () => {
+                              session={floatingInfo}
+                              workdir={floatingSlot.workdir}
+                              active={active && !item.hidden && !inboxOpen}
+                              searchContext={searchContextForSlot(floatingSlot)}
+                              onSearchContextClear={() => clearSearchContextForSlot(floatingSlot)}
+                              referenceContextPrompt={floatingProjectReference?.prompt || null}
+                              referenceContextLabel={floatingProjectReference?.label || null}
+                              referenceContextProject={floatingProjectReference?.project || null}
+                              onReferenceContextClear={floatingProjectReference ? () => {
                                     markProjectContextAppliedLocal(
                                       floatingSlot.workdir,
                                       floatingSlot.agent,
@@ -10595,7 +10649,7 @@ function TodoEditorModal({
                   <button
                     type="button"
                     onClick={() => onRemoveImage(image.id)}
-                    className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white opacity-0 transition hover:bg-black/75 group-hover:opacity-100 focus-visible:opacity-100"
+                    className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white opacity-100 transition hover:bg-black/75 focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                     aria-label={t('hub.removeImage')}
                   >
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -10621,6 +10675,8 @@ function TodoEditorModal({
   );
 }
 
+type TodoCenterStatusFilter = 'all' | 'open' | 'chat-created' | 'done';
+
 function TodoCenterModal({
   items,
   loading,
@@ -10631,6 +10687,7 @@ function TodoCenterModal({
   onCreateChat,
   onCreateTask,
   onCreateDaily,
+  onOpenLinkedChat,
   onToggleDone,
   onDelete,
   t,
@@ -10644,14 +10701,23 @@ function TodoCenterModal({
   onCreateChat: (todoIds: string[]) => void;
   onCreateTask: (todoIds: string[]) => void;
   onCreateDaily: (todoIds: string[]) => void;
+  onOpenLinkedChat: (item: TodoItem) => void;
   onToggleDone: (item: TodoItem) => void;
   onDelete: (todoId: string) => void;
   t: (key: string) => string;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [menu, setMenu] = useState<null | { itemId: string; anchor: DOMRect }>(null);
+  const [statusFilter, setStatusFilter] = useState<TodoCenterStatusFilter>('all');
+  const filterStripRef = useRef<HTMLDivElement | null>(null);
+  const filterButtonRefs = useRef<Partial<Record<TodoCenterStatusFilter, HTMLButtonElement | null>>>({});
   const visibleItems = orderTodoItems(items.filter(item => item.status !== 'archived'));
   const openItems = visibleItems.filter(item => item.status === 'open');
+  const chatCreatedItems = visibleItems.filter(item => item.status === 'chat-created');
+  const doneItems = visibleItems.filter(item => item.status === 'done');
+  const filteredItems = statusFilter === 'all'
+    ? visibleItems
+    : visibleItems.filter(item => item.status === statusFilter);
   const openItemIds = useMemo(() => new Set(openItems.map(item => item.id)), [openItems]);
   const closeMenu = useCallback(() => setMenu(null), []);
   const openMenu = useCallback((event: ReactMouseEvent<HTMLButtonElement>, itemId: string) => {
@@ -10666,6 +10732,12 @@ function TodoCenterModal({
   useEffect(() => {
     setSelectedIds(prev => prev.filter(id => openItemIds.has(id)));
   }, [openItemIds]);
+  useEffect(() => {
+    const strip = filterStripRef.current;
+    const button = filterButtonRefs.current[statusFilter];
+    if (!strip || !button || strip.scrollWidth <= strip.clientWidth + 1) return;
+    button.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+  }, [statusFilter]);
   const toggleSelected = useCallback((todoId: string) => {
     setSelectedIds(prev => prev.includes(todoId) ? prev.filter(id => id !== todoId) : [...prev, todoId]);
   }, []);
@@ -10675,15 +10747,22 @@ function TodoCenterModal({
   }, [onToggleDone]);
   const chatTodoIds = selectedIds.filter(id => openItemIds.has(id));
   const menuItem = menu ? visibleItems.find(item => item.id === menu.itemId) : null;
+  const intakeStats: Array<{ key: TodoCenterStatusFilter; label: string; value: number; tone: string }> = [
+    { key: 'all', label: t('todo.allCount'), value: visibleItems.length, tone: 'text-fg' },
+    { key: 'open', label: t('todo.openCount'), value: openItems.length, tone: 'text-primary' },
+    { key: 'chat-created', label: t('todo.consumedCount'), value: chatCreatedItems.length, tone: 'text-fg-3' },
+    { key: 'done', label: t('todo.doneCount'), value: doneItems.length, tone: 'text-fg-4' },
+  ];
 
   return (
-    <div className="fixed inset-0 z-[230] flex items-center justify-center bg-black/24 px-4 py-8 backdrop-blur-[2px]" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[230] flex items-end justify-center bg-black/24 px-2 py-2 backdrop-blur-[2px] sm:items-center sm:px-4 sm:py-8" onMouseDown={onClose}>
       <div
-        className="flex max-h-[min(720px,calc(100vh-64px))] w-full max-w-[720px] flex-col overflow-hidden rounded-2xl border border-edge-h bg-panel shadow-[0_24px_72px_rgba(15,23,42,0.24)]"
+        className="flex max-h-[calc(100dvh-16px)] w-full max-w-[720px] flex-col overflow-hidden rounded-t-2xl border border-edge-h bg-panel pb-[env(safe-area-inset-bottom)] shadow-[0_24px_72px_rgba(15,23,42,0.24)] sm:max-h-[min(720px,calc(100dvh-64px))] sm:rounded-2xl sm:pb-0"
         onMouseDown={event => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={t('todo.workspaceTitle')}
+        data-testid="work-intake-modal"
       >
         <div className="shrink-0 border-b border-edge/45 px-4 py-3">
           <div className="flex items-start gap-3">
@@ -10696,6 +10775,33 @@ function TodoCenterModal({
                 <Badge variant="muted" className="h-5 px-1.5 text-[10px]">{openItems.length}</Badge>
               </div>
               <div className="mt-0.5 text-[12px] text-fg-5">{t('todo.modalSubtitle')}</div>
+              <div className="relative mt-2 max-w-[520px]">
+                <div
+                  ref={filterStripRef}
+                  className="flex snap-x snap-mandatory scroll-px-2 overflow-x-auto rounded-lg border border-edge/55 bg-inset/45 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid sm:grid-cols-4 sm:overflow-hidden"
+                  data-testid="work-intake-filter-strip"
+                >
+                  {intakeStats.map((stat, index) => (
+                    <button
+                      key={stat.key}
+                      ref={node => { filterButtonRefs.current[stat.key] = node; }}
+                      type="button"
+                      onClick={() => setStatusFilter(stat.key)}
+                      className={cn(
+                        'min-w-[96px] snap-start scroll-ml-2 px-2 py-1.5 text-left transition hover:bg-panel-h focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--th-selection-ring)] sm:min-w-0 sm:snap-none',
+                        index > 0 && 'border-l border-edge/45',
+                        statusFilter === stat.key && 'bg-primary/[0.07]',
+                      )}
+                      data-testid={`work-intake-filter-${stat.key}`}
+                    >
+                      <div className={cn('text-[13px] font-semibold tabular-nums', stat.tone)}>{stat.value}</div>
+                      <div className="truncate text-[9.5px] font-semibold uppercase tracking-[0.1em] text-fg-5">{stat.label}</div>
+                    </button>
+                  ))}
+                </div>
+                <div className="pointer-events-none absolute inset-y-px left-px w-5 rounded-l-lg bg-gradient-to-r from-[var(--th-panel)] to-transparent sm:hidden" />
+                <div className="pointer-events-none absolute inset-y-px right-px w-5 rounded-r-lg bg-gradient-to-l from-[var(--th-panel)] to-transparent sm:hidden" />
+              </div>
             </div>
             <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-fg-5 transition hover:bg-panel-h hover:text-fg" aria-label={t('common.close')}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
@@ -10703,14 +10809,18 @@ function TodoCenterModal({
               </svg>
             </button>
           </div>
-          <div className="mt-3 flex flex-wrap justify-end gap-2">
-            <Button variant="secondary" size="sm" onClick={onCreateTodo}>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+            <Button variant="secondary" size="sm" className="min-w-0 justify-center" onClick={onCreateTodo} data-testid="work-intake-capture">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
               </svg>
               {t('todo.createTodo')}
             </Button>
-            <Button variant="primary" size="sm" disabled={!chatTodoIds.length || creating} onClick={() => onCreateChat(chatTodoIds)}>
+            <Button variant="primary" size="sm" className="min-w-0 justify-center" disabled={!chatTodoIds.length || creating} onClick={() => onCreateTask(chatTodoIds)} data-testid="work-intake-create-work-item">
+              {creating ? <Spinner className="h-3 w-3" /> : <TodoGlyph className="h-3.5 w-3.5" />}
+              {t('todo.createWorkItem')}
+            </Button>
+            <Button variant="outline" size="sm" className="min-w-0 justify-center" disabled={!chatTodoIds.length || creating} onClick={() => onCreateChat(chatTodoIds)} data-testid="work-intake-start-chat">
               {creating ? <Spinner className="h-3 w-3" /> : (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                   <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
@@ -10718,16 +10828,12 @@ function TodoCenterModal({
               )}
               {t('todo.createChat')}
             </Button>
-            <Button variant="outline" size="sm" disabled={!chatTodoIds.length || creating} onClick={() => onCreateTask(chatTodoIds)}>
-              <TodoGlyph className="h-3.5 w-3.5" />
-              Create task
-            </Button>
-            <Button variant="outline" size="sm" disabled={!chatTodoIds.length || creating} onClick={() => onCreateDaily(chatTodoIds)}>
+            <Button variant="ghost" size="sm" className="min-w-0 justify-center" disabled={!chatTodoIds.length || creating} onClick={() => onCreateDaily(chatTodoIds)} data-testid="work-intake-plan-today">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                 <rect x="3" y="4" width="18" height="17" rx="2" />
                 <path d="M8 2v4" /><path d="M16 2v4" /><path d="M3 10h18" />
               </svg>
-              Add to daily
+              {t('todo.planToday')}
             </Button>
           </div>
         </div>
@@ -10736,69 +10842,94 @@ function TodoCenterModal({
           <div className="space-y-2">
             {loading && !visibleItems.length ? (
               <div className="flex h-32 items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>
-            ) : visibleItems.length === 0 ? (
+            ) : filteredItems.length === 0 ? (
               <div className="rounded-xl border border-dashed border-edge/45 px-4 py-12 text-center text-[13px] text-fg-5">{t('todo.empty')}</div>
-            ) : visibleItems.map(item => {
+            ) : filteredItems.map(item => {
               const completed = item.status !== 'open';
+              const chatCreated = item.status === 'chat-created';
+              const done = item.status === 'done';
+              const statusLabel = item.status === 'chat-created'
+                ? t('todo.statusChatCreated')
+                : item.status === 'done'
+                  ? t('todo.statusDone')
+                  : t('todo.statusOpen');
               const itemTimeSource = item.createdAt || item.updatedAt;
               const itemTime = fmtTime(itemTimeSource);
-              const itemTitle = [
-                item.title,
-                item.body && item.body !== item.title ? item.body : '',
-                item.source?.quote || '',
-              ].filter(Boolean).join('\n\n');
               return (
               <div key={item.id} className={cn(
                 'group rounded-lg border px-3 py-2 transition hover:border-edge/80 hover:bg-panel-alt',
-                selectedIds.includes(item.id) ? 'border-primary/45 bg-primary/5' : completed ? 'border-edge/35 bg-panel-alt/30 opacity-75' : 'border-edge/45 bg-panel-alt/55',
+                selectedIds.includes(item.id) ? 'border-primary/45 bg-primary/5' : completed ? 'border-edge/35 bg-panel-alt/30 opacity-85' : 'border-edge/45 bg-panel-alt/55',
               )}>
-                <div className="flex min-w-0 items-center gap-2">
+                <div className="flex min-w-0 items-start gap-2">
                   <input
                     type="checkbox"
                     checked={selectedIds.includes(item.id)}
                     disabled={completed}
                     onChange={() => toggleSelected(item.id)}
-                    className="h-4 w-4 shrink-0 rounded border-edge disabled:cursor-not-allowed disabled:opacity-35"
+                    className="mt-1 h-4 w-4 shrink-0 rounded border-edge disabled:cursor-not-allowed disabled:opacity-35"
                     aria-label={t('todo.selectForChat')}
                   />
-                  <div className="min-w-0 flex-1 text-left">
-                    <div
-                      className={cn('truncate text-[13px] font-medium text-fg-3 group-hover:text-fg', completed && 'text-fg-5 line-through decoration-fg-5/50 group-hover:text-fg-5')}
-                      title={itemTitle || item.title}
-                    >
-                      {item.title}
-                    </div>
-                  </div>
-                  {item.images?.length ? (
-                    <span className="shrink-0 rounded border border-edge/45 bg-inset px-1.5 py-0.5 text-[10px] font-medium text-fg-5" title={`${item.images.length} image${item.images.length > 1 ? 's' : ''}`}>
-                      {item.images.length} img
-                    </span>
-                  ) : null}
+                  <TodoEvidenceSummary
+                    item={item}
+                    copy={{
+                      linkedChat: t('todo.linkedChat'),
+                      sourceQuote: t('todo.sourceQuote'),
+                      sourceSession: t('todo.sourceSession'),
+                    }}
+                    statusLabel={statusLabel}
+                    statusClassName={cn(
+                      item.status === 'open'
+                        ? 'border-primary/25 bg-primary/[0.08] text-primary'
+                        : chatCreated
+                          ? 'border-edge bg-inset text-fg-4'
+                          : 'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-600',
+                    )}
+                    imageCountLabel={count => `${count} img`}
+                    titleClassName={cn(done && 'text-fg-5 line-through decoration-fg-5/50 group-hover:text-fg-5', chatCreated && 'text-fg-4')}
+                    imageStripTestId="work-intake-image-strip"
+                  />
                   <span className="shrink-0 text-[10px] text-fg-5" title={itemTimeSource ? new Date(itemTimeSource).toLocaleString() : undefined}>
                     {itemTime}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => toggleDone(item)}
-                    className={cn(
-                      'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-5 opacity-80 transition hover:bg-panel-h hover:text-fg group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
-                      completed && 'text-emerald-600 hover:text-emerald-600',
-                    )}
-                    aria-label={completed ? t('todo.reopen') : t('todo.markDone')}
-                    title={completed ? t('todo.reopen') : t('todo.markDone')}
-                  >
-                    {completed ? (
+                  {item.linkedChat && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenLinkedChat(item)}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-5 opacity-80 transition hover:bg-primary/[0.08] hover:text-primary group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+                      aria-label={t('todo.openLinkedChat')}
+                      title={t('todo.openLinkedChat')}
+                      data-testid="work-intake-open-linked-chat"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+                        <path d="m10 9 4 3-4 3V9Z" />
+                      </svg>
+                    </button>
+                  )}
+                  {!chatCreated && (
+                    <button
+                      type="button"
+                      onClick={() => toggleDone(item)}
+                      className={cn(
+                        'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-5 opacity-80 transition hover:bg-panel-h hover:text-fg group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]',
+                        done && 'text-emerald-600 hover:text-emerald-600',
+                      )}
+                      aria-label={done ? t('todo.reopen') : t('todo.markDone')}
+                      title={done ? t('todo.reopen') : t('todo.markDone')}
+                    >
+                      {done ? (
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M3 12a9 9 0 1 0 3-6.7" />
                         <path d="M3 4v6h6" />
                       </svg>
-                    ) : (
+                      ) : (
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <circle cx="12" cy="12" r="9" />
                         <path d="m8.5 12.2 2.2 2.2 4.8-5" />
                       </svg>
-                    )}
-                  </button>
+                      )}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={event => openMenu(event, item.id)}
@@ -10828,6 +10959,15 @@ function TodoCenterModal({
               </svg>
               {t('todo.edit')}
             </button>
+            {menuItem?.linkedChat && (
+              <button type="button" role="menuitem" onClick={() => runMenuAction(() => onOpenLinkedChat(menuItem))} className={menuItemClass('primary')}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+                  <path d="m10 9 4 3-4 3V9Z" />
+                </svg>
+                {t('todo.openLinkedChat')}
+              </button>
+            )}
             <button type="button" role="menuitem" onClick={() => runMenuAction(() => onDelete(menu.itemId))} className={menuItemClass('danger')}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                 <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />

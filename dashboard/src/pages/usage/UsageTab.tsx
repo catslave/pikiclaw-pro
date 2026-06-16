@@ -9,6 +9,7 @@ import { formatUsageSummary, usageBadgeText, usageTone } from '../../usage';
 import { cn, getAgentMeta } from '../../utils';
 
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'copilot', 'cursor', 'agy', 'gemini', 'hermes'];
+const HISTORICAL_USAGE_SCAN_LIMIT = 160;
 
 type Tone = 'ok' | 'warn' | 'err' | 'muted';
 
@@ -25,6 +26,24 @@ function formatTokens(value: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(Math.round(n));
+}
+
+function formatUsd(value: number | null | undefined): string {
+  const n = Math.max(0, Number(value || 0));
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: n > 0 && n < 1 ? 4 : 2,
+  }).format(n);
+}
+
+function formatCostCoverage(pricedTokens: number | null | undefined, unpricedTokens: number | null | undefined): string {
+  const priced = Math.max(0, Number(pricedTokens || 0));
+  const unpriced = Math.max(0, Number(unpricedTokens || 0));
+  const total = priced + unpriced;
+  if (!total) return 'No priced usage yet';
+  const percent = Math.round((priced / total) * 100);
+  return `${percent}% priced · ${formatTokens(unpriced)} unpriced`;
 }
 
 function formatDuration(value: number | null | undefined): string {
@@ -221,13 +240,19 @@ export function UsageTab() {
   useEffect(() => { if (storeState) setState(storeState); }, [storeState]);
   useEffect(() => { if (storeAgentStatus) setAgentStatus(storeAgentStatus); }, [storeAgentStatus]);
 
+  const loadHistoricalUsage = useCallback(async () => {
+    const result = await api.getProUsageSummary(HISTORICAL_USAGE_SCAN_LIMIT);
+    if (result.ok) setProUsage(result.summary);
+    return result;
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const [nextState, nextAgents, nextProUsage] = await Promise.all([
         reload(),
         refreshAgentStatus(),
-        api.getProUsageSummary(240),
+        loadHistoricalUsage(),
       ]);
       const current = useStore.getState();
       setState(nextState || current.state);
@@ -241,10 +266,11 @@ export function UsageTab() {
     } finally {
       setLoading(false);
     }
-  }, [refreshAgentStatus, reload, t, toast]);
+  }, [loadHistoricalUsage, refreshAgentStatus, reload, t, toast]);
 
   useEffect(() => {
     if (!storeState || !storeAgentStatus) void refresh();
+    else void loadHistoricalUsage().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -278,6 +304,13 @@ export function UsageTab() {
   const historicalTokenHint = historical
     ? `${formatTokens(historical.inputTokens)} input / ${formatTokens(historical.outputTokens)} output`
     : 'Saved transcript scan';
+  const historicalCostHint = historical
+    ? formatCostCoverage(historical.pricedTokens, historical.unpricedTokens)
+    : 'Requires saved model pricing metadata';
+  const costLedger = proUsage?.costLedger || null;
+  const costLedgerHint = costLedger
+    ? `${formatTokens(costLedger.totalTokens)} tokens · ${formatCostCoverage(costLedger.pricedTokens, costLedger.unpricedTokens)}`
+    : 'Recorded after new agent turns';
 
   return (
     <div className="animate-in space-y-4">
@@ -305,11 +338,21 @@ export function UsageTab() {
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <MetricCard
           label={t('usage.totalTokens')}
           value={formatTokens((historical?.totalTokens || 0) || totalTokens)}
           hint={historical ? historicalTokenHint : `${formatTokens(inputTokens)} ${t('usage.inputTokens')} / ${formatTokens(outputTokens)} ${t('usage.outputTokens')}`}
+        />
+        <MetricCard
+          label="Estimated Spend"
+          value={formatUsd(historical?.estimatedCostUsd)}
+          hint={historicalCostHint}
+        />
+        <MetricCard
+          label="Cost Ledger"
+          value={formatUsd(costLedger?.estimatedCostUsd)}
+          hint={costLedger ? `${costLedger.eventCount} turn events` : costLedgerHint}
         />
         <MetricCard
           label="Chats"
@@ -341,6 +384,9 @@ export function UsageTab() {
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <CompactMetric label="Cache Read" value={formatTokens(proUsage.totals.cachedInputTokens || cachedTokens)} />
+            <CompactMetric label="Cost Coverage" value={formatCostCoverage(proUsage.totals.pricedTokens, proUsage.totals.unpricedTokens)} hint={proUsage.totals.costSource} />
+            <CompactMetric label="Cost Events" value={formatTokens(proUsage.costLedger.eventCount)} hint={costLedgerHint} />
+            <CompactMetric label="Ledger Coverage" value={formatCostCoverage(proUsage.costLedger.pricedTokens, proUsage.costLedger.unpricedTokens)} hint={proUsage.costLedger.latestEventAt ? `Latest ${formatDateTime(proUsage.costLedger.latestEventAt)}` : 'No turn events'} />
             <CompactMetric label="Avg Active / Chat" value={formatDuration(proUsage.totals.chatCount ? proUsage.totals.activeSeconds / proUsage.totals.chatCount : 0)} />
             <CompactMetric label="Task Cycle Avg" value={formatDuration(proUsage.taskTimings.averageRefinementToResolvedSeconds)} hint={`${proUsage.taskTimings.resolvedCount}/${proUsage.taskTimings.count} resolved`} />
             <CompactMetric label="My Task Focus" value={formatDuration(proUsage.taskTimings.userFocusSeconds)} hint="Jira task focus windows" />
@@ -352,13 +398,14 @@ export function UsageTab() {
             <div className="rounded-md border border-edge bg-panel-alt p-3">
               <div className="mb-2 text-[12px] font-semibold text-fg-3">By Agent</div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[520px] text-[12px]">
+                <table className="w-full min-w-[600px] text-[12px]">
                   <thead>
                     <tr className="border-b border-edge text-left text-[11px] uppercase tracking-[0.14em] text-fg-5">
                       <th className="py-2 pr-3">Agent</th>
                       <th className="py-2 pr-3">Chats</th>
                       <th className="py-2 pr-3">Turns</th>
                       <th className="py-2 pr-3">Tokens</th>
+                      <th className="py-2 pr-3">Cost</th>
                       <th className="py-2 pr-3">Time</th>
                     </tr>
                   </thead>
@@ -374,6 +421,7 @@ export function UsageTab() {
                         <td className="py-2 pr-3 font-mono text-fg-3">{row.chatCount}</td>
                         <td className="py-2 pr-3 font-mono text-fg-3">{row.turnCount}</td>
                         <td className="py-2 pr-3 font-mono text-fg-3">{formatTokens(row.totalTokens)}</td>
+                        <td className="py-2 pr-3 font-mono text-fg-3">{formatUsd(row.estimatedCostUsd)}</td>
                         <td className="py-2 pr-3 text-fg-4">{formatDuration(row.activeSeconds)}</td>
                       </tr>
                     ))}
@@ -414,6 +462,8 @@ export function UsageTab() {
                     </div>
                     <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-fg-5">
                       <span>{formatTokens(chat.totalTokens)} tokens</span>
+                      <span>{formatUsd(chat.estimatedCostUsd)}</span>
+                      {chat.model && <span className="max-w-[220px] truncate font-mono">{chat.model}</span>}
                       <span>{chat.turnCount} turns</span>
                       <span>{formatDuration(chat.activeSeconds)} active</span>
                     </div>
@@ -440,6 +490,46 @@ export function UsageTab() {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-edge bg-panel-alt p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[12px] font-semibold text-fg-3">Cost Ledger Breakdown</div>
+              <span className="text-[11px] text-fg-5">{proUsage.costLedger.eventCount} turn events</span>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              {[
+                { label: 'Agent', rows: proUsage.costLedger.byAgent },
+                { label: 'Model', rows: proUsage.costLedger.byModel },
+                { label: 'Channel', rows: proUsage.costLedger.byChannel },
+                { label: 'Session', rows: proUsage.costLedger.bySession },
+              ].map(section => (
+                <div key={section.label} className="min-w-0 rounded-md border border-edge bg-panel px-2.5 py-2">
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{section.label}</div>
+                  <div className="space-y-1.5">
+                    {section.rows.slice(0, 4).map(row => (
+                      <div key={row.key} className="min-w-0">
+                        <div className="flex min-w-0 items-center justify-between gap-2 text-[12px]">
+                          <span className="min-w-0 truncate font-medium text-fg-2" title={row.key}>{row.key}</span>
+                          <span className="shrink-0 font-mono text-fg-4">{formatUsd(row.estimatedCostUsd)}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-sm bg-inset">
+                          <div
+                            className="h-full rounded-sm bg-primary"
+                            style={{ width: `${Math.min(100, proUsage.costLedger.estimatedCostUsd ? (row.estimatedCostUsd / proUsage.costLedger.estimatedCostUsd) * 100 : proUsage.costLedger.totalTokens ? (row.totalTokens / proUsage.costLedger.totalTokens) * 100 : row.eventCount * 8)}%` }}
+                          />
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px] text-fg-5">
+                          <span>{formatTokens(row.totalTokens)} tokens</span>
+                          <span>{row.eventCount} events</span>
+                        </div>
+                      </div>
+                    ))}
+                    {!section.rows.length && <div className="rounded border border-dashed border-edge px-2 py-3 text-center text-[11px] text-fg-5">No ledger data</div>}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 

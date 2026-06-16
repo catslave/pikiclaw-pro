@@ -101,7 +101,7 @@ export class WeixinBot extends Bot {
   private processRuntimeCleanup: (() => void) | null = null;
 
   constructor() {
-    super();
+    super('weixin');
     const config = getActiveUserConfig();
     if (process.env.WEIXIN_ALLOWED_USER_IDS) {
       for (const id of parseAllowedChatIds(process.env.WEIXIN_ALLOWED_USER_IDS)) this.allowedChatIds.add(id);

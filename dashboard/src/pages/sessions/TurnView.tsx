@@ -7,12 +7,13 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { createMdComponents, mdPlugins, type OpenFileLinkHandler } from './markdown';
 import { stripOaiMemoryCitations } from './messageSanitizers';
 import { isContinuationSummary } from './utils';
-import { AssistantMsg, hasRenderableAssistant } from './AssistantContent';
-import type { MessageBlock, RichMessage, StreamPreviewMeta } from '../../types';
+import { AssistantMsg, hasRenderableAssistant, type ScheduleProposalActionHandler, type WorkflowAskAnswerHandler } from './AssistantContent';
+import type { MessageBlock, RichMessage, StreamPreviewMeta, WorkflowRunRecord } from '../../types';
 import type { Turn } from './utils';
 
 export type SelectionActionRequest = { quote: string; note: string; turnIndex?: number };
 export type SelectionSideChatRequest = SelectionActionRequest & { question: string };
+export type SessionMessageAnchorRole = 'user' | 'assistant';
 
 type SelectionDraft = {
   quote: string;
@@ -78,7 +79,7 @@ function parseReviewCommentCard(text: string): ReviewCommentCardData | null {
   return { comments, trailingText: tail.join('\n\n').trim() };
 }
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent, assistantRunError }: {
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, previewMeta, liveAssistant, t, onResend, onEdit, onFork, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, workdir, retryProminent, assistantRunError, highlightRole, workflowRun, workflowAskBusyId, onWorkflowAskAnswer, scheduleProposalBusyKey, onScheduleProposalCreate }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   /** BYOK provider name shown on the assistant turn header — set when the
    *  agent is currently bound to a Profile. Saved turns lack this in their
@@ -97,6 +98,12 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   workdir?: string;
   retryProminent?: boolean;
   assistantRunError?: string | null;
+  highlightRole?: SessionMessageAnchorRole | null;
+  workflowRun?: WorkflowRunRecord | null;
+  workflowAskBusyId?: string | null;
+  onWorkflowAskAnswer?: WorkflowAskAnswerHandler;
+  scheduleProposalBusyKey?: string | null;
+  onScheduleProposalCreate?: ScheduleProposalActionHandler;
 }) {
   // Detect system continuation messages stored as user role (context compression summaries,
   // interruption markers). These should not render as user bubbles regardless of whether
@@ -109,11 +116,22 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
   const showLiveAssistant = !!liveAssistant;
   const showRunErrorOnly = !!assistantRunError && !showAssistant && !showLiveAssistant;
   const mdComponents = createMdComponents({ onOpenFileLink, workdir });
+  const userAnchor = typeof turnIndex === 'number' ? `${turnIndex}:user` : undefined;
+  const assistantAnchor = typeof turnIndex === 'number' ? `${turnIndex}:assistant` : undefined;
+  const searchAnchorHighlightClass = 'bg-primary/[0.075] shadow-[0_0_0_1px_rgba(125,160,255,0.22)]';
 
   return (
-    <div className="session-turn">
+    <div className="session-turn pk-conversation-turn">
       {turn.user && !isSystemMsg && (
-        <UserBubble text={turn.user.text} blocks={turn.user.blocks} createdAt={turn.user.createdAt} t={t} onResend={onResend} onEdit={onEdit} onFork={handleFork} retryProminent={retryProminent} />
+        <div
+          data-session-message-anchor={userAnchor}
+          className={cn(
+            'rounded-xl transition-[background-color,box-shadow] duration-500',
+            highlightRole === 'user' && searchAnchorHighlightClass,
+          )}
+        >
+          <UserBubble text={turn.user.text} blocks={turn.user.blocks} createdAt={turn.user.createdAt} t={t} onResend={onResend} onEdit={onEdit} onFork={handleFork} retryProminent={retryProminent} />
+        </div>
       )}
       {isSystemMsg && turn.user && !turn.assistant && (
         <div className="mb-4 px-4 py-3 rounded-lg bg-[rgba(255,255,255,0.02)] border border-edge/20 text-[12.5px] leading-[1.7] text-fg-4">
@@ -123,14 +141,20 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
         </div>
       )}
       {(showAssistant || showLiveAssistant || showRunErrorOnly) && (
-        <>
+        <div
+          data-session-message-anchor={assistantAnchor}
+          className={cn(
+            'rounded-xl transition-[background-color,box-shadow] duration-500',
+            highlightRole === 'assistant' && searchAnchorHighlightClass,
+          )}
+        >
           <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={previewMeta ?? turn.assistant?.usage ?? null} />
           {showLiveAssistant
-            ? <AssistantMessageFrame liveContent={liveAssistant} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} cacheKeyExtra="live" />
+            ? <AssistantMessageFrame liveContent={liveAssistant} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} cacheKeyExtra="live" scheduleProposalBusyKey={scheduleProposalBusyKey} onScheduleProposalCreate={onScheduleProposalCreate} />
             : showAssistant
-              ? <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} runError={assistantRunError ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} />
+              ? <AssistantMessageFrame message={turn.assistant!} turnIndex={turnIndex} t={t} startedAt={turn.user?.createdAt ?? null} runError={assistantRunError ?? null} onFork={handleFork} onOpenFileLink={onOpenFileLink} onCreateSideChatFromSelection={onCreateSideChatFromSelection} onCreateTodoFromSelection={onCreateTodoFromSelection} onCreateReviewCommentFromSelection={onCreateReviewCommentFromSelection} workdir={workdir} workflowRun={workflowRun} workflowAskBusyId={workflowAskBusyId} onWorkflowAskAnswer={onWorkflowAskAnswer} scheduleProposalBusyKey={scheduleProposalBusyKey} onScheduleProposalCreate={onScheduleProposalCreate} />
               : <RunErrorNotice detail={assistantRunError!} t={t} />}
-        </>
+        </div>
       )}
     </div>
   );
@@ -218,12 +242,12 @@ export function UserBubble({ text, blocks, createdAt, t, onResend, onEdit, onFor
 
   return (
     <div
-      className="flex flex-col items-end mb-5 group/bubble"
+      className="pk-conversation-user-turn flex flex-col items-end mb-5 group/bubble"
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
     >
       <div className={cn(
-        'min-w-0 rounded-md border border-fg-6 bg-panel text-fg shadow-sm',
+        'pk-conversation-user-bubble min-w-0 rounded-md border border-fg-6 bg-panel text-fg shadow-sm',
         reviewCommentCard ? 'w-full max-w-[760px] px-0 py-0' : 'max-w-[72%] px-4 py-3 text-[13.5px] leading-[1.72]',
       )}>
         {reviewCommentCard ? (
@@ -351,6 +375,11 @@ function AssistantMessageFrame({
   onCreateTodoFromSelection,
   onCreateReviewCommentFromSelection,
   workdir,
+  workflowRun,
+  workflowAskBusyId,
+  onWorkflowAskAnswer,
+  scheduleProposalBusyKey,
+  onScheduleProposalCreate,
 }: {
   message?: RichMessage;
   liveContent?: ReactNode;
@@ -365,6 +394,11 @@ function AssistantMessageFrame({
   onCreateTodoFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   onCreateReviewCommentFromSelection?: (request: SelectionActionRequest) => void | Promise<void>;
   workdir?: string;
+  workflowRun?: WorkflowRunRecord | null;
+  workflowAskBusyId?: string | null;
+  onWorkflowAskAnswer?: WorkflowAskAnswerHandler;
+  scheduleProposalBusyKey?: string | null;
+  onScheduleProposalCreate?: ScheduleProposalActionHandler;
 }) {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -497,14 +531,14 @@ function AssistantMessageFrame({
   return (
     <div
       ref={frameRef}
-      className="mb-6 group/assistant"
+      className="pk-conversation-assistant-turn mb-6 group/assistant"
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
       onMouseDown={handleSelectionStart}
       onMouseUp={handleSelectionEnd}
       onKeyUp={handleSelectionEnd}
     >
-      {liveContent ?? (message ? <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} runError={runError ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} /> : null)}
+      {liveContent ?? (message ? <AssistantMsg message={message} t={t} startedAt={startedAt ?? null} completedAt={message.createdAt ?? null} runError={runError ?? null} onOpenFileLink={onOpenFileLink} workdir={workdir} workflowRun={workflowRun} workflowAskBusyId={workflowAskBusyId} onWorkflowAskAnswer={onWorkflowAskAnswer} scheduleProposalBusyKey={scheduleProposalBusyKey} onScheduleProposalCreate={onScheduleProposalCreate} /> : null)}
       <HoverMessageActions
         align="left"
         visible={showActions && !!message}
@@ -735,9 +769,9 @@ export function TurnDivider({ agent, meta, model, effort, providerName: provider
   // the session-level prop for saved turns whose `usage` lacks the field.
   const providerName = previewMeta?.providerName ?? providerNameProp ?? null;
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 mt-1 mb-3">
+    <div className="pk-turn-divider flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 mt-1 mb-3">
       <BrandIcon brand={agent} size={13} />
-      <span className="shrink-0 text-[12px] font-semibold text-fg-2">{meta.label}</span>
+      <span className="pk-turn-divider-agent shrink-0 text-[12px] font-semibold text-fg-2" style={{ color: meta.color }}>{meta.label}</span>
       {(model || effort) && (
         <span className="min-w-0 truncate text-[10px] font-mono text-fg-4">
           {model || ''}{model && effort ? ' · ' : ''}{effort || ''}

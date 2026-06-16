@@ -8,6 +8,7 @@ import {
   getNotePage,
   getOrCreateDailyNote,
   listNoteTree,
+  promoteNoteSelection,
   readNoteDocument,
   reorderNotePages,
   resolveNoteAsset,
@@ -16,19 +17,25 @@ import {
   updateNotePage,
   writeNoteDocument,
 } from '../src/pro/notes.ts';
+import { getProTask } from '../src/pro/tasks.ts';
 
 let tmpDir: string;
 let previousNotesDir: string | undefined;
+let previousTaskFile: string | undefined;
 
 beforeEach(() => {
   tmpDir = makeTmpDir('pikiclaw-pro-notes-');
   previousNotesDir = process.env.PIKICLAW_PRO_NOTES_DIR;
+  previousTaskFile = process.env.PIKICLAW_PRO_TASK_FILE;
   process.env.PIKICLAW_PRO_NOTES_DIR = path.join(tmpDir, 'notes');
+  process.env.PIKICLAW_PRO_TASK_FILE = path.join(tmpDir, 'tasks.json');
 });
 
 afterEach(() => {
   if (previousNotesDir == null) delete process.env.PIKICLAW_PRO_NOTES_DIR;
   else process.env.PIKICLAW_PRO_NOTES_DIR = previousNotesDir;
+  if (previousTaskFile == null) delete process.env.PIKICLAW_PRO_TASK_FILE;
+  else process.env.PIKICLAW_PRO_TASK_FILE = previousTaskFile;
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 });
 
@@ -130,5 +137,23 @@ describe('Pro notes store', () => {
       mimeType: 'text/plain',
       bytes: Buffer.from('nope'),
     })).toThrow(/only image assets/);
+  });
+
+  it('promotes note selections into tasks with note origin', () => {
+    const page = createNotePage({ title: 'Source note' });
+    const result = promoteNoteSelection({
+      pageId: page.id,
+      target: 'task',
+      text: 'Turn this note into a durable work item.',
+      workdir: '/repo/pikiclaw',
+    });
+
+    expect(result.target).toBe('task');
+    expect(result.task.origin).toEqual({ type: 'note', key: page.id });
+    expect(getProTask(result.task.id)).toMatchObject({
+      title: 'Turn this note into a durable work item.',
+      workdir: '/repo/pikiclaw',
+      origin: { type: 'note', key: page.id },
+    });
   });
 });

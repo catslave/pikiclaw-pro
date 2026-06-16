@@ -4,6 +4,7 @@ import type { JiraRemoteUpdateRun } from './workflow.js';
 
 const DEFAULT_JIRA_MCP_SERVICE_URL = 'http://xia01-i01-dkr01.int.rclabenv.com:8000/mcp/';
 const JIRA_SYNC_FIELDS = 'summary,description,issuetype,status,assignee,reporter,fixVersions,duedate,priority,labels,updated,issuelinks,customfield_10652';
+const JIRA_SYNC_COMMENT_LIMIT = 5;
 
 function text(value: unknown, max = 16_000): string {
   const raw = typeof value === 'string' ? value.trim() : '';
@@ -288,7 +289,7 @@ export async function fetchJiraIssueFromMcp(jiraKey: string): Promise<{ issue: S
       const result = await callMcpTool(config.url, config.headers, sessionId, 'jira_get_issue', {
         issue_key: key,
         fields: JIRA_SYNC_FIELDS,
-        comment_limit: 0,
+        comment_limit: JIRA_SYNC_COMMENT_LIMIT,
       });
       const parsed = parseMcpJsonText(result);
       const issue = parsed?.issue && typeof parsed.issue === 'object' ? parsed.issue : parsed;

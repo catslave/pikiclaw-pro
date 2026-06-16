@@ -9,6 +9,7 @@ import {
   liveStreamAlreadyInHistory,
   resolveEffectiveLiveStream,
   shouldSkipEmptyStreamingHandoff,
+  summarizeSessionCommandState,
   willQueueSendOnStart,
 } from '../dashboard/src/pages/sessions/stream-ui.ts';
 
@@ -377,6 +378,96 @@ describe('session stream UI helpers', () => {
         effectiveTaskId: 't1',
         doneHandoffTaskId: 't1',
       })).toBe(false);
+    });
+  });
+
+  describe('summarizeSessionCommandState', () => {
+    it('surfaces a fresh local send before the backend assigns a task', () => {
+      expect(summarizeSessionCommandState({
+        pendingPrompt: 'ship the audit',
+        pendingTaskId: null,
+        pendingImageCount: 0,
+        streamPhase: null,
+        streamTaskId: null,
+        streaming: false,
+        queuedTaskCount: 0,
+        pendingQueuedSendCount: 0,
+      })).toMatchObject({
+        kind: 'pending-send',
+        title: 'Sending command',
+        activeTaskId: null,
+      });
+    });
+
+    it('surfaces provider wake before the first stream-state check returns', () => {
+      expect(summarizeSessionCommandState({
+        pendingPrompt: null,
+        pendingTaskId: null,
+        pendingImageCount: 0,
+        streamPhase: null,
+        streamTaskId: 'task-1',
+        streaming: false,
+        sessionRunning: true,
+        streamStateChecked: false,
+        queuedTaskCount: 0,
+        pendingQueuedSendCount: 0,
+      })).toMatchObject({
+        kind: 'provider-wake',
+        title: 'Reconnecting runtime',
+        activeTaskId: 'task-1',
+      });
+    });
+
+    it('treats a queued snapshot as a command waiting for its turn', () => {
+      expect(summarizeSessionCommandState({
+        pendingPrompt: 'next',
+        pendingTaskId: 'task-2',
+        pendingImageCount: 0,
+        streamPhase: 'queued',
+        streamTaskId: 'task-2',
+        streaming: false,
+        queuedTaskCount: 1,
+        pendingQueuedSendCount: 0,
+      })).toMatchObject({
+        kind: 'queued',
+        count: 1,
+        activeTaskId: 'task-2',
+      });
+    });
+
+    it('promotes follow-up queue count while the active task is streaming', () => {
+      expect(summarizeSessionCommandState({
+        pendingPrompt: 'active',
+        pendingTaskId: 'task-1',
+        pendingImageCount: 0,
+        streamPhase: 'streaming',
+        streamTaskId: 'task-1',
+        streaming: true,
+        queuedTaskCount: 2,
+        pendingQueuedSendCount: 1,
+        activity: 'Editing files',
+      })).toMatchObject({
+        kind: 'command-queue',
+        title: 'Command queue active',
+        detail: 'Editing files',
+        count: 3,
+        activeTaskId: 'task-1',
+      });
+    });
+
+    it('stays silent when the session is idle', () => {
+      expect(summarizeSessionCommandState({
+        pendingPrompt: null,
+        pendingTaskId: null,
+        pendingImageCount: 0,
+        streamPhase: null,
+        streamTaskId: null,
+        streaming: false,
+        sessionRunning: false,
+        streamStateChecked: true,
+        queuedTaskCount: 0,
+        pendingQueuedSendCount: 0,
+      })).toBeNull();
     });
   });
 });

@@ -7,9 +7,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { Hono } from 'hono';
 import { loadUserConfig, loadWorkspaces } from '../../core/config/user-config.js';
+import { resolveAgentModel } from '../../core/config/runtime-config.js';
+import { normalizeSessionContextSources } from '../../agent/context-sources.js';
 import { findPikiclawSessionInfo } from '../../agent/session.js';
+import type { Agent } from '../../agent/index.js';
+import { querySessionMessages } from '../../bot/session-hub.js';
 import { runtime } from '../runtime.js';
-import { queueDashboardSessionTask } from '../session-control.js';
+import { createDashboardSideChat, queueDashboardSessionTask } from '../session-control.js';
+import { enrichWorkbenchSideChats } from '../workbench-side-chats.js';
 import {
   clickBrowserPanelSession,
   closeBrowserPanelSession,
@@ -21,6 +26,7 @@ import {
 } from '../browser-panel.js';
 import {
   addStageRun,
+  appendProTaskSourceEvidence,
   archiveTaskSpace,
   assignProTasksToCycle,
   createSubtask,
@@ -90,14 +96,22 @@ import {
   resolveWorkdirForJiraAnalyze,
 } from '../../pro/jira-analyze.js';
 import { applyJiraRemoteUpdate, fetchJiraIssueFromMcp, resolveJiraIssueKeyInput } from '../../pro/jira-remote.js';
-import { buildProUsageSummary } from '../../pro/usage-summary.js';
+import { buildAutomationRunPrompt, collectAutomationContextSources } from '../../pro/automation-context.js';
+import { importProjectReferencesAsKnowledge } from '../../pro/knowledge-import.js';
+import { refreshKnowledgeEntrySources } from '../../pro/knowledge-source-freshness.js';
+import { evaluateCurrentUsageBudgetGate } from '../../pro/usage-budget-gate.js';
+import { buildProUsageSummary, clearProUsageSummaryCache } from '../../pro/usage-summary.js';
+import { deleteUsageBudget, listUsageBudgetAlerts, upsertUsageBudget } from '../../pro/usage-budget.js';
 import {
   cancelJiraRemoteUpdateRun,
   createAgentAssistant,
   createAutomationRule,
+  createCustomWorkflowRecipe,
   createJiraSyncRun,
   createJiraRemoteUpdateRun,
   createKnowledgeEntry,
+  deleteAutomationRule,
+  deleteCustomWorkflowRecipe,
   deleteKnowledgeEntry,
   deleteAgentAssistant,
   getJiraRemoteUpdateRun,
@@ -109,22 +123,40 @@ import {
   resetAnalyzeTicketPrompt,
   listAgentAssistants,
   listAutomationRules,
+  listCustomWorkflowRecipes,
+  listWorkflowRuns,
+  getWorkflowRun,
   listJiraSyncRuns,
   listJiraRemoteUpdateRuns,
   listKnowledgeEntries,
+  ingestWorkflowRunMarkersFromMessages,
+  reconcileWorkflowRunMarkersFromMessages,
+  markAutomationMissedRun,
   markAutomationRun,
+  markStalledWorkflowRunAutonomousWorkers,
+  answerWorkflowRunAsk,
+  completeWorkflowRunStepAutonomous,
+  recordWorkflowRunStepAutonomousDispatch,
+  recordWorkflowRunAsk,
+  recordWorkflowRun,
   stopJiraSyncRun,
   updateAgentAssistant,
   resetAgentAssistantPrompt,
   updateAgentAssistantPrompt,
+  updateAutomationRule,
+  updateCustomWorkflowRecipe,
   updateJiraSyncRun,
   updateJiraRemoteUpdateRun,
   updateAnalyzeTicketPrompt,
   updateJiraWorkflowConfig,
   updateKnowledgeEntry,
+  updateWorkflowRunAskDelivery,
+  deleteWorkflowRun,
   upsertAutomationRuleByKey,
   type AgentAssistant,
   type AutomationRule,
+  type WorkflowRunRecord,
+  type WorkflowRunStep,
 } from '../../pro/workflow.js';
 
 const app = new Hono();
@@ -462,11 +494,57 @@ function buildJiraMcpSyncPrompt(runId?: string): string {
   ].filter(Boolean).join('\n');
 }
 
-async function queueAutomationRule(rule: AutomationRule) {
+type AutomationQueueSource = 'manual' | 'scheduler';
+
+function emitScheduledTaskEvent(
+  rule: AutomationRule,
+  status: 'queued' | 'completed' | 'failed' | 'missed',
+  details: { sessionKey?: string; error?: unknown; scheduledFor?: string } = {},
+) {
+  runtime.emitDashboardEvent({
+    type: 'scheduled-task',
+    key: rule.id,
+    automationId: rule.id,
+    name: rule.name,
+    schedule: rule.schedule,
+    status,
+    sessionKey: details.sessionKey,
+    scheduledFor: details.scheduledFor,
+    error: typeof details.error === 'string'
+      ? details.error
+      : details.error instanceof Error
+        ? details.error.message
+        : details.error == null
+          ? undefined
+          : String(details.error),
+  });
+}
+
+async function queueAutomationRule(rule: AutomationRule, source: AutomationQueueSource = 'manual') {
   const config = loadUserConfig();
   const assistant = rule.assistantId ? listAgentAssistants().find(item => item.id === rule.assistantId) : undefined;
   const agent = pickAssistantAgent(assistant, rule.agent);
   const workdir = rule.workdir || runtime.getRequestWorkdir(config);
+  const model = agent ? resolveAgentModel(config, agent as any) : null;
+  const budgetGate = await evaluateCurrentUsageBudgetGate({ agent, model });
+  if (!budgetGate.allowed) {
+    const updated = markAutomationRun(rule.id, undefined, {
+      error: budgetGate.message,
+      code: 'usage_budget_paused',
+      budgetId: budgetGate.budget.id,
+      budgetName: budgetGate.budget.name,
+    });
+    if (source === 'scheduler') emitScheduledTaskEvent(rule, 'failed', { error: budgetGate.message });
+    return {
+      queued: {
+        ok: false as const,
+        error: budgetGate.message,
+        code: 'usage_budget_paused',
+        budget: budgetGate.budget,
+      },
+      updated,
+    };
+  }
   const syncRun = rule.key === JIRA_MCP_SYNC_AUTOMATION_KEY
     ? createJiraSyncRun({ assistantId: rule.assistantId, assistantName: assistant?.name, agent, workdir })
     : null;
@@ -480,15 +558,28 @@ async function queueAutomationRule(rule: AutomationRule) {
     workdir,
     agent,
     sessionId: '',
-    prompt: buildAssistantPrompt(syncRun ? buildJiraMcpSyncPrompt(syncRun.id) : rule.prompt, assistant),
+    prompt: buildAssistantPrompt(buildAutomationRunPrompt({
+      name: rule.name,
+      schedule: rule.schedule,
+      prompt: syncRun ? buildJiraMcpSyncPrompt(syncRun.id) : rule.prompt,
+    }), assistant),
     attachments: [],
+    contextSources: collectAutomationContextSources({
+      workdir,
+      includeProjectReferences: rule.includeProjectReferences,
+      projectReferenceNames: rule.projectReferenceNames,
+    }),
   });
   if (!queued.ok) {
     if (syncRun) updateJiraSyncRun(syncRun.id, { status: 'failed', error: queued.error, event: { label: 'Failed to start scheduled sync session', detail: queued.error } });
-    return { queued, updated: markAutomationRun(rule.id, undefined) };
+    const updated = markAutomationRun(rule.id, undefined, { error: queued.error });
+    if (source === 'scheduler') emitScheduledTaskEvent(rule, 'failed', { error: queued.error });
+    return { queued, updated };
   }
   if (syncRun) updateJiraSyncRun(syncRun.id, { status: 'queued', sessionKey: queued.sessionKey, event: { label: 'Scheduled agent session queued', detail: queued.sessionKey || queued.taskId || 'Queued' } });
-  return { queued, updated: markAutomationRun(rule.id, queued.sessionKey) };
+  const updated = markAutomationRun(rule.id, queued.sessionKey, { taskId: queued.taskId });
+  if (source === 'scheduler') emitScheduledTaskEvent(rule, 'queued', { sessionKey: queued.sessionKey });
+  return { queued, updated };
 }
 
 function parseSchedule(schedule: string): { cadence: string; time: string; weekday?: number; day?: number } | null {
@@ -541,16 +632,81 @@ function automationDueSlot(rule: AutomationRule, now = new Date()): string | nul
   return null;
 }
 
+const AUTOMATION_MISSED_GRACE_MS = 90_000;
+
+function automationDateAtTime(base: Date, time: string): Date {
+  const [hour = '9', minute = '0'] = time.split(':');
+  const date = new Date(base);
+  date.setHours(Number(hour) || 0, Number(minute) || 0, 0, 0);
+  return date;
+}
+
+function previousAutomationDueAt(rule: AutomationRule, now = new Date()): Date | null {
+  if (!rule.enabled) return null;
+  const parsed = parseSchedule(rule.schedule);
+  if (!parsed) return null;
+  if (parsed.cadence === 'daily') {
+    const today = automationDateAtTime(now, parsed.time);
+    return today.getTime() <= now.getTime() ? today : new Date(today.getTime() - 24 * 60 * 60 * 1000);
+  }
+  if (parsed.cadence === 'weekly' || parsed.cadence === 'biweekly') {
+    if (parsed.weekday == null) return null;
+    const candidate = automationDateAtTime(now, parsed.time);
+    let delta = (now.getDay() - parsed.weekday + 7) % 7;
+    if (delta === 0 && candidate.getTime() > now.getTime()) delta = 7;
+    let previous = new Date(candidate.getTime() - delta * 24 * 60 * 60 * 1000);
+    if (parsed.cadence === 'biweekly') {
+      const week = Math.floor(previous.getTime() / (7 * 24 * 60 * 60 * 1000));
+      if (week % 2 !== 0) previous = new Date(previous.getTime() - 7 * 24 * 60 * 60 * 1000);
+    }
+    return previous;
+  }
+  if (parsed.cadence === 'monthly') {
+    if (parsed.day == null) return null;
+    const candidate = automationDateAtTime(new Date(now.getFullYear(), now.getMonth(), parsed.day), parsed.time);
+    return candidate.getTime() <= now.getTime()
+      ? candidate
+      : automationDateAtTime(new Date(now.getFullYear(), now.getMonth() - 1, parsed.day), parsed.time);
+  }
+  return null;
+}
+
+function latestAutomationKnownRunAt(rule: AutomationRule): number {
+  const values = [
+    rule.lastRunAt,
+    ...(rule.runHistory || []).flatMap(item => [item.ranAt, item.scheduledFor]),
+  ];
+  return values.reduce((latest, value) => {
+    if (!value) return latest;
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? Math.max(latest, time) : latest;
+  }, 0);
+}
+
+function recordMissedAutomationIfNeeded(rule: AutomationRule, now = new Date()): AutomationRule | null {
+  const dueAt = previousAutomationDueAt(rule, now);
+  if (!dueAt) return null;
+  if (now.getTime() - dueAt.getTime() < AUTOMATION_MISSED_GRACE_MS) return null;
+  if (latestAutomationKnownRunAt(rule) >= dueAt.getTime()) return null;
+  const scheduledFor = dueAt.toISOString();
+  const updated = markAutomationMissedRun(rule.id, scheduledFor, {
+    error: `Scheduled task missed its ${dueAt.toLocaleString()} run window while Pikiclaw was not available to queue it.`,
+  });
+  emitScheduledTaskEvent(updated, 'missed', { scheduledFor, error: updated.runHistory?.[0]?.error });
+  return updated;
+}
+
 const runningScheduleSlots = new Set<string>();
 
 async function runDueAutomations() {
   for (const rule of listAutomationRules()) {
+    recordMissedAutomationIfNeeded(rule);
     const slot = automationDueSlot(rule);
     if (!slot || runningScheduleSlots.has(slot)) continue;
     const lastRunKey = rule.lastRunAt ? automationDueSlot({ ...rule, lastRunAt: undefined }, new Date(rule.lastRunAt)) : null;
     if (lastRunKey === slot) continue;
     runningScheduleSlots.add(slot);
-    void queueAutomationRule(rule).finally(() => {
+    void queueAutomationRule(rule, 'scheduler').finally(() => {
       setTimeout(() => runningScheduleSlots.delete(slot), 70_000);
     });
   }
@@ -573,6 +729,42 @@ function parseSessionKey(sessionKey: string | null | undefined): { agent: string
   const index = raw.indexOf(':');
   if (index <= 0 || index >= raw.length - 1) return null;
   return { agent: raw.slice(0, index), sessionId: raw.slice(index + 1) };
+}
+
+function workflowRunParentSession(run: WorkflowRunRecord): { agent: string; sessionId: string } | null {
+  const agent = readString(run.agent);
+  const sessionId = readString(run.sessionId);
+  if (agent && sessionId) return { agent, sessionId };
+  return parseSessionKey(run.sessionKey);
+}
+
+function buildWorkflowAutonomousStepPrompt(run: WorkflowRunRecord, step: WorkflowRunStep): string {
+  const steps = (run.steps || []).map(item => {
+    const marker = item.index === step.index ? 'TARGET' : item.index < step.index ? 'context' : 'later';
+    return `${item.index}. [${marker}] ${item.title}`;
+  });
+  return [
+    '[Workflow Autonomous Step]',
+    `Parent workflow: ${run.workflowName}`,
+    `Parent run id: ${run.id}`,
+    `Target step: ${step.index}/${run.totalSteps} - ${step.title}`,
+    run.workdir ? `Project: ${run.workdir}` : '',
+    run.note ? `Run note: ${run.note}` : '',
+    '',
+    'You are a child worker spawned by Pikiclaw to execute exactly one workflow step.',
+    'Do not restart the whole workflow. Do not continue later steps unless they are required to finish this step.',
+    'Use the project files, skills, MCP, CLI tools, and local context available in this child chat.',
+    '',
+    'Workflow map:',
+    ...steps,
+    '',
+    'Execution contract:',
+    '- Start with a one-line statement of what this step will produce.',
+    '- Perform the concrete work needed for the target step.',
+    '- If blocked, stop and state the exact missing decision, credential, file, or risk.',
+    '- Finish with Markdown sections: Result, Evidence, Files or commands used, Handoff back to parent workflow.',
+    '- Do not claim the parent workflow is complete; only report this step outcome.',
+  ].filter(Boolean).join('\n');
 }
 
 app.get('/api/pro/task-spaces', (c) => {
@@ -653,9 +845,38 @@ app.delete('/api/pro/jira/cycles/:cycleId', (c) => {
 
 app.get('/api/pro/usage-summary', async (c) => {
   try {
-    return c.json({ ok: true, summary: await buildProUsageSummary(c.req.query('limit')) });
+    return c.json({ ok: true, summary: await buildProUsageSummary(c.req.query('limit'), { cache: c.req.query('fresh') !== '1' }) });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.get('/api/pro/usage-budget-alerts', (c) => {
+  try {
+    return c.json({ ok: true, alerts: listUsageBudgetAlerts(Number(c.req.query('limit') || 20)) });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 500);
+  }
+});
+
+app.post('/api/pro/usage-budgets', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const budget = upsertUsageBudget(body);
+    clearProUsageSummaryCache();
+    return c.json({ ok: true, budget });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.delete('/api/pro/usage-budgets/:budgetId', (c) => {
+  try {
+    const deleted = deleteUsageBudget(c.req.param('budgetId'));
+    if (deleted) clearProUsageSummaryCache();
+    return c.json({ ok: true, deleted });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 404);
   }
 });
 
@@ -986,8 +1207,9 @@ app.post('/api/pro/todos/chat', async (c) => {
       for (const item of items) {
         if (session) {
           linkTodoChat(item.id, { workdir, agent: session.agent, sessionId: session.sessionId });
+        } else {
+          updateTodoItem(item.id, { status: 'chat-created' });
         }
-        deleteTodoItem(item.id);
       }
       return c.json({ ok: true, queued, items: getTodoItems(items.map(item => item.id)) });
     } finally {
@@ -1136,6 +1358,7 @@ app.post('/api/pro/assistants/:assistantId/run', async (c) => {
     if (!userPrompt) return c.json({ ok: false, error: 'prompt is required' }, 400);
     const displayPrompt = readString(body?.displayPrompt) || userPrompt;
     const projectContext = readProjectContextRef(body?.projectContext);
+    const contextSources = normalizeSessionContextSources(body?.contextSources);
 
     const config = loadUserConfig();
     const workdir = readString(body?.workdir) || runtime.getRequestWorkdir(config);
@@ -1146,7 +1369,9 @@ app.post('/api/pro/assistants/:assistantId/run', async (c) => {
       sessionId: '',
       prompt: buildQuickAssistantPrompt(userPrompt, assistant),
       displayPrompt,
+      permissionMode: readString(body?.permissionMode) || null,
       attachments: [],
+      contextSources,
       projectContext,
       origin: {
         channel: 'dashboard',
@@ -1291,6 +1516,323 @@ app.delete('/api/pro/assistants/:assistantId', (c) => {
   }
 });
 
+app.get('/api/pro/workflow-recipes', (c) => {
+  return c.json({ ok: true, workflows: listCustomWorkflowRecipes() });
+});
+
+app.post('/api/pro/workflow-recipes', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workflow = createCustomWorkflowRecipe({
+      name: body?.name,
+      description: body?.description,
+      category: body?.category,
+      tags: body?.tags,
+      outputs: body?.outputs,
+      steps: body?.steps,
+      capabilities: body?.capabilities,
+      promptHint: body?.promptHint,
+      cadence: body?.cadence,
+      defaultEffort: body?.defaultEffort,
+    });
+    return c.json({ ok: true, workflow });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/workflow-recipes/:workflowId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const input: {
+      name?: unknown;
+      description?: unknown;
+      category?: unknown;
+      tags?: unknown;
+      outputs?: unknown;
+      steps?: unknown;
+      capabilities?: unknown;
+      promptHint?: unknown;
+      cadence?: unknown;
+      defaultEffort?: unknown;
+    } = {};
+    if (body && typeof body === 'object') {
+      for (const key of ['name', 'description', 'category', 'tags', 'outputs', 'steps', 'capabilities', 'promptHint', 'cadence', 'defaultEffort'] as const) {
+        if (Object.prototype.hasOwnProperty.call(body, key)) input[key] = body[key];
+      }
+    }
+    const workflow = updateCustomWorkflowRecipe(c.req.param('workflowId'), input);
+    return c.json({ ok: true, workflow });
+  } catch (e: any) {
+    const status = e?.message === 'workflow not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/workflow-recipes/:workflowId', (c) => {
+  try {
+    const workflow = deleteCustomWorkflowRecipe(c.req.param('workflowId'));
+    return c.json({ ok: true, workflow });
+  } catch (e: any) {
+    const status = e?.message === 'workflow not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.get('/api/pro/workflow-runs', (c) => {
+  return c.json({
+    ok: true,
+    runs: listWorkflowRuns({
+      activeOnly: c.req.query('activeOnly'),
+      limit: c.req.query('limit'),
+    }),
+  });
+});
+
+app.post('/api/pro/workflow-runs/watchdog', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const result = markStalledWorkflowRunAutonomousWorkers({
+      timeoutMs: body?.timeoutMs,
+      limit: body?.limit,
+    });
+    return c.json({ ok: true, result });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/workflow-runs/ingest-markers', async (c) => {
+  try {
+    const body = await c.req.json();
+    const text = typeof body?.text === 'string' ? body.text : '';
+    const run = ingestWorkflowRunMarkersFromMessages({
+      workdir: body?.workdir,
+      agent: body?.agent,
+      sessionId: body?.sessionId,
+      messages: text
+        ? [{
+            role: 'assistant',
+            text,
+            blocks: [{ type: 'text', content: text, phase: 'final_answer' }],
+          }]
+        : [],
+    });
+    return c.json({ ok: true, run });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/workflow-runs/reconcile-session', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir : '';
+    const agent = typeof body?.agent === 'string' ? body.agent : '';
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+
+    const messages = await querySessionMessages({
+      workdir,
+      agent: agent as Agent,
+      sessionId,
+      rich: true,
+    });
+    if (!messages.ok) {
+      return c.json({ ok: false, error: messages.error || 'session messages unavailable' }, 404);
+    }
+
+    const reconciliation = reconcileWorkflowRunMarkersFromMessages({
+      workdir,
+      agent,
+      sessionId,
+      messages: messages.richMessages || messages.messages,
+    });
+    return c.json({
+      ok: true,
+      ...reconciliation,
+      totalTurns: messages.totalTurns,
+      window: messages.window || null,
+    });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/workflow-runs', async (c) => {
+  try {
+    const body = await c.req.json();
+    const run = recordWorkflowRun({
+      id: body?.id,
+      workflowId: body?.workflowId,
+      workflowName: body?.workflowName,
+      title: body?.title,
+      workdir: body?.workdir,
+      agent: body?.agent,
+      model: body?.model,
+      effort: body?.effort,
+      assistantId: body?.assistantId,
+      assistantName: body?.assistantName,
+      sessionKey: body?.sessionKey,
+      sessionId: body?.sessionId,
+      note: body?.note,
+      currentStep: body?.currentStep,
+      totalSteps: body?.totalSteps,
+      steps: body?.steps,
+      asks: body?.asks,
+      status: body?.status,
+      lastMarker: body?.lastMarker,
+    });
+    return c.json({ ok: true, run });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/workflow-runs/:runId/steps/:stepIndex/autonomous', async (c) => {
+  let dispatchRunId = '';
+  let dispatchStepIndex = 0;
+  try {
+    const run = getWorkflowRun(c.req.param('runId'));
+    if (!run) return c.json({ ok: false, error: 'workflow run not found' }, 404);
+    const stepIndex = Math.floor(Number(c.req.param('stepIndex')) || 0);
+    const step = run.steps.find(item => item.index === stepIndex);
+    if (!step) return c.json({ ok: false, error: 'workflow step not found' }, 404);
+    if (!run.workdir) return c.json({ ok: false, error: 'workflow run has no project workspace' }, 400);
+    const parent = workflowRunParentSession(run);
+    if (!parent) return c.json({ ok: false, error: 'workflow run has no parent chat session' }, 400);
+
+    const child = createDashboardSideChat({
+      workdir: run.workdir,
+      agent: parent.agent,
+      parentSessionId: parent.sessionId,
+      title: `${run.workflowName} - Step ${step.index}`,
+    });
+    if (!child.ok) return c.json(child, 400);
+    const childSession = parseSessionKey(child.sessionKey);
+    if (!childSession) return c.json({ ok: false, error: 'autonomous child session was not created' }, 500);
+
+    const prompt = buildWorkflowAutonomousStepPrompt(run, step);
+    const dispatch = recordWorkflowRunStepAutonomousDispatch(run.id, step.index, {
+      childAgent: childSession.agent,
+      childSessionId: childSession.sessionId,
+      childSessionKey: child.sessionKey,
+    });
+    dispatchRunId = dispatch.run.id;
+    dispatchStepIndex = dispatch.step.index;
+
+    const queued = await queueDashboardSessionTask({
+      workdir: run.workdir,
+      agent: childSession.agent,
+      sessionId: childSession.sessionId,
+      prompt,
+      displayPrompt: `Run workflow step ${step.index}: ${step.title}`,
+      model: run.model || null,
+      effort: run.effort || null,
+      origin: {
+        channel: 'workflow',
+        chatId: run.id,
+        chatType: 'autonomous-step',
+        sourceMessageId: `step:${step.index}`,
+      },
+    });
+    if (!queued.ok) {
+      const failed = completeWorkflowRunStepAutonomous(dispatchRunId, dispatchStepIndex, {
+        state: 'failed',
+        childAgent: childSession.agent,
+        childSessionId: childSession.sessionId,
+        childSessionKey: child.sessionKey,
+        error: queued.error || 'Autonomous worker failed to queue.',
+      });
+      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json({ ...queued, run: failed.run, step: failed.step }, statusCode);
+    }
+
+    const queuedSession = parseSessionKey(queued.sessionKey) || childSession;
+    const updated = recordWorkflowRunStepAutonomousDispatch(run.id, step.index, {
+      dispatchId: dispatch.step.autonomousRun?.dispatchId,
+      childAgent: queuedSession.agent,
+      childSessionId: queuedSession.sessionId,
+      childSessionKey: queued.sessionKey || child.sessionKey,
+      taskId: queued.taskId,
+    });
+    return c.json({ ok: true, run: updated.run, step: updated.step, queued, child });
+  } catch (e: any) {
+    if (dispatchRunId && dispatchStepIndex) {
+      try {
+        const failed = completeWorkflowRunStepAutonomous(dispatchRunId, dispatchStepIndex, {
+          state: 'failed',
+          error: e?.message || String(e),
+        });
+        return c.json({ ok: false, run: failed.run, step: failed.step, error: e?.message || String(e) }, 400);
+      } catch {}
+    }
+    const status = e?.message === 'workflow run not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/workflow-runs/:runId/asks', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = recordWorkflowRunAsk(c.req.param('runId'), {
+      id: body?.id,
+      stepIndex: body?.stepIndex,
+      question: body?.question,
+      type: body?.type,
+      options: body?.options,
+      max: body?.max,
+      placeholder: body?.placeholder,
+    });
+    return c.json({ ok: true, run: result.run, ask: result.ask });
+  } catch (e: any) {
+    const status = e?.message === 'workflow run not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/workflow-runs/:runId/asks/:askId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = answerWorkflowRunAsk(c.req.param('runId'), c.req.param('askId'), {
+      answer: body?.answer,
+      skipped: body?.skipped,
+    });
+    return c.json({ ok: true, run: result.run, ask: result.ask });
+  } catch (e: any) {
+    const status = e?.message === 'workflow run not found' || e?.message === 'workflow ask not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.patch('/api/pro/workflow-runs/:runId/asks/:askId/delivery', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = updateWorkflowRunAskDelivery(c.req.param('runId'), c.req.param('askId'), {
+      deliveryStatus: body?.deliveryStatus,
+      status: body?.status,
+      error: body?.error,
+      taskId: body?.taskId,
+    });
+    return c.json({ ok: true, run: result.run, ask: result.ask });
+  } catch (e: any) {
+    const status = e?.message === 'workflow run not found' || e?.message === 'workflow ask not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/workflow-runs/:runId', (c) => {
+  try {
+    const run = deleteWorkflowRun(c.req.param('runId'));
+    return c.json({ ok: true, run });
+  } catch (e: any) {
+    const status = e?.message === 'workflow run not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
 app.get('/api/pro/automations', (c) => {
   return c.json({ ok: true, automations: listAutomationRules() });
 });
@@ -1308,10 +1850,49 @@ app.post('/api/pro/automations', async (c) => {
       agent: body?.agent,
       assistantId: body?.assistantId,
       enabled: body?.enabled,
+      includeProjectReferences: body?.includeProjectReferences,
+      projectReferenceNames: body?.projectReferenceNames,
     });
     return c.json({ ok: true, automation });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.patch('/api/pro/automations/:automationId', async (c) => {
+  try {
+    const body = await c.req.json();
+    const input: {
+      name?: unknown;
+      schedule?: unknown;
+      prompt?: unknown;
+      workdir?: unknown;
+      agent?: unknown;
+      assistantId?: unknown;
+      enabled?: unknown;
+      includeProjectReferences?: unknown;
+      projectReferenceNames?: unknown;
+    } = {};
+    if (body && typeof body === 'object') {
+      for (const key of ['name', 'schedule', 'prompt', 'workdir', 'agent', 'assistantId', 'enabled', 'includeProjectReferences', 'projectReferenceNames'] as const) {
+        if (Object.prototype.hasOwnProperty.call(body, key)) input[key] = body[key];
+      }
+    }
+    const automation = updateAutomationRule(c.req.param('automationId'), input);
+    return c.json({ ok: true, automation });
+  } catch (e: any) {
+    const status = e?.message === 'automation not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.delete('/api/pro/automations/:automationId', (c) => {
+  try {
+    const automation = deleteAutomationRule(c.req.param('automationId'));
+    return c.json({ ok: true, automation });
+  } catch (e: any) {
+    const status = e?.message === 'automation not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
   }
 });
 
@@ -1321,7 +1902,7 @@ app.post('/api/pro/automations/:automationId/run', async (c) => {
     if (!automation) return c.json({ ok: false, error: 'automation not found' }, 404);
     const { queued, updated } = await queueAutomationRule(automation);
     if (!queued.ok) {
-      const statusCode = queued.error === 'Bot is not running' ? 503 : 400;
+      const statusCode = (queued as any).code === 'usage_budget_paused' ? 429 : queued.error === 'Bot is not running' ? 503 : 400;
       return c.json(queued, statusCode);
     }
     return c.json({ ok: true, automation: updated, queued });
@@ -1608,6 +2189,32 @@ app.post('/api/pro/knowledge', async (c) => {
   }
 });
 
+app.post('/api/pro/knowledge/import-project-references', async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = importProjectReferencesAsKnowledge({
+      workdir: readString(body?.workdir),
+      status: body?.status,
+      maxFiles: body?.maxFiles,
+    });
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
+app.post('/api/pro/knowledge/:id/source-refresh', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const result = refreshKnowledgeEntrySources(c.req.param('id'), {
+      acceptCurrent: Boolean(body?.acceptCurrent),
+    });
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || String(e) }, 400);
+  }
+});
+
 app.patch('/api/pro/knowledge/:id', async (c) => {
   try {
     const body = await c.req.json();
@@ -1730,7 +2337,12 @@ app.get('/api/pro/tasks/:taskId', (c) => {
 app.get('/api/pro/tasks/:taskId/workbench', (c) => {
   const workbench = getProTaskWorkbench(c.req.param('taskId'));
   if (!workbench) return c.json({ ok: false, error: 'task not found' }, 404);
-  return c.json({ ok: true, workbench });
+  return c.json({
+    ok: true,
+    workbench: enrichWorkbenchSideChats(workbench, (workdir, agent, sessionId) => (
+      findPikiclawSessionInfo(workdir, agent as Agent, sessionId)
+    )),
+  });
 });
 
 app.delete('/api/pro/tasks/:taskId', (c) => {
@@ -1765,6 +2377,7 @@ app.post('/api/pro/tasks', async (c) => {
       plannedDate: body?.plannedDate,
       linkedTaskId: body?.linkedTaskId,
       spaceId: body?.spaceId,
+      origin: body?.origin,
       workdir: body?.workdir || runtime.getRequestWorkdir(config),
       defaultAgent: body?.defaultAgent,
       defaultAssistantId: body?.defaultAssistantId,
@@ -2021,6 +2634,20 @@ app.patch('/api/pro/tasks/:taskId/meta', async (c) => {
       task = getProTask(c.req.param('taskId')) || task;
       return c.json({ ok: true, task, dailyItem: reverted });
     }
+    return c.json({ ok: true, task });
+  } catch (e: any) {
+    const status = e?.message === 'task not found' ? 404 : 400;
+    return c.json({ ok: false, error: e?.message || String(e) }, status);
+  }
+});
+
+app.post('/api/pro/tasks/:taskId/source-evidence', async (c) => {
+  try {
+    const body = await c.req.json();
+    const task = appendProTaskSourceEvidence(c.req.param('taskId'), {
+      kind: body?.kind,
+      value: body?.value,
+    });
     return c.json({ ok: true, task });
   } catch (e: any) {
     const status = e?.message === 'task not found' ? 404 : 400;

@@ -1,13 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Agent, SessionContextOutputSource, SessionContextSessionSource, TailMessage } from './types.js';
+import type { Agent, SessionContextFileSource, SessionContextOutputSource, SessionContextSessionSource, TailMessage } from './types.js';
 import { compactForHandover } from './handover.js';
 import { findPikiclawSession, getSessionMessages } from './session.js';
 import { normalizeSessionContextSources } from './context-sources.js';
 
 const MAX_SOURCE_BUNDLE_CHARS = 140_000;
 const MAX_OUTPUT_INLINE_CHARS = 16_000;
+const MAX_FILE_INLINE_CHARS = 24_000;
 const MAX_FULL_SESSION_CHARS = 100_000;
+const MAX_CONTEXT_FILE_BYTES = 512_000;
 
 function escapeAttr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
@@ -21,6 +23,11 @@ function clip(value: string, max: number): string {
   const text = safeBody(value);
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 32)).trimEnd()}\n...[truncated]`;
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function formatMessages(messages: TailMessage[]): string {
@@ -153,6 +160,52 @@ function buildOutputSource(input: SessionContextOutputSource): string {
   ].filter(Boolean).join('\n');
 }
 
+function buildFileSource(source: SessionContextFileSource): string {
+  const rawPath = String(source.path || '').trim();
+  const referenceRoot = path.resolve(source.workdir, '.pikiclaw', 'reference');
+  const filePath = path.resolve(path.isAbsolute(rawPath) ? rawPath : path.resolve(source.workdir, rawPath));
+  const title = source.title || path.basename(filePath) || 'Reference file';
+  let note = '';
+  let content = '';
+  let size = source.size;
+
+  try {
+    if (!isPathInside(referenceRoot, filePath)) {
+      note = 'Skipped: file is outside the project reference pool.';
+    } else {
+      const stat = fs.lstatSync(filePath);
+      size = stat.size;
+      if (stat.isSymbolicLink()) {
+        note = 'Skipped: symbolic links are not inlined as context sources.';
+      } else if (!stat.isFile()) {
+        note = 'Skipped: source is not a regular file.';
+      } else if (stat.size > MAX_CONTEXT_FILE_BYTES) {
+        note = `Skipped: file is larger than ${MAX_CONTEXT_FILE_BYTES} bytes.`;
+      } else {
+        const buf = fs.readFileSync(filePath);
+        if (buf.includes(0)) {
+          note = 'Skipped: file appears to be binary.';
+        } else {
+          content = clip(buf.toString('utf8'), MAX_FILE_INLINE_CHARS);
+          note = `Included project reference file (${stat.size} bytes).`;
+        }
+      }
+    }
+  } catch (err: any) {
+    note = `Skipped: ${err?.message || 'file could not be read'}.`;
+  }
+
+  return [
+    `<source kind="file" source="${escapeAttr(source.source || 'project-reference')}" workdir="${escapeAttr(source.workdir)}" path="${escapeAttr(filePath)}">`,
+    `Title: ${safeBody(title)}`,
+    typeof size === 'number' ? `Size: ${size} bytes` : '',
+    `Note: ${safeBody(note)}`,
+    content ? 'Content:' : '',
+    content,
+    '</source>',
+  ].filter(Boolean).join('\n');
+}
+
 export async function buildContextSourceBundle(opts: {
   sources: unknown;
   targetAgent: Agent;
@@ -163,7 +216,8 @@ export async function buildContextSourceBundle(opts: {
   const sections: string[] = [];
   for (const source of sources) {
     if (source.kind === 'session') sections.push(await buildSessionSource(source, opts.targetAgent, opts.targetModel));
-    else sections.push(buildOutputSource(source));
+    else if (source.kind === 'output') sections.push(buildOutputSource(source));
+    else sections.push(buildFileSource(source));
   }
   const body = sections.join('\n\n');
   return [

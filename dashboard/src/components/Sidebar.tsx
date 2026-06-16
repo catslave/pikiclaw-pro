@@ -65,8 +65,8 @@ function MenuTooltip({ label }: { label: string }) {
 const TAB_ROUTES: Record<string, string> = {
   chat: '/chat',
   sessions: '/chat',
-  dashboard: '/tasks',
-  daily: '/daily',
+  dashboard: '/work-items',
+  daily: '/work-items?source=manual',
   notes: '/notes',
   knowledge: '/chat',
   workflows: '/chat',
@@ -100,6 +100,8 @@ export function Sidebar({
   const setLocale = useStore(s => s.setLocale);
   const t = useMemo(() => createT(locale), [locale]);
   const location = useLocation();
+  const workItemsManualActive = location.pathname === '/work-items'
+    && new URLSearchParams(location.search).get('source') === 'manual';
   const primaryNavItems = useMemo(() => [
     { key: 'chat', to: TAB_ROUTES.chat, label: t('nav.chat'), state: undefined },
     { key: 'sessions', to: TAB_ROUTES.sessions, label: t('nav.workspace'), exact: true, chatProjectPicker: true },
@@ -179,24 +181,24 @@ export function Sidebar({
             <div id="workspace-sidebar-toggle-host" className="absolute inset-1 flex shrink-0 items-center justify-center empty:hidden" />
           </div>
           <NavLink
-            to="/tasks"
+            to="/work-items"
             title={t('nav.dashboard')}
             aria-label={t('nav.dashboard')}
             className={({ isActive }) => cn(
               'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+              isActive && !workItemsManualActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
             )}
           >
             {IconTasks}
             <MenuTooltip label={t('nav.dashboard')} />
           </NavLink>
           <NavLink
-            to="/daily"
+            to="/work-items?source=manual"
             title={t('nav.daily')}
             aria-label={t('nav.daily')}
             className={({ isActive }) => cn(
               'group relative mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-fg-5 transition-colors hover:bg-panel-h hover:text-fg',
-              isActive && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+              (isActive || workItemsManualActive) && 'bg-panel-h text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
             )}
           >
             {IconDaily}
@@ -339,11 +341,18 @@ export function Sidebar({
                 to={item.to}
                 end={item.exact}
                 state={chatNavState(item)}
-                className={({ isActive }) => cn(
-                  'inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-sm font-semibold transition-colors duration-200',
-                  'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
-                  isActive && !('chatPanel' in item) && !('chatProjectPicker' in item) ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
-                )}
+                className={({ isActive }) => {
+                  const active = item.key === 'dashboard'
+                    ? location.pathname === '/work-items' && !workItemsManualActive
+                    : item.key === 'daily'
+                      ? workItemsManualActive
+                      : isActive && !('chatPanel' in item) && !('chatProjectPicker' in item);
+                  return cn(
+                    'inline-flex h-8 shrink-0 items-center justify-center rounded-md px-3 text-sm font-semibold transition-colors duration-200',
+                    'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
+                    active ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
+                  );
+                }}
               >
                 {item.label}
               </NavLink>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo, type DragEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { AGENT_ACCEPTED_PROVIDER_KINDS, cn, EFFORT_OPTIONS, getAgentMeta, shortenModel } from '../../utils';
+import { AGENT_ACCEPTED_PROVIDER_KINDS, cn, EFFORT_OPTIONS, getAgentMeta, isImeCompositionKeyEvent, shortenModel } from '../../utils';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { Spinner } from '../../components/ui';
@@ -465,6 +465,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   const inputValueRef = useRef('');
   const initialDraftConsumedRef = useRef('');
   const composingRef = useRef(false);
+  const compositionEndedAtRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -1171,6 +1172,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   const effectiveQueuedId = effectiveQueuedIds[effectiveQueuedIds.length - 1] || null;
   const hasQueuedTask = effectiveQueuedIds.length > 0;
   const showTaskBar = hasQueuedTask;
+  const commandQueueCountLabel = `${effectiveQueuedIds.length} ${t('hub.commandQueueCount')}`;
   const sessionRunning = !!(session.running || session.runState === 'running');
   const showStopAll = !!onStopAll && (sessionRunning || streamPhase === 'streaming' || streamPhase === 'queued' || sending);
   const handleStopAll = useCallback(async () => {
@@ -1313,10 +1315,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
   }, [persistDraft]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    const isComposing = isImeCompositionKeyEvent(e, composingRef.current, compositionEndedAtRef.current);
+    if (isComposing) return;
     if (skillMenuOpen && commandOptions.length > 0) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setSkillMenuIndex(i => (i + 1) % commandOptions.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSkillMenuIndex(i => (i - 1 + commandOptions.length) % commandOptions.length); return; }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !composingRef.current)) {
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
         e.preventDefault();
         const option = commandOptions[Math.min(skillMenuIndex, commandOptions.length - 1)];
         if (option) selectCommandOption(option);
@@ -1324,7 +1328,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
       }
       if (e.key === 'Escape') { e.preventDefault(); setSkillMenuOpen(false); return; }
     }
-    if (e.key === 'Enter' && !e.shiftKey && !composingRef.current) { e.preventDefault(); handleSend(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
   const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1521,19 +1525,47 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
     <div className={cn('composer-shell shrink-0', compact && 'composer-shell-compact')} ref={composerRef} data-session-composer>
       {/* Floating centered input area */}
       <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] px-2.5 pb-2 pt-1.5' : 'w-full max-w-[860px] px-4 pb-4 pt-2 sm:px-3')}>
-        {/* Task control bar — queued follow-ups only. Active streams use the inline stop button near Send. */}
+        {/* Queue dock: queued follow-ups only. Active streams use the inline stop button near Send. */}
         {showTaskBar && (
-          <div className="mb-2 space-y-1.5">
-            {/* One row per queued task — each carries its own steer/recall. */}
+          <section
+            className="pk-command-queue-dock mb-2 rounded-xl border border-warn/25 bg-panel/72 px-2.5 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.16)] backdrop-blur-md"
+            data-testid="session-command-queue-dock"
+            aria-label={t('hub.commandQueue')}
+          >
+            <div className="mb-2 flex min-w-0 items-center justify-between gap-3 px-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="pk-command-queue-orb grid h-7 w-7 shrink-0 place-items-center rounded-full border border-warn/35 bg-warn/[0.09] text-warn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M4 6h11" />
+                    <path d="M4 12h8" />
+                    <path d="M4 18h6" />
+                    <path d="m16 15 3 3 3-3" />
+                    <path d="M19 6v12" />
+                  </svg>
+                </span>
+                <div className="min-w-0">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-[12px] font-semibold text-fg">{t('hub.commandQueue')}</span>
+                    <span className="shrink-0 rounded-full border border-warn/25 bg-warn/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-warn">
+                      {commandQueueCountLabel}
+                    </span>
+                  </div>
+                  <div className="truncate text-[11px] text-fg-5">{t('hub.commandQueueHint')}</div>
+                </div>
+              </div>
+              <div className="hidden shrink-0 items-center gap-1 rounded-full border border-edge bg-inset px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-fg-5 sm:inline-flex">
+                <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse" />
+                {t('hub.commandQueueWaiting')}
+              </div>
+            </div>
+            {/* One row per queued task; each carries its own steer/recall. */}
             {effectiveQueuedIds.length > 0 && (
-              <div className="max-h-[min(32vh,260px)] space-y-1.5 overflow-y-auto overscroll-contain pr-1 -mr-1">
+              <div className="max-h-[min(32vh,272px)] space-y-1.5 overflow-y-auto overscroll-contain pr-1 -mr-1">
                 {effectiveQueuedIds.map((taskId, idx) => {
                   const isLatest = idx === effectiveQueuedIds.length - 1;
                   const positionLabel = effectiveQueuedIds.length > 1 ? `${t('hub.queued')} #${idx + 1}` : t('hub.queued');
-                  // Per-task prompt + images come from pendingQueuedSends (client-
-                  // only blob URLs) with the server snapshot as the text fallback.
-                  // Server queue state doesn't carry image data, so an older
-                  // queued row that survives a refresh just shows the text.
+                  // Per-task prompt + images come from pendingQueuedSends (client-only blob URLs) with
+                  // the server snapshot as the text fallback. Server queue state doesn't carry image data.
                   const optimistic = pendingQueuedSends?.find(p => p.taskId === taskId)
                     || pendingQueuedSends?.find(p => p.localId === taskId)
                     || (isLatest ? pendingQueuedSends?.find(p => !p.taskId) : undefined);
@@ -1564,7 +1596,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                         void reorderQueuedTask(draggedTaskId, taskId);
                       }}
                       className={cn(
-                        'flex gap-2.5 rounded-lg border border-warn/30 bg-panel/60 px-3.5 py-1.5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] backdrop-blur-md transition-[background-color,border-color,box-shadow,opacity]',
+                        'pk-command-queue-item flex gap-2.5 rounded-lg border border-warn/24 bg-inset/78 px-3 py-2 shadow-[0_8px_24px_rgba(15,23,42,0.08)] backdrop-blur-md transition-[background-color,border-color,box-shadow,opacity,transform]',
                         isExpanded ? 'items-start' : 'items-center',
                         draggingQueuedTaskId === taskId && 'opacity-55',
                         dragOverQueuedTaskId === taskId && draggingQueuedTaskId !== taskId && 'border-warn/70 bg-panel/75 shadow-[inset_0_0_0_1px_rgba(251,146,60,0.22),0_8px_24px_rgba(15,23,42,0.08)]'
@@ -1594,7 +1626,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                           </svg>
                         </button>
                       )}
-                      <span className={cn('h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0', isExpanded && 'mt-2')} />
+                      <span className={cn('mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border border-warn/30 bg-warn/[0.08] text-[10px] font-semibold text-warn', isExpanded && 'mt-1')}>
+                        {idx + 1}
+                      </span>
                       <div className="flex-1 min-w-0">
                         <div className={cn('flex min-w-0 gap-2', isExpanded ? 'items-start flex-wrap' : 'items-center')}>
                           <button
@@ -1619,9 +1653,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                             >
                               <polyline points="9 6 15 12 9 18" />
                             </svg>
-                            <span className="shrink-0 text-[12px] font-medium text-warn">{positionLabel}</span>
+                            <span className="shrink-0 text-[12px] font-semibold text-warn">{positionLabel}</span>
                             {!isExpanded && taskPrompt && (
-                              <span className="min-w-0 truncate text-[11px] text-fg-5/60">{taskPrompt}</span>
+                              <span className="min-w-0 truncate text-[11px] text-fg-4/75">{taskPrompt}</span>
                             )}
                           </button>
                           {taskImages.length > 0 && (
@@ -1646,18 +1680,18 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                         {isExpanded && taskPrompt && (
                           <div
                             title={taskPrompt}
-                            className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded bg-warn/[0.035] px-2 py-1.5 text-left text-[11px] text-fg-5/70"
+                            className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-edge/50 bg-panel/42 px-2 py-1.5 text-left text-[11px] text-fg-4/80"
                           >
                             {taskPrompt}
                           </div>
                         )}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex shrink-0 items-center gap-1">
                         <button
                           onClick={() => handleSteerQueued(taskId)}
                           disabled={isLocalOnly || steeringIds.has(taskId)}
                           title={t('hub.steerHint')}
-                          className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                          className="flex items-center gap-1 rounded-md border border-transparent px-2 py-1 text-[11px] font-medium text-fg-4 transition-colors hover:border-primary/25 hover:bg-primary/10 hover:text-primary disabled:pointer-events-none disabled:opacity-30"
                         >
                           {steeringIds.has(taskId)
                             ? <Spinner className="h-2.5 w-2.5" />
@@ -1668,7 +1702,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                           onClick={() => handleRecallQueued(taskId)}
                           disabled={isLocalOnly || recallingIds.has(taskId)}
                           title={t('hub.recallHint')}
-                          className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                          className="flex items-center gap-1 rounded-md border border-transparent px-2 py-1 text-[11px] font-medium text-fg-4 transition-colors hover:border-err/25 hover:bg-err/10 hover:text-err disabled:pointer-events-none disabled:opacity-30"
                         >
                           {recallingIds.has(taskId)
                             ? <Spinner className="h-2.5 w-2.5" />
@@ -1681,7 +1715,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
                 })}
               </div>
             )}
-          </div>
+          </section>
         )}
         <div className="relative rounded-xl border border-control-border bg-control shadow-[var(--th-composer-shadow)] transition-[border-color,box-shadow,background-color] duration-200 focus-within:border-control-border-h focus-within:shadow-[var(--th-composer-shadow-focus)]">
           <input
@@ -1898,11 +1932,20 @@ export const InputComposer = memo(function InputComposer({ session, workdir, com
             value={input}
             onChange={e => handleInputChange(e.target.value)}
             onFocus={rememberComposerFocus}
-            onBlur={handleInputBlur}
+            onBlur={() => {
+              composingRef.current = false;
+              handleInputBlur();
+            }}
             onPaste={onPaste}
             onKeyDown={onKeyDown}
-            onCompositionStart={() => { composingRef.current = true; }}
-            onCompositionEnd={() => { composingRef.current = false; }}
+            onCompositionStart={() => {
+              composingRef.current = true;
+              compositionEndedAtRef.current = 0;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+              compositionEndedAtRef.current = Date.now();
+            }}
             placeholder={t('hub.inputPlaceholder')}
             rows={1}
             className={cn(

@@ -128,9 +128,10 @@ export {
 
 // ── Re-export: skills ───────────────────────────────────────────────────────
 export {
-  getProjectSkillPaths, initializeProjectSkills, listSkills, getGlobalSkillsRoot,
+  buildPinnedSkillsPrompt, buildRelevantSkillsPrompt, getProjectSkillPaths, initializeProjectSkills, listPinnedSkills, listSkills, getGlobalSkillsRoot,
+  retrieveRelevantSkills, setSkillPinned,
   collapseSkillPrompt,
-  type ProjectSkillPaths, type SkillInfo, type SkillListResult, type SkillScope,
+  type PinnedSkillListResult, type ProjectSkillPaths, type RetrievedSkillInfo, type SkillInfo, type SkillListResult, type SkillPinResult, type SkillScope,
 } from './skills.js';
 
 // ── Re-export: goal (persistent thread objective) ────────────────────────────
@@ -196,8 +197,23 @@ export {
 
 export {
   installSkill, removeSkill, checkSkillUpdates, getGlobalSkillsDir,
-  type SkillInstallOpts, type SkillInstallResult, type SkillRemoveResult,
+  importSkillFolder, importSkillGit, importSkillMarkdown, importSkillZip, isAllowedSkillGitUrl, previewSkillMarkdownImport,
+  restoreSkillQuarantine,
+  type SkillInstallOpts, type SkillInstallResult,
+  type SkillFolderImportEntryResult, type SkillFolderImportEntryStatus, type SkillFolderImportResult,
+  type SkillGitImportResult, type SkillZipImportResult,
+  type SkillMarkdownImportResult, type SkillMarkdownScanResult, type SkillQuarantineRestoreResult, type SkillRemoveResult,
 } from './skill-installer.js';
+
+export {
+  scanSkillMarkdown, scanSkillSecurity, skillImportVerdict,
+  type SkillImportVerdict, type SkillImportWarning, type SkillSecurityReport, type SkillSecurityVerdict,
+} from './skill-safety.js';
+
+export {
+  listSkillQuarantine, quarantineSkillMarkdown, removeSkillQuarantine,
+  type SkillQuarantineListResult, type SkillQuarantineRecord, type SkillQuarantineRemoveResult, type SkillQuarantineScope,
+} from './skill-quarantine.js';
 
 // ── Re-export: CLI extensions ───────────────────────────────────────────────
 export {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
-import { createTodoItem, getTodoItems } from '../src/pro/todos.ts';
+import { createTodoItem, getTodoItems, linkTodoChat } from '../src/pro/todos.ts';
 import { createProTask, getProTask, updateProTaskMeta } from '../src/pro/tasks.ts';
 import {
   addTaskToDaily,
@@ -14,6 +14,7 @@ import {
   revertDailyItemTaskForTask,
   reorderDailyItems,
 } from '../src/pro/daily-items.ts';
+import { DAILY_ASSISTANT_ID } from '../src/pro/assistant-defaults.ts';
 
 let tmpDir: string;
 let previousTaskFile: string | undefined;
@@ -68,6 +69,10 @@ describe('Daily item store', () => {
     expect(tasks.map(task => task?.title)).toEqual(['Clarify onboarding', 'Plan the release']);
     expect(tasks.every(task => task?.status === 'backlog')).toBe(true);
     expect(tasks.every(task => task?.plannedDate === '2026-06-01')).toBe(true);
+    expect(tasks.map(task => task?.origin)).toEqual([
+      { type: 'daily', key: first.id },
+      { type: 'daily', key: second.id },
+    ]);
     expect(listDailyItems('2026-06-01').every(item => item.status === 'task-created')).toBe(true);
   });
 
@@ -174,10 +179,70 @@ describe('Daily item store', () => {
     expect(result.item.sourceTodoId).toBe(todo.id);
     expect(getProTask(result.taskId)).toMatchObject({
       title: 'Check API drift',
+      kind: 'todo',
       status: 'backlog',
       plannedDate: '2026-06-01',
+      defaultAssistantId: DAILY_ASSISTANT_ID,
+      origin: { type: 'todo', key: todo.id },
     });
     expect(getTodoItems([todo.id])[0]?.status).toBe('archived');
+  });
+
+  it('assigns the Daily Assistant when promoting a daily item to a task', () => {
+    const [item] = createDailyItems({
+      date: '2026-06-01',
+      titles: ['Clarify daily work'],
+    });
+
+    const result = promoteDailyItemsToTasks('2026-06-01', [item.id]);
+    const task = getProTask(result.taskIds[0]);
+
+    expect(task).toMatchObject({
+      title: 'Clarify daily work',
+      plannedDate: '2026-06-01',
+      defaultAssistantId: DAILY_ASSISTANT_ID,
+      origin: { type: 'daily', key: item.id },
+    });
+  });
+
+  it('preserves todo source evidence when planning it today', () => {
+    const todo = createTodoItem({
+      title: 'Check screenshot evidence',
+      body: 'Compare the screenshot with the current task state.',
+      source: {
+        type: 'chat-selection',
+        workdir: '/repo/pikiclaw',
+        agent: 'codex',
+        sessionId: 'session-1',
+        turnIndex: 7,
+        quote: 'The Work Item source is hidden.',
+      },
+      images: [
+        {
+          id: 'image-1',
+          kind: 'image',
+          name: 'source.png',
+          mimeType: 'image/png',
+          size: 2048,
+          dataUrl: 'data:image/png;base64,abc',
+        },
+      ],
+    });
+    linkTodoChat(todo.id, {
+      workdir: '/repo/pikiclaw',
+      agent: 'codex',
+      sessionId: 'linked-session',
+    });
+
+    const result = addTodoToDaily('2026-06-01', todo.id);
+    const task = getProTask(result.taskId);
+
+    expect(task?.description).toContain('Inbox note:');
+    expect(task?.description).toContain('Quoted source:');
+    expect(task?.description).toContain('source.png (2 KB)');
+    expect(task?.description).toContain('Source session: codex:session-1 turn 7');
+    expect(task?.description).toContain('Source workspace: /repo/pikiclaw');
+    expect(task?.description).toContain('Linked chat: codex:linked-session');
   });
 
   it('adds an existing task to daily without changing its space ownership', () => {

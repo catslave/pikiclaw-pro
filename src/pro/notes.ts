@@ -553,6 +553,7 @@ export function promoteNoteSelection(input: PromoteNoteSelectionInput) {
       description: body,
       kind: 'manual',
       status: 'backlog',
+      origin: { type: 'note', key: page.id },
       workdir: normalizeText(input.workdir, 2048) || undefined,
     }),
   };

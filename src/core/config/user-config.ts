@@ -10,6 +10,7 @@ import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from '../constants.js';
 import { expandTilde } from '../platform.js';
 
 export type ChannelName = 'telegram' | 'feishu' | 'weixin' | 'slack' | 'discord' | 'dingtalk' | 'wecom';
+export type TerminalName = ChannelName | 'dashboard';
 
 /** MCP server configuration — compatible with .mcp.json standard format. */
 export interface McpServerConfig {
@@ -74,11 +75,73 @@ export interface WorkspaceEntry {
   addedAt: string;
 }
 
+export interface ChannelRuntimeDefaults {
+  /** Default agent for new conversations started from this terminal. */
+  agent?: Agent;
+  /** Optional model override for the selected agent in this terminal. */
+  model?: string;
+  /** Optional reasoning effort override for this terminal. */
+  effort?: string;
+  /** Optional project/workspace override for this terminal. */
+  workdir?: string;
+  /** Optional execution-safety posture for dashboard-launched chats. */
+  permissionMode?: 'autopilot' | 'ask' | 'read-only';
+}
+
+export interface WorkSurfaceDefaults {
+  /** Preferred Assistant profile for a product work surface such as Daily/Todo. */
+  assistantId?: string;
+  /** Fallback agent when the preferred Assistant is not available. */
+  agent?: Agent;
+  /** Optional model override for the selected fallback agent. */
+  model?: string;
+  /** Optional reasoning effort override for this work surface. */
+  effort?: string;
+  /** Optional execution-safety posture for work-surface launches. */
+  permissionMode?: 'autopilot' | 'ask' | 'read-only';
+}
+
+export interface WorkDefaults {
+  /** Defaults used when Inbox/Todo items are loaded into the Daily work surface. */
+  daily?: WorkSurfaceDefaults;
+  /** Defaults used when Todo-derived Work Items are loaded into Chat. */
+  todo?: WorkSurfaceDefaults;
+  /** Defaults used when Jira-derived Work Items are loaded into Chat. */
+  jira?: WorkSurfaceDefaults;
+}
+
+export interface NotificationPreferences {
+  /** Master switch for dashboard/user-facing notifications. */
+  master?: boolean;
+  /** Notify when long-running agent work finishes. */
+  agentFinished?: boolean;
+  /** Notify when agent work fails or hits a runtime error. */
+  agentError?: boolean;
+  /** Notify when scheduled tasks fire or complete. */
+  scheduledTask?: boolean;
+  /** Notify when connected IM channels receive messages. */
+  channelMessage?: boolean;
+  /** Notify when a usage budget warning is crossed. */
+  budgetWarn?: boolean;
+  /** Future desktop/sound notification preference. Dashboard toasts are visual only. */
+  playSound?: boolean;
+  /** Quiet-hours start in HH:mm local time. */
+  quietStart?: string;
+  /** Quiet-hours end in HH:mm local time. */
+  quietEnd?: string;
+}
+
 export interface UserConfig {
   version: 1;
   channel?: ChannelName;
   /** Launch multiple channels simultaneously (comma-separated or array). */
   channels?: ChannelName[];
+  /** Per-terminal defaults layered on top of the global Agent/Model/Project defaults. */
+  channelDefaults?: Partial<Record<TerminalName, ChannelRuntimeDefaults>>;
+  /** Product work-surface defaults layered on top of terminal defaults. */
+  workDefaults?: WorkDefaults;
+  /** User-facing notification preferences for dashboard and future native notifications. */
+  notifications?: NotificationPreferences;
   defaultAgent?: Agent;
   agentAutoUpdate?: boolean;
   claudeModel?: string;
@@ -142,6 +205,11 @@ export interface UserConfig {
     mcp?: Record<string, McpServerConfig>;
     /** OAuth tokens keyed by MCP server id (same key as extensions.mcp). */
     mcpTokens?: Record<string, McpOAuthTokenRecord>;
+    /** Skills that should be surfaced as always-at-hand references in chats. */
+    skills?: {
+      pinnedGlobal?: string[];
+      pinnedByWorkspace?: Record<string, string[]>;
+    };
   };
   /**
    * Model layer — Provider+Profile abstraction for BYOK across all agents.

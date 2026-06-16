@@ -22,6 +22,7 @@ import {
   exportSession as _exportSession,
   importSession as _importSession,
   findPikiclawSession,
+  listPikiclawSessions,
   updateSessionMeta,
   deleteAgentSession as _deleteAgentSession,
   deleteSideChatSession as _deleteSideChatSession,
@@ -55,6 +56,7 @@ export interface SessionQueryOpts {
   /** Single agent, array of agents, or omit for all installed agents. */
   agent?: Agent | Agent[];
   limit?: number;
+  managedOnly?: boolean;
   userStatus?: UserStatus[];
   archiveMode?: 'active' | 'archived' | 'all';
 }
@@ -149,11 +151,51 @@ export async function querySessions(opts: SessionQueryOpts): Promise<SessionQuer
   const agents = normalizeAgents(opts.agent);
 
   const results = await Promise.all(
-    agents.map(agent =>
-      _getSessions({ agent, workdir: resolvedWorkdir }).catch((): SessionListResult => ({
+    agents.map(agent => {
+      if (opts.managedOnly) {
+        return Promise.resolve({
+          ok: true,
+          sessions: listPikiclawSessions(resolvedWorkdir, agent, opts.limit, { includeSideChats: true }).map(record => ({
+            sessionId: record.sessionId,
+            agent: record.agent,
+            workdir: record.workdir,
+            workspacePath: record.workspacePath,
+            threadId: record.threadId,
+            model: record.model,
+            createdAt: record.createdAt,
+            origin: record.origin ?? null,
+            title: record.title,
+            titleSource: record.titleSource ?? null,
+            running: record.runState === 'running',
+            runState: record.runState,
+            runDetail: record.runDetail,
+            runUpdatedAt: record.runUpdatedAt,
+            runPid: record.runPid,
+            classification: record.classification,
+            userStatus: record.userStatus,
+            userNote: record.userNote,
+            pinned: record.pinned === true,
+            archived: record.archived === true,
+            archivedAt: record.archivedAt ?? null,
+            lastQuestion: record.lastQuestion,
+            lastAnswer: record.lastAnswer,
+            lastMessageText: record.lastMessageText,
+            migratedFrom: record.migratedFrom,
+            migratedTo: record.migratedTo,
+            linkedSessions: record.linkedSessions,
+            sideChatOf: record.sideChatOf ?? null,
+            sideChats: record.sideChats ?? [],
+            contextSources: record.contextSources ?? [],
+            outputs: record.outputs ?? [],
+            numTurns: null,
+          })),
+          error: null,
+        } satisfies SessionListResult);
+      }
+      return _getSessions({ agent, workdir: resolvedWorkdir, limit: opts.limit }).catch((): SessionListResult => ({
         ok: false, sessions: [], error: `Failed to fetch ${agent} sessions`,
-      })),
-    ),
+      }));
+    }),
   );
 
   let allSessions: WorkspaceSessionInfo[] = [];

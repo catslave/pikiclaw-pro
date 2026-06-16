@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo, useMemo, type ReactNode } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo, useMemo, type CSSProperties, type ReactNode } from 'react';
 import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
@@ -6,12 +6,16 @@ import { loadSessionMessages, peekSessionMessages } from '../../session-preload'
 import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '../../ws';
 import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
 import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
+import { BrandIcon } from '../../components/BrandIcon';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { AgentCapabilityDescriptor, InteractionSnapshot, MessageBlock, SessionGoalView, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
-import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest } from './TurnView';
+import type { AgentCapabilityDescriptor, AutomationRule, InteractionSnapshot, MessageBlock, SessionGoalView, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent, WorkflowRunRecord } from '../../types';
+import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest, type SessionMessageAnchorRole } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
-import { hasRenderableAssistant, insertComposerCommand, messageHasProposedPlan, textHasProposedPlan } from './AssistantContent';
+import { hasRenderableAssistant, insertComposerCommand, messageHasProposedPlan, textHasProposedPlan, type ScheduleProposalActionHandler, type WorkflowAskAnswerHandler } from './AssistantContent';
 import { buildReferenceContextEnvelope, InputComposer, type PendingReviewComment } from './InputComposer';
+import { WorkflowProgressStrip } from './WorkflowProgressRail';
+import { buildWorkflowAskAnswerEnvelope, extractWorkflowAskMarkers, latestWorkflowProgressFromTexts, parseWorkflowProgress, type WorkflowAskMarker } from './workflowProgress';
+import { scheduleProposalSignature } from './scheduleProposal';
 import { InteractionPromptModal } from './InteractionPromptModal';
 import type { OpenFileLinkHandler } from './markdown';
 import {
@@ -30,11 +34,29 @@ import {
   isStaleDoneSnapshotForPending,
   resolveEffectiveLiveStream,
   shouldSkipEmptyStreamingHandoff,
+  summarizeSessionCommandState,
   willQueueSendOnStart,
+  type SessionCommandStateSummary,
 } from './stream-ui';
 
 export type SessionPanelChange = { agent: string; sessionId: string; workdir: string; openInNewSlot?: boolean };
-export type SessionPanelScrollRequest = { turnIndex: number; totalTurns?: number; nonce: number };
+export type SessionPanelScrollRequest = { turnIndex: number; totalTurns?: number; nonce: number; highlight?: boolean; targetRole?: SessionMessageAnchorRole | null };
+export type SessionPanelSearchContext = {
+  query: string;
+  snippet?: string | null;
+  role?: 'user' | 'assistant' | null;
+  nonce?: number;
+  targetTurnIndex?: number | null;
+  targetTotalTurns?: number | null;
+};
+type HighlightedSearchTarget = { turnIndex: number; role: SessionMessageAnchorRole | null };
+type SessionFindMatch = {
+  key: string;
+  turnIndex: number;
+  role: SessionMessageAnchorRole;
+  label: string;
+  snippet: string;
+};
 
 const SESSION_PAGE_TURNS = 12;
 const TOP_LOAD_THRESHOLD_PX = 160;
@@ -45,12 +67,52 @@ const USER_SCROLL_AUTOSTICK_PAUSE_MS = 60 * 60 * 1000;
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 160;
 const USER_SCROLL_UP_THRESHOLD_PX = 4;
 const STREAM_BOTTOM_SCROLL_THROTTLE_MS = 220;
+const SEARCH_RESULT_HIGHLIGHT_MS = 5200;
+const SESSION_FIND_SNIPPET_MAX = 92;
+
+function isSessionFindEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
+}
+
+function normalizeSessionFindText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function buildSessionFindSnippet(text: string, query: string): string {
+  const normalized = normalizeSessionFindText(text);
+  const needle = normalizeSessionFindText(query);
+  if (!normalized) return '';
+  if (!needle) return normalized.slice(0, SESSION_FIND_SNIPPET_MAX);
+  const index = normalized.toLowerCase().indexOf(needle.toLowerCase());
+  if (index < 0) {
+    return normalized.length > SESSION_FIND_SNIPPET_MAX
+      ? `${normalized.slice(0, SESSION_FIND_SNIPPET_MAX).trimEnd()}...`
+      : normalized;
+  }
+  const before = Math.max(0, index - 28);
+  const after = Math.min(normalized.length, index + needle.length + 52);
+  return `${before > 0 ? '...' : ''}${normalized.slice(before, after).trim()}${after < normalized.length ? '...' : ''}`;
+}
+
+function findWorkflowRunAskForMarker(run: WorkflowRunRecord | null | undefined, marker: WorkflowAskMarker) {
+  const matches = (run?.asks || []).filter(item => item.question === marker.question && item.type === marker.type);
+  if (!matches.length) return null;
+  return matches.find(item => item.status === 'pending') || matches[0];
+}
 
 function scrollToMessageBottom(el: HTMLDivElement) {
   const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
   if (Math.abs(el.scrollTop - maxScrollTop) > 1) {
     el.scrollTop = maxScrollTop;
   }
+}
+
+function sessionWorkdirLabel(workdir: string): string {
+  const trimmed = workdir.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || workdir || 'Workspace';
 }
 
 function remainingToMessageBottom(el: HTMLDivElement) {
@@ -153,6 +215,33 @@ function GoalStatusBar({
   const canPause = actions.has('pause');
   const canResume = actions.has('resume');
   const canClear = actions.has('clear');
+  if (compact) {
+    const statusLabel = `${goal.source}:${goal.status}`;
+    return (
+      <div className="mx-auto flex w-[calc(100%_-_32px)] max-w-[640px] items-center gap-1.5 px-2.5 pb-0.5 pt-1.5">
+        <div
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-edge/40 bg-panel-alt/55 px-2 py-1 text-[10px] text-fg-4"
+          title={goal.objective}
+        >
+          <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-emerald-400/80' : paused ? 'bg-amber-400/80' : 'bg-fg-5/50')} />
+          <span className="shrink-0 font-semibold uppercase tracking-wider text-fg-5">Goal</span>
+          <span className="min-w-0 truncate text-fg-3">{goal.objective}</span>
+          <span className="shrink-0 rounded border border-edge/30 bg-control/75 px-1.5 py-[1px] font-mono text-[9px] text-fg-5">
+            {statusLabel}
+          </span>
+        </div>
+        {active && canPause && (
+          <Button variant="ghost" size="sm" disabled={busy} onClick={onPause} className="h-6 px-1.5 text-[10px]">Pause</Button>
+        )}
+        {paused && canResume && (
+          <Button variant="ghost" size="sm" disabled={busy} onClick={onResume} className="h-6 px-1.5 text-[10px]">Resume</Button>
+        )}
+        {canClear && (
+          <Button variant="ghost" size="sm" disabled={busy} onClick={onClear} className="h-6 px-1.5 text-[10px]">Clear</Button>
+        )}
+      </div>
+    );
+  }
   return (
     <div className={cn('mx-auto flex items-center gap-2 px-3 py-1.5', compact ? 'w-[calc(100%_-_32px)] max-w-[640px]' : 'max-w-[860px]')}>
       <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-edge/45 bg-panel-alt/70 px-2.5 py-1.5 text-[11px] text-fg-4">
@@ -167,6 +256,45 @@ function GoalStatusBar({
         {active && canPause && <Button variant="ghost" size="sm" disabled={busy} onClick={onPause}>Pause</Button>}
         {paused && canResume && <Button variant="ghost" size="sm" disabled={busy} onClick={onResume}>Resume</Button>}
         {canClear && <Button variant="ghost" size="sm" disabled={busy} onClick={onClear}>Clear</Button>}
+      </div>
+    </div>
+  );
+}
+
+function CommandStateStrip({ summary, compact }: { summary: SessionCommandStateSummary | null; compact: boolean }) {
+  if (!summary) return null;
+  const toneClass = summary.kind === 'queued' || summary.kind === 'command-queue'
+    ? 'border-warn/25 bg-warn/[0.07] text-warn'
+    : summary.kind === 'pending-send' || summary.kind === 'provider-wake'
+      ? 'border-primary/25 bg-primary/[0.065] text-primary'
+      : 'border-emerald-500/25 bg-emerald-500/[0.065] text-emerald-500';
+  const dotClass = summary.kind === 'queued' || summary.kind === 'command-queue'
+    ? 'bg-warn'
+    : summary.kind === 'pending-send' || summary.kind === 'provider-wake'
+      ? 'bg-primary'
+      : 'bg-emerald-500';
+  return (
+    <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] px-2.5 pt-1.5' : 'w-full max-w-[860px] px-4 pt-2 sm:px-3')}>
+      <div
+        className={cn(
+          'flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] shadow-[0_6px_18px_rgba(15,23,42,0.06)]',
+          toneClass,
+        )}
+        data-testid="session-command-state-strip"
+      >
+        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full animate-pulse', dotClass)} />
+        <span className="shrink-0 font-semibold text-fg">{summary.title}</span>
+        <span className="min-w-0 flex-1 truncate text-fg-4">{summary.detail}</span>
+        {summary.count > 0 && (
+          <span className="shrink-0 rounded border border-current/20 bg-panel/55 px-1.5 py-[1px] font-mono text-[10px] text-current">
+            {summary.count}
+          </span>
+        )}
+        {summary.activeTaskId && (
+          <span className="hidden shrink-0 rounded border border-edge/35 bg-control/60 px-1.5 py-[1px] font-mono text-[10px] text-fg-5 sm:inline">
+            {summary.activeTaskId.slice(0, 8)}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -202,11 +330,135 @@ function PlanDecisionBar({ compact }: { compact: boolean }) {
   );
 }
 
+function interactionKindLabel(kind: InteractionSnapshot['kind']): string {
+  if (kind === 'permission') return 'Permission';
+  if (kind === 'confirmation') return 'Confirmation';
+  return 'Input';
+}
+
+function InteractionRequestDock({
+  snapshot,
+  count,
+  compact,
+  onOpen,
+  onCancel,
+  t,
+}: {
+  snapshot: InteractionSnapshot;
+  count: number;
+  compact: boolean;
+  onOpen: () => void;
+  onCancel: () => void;
+  t: ReturnType<typeof createT>;
+}) {
+  const question = snapshot.questions?.[snapshot.currentIndex ?? 0] || snapshot.questions?.[0] || null;
+  const queueLabel = count > 1
+    ? t('session.interactionDockCount').replace('{count}', String(count))
+    : interactionKindLabel(snapshot.kind);
+  return (
+    <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] px-2.5 pt-1.5' : 'w-full max-w-[860px] px-4 pt-2 sm:px-3')}>
+      <section
+        className="pk-interaction-dock flex min-w-0 flex-col gap-2 rounded-xl border border-primary/25 bg-panel/78 px-3 py-2.5 shadow-[0_12px_36px_rgba(15,23,42,0.16)] backdrop-blur-md sm:flex-row sm:items-center"
+        data-testid="session-interaction-dock"
+        aria-label={t('session.interactionDockTitle')}
+      >
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+          <span className="pk-interaction-orb mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-primary/35 bg-primary/[0.09] text-primary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" />
+              <path d="M12 7v5l3 2" />
+              <path d="M16.5 3.5h4v4" />
+              <path d="m20.5 3.5-5 5" />
+            </svg>
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="truncate text-[12px] font-semibold text-fg">{t('session.interactionDockTitle')}</span>
+              <span className="shrink-0 rounded-full border border-primary/25 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-primary">
+                {queueLabel}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-fg-5">
+              {snapshot.title || t('session.interactionDockFallback')}
+            </div>
+            {question && (
+              <div className="mt-1 truncate text-[11px] text-fg-4" title={question.prompt}>
+                {question.header ? `${question.header}: ` : ''}{question.prompt}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center justify-end gap-1.5">
+          <Button variant="primary" size="sm" onClick={onOpen}>
+            {t('session.interactionAnswerNow')}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onCancel} className="text-red-600 hover:text-red-600">
+            {t('session.interactionCancel')}
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SessionSearchContextBanner({
+  context,
+  compact,
+  onClear,
+}: {
+  context: SessionPanelSearchContext;
+  compact: boolean;
+  onClear?: () => void;
+}) {
+  const roleLabel = context.role === 'user'
+    ? 'User message'
+    : context.role === 'assistant'
+      ? 'Assistant reply'
+      : 'Conversation';
+  const snippet = (context.snippet || '').trim();
+  return (
+    <div className={cn(
+      'rounded-xl border border-primary/20 bg-primary/[0.07] px-3 py-2 shadow-[0_8px_22px_rgba(15,23,42,0.06)]',
+      compact && 'rounded-lg px-2.5 py-2',
+    )}>
+      <div className="flex min-w-0 items-start gap-2">
+        <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/80" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-primary">Search match</span>
+            <span className="shrink-0 rounded-md border border-primary/15 bg-primary/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-fg-4">
+              {roleLabel}
+            </span>
+          </div>
+          <div className="mt-1 truncate text-[12px] font-semibold text-fg">{context.query}</div>
+          {snippet && (
+            <div className="mt-1 line-clamp-2 text-[12px] leading-5 text-fg-4">{snippet}</div>
+          )}
+        </div>
+        {onClear && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-5 transition hover:bg-primary/[0.1] hover:text-primary"
+            aria-label="Dismiss search match"
+            title="Dismiss"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+              <path d="M18 6 6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, referenceContextPrompt = null, referenceContextLabel = null, referenceContextProject = null, initialRuntimeSelection = null, onReferenceContextClear, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, onTranscriptScroll, scrollToTurnRequest = null, initialDraftPrompt = null, suppressLiveStreamState = false, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
+  session, workdir, active = true, readOnly = false, compact = false, transcriptHeader, transcriptFooter, searchContext = null, referenceContextPrompt = null, referenceContextLabel = null, referenceContextProject = null, initialRuntimeSelection = null, onReferenceContextClear, onSearchContextClear, onSessionChange, onMultiSessionChange, onRuntimeSelectionChange, onOpenFileLink, onCreateSideChatFromSelection, onCreateTodoFromSelection, onCreateReviewCommentFromSelection, onTranscriptScroll, scrollToTurnRequest = null, initialDraftPrompt = null, suppressLiveStreamState = false, initialPendingPrompt, initialPendingImageUrls, initialPendingCreatedAt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
@@ -215,11 +467,13 @@ export const SessionPanel = memo(function SessionPanel({
   compact?: boolean;
   transcriptHeader?: ReactNode;
   transcriptFooter?: ReactNode;
+  searchContext?: SessionPanelSearchContext | null;
   referenceContextPrompt?: string | null;
   referenceContextLabel?: string | null;
   referenceContextProject?: { source: string; hash: string; title?: string | null } | null;
   initialRuntimeSelection?: { agent?: string | null; model?: string | null; effort?: string | null } | null;
   onReferenceContextClear?: () => void;
+  onSearchContextClear?: () => void;
   onSessionChange?: (next: SessionPanelChange) => void;
   onMultiSessionChange?: (next: SessionPanelChange[], prompt: string) => void;
   onRuntimeSelectionChange?: (next: { agent: string; model: string | null; effort: string | null }) => void;
@@ -255,6 +509,10 @@ export const SessionPanel = memo(function SessionPanel({
   const [history, setHistory] = useState<TurnHistoryWindow | null>(null);
   const [loading, setLoading] = useState(!hasInitialPending);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [highlightedSearchTarget, setHighlightedSearchTarget] = useState<HighlightedSearchTarget | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findActiveIndex, setFindActiveIndex] = useState(0);
   const [pendingReviewComments, setPendingReviewComments] = useState<PendingReviewComment[]>([]);
   const [liveStream, setLiveStream] = useState<{
     taskId: string | null;
@@ -288,8 +546,14 @@ export const SessionPanel = memo(function SessionPanel({
   // `interactions` field of the stream snapshot. The latest entry is rendered
   // as a modal popup; the server clears entries as users answer them.
   const [interactions, setInteractions] = useState<InteractionSnapshot[]>([]);
+  const [dismissedInteractionPromptId, setDismissedInteractionPromptId] = useState<string | null>(null);
   const [goalView, setGoalView] = useState<SessionGoalView | null>(null);
   const [goalBusy, setGoalBusy] = useState(false);
+  const [workflowRun, setWorkflowRun] = useState<WorkflowRunRecord | null>(null);
+  const [workflowAskBusyId, setWorkflowAskBusyId] = useState<string | null>(null);
+  const [scheduleProposalBusyKey, setScheduleProposalBusyKey] = useState<string | null>(null);
+  const liveWorkflowIngestSignatureRef = useRef<string | null>(null);
+  const workflowReconcileSignatureRef = useRef<string | null>(null);
   // Optimistic state for the RUNNING task only — the user message bubble that
   // backs the in-flight turn until rawTurns picks it up. Earlier this slot
   // doubled as the optimistic source for queued sends, which meant sending a
@@ -341,9 +605,13 @@ export const SessionPanel = memo(function SessionPanel({
   streamTaskIdRef.current = streamTaskId;
   queuedTaskIdsRef.current = queuedTaskIds;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const pendingRecallScrollTurnRef = useRef<number | null>(null);
+  const pendingRecallScrollHighlightRef = useRef(false);
+  const pendingRecallScrollRoleRef = useRef<SessionMessageAnchorRole | null>(null);
   const lastRecallScrollNonceRef = useRef<number | null>(null);
+  const highlightedTurnTimerRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
   const scrollToBottomRef = useRef(false);
   const forceScrollToBottomRef = useRef(false);
@@ -653,6 +921,55 @@ export const SessionPanel = memo(function SessionPanel({
     }
   }, [workdir, session.agent, session.sessionId]);
 
+  useEffect(() => {
+    setWorkflowRun(null);
+    setWorkflowAskBusyId(null);
+    liveWorkflowIngestSignatureRef.current = null;
+    workflowReconcileSignatureRef.current = null;
+  }, [session.agent, session.sessionId, workdir]);
+
+  const refreshSessionWorkflowRun = useCallback(async (): Promise<WorkflowRunRecord | null> => {
+    const agent = session.agent || '';
+    const sessionId = session.sessionId || '';
+    if (!agent || !sessionId || sessionId.startsWith('pending_')) {
+      setWorkflowRun(null);
+      return null;
+    }
+    try {
+      const res = await api.getProWorkflowRuns({ limit: 100 });
+      if (!res.ok) return null;
+      const sessionKey = `${agent}:${sessionId}`;
+      const run = (res.runs || []).find(item => (
+        item.sessionKey === sessionKey
+        || (item.agent === agent && item.sessionId === sessionId && (!item.workdir || item.workdir === workdir))
+      )) || null;
+      if (run) {
+        setWorkflowRun(run);
+        return run;
+      }
+
+      const reconcileSignature = `${workdir}:${agent}:${sessionId}`;
+      if (workflowReconcileSignatureRef.current !== reconcileSignature) {
+        workflowReconcileSignatureRef.current = reconcileSignature;
+        try {
+          const reconciled = await api.reconcileProWorkflowRunSession({ workdir, agent, sessionId }, { timeoutMs: 30_000 });
+          if (reconciled.ok && reconciled.run) {
+            setWorkflowRun(reconciled.run);
+            return reconciled.run;
+          }
+        } catch {
+          // Workflow state is supplemental to the transcript; failed reconciliation
+          // should never block opening an old chat.
+        }
+      }
+
+      setWorkflowRun(null);
+      return null;
+    } catch {
+      return null;
+    }
+  }, [session.agent, session.sessionId, workdir]);
+
   const loadLatestTurns = useCallback(async ({ keepOlder, force = false, scrollToBottom = false }: { keepOlder: boolean; force?: boolean; scrollToBottom?: boolean }) => {
     const callSessionId = session.sessionId;
     // Per-session re-entrancy guard. A fetch already in flight for *this* session
@@ -714,6 +1031,7 @@ export const SessionPanel = memo(function SessionPanel({
           && (pending === true || liveStreamRef.current.taskId === scopedTaskId);
         if (owned) setLiveStream(null);
       }
+      void refreshSessionWorkflowRun();
       return true;
     } finally {
       // Only release the guard if we still own it for this session; a
@@ -722,7 +1040,7 @@ export const SessionPanel = memo(function SessionPanel({
         loadingLatestRef.current = null;
       }
     }
-  }, [fetchTurnWindow, clearPending, session.sessionId]);
+  }, [fetchTurnWindow, clearPending, refreshSessionWorkflowRun, session.sessionId]);
 
   const loadOlderTurns = useCallback(async () => {
     if (!history?.hasOlder || loadingOlderRef.current) return;
@@ -1107,6 +1425,108 @@ export const SessionPanel = memo(function SessionPanel({
       .catch(() => { handleSendFailed(); });
   }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, referenceContextProject, referenceContextPrompt, requestStreamPolling, session.agent, session.sessionId, workdir]);
 
+  const handleWorkflowAskAnswer = useCallback<WorkflowAskAnswerHandler>(async (askMarker, answer, skipped = false) => {
+    const agent = session.agent || '';
+    const sessionId = session.sessionId || '';
+    const trimmed = answer.trim();
+    if (!agent || !sessionId || sessionId.startsWith('pending_')) return;
+    if (!trimmed && !skipped) return;
+    const run = workflowRun || await refreshSessionWorkflowRun();
+    const ask = findWorkflowRunAskForMarker(run, askMarker);
+    if (!run || !ask) return;
+    const retryingDelivery = ask.status !== 'pending' && ask.deliveryStatus === 'failed';
+    if (ask.status !== 'pending' && !retryingDelivery) return;
+    setWorkflowAskBusyId(ask.id);
+    const answerForSend = retryingDelivery
+      ? (ask.answer || trimmed || (ask.status === 'skipped' ? 'skip' : '')).trim()
+      : (trimmed || 'skip');
+    if (!answerForSend) {
+      setWorkflowAskBusyId(null);
+      return;
+    }
+    const visiblePrompt = skipped || ask.status === 'skipped' ? `Workflow answer skipped: ${ask.question}` : `Workflow answer: ${answerForSend}`;
+    let deliveryRunId = run.id;
+    let deliveryAskId = ask.id;
+    let deliveryStarted = false;
+    try {
+      const updated = retryingDelivery
+        ? await api.updateProWorkflowRunAskDelivery(run.id, ask.id, { deliveryStatus: 'sending' })
+        : await api.answerProWorkflowRunAsk(run.id, ask.id, { answer: trimmed || 'skip', skipped });
+      if (!updated.ok || !updated.run || !updated.ask) throw new Error(updated.error || 'Workflow ask answer failed');
+      deliveryRunId = updated.run.id;
+      deliveryAskId = updated.ask.id;
+      deliveryStarted = true;
+      setWorkflowRun(updated.run);
+      const envelope = buildWorkflowAskAnswerEnvelope(updated.ask, updated.ask.answer || answerForSend);
+      forceScrollToBottomRef.current = true;
+      scrollToBottomRef.current = true;
+      handleSendStart(visiblePrompt);
+      requestStreamPolling();
+      const sent = await api.sendSessionMessage(workdir, agent, sessionId, envelope, {
+        model: updated.run.model,
+        effort: updated.run.effort,
+        displayPrompt: visiblePrompt,
+        timeoutMs: 30_000,
+      });
+      if (!sent.ok) {
+        handleSendFailed();
+        throw new Error(sent.error || 'Workflow answer send failed');
+      }
+      const delivered = await api.updateProWorkflowRunAskDelivery(deliveryRunId, deliveryAskId, { deliveryStatus: 'sent', taskId: sent.taskId });
+      if (delivered.ok && delivered.run) setWorkflowRun(delivered.run);
+      if (sent.taskId) handleSendTaskAssigned(sent.taskId);
+    } catch (err) {
+      if (deliveryStarted) {
+        const failed = await api.updateProWorkflowRunAskDelivery(deliveryRunId, deliveryAskId, {
+          deliveryStatus: 'failed',
+          error: err instanceof Error ? err.message : String(err || 'Workflow answer send failed'),
+        }).catch(() => null);
+        if (failed?.ok && failed.run) setWorkflowRun(failed.run);
+      }
+      handleSendFailed();
+    } finally {
+      setWorkflowAskBusyId(null);
+      void refreshSessionWorkflowRun();
+    }
+  }, [handleSendFailed, handleSendStart, handleSendTaskAssigned, refreshSessionWorkflowRun, requestStreamPolling, session.agent, session.sessionId, workdir, workflowRun]);
+
+  const handleScheduleProposalCreate = useCallback<ScheduleProposalActionHandler>(async (proposal) => {
+    const promptBody = proposal.prompt.trim();
+    if (!promptBody) throw new Error('Add an instruction before creating this scheduled task.');
+    const agent = session.agent || '';
+    if (!agent) throw new Error('Select an agent before creating a scheduled task.');
+    const signature = scheduleProposalSignature(proposal);
+    setScheduleProposalBusyKey(signature);
+    try {
+      const sourceLines: string[] = [];
+      if (session.sessionId && !session.sessionId.startsWith('pending_')) {
+        sourceLines.push(`Source chat: ${agent}:${session.sessionId}`);
+      }
+      if (session.title || session.lastQuestion) {
+        sourceLines.push(`Source title: ${session.title || session.lastQuestion}`);
+      }
+      const prompt = [
+        promptBody,
+        sourceLines.length ? ['Scheduled from Pikiclaw chat.', ...sourceLines].join('\n') : '',
+      ].filter(Boolean).join('\n\n');
+      const res = await api.createProAutomation({
+        name: proposal.name.trim() || `Follow up: ${session.title || session.lastQuestion || 'chat'}`,
+        schedule: proposal.schedule || 'manual',
+        prompt,
+        workdir,
+        agent,
+        assistantId: null,
+        enabled: proposal.enabled,
+        includeProjectReferences: proposal.includeProjectReferences,
+        projectReferenceNames: proposal.includeProjectReferences ? proposal.projectReferenceNames : [],
+      });
+      if (!res.ok || !res.automation) throw new Error(res.error || 'Failed to create scheduled task.');
+      return res.automation as AutomationRule;
+    } finally {
+      setScheduleProposalBusyKey(null);
+    }
+  }, [session.agent, session.lastQuestion, session.sessionId, session.title, workdir]);
+
   const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
     // During session promotion (pending→native), the sessionId prop changes but the
@@ -1228,6 +1648,13 @@ export const SessionPanel = memo(function SessionPanel({
     return () => window.clearInterval(timer);
   }, [applyStreamSnapshot, session.agent, session.sessionId, session.running, session.runState, streaming, streamPhase, suppressLiveStreamState]);
 
+  useEffect(() => {
+    if (!dismissedInteractionPromptId) return;
+    if (!interactions.some(item => item.promptId === dismissedInteractionPromptId)) {
+      setDismissedInteractionPromptId(null);
+    }
+  }, [dismissedInteractionPromptId, interactions]);
+
   /* ── Safety: clear stale pending state when session stops running ── */
   // Must wait until the stream snapshot is gone (streamPhase null, no queued
   // tasks). Otherwise a steer/recall mid-flight — where session.running can
@@ -1274,21 +1701,45 @@ export const SessionPanel = memo(function SessionPanel({
   const historyScrollKey = history ? `${history.startTurn}:${history.endTurn}:${history.turns.length}` : 'none';
   const liveScrollKey = liveStream ? `${liveStream.taskId || ''}:${liveStream.phase}:${(liveStream.text || '').length}` : 'none';
 
-  const scrollLoadedTurnIntoView = useCallback((turnIndex: number): boolean => {
+  const showTurnHighlight = useCallback((turnIndex: number, role: SessionMessageAnchorRole | null = null) => {
+    setHighlightedSearchTarget({ turnIndex, role });
+    if (highlightedTurnTimerRef.current !== null) window.clearTimeout(highlightedTurnTimerRef.current);
+    highlightedTurnTimerRef.current = window.setTimeout(() => {
+      highlightedTurnTimerRef.current = null;
+      setHighlightedSearchTarget(current => (
+        current?.turnIndex === turnIndex && current.role === role ? null : current
+      ));
+    }, SEARCH_RESULT_HIGHLIGHT_MS);
+  }, []);
+
+  const scrollLoadedTurnIntoView = useCallback((turnIndex: number, highlight = false, targetRole: SessionMessageAnchorRole | null = null): boolean => {
     const el = scrollRef.current;
     if (!el) return false;
-    const target = el.querySelector<HTMLElement>(`[data-session-turn-index="${turnIndex}"]`);
+    let resolvedRole: SessionMessageAnchorRole | null = null;
+    let target: HTMLElement | null = null;
+    if (targetRole) {
+      target = el.querySelector<HTMLElement>(`[data-session-message-anchor="${turnIndex}:${targetRole}"]`);
+      if (target) resolvedRole = targetRole;
+    }
+    target ||= el.querySelector<HTMLElement>(`[data-session-turn-index="${turnIndex}"]`);
     if (!target) return false;
     programmaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
     target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    if (highlight) showTurnHighlight(turnIndex, resolvedRole);
     return true;
-  }, []);
+  }, [showTurnHighlight]);
 
-  const scheduleRecallTurnScroll = useCallback((turnIndex: number) => {
+  const scheduleRecallTurnScroll = useCallback((turnIndex: number, highlight = false, targetRole: SessionMessageAnchorRole | null = null) => {
     pendingRecallScrollTurnRef.current = turnIndex;
+    pendingRecallScrollHighlightRef.current = highlight;
+    pendingRecallScrollRoleRef.current = targetRole;
     const run = () => {
-      if (pendingRecallScrollTurnRef.current !== turnIndex) return;
-      if (scrollLoadedTurnIntoView(turnIndex)) pendingRecallScrollTurnRef.current = null;
+      if (pendingRecallScrollTurnRef.current !== turnIndex || pendingRecallScrollRoleRef.current !== targetRole) return;
+      if (scrollLoadedTurnIntoView(turnIndex, pendingRecallScrollHighlightRef.current, pendingRecallScrollRoleRef.current)) {
+        pendingRecallScrollTurnRef.current = null;
+        pendingRecallScrollHighlightRef.current = false;
+        pendingRecallScrollRoleRef.current = null;
+      }
     };
     if (typeof window === 'undefined') {
       run();
@@ -1297,10 +1748,38 @@ export const SessionPanel = memo(function SessionPanel({
     window.requestAnimationFrame(() => window.requestAnimationFrame(run));
   }, [scrollLoadedTurnIntoView]);
 
+  const openSessionFind = useCallback(() => {
+    setFindOpen(true);
+    window.setTimeout(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    }, 0);
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if ((event as unknown as { isComposing?: boolean }).isComposing) return;
+      const key = event.key.toLowerCase();
+      const isCmdOrCtrl = event.metaKey || event.ctrlKey;
+      if (!isCmdOrCtrl || event.altKey || event.shiftKey || key !== 'f') return;
+      if (isSessionFindEditableTarget(event.target)) return;
+      event.preventDefault();
+      openSessionFind();
+    };
+    document.addEventListener('keydown', handleFindShortcut, true);
+    return () => document.removeEventListener('keydown', handleFindShortcut, true);
+  }, [active, openSessionFind]);
+
   useLayoutEffect(() => {
     const pendingTurn = pendingRecallScrollTurnRef.current;
     if (pendingTurn == null) return;
-    if (scrollLoadedTurnIntoView(pendingTurn)) pendingRecallScrollTurnRef.current = null;
+    if (scrollLoadedTurnIntoView(pendingTurn, pendingRecallScrollHighlightRef.current, pendingRecallScrollRoleRef.current)) {
+      pendingRecallScrollTurnRef.current = null;
+      pendingRecallScrollHighlightRef.current = false;
+      pendingRecallScrollRoleRef.current = null;
+    }
   }, [historyScrollKey, scrollLoadedTurnIntoView]);
 
   useEffect(() => {
@@ -1308,8 +1787,12 @@ export const SessionPanel = memo(function SessionPanel({
     if (lastRecallScrollNonceRef.current === scrollToTurnRequest.nonce) return;
     lastRecallScrollNonceRef.current = scrollToTurnRequest.nonce;
     const turnIndex = Math.max(0, Math.floor(scrollToTurnRequest.turnIndex));
+    const highlight = scrollToTurnRequest.highlight === true;
+    const targetRole = scrollToTurnRequest.targetRole === 'user' || scrollToTurnRequest.targetRole === 'assistant'
+      ? scrollToTurnRequest.targetRole
+      : null;
     if (history && turnIndex >= history.startTurn && turnIndex < history.endTurn) {
-      scheduleRecallTurnScroll(turnIndex);
+      scheduleRecallTurnScroll(turnIndex, highlight, targetRole);
       return;
     }
     const totalTurns = Math.max(
@@ -1329,6 +1812,8 @@ export const SessionPanel = memo(function SessionPanel({
     const turnLimit = Math.max(1, desiredEnd - desiredStart);
     const turnOffset = Math.max(0, totalTurns - desiredEnd);
     pendingRecallScrollTurnRef.current = turnIndex;
+    pendingRecallScrollHighlightRef.current = highlight;
+    pendingRecallScrollRoleRef.current = targetRole;
     void fetchTurnWindow({ turnOffset, turnLimit }, { force: true }).then(next => {
       if (!next) return;
       setHistory(current => {
@@ -1337,9 +1822,13 @@ export const SessionPanel = memo(function SessionPanel({
         if (next.startTurn >= current.endTurn) return mergeLatestHistory(current, next);
         return next;
       });
-      scheduleRecallTurnScroll(turnIndex);
+      scheduleRecallTurnScroll(turnIndex, highlight, targetRole);
     });
   }, [fetchTurnWindow, history, scheduleRecallTurnScroll, scrollToTurnRequest, session.numTurns]);
+
+  useEffect(() => () => {
+    if (highlightedTurnTimerRef.current !== null) window.clearTimeout(highlightedTurnTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!scrollToBottomRef.current) return;
@@ -1479,6 +1968,26 @@ export const SessionPanel = memo(function SessionPanel({
     sessionRunning,
     streamStateChecked,
   ]);
+  useEffect(() => {
+    const agent = session.agent || '';
+    const sessionId = session.sessionId || '';
+    const text = effectiveLiveStream?.text || '';
+    if (!agent || !sessionId || sessionId.startsWith('pending_') || !text.trim()) return;
+    if (!parseWorkflowProgress(text) && extractWorkflowAskMarkers(text).length === 0) return;
+
+    const signature = `${agent}:${sessionId}:${text.length}:${text.slice(-420)}`;
+    if (liveWorkflowIngestSignatureRef.current === signature) return;
+    const timeout = window.setTimeout(() => {
+      liveWorkflowIngestSignatureRef.current = signature;
+      void api.ingestProWorkflowRunMarkers({ workdir, agent, sessionId, text }, { timeoutMs: 10_000 })
+        .then((res) => {
+          if (res.ok && res.run) setWorkflowRun(res.run);
+        })
+        .catch(() => null);
+    }, effectiveLiveStream?.phase === 'streaming' ? 350 : 0);
+    return () => window.clearTimeout(timeout);
+  }, [effectiveLiveStream?.phase, effectiveLiveStream?.text, session.agent, session.sessionId, workdir]);
+
   const activeLivePrompt = (pendingPrompt || effectiveLiveStream?.prompt || '').trim();
   // When a live stream is active, the stream prompt owns where the live assistant
   // card attaches. Pending input can be a queued follow-up, so it must not steal
@@ -1575,6 +2084,74 @@ export const SessionPanel = memo(function SessionPanel({
         return replacementSourceIndex >= 0 && sourceIndex >= replacementSourceIndex;
       });
   }, [editReplacement, history?.startTurn, turns]);
+  const sessionWorkflowProgress = useMemo(() => {
+    const texts = displayTurnItems.map(({ turn }) => turn.assistant?.text || '');
+    if (effectiveLiveStream?.text) texts.push(effectiveLiveStream.text);
+    return latestWorkflowProgressFromTexts(texts);
+  }, [displayTurnItems, effectiveLiveStream?.text]);
+  const durableSessionWorkflowProgress = useMemo(() => {
+    const agent = session.agent || '';
+    const sessionId = session.sessionId || '';
+    if (!workflowRun || workflowRun.sessionKey !== `${agent}:${sessionId}`) return null;
+    if (workflowRun.status !== 'running' && workflowRun.status !== 'blocked') return null;
+    const step = workflowRun.steps.find(item => item.index === workflowRun.currentStep);
+    return {
+      currentStep: workflowRun.currentStep,
+      totalSteps: workflowRun.totalSteps,
+      title: step?.title || workflowRun.title || workflowRun.workflowName,
+      status: workflowRun.status,
+    };
+  }, [session.agent, session.sessionId, workflowRun]);
+  const activeSessionWorkflowProgress = durableSessionWorkflowProgress
+    || (
+      sessionWorkflowProgress?.status === 'running' || sessionWorkflowProgress?.status === 'blocked'
+        ? sessionWorkflowProgress
+        : null
+    );
+  const findMatches = useMemo<SessionFindMatch[]>(() => {
+    const query = findQuery.trim();
+    if (!query) return [];
+    const lowerQuery = query.toLowerCase();
+    const out: SessionFindMatch[] = [];
+    for (const { turn, sourceIndex } of displayTurnItems) {
+      const turnIndex = (history?.startTurn || 0) + sourceIndex;
+      const userText = turn.user?.text || '';
+      if (userText.toLowerCase().includes(lowerQuery)) {
+        out.push({
+          key: `${turnIndex}:user`,
+          turnIndex,
+          role: 'user',
+          label: `Turn ${turnIndex + 1} · User`,
+          snippet: buildSessionFindSnippet(userText, query),
+        });
+      }
+      const assistantText = turn.assistant?.text || '';
+      if (assistantText.toLowerCase().includes(lowerQuery)) {
+        out.push({
+          key: `${turnIndex}:assistant`,
+          turnIndex,
+          role: 'assistant',
+          label: `Turn ${turnIndex + 1} · Assistant`,
+          snippet: buildSessionFindSnippet(assistantText, query),
+        });
+      }
+    }
+    return out;
+  }, [displayTurnItems, findQuery, history?.startTurn]);
+  const activeFindMatch = findMatches[Math.min(findActiveIndex, Math.max(0, findMatches.length - 1))] || null;
+
+  useEffect(() => {
+    setFindActiveIndex(0);
+  }, [findQuery, findMatches.length]);
+
+  const jumpToFindMatch = useCallback((index: number) => {
+    if (!findMatches.length) return;
+    const nextIndex = (index + findMatches.length) % findMatches.length;
+    const match = findMatches[nextIndex];
+    setFindActiveIndex(nextIndex);
+    scheduleRecallTurnScroll(match.turnIndex, true, match.role);
+  }, [findMatches, scheduleRecallTurnScroll]);
+
   const pendingBubble = (pendingPrompt || pendingImageUrls.length > 0)
     ? (
       <UserBubble
@@ -1665,6 +2242,49 @@ export const SessionPanel = memo(function SessionPanel({
   }, [session.agent, session.sessionId, workdir]);
   const composerContextMeta = latestContextMeta ?? lastContextMeta;
   const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || effectiveLiveStream);
+  const uniqueQueuedCommandCount = useMemo(() => {
+    const ids = new Set<string>();
+    for (const id of queuedTaskIds) if (id) ids.add(id);
+    for (const send of pendingQueuedSends) {
+      const id = send.taskId || send.localId;
+      if (id) ids.add(id);
+    }
+    return ids.size;
+  }, [pendingQueuedSends, queuedTaskIds]);
+  const pendingQueuedWithoutSnapshotCount = useMemo(() => {
+    const snapshotIds = new Set(queuedTaskIds);
+    return pendingQueuedSends.filter(send => {
+      const id = send.taskId || send.localId;
+      return id && !snapshotIds.has(id);
+    }).length;
+  }, [pendingQueuedSends, queuedTaskIds]);
+  const commandStateSummary = useMemo(() => summarizeSessionCommandState({
+    pendingPrompt,
+    pendingTaskId,
+    pendingImageCount: pendingImageUrls.length,
+    streamPhase: suppressLiveStreamState ? null : streamPhase,
+    streamTaskId: suppressLiveStreamState ? null : streamTaskId,
+    streaming: suppressLiveStreamState ? false : streaming,
+    sessionRunning,
+    streamStateChecked,
+    queuedTaskCount: uniqueQueuedCommandCount - pendingQueuedWithoutSnapshotCount,
+    pendingQueuedSendCount: pendingQueuedWithoutSnapshotCount,
+    activity: effectiveLiveStream?.activity || effectiveLiveStream?.previewMeta?.lastEvent || null,
+  }), [
+    effectiveLiveStream?.activity,
+    effectiveLiveStream?.previewMeta,
+    pendingImageUrls.length,
+    pendingPrompt,
+    pendingQueuedWithoutSnapshotCount,
+    pendingTaskId,
+    sessionRunning,
+    streamPhase,
+    streamStateChecked,
+    streamTaskId,
+    streaming,
+    suppressLiveStreamState,
+    uniqueQueuedCommandCount,
+  ]);
   const staleRuntimeConfirmed = sessionRunning
     && streamStateChecked
     && !streaming
@@ -1697,6 +2317,20 @@ export const SessionPanel = memo(function SessionPanel({
     const latestTurn = turns[turns.length - 1];
     return messageHasProposedPlan(latestTurn?.assistant);
   }, [effectiveLiveStream?.text, streamIsActive, turns]);
+  const latestInteraction = interactions[interactions.length - 1] || null;
+  const latestInteractionPromptId = latestInteraction?.promptId || null;
+  const interactionDismissed = !!latestInteractionPromptId && dismissedInteractionPromptId === latestInteractionPromptId;
+  const dismissLatestInteraction = useCallback(() => {
+    if (latestInteractionPromptId) setDismissedInteractionPromptId(latestInteractionPromptId);
+  }, [latestInteractionPromptId]);
+  const openLatestInteraction = useCallback(() => {
+    setDismissedInteractionPromptId(null);
+  }, []);
+  const cancelLatestInteraction = useCallback(() => {
+    if (!latestInteractionPromptId) return;
+    setDismissedInteractionPromptId(null);
+    void api.interactionCancel(latestInteractionPromptId);
+  }, [latestInteractionPromptId]);
   useLayoutEffect(() => {
     if (!stickToBottomRef.current) return;
     scheduleBottomScroll(scrollToBottomRef.current || forceScrollToBottomRef.current);
@@ -1704,28 +2338,185 @@ export const SessionPanel = memo(function SessionPanel({
     forceScrollToBottomRef.current = false;
   }, [transcriptTailKey, scheduleBottomScroll]);
   const transcriptClass = compact
-    ? 'w-[calc(100%_-_32px)] max-w-[640px] mx-auto px-3 pt-3 pb-6 space-y-0'
-    : 'max-w-[860px] mx-auto px-6 pt-6 pb-12 space-y-0';
+    ? 'pk-conversation-transcript w-[calc(100%_-_32px)] max-w-[640px] mx-auto px-3 pt-3 pb-6 space-y-0'
+    : 'pk-conversation-transcript max-w-[900px] mx-auto px-6 pt-6 pb-12 space-y-0';
+  const sessionTheme = useMemo(() => ({
+    '--pk-session-agent-color': meta.color,
+    '--pk-session-agent-bg': meta.bg,
+    '--pk-session-agent-border': meta.border,
+    '--pk-session-agent-glow': meta.glow,
+  }) as CSSProperties, [meta.bg, meta.border, meta.color, meta.glow]);
+  const workspaceLabel = sessionWorkdirLabel(workdir);
+  const sessionStateLabel = displayState === 'running'
+    ? t('session.statusRunning')
+    : displayState === 'incomplete'
+      ? t('hub.statusStopped')
+      : t('hub.statusTurnDone');
+  const sessionEmptyHint = locale === 'zh-CN'
+    ? '可以在下方继续输入，或回到 Chat Home 重新选择 Project / Agent。'
+    : 'Continue from the composer below, or return to Chat Home to change Project or Agent.';
+  const sessionLoadingHint = locale === 'zh-CN'
+    ? '正在整理历史、运行状态和当前上下文。'
+    : 'Loading history, run state, and current context.';
 
   return (
-    <div className={cn('flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]', compact && 'text-[12px]')}>
+    <div
+      className={cn('pk-conversation-panel relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--th-session-bg)]', compact && 'text-[12px]')}
+      style={sessionTheme}
+      data-agent={session.agent || ''}
+      data-state={displayState}
+    >
+      {findOpen && (
+        <div
+          className="absolute right-3 top-3 z-30 w-[min(420px,calc(100%-24px))] rounded-xl border border-edge-h bg-panel/96 p-2.5 shadow-[0_18px_52px_rgba(2,6,23,0.24)] backdrop-blur-xl"
+          data-testid="session-find-bar"
+        >
+          <div className="mb-2 flex min-w-0 items-center gap-2">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary shadow-[0_0_0_4px_var(--th-glow-a)]" />
+            <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">
+              Find in chat
+            </span>
+            <span className="shrink-0 rounded-md border border-edge bg-inset px-1.5 py-0.5 font-mono text-[10px] text-fg-5">
+              Cmd/Ctrl F
+            </span>
+            <button
+              type="button"
+              onClick={() => setFindOpen(false)}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
+              aria-label="Close find"
+              title="Close find"
+            >
+              ×
+            </button>
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <input
+              ref={findInputRef}
+              value={findQuery}
+              onChange={event => setFindQuery(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setFindOpen(false);
+                  return;
+                }
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  jumpToFindMatch(findActiveIndex + (event.shiftKey ? -1 : 1));
+                }
+              }}
+              placeholder="Search visible turns..."
+              aria-label="Find in chat"
+              className="min-w-0 flex-1 rounded-md border border-control-border bg-control px-2.5 py-1.5 text-[12px] text-fg outline-none transition-[border-color,box-shadow,background] placeholder:text-fg-5 focus:border-control-border-h focus:bg-control-h focus:shadow-[0_0_0_3px_var(--th-glow-a)]"
+            />
+            <span className="shrink-0 rounded-md border border-edge bg-inset px-2 py-1.5 text-[11px] font-semibold text-fg-4">
+              {findQuery.trim() ? `${findMatches.length ? findActiveIndex + 1 : 0}/${findMatches.length}` : '0/0'}
+            </span>
+            <button
+              type="button"
+              onClick={() => jumpToFindMatch(findActiveIndex - 1)}
+              disabled={!findMatches.length}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-edge bg-inset text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg disabled:opacity-45"
+              aria-label="Previous match"
+              title="Previous match"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              onClick={() => jumpToFindMatch(findActiveIndex + 1)}
+              disabled={!findMatches.length}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-edge bg-inset text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg disabled:opacity-45"
+              aria-label="Next match"
+              title="Next match"
+            >
+              ↓
+            </button>
+          </div>
+          {findQuery.trim() && (
+            <div className="mt-2 rounded-lg border border-edge bg-inset/80 px-2.5 py-2">
+              {activeFindMatch ? (
+                <button
+                  type="button"
+                  onClick={() => jumpToFindMatch(findActiveIndex)}
+                  className="block w-full min-w-0 text-left"
+                >
+                  <span className="block truncate text-[11px] font-semibold text-fg-3">{activeFindMatch.label}</span>
+                  <span className="mt-0.5 block truncate text-[11px] text-fg-5">{activeFindMatch.snippet}</span>
+                </button>
+              ) : (
+                <span className="block text-[11px] text-fg-5">No matches in loaded turns.</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {/* ── Messages ── */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
         onWheel={pauseAutoStickForUserScroll}
-        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain [overflow-anchor:none]"
+        className="pk-conversation-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain [overflow-anchor:none]"
       >
         {loading && !hasImmediateMessageContent ? (
-          <div className="flex items-center justify-center py-20"><Spinner className="h-5 w-5 text-fg-4" /></div>
+          <div className={cn(transcriptClass, 'flex min-h-full items-center justify-center')}>
+            <div className="pk-conversation-state-card w-full max-w-[520px] rounded-2xl border border-edge/70 bg-panel/78 px-5 py-5 shadow-[var(--th-card-shadow)] backdrop-blur-md">
+              <div className="flex items-start gap-4">
+                <span className="pk-conversation-state-orb grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-[color:var(--pk-session-agent-border)] bg-[var(--pk-session-agent-bg)] text-[var(--pk-session-agent-color)]">
+                  <Spinner className="h-4 w-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <BrandIcon brand={session.agent || ''} size={14} />
+                    <span className="truncate text-[13px] font-semibold text-fg">{t('modal.loadingConv')}</span>
+                  </div>
+                  <p className="mt-1 text-[12px] leading-5 text-fg-5">{sessionLoadingHint}</p>
+                  <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5 text-[10.5px] font-semibold text-fg-5">
+                    <span className="rounded-md border border-edge/55 bg-inset px-2 py-1">{workspaceLabel}</span>
+                    <span className="rounded-md border border-edge/55 bg-inset px-2 py-1">{meta.shortLabel}</span>
+                    <span className="rounded-md border border-edge/55 bg-inset px-2 py-1 font-mono">{session.sessionId.slice(0, 8)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !effectiveLiveStream ? (
-          <div className={transcriptClass}>
+          <div className={cn(transcriptClass, 'flex min-h-full flex-col justify-center')}>
             {transcriptHeader && (
               <div className="mb-4">
                 {transcriptHeader}
               </div>
             )}
-            <div className={cn('text-center text-fg-5', compact ? 'py-12 text-[12px]' : 'py-20 text-[13px]')}>{t('hub.noMessages')}</div>
+            <div className="pk-conversation-state-card mx-auto w-full max-w-[560px] rounded-2xl border border-dashed border-edge/75 bg-panel/62 px-5 py-6 text-left shadow-[var(--th-card-shadow)] backdrop-blur-md">
+              <div className="flex items-start gap-4">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-[color:var(--pk-session-agent-border)] bg-[var(--pk-session-agent-bg)] text-[var(--pk-session-agent-color)]">
+                  <BrandIcon brand={session.agent || ''} size={18} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <h2 className="truncate text-[14px] font-semibold text-fg">{t('hub.noMessages')}</h2>
+                    <span className="rounded-full border border-[color:var(--pk-session-agent-border)] bg-[var(--pk-session-agent-bg)] px-2 py-0.5 text-[10px] font-semibold text-[var(--pk-session-agent-color)]">
+                      {sessionStateLabel}
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-[12px] leading-5 text-fg-5">{sessionEmptyHint}</p>
+                  <div className="mt-4 grid grid-cols-3 gap-2 text-[10.5px]">
+                    <div className="min-w-0 rounded-lg border border-edge/50 bg-inset/80 px-2.5 py-2">
+                      <div className="text-fg-5">Project</div>
+                      <div className="mt-0.5 truncate font-semibold text-fg-3">{workspaceLabel}</div>
+                    </div>
+                    <div className="min-w-0 rounded-lg border border-edge/50 bg-inset/80 px-2.5 py-2">
+                      <div className="text-fg-5">Agent</div>
+                      <div className="mt-0.5 truncate font-semibold text-fg-3">{meta.shortLabel}</div>
+                    </div>
+                    <div className="min-w-0 rounded-lg border border-edge/50 bg-inset/80 px-2.5 py-2">
+                      <div className="text-fg-5">Session</div>
+                      <div className="mt-0.5 truncate font-mono text-fg-3">{session.sessionId.slice(0, 8)}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         ) : (
           <div className={transcriptClass}>
@@ -1778,14 +2569,36 @@ export const SessionPanel = memo(function SessionPanel({
                 && !streamPhase
                 ? (session.runDetail || t('dashboard.incompleteHint'))
                 : null;
+              const highlightedTarget = highlightedSearchTarget?.turnIndex === absoluteTurnIndex ? highlightedSearchTarget : null;
               return (
-                <div key={`${history?.startTurn || 0}:${sourceIndex}`} data-session-turn-index={absoluteTurnIndex}>
+                <div
+                  key={`${history?.startTurn || 0}:${sourceIndex}`}
+                  data-session-turn-index={absoluteTurnIndex}
+                  className={cn(
+                    'rounded-xl transition-[background-color,box-shadow] duration-500',
+                    highlightedTarget && !highlightedTarget.role && 'bg-primary/[0.075] shadow-[0_0_0_1px_rgba(125,160,255,0.22)]',
+                  )}
+                >
                   <TurnView
                     turn={turn}
                     turnIndex={absoluteTurnIndex}
                     agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
                     previewMeta={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? effectiveLiveStream.previewMeta ?? null : undefined}
-                    liveAssistant={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} /> : undefined}
+                    liveAssistant={sourceIndex === liveStreamAttachIndex && effectiveLiveStream ? (
+                      <LivePreview
+                        stream={effectiveLiveStream}
+                        streamActive={streamIsActive}
+                        t={t}
+                        onOpenFileLink={onOpenFileLink}
+                        workdir={workdir}
+                        onStopAll={handleStopAll}
+                        workflowRun={workflowRun}
+                        workflowAskBusyId={workflowAskBusyId}
+                        onWorkflowAskAnswer={handleWorkflowAskAnswer}
+                        scheduleProposalBusyKey={scheduleProposalBusyKey}
+                        onScheduleProposalCreate={handleScheduleProposalCreate}
+                      />
+                    ) : undefined}
                     onResend={handleResendText}
                     onEdit={(txt) => setEditRequest({ atTurn: absoluteTurnIndex, text: txt, draftPending: true })}
                     onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
@@ -1796,6 +2609,12 @@ export const SessionPanel = memo(function SessionPanel({
                     workdir={workdir}
                     retryProminent={retryProminent}
                     assistantRunError={assistantRunError}
+                    highlightRole={highlightedTarget?.role ?? null}
+                    workflowRun={workflowRun}
+                    workflowAskBusyId={workflowAskBusyId}
+                    onWorkflowAskAnswer={handleWorkflowAskAnswer}
+                    scheduleProposalBusyKey={scheduleProposalBusyKey}
+                    onScheduleProposalCreate={handleScheduleProposalCreate}
                   />
                 </div>
               );
@@ -1822,7 +2641,19 @@ export const SessionPanel = memo(function SessionPanel({
                     <>
                       <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={effectiveLiveStream.previewMeta ?? null} />
                       <div className="mb-6">
-                        <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
+                        <LivePreview
+                          stream={effectiveLiveStream}
+                          streamActive={streamIsActive}
+                          t={t}
+                          onOpenFileLink={onOpenFileLink}
+                          workdir={workdir}
+                          onStopAll={handleStopAll}
+                          workflowRun={workflowRun}
+                          workflowAskBusyId={workflowAskBusyId}
+                          onWorkflowAskAnswer={handleWorkflowAskAnswer}
+                          scheduleProposalBusyKey={scheduleProposalBusyKey}
+                          onScheduleProposalCreate={handleScheduleProposalCreate}
+                        />
                       </div>
                     </>
                   ) : !liveStream && !pendingStopped && (
@@ -1837,7 +2668,19 @@ export const SessionPanel = memo(function SessionPanel({
             {liveStreamVisible && liveStreamAttachIndex < 0 && !showStandalonePending && effectiveLiveStream && (
               <div className="mb-6">
                 <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={effectiveLiveStream.previewMeta} />
-                <LivePreview stream={effectiveLiveStream} streamActive={streamIsActive} t={t} onOpenFileLink={onOpenFileLink} workdir={workdir} onStopAll={handleStopAll} />
+                <LivePreview
+                  stream={effectiveLiveStream}
+                  streamActive={streamIsActive}
+                  t={t}
+                  onOpenFileLink={onOpenFileLink}
+                  workdir={workdir}
+                  onStopAll={handleStopAll}
+                  workflowRun={workflowRun}
+                  workflowAskBusyId={workflowAskBusyId}
+                  onWorkflowAskAnswer={handleWorkflowAskAnswer}
+                  scheduleProposalBusyKey={scheduleProposalBusyKey}
+                  onScheduleProposalCreate={handleScheduleProposalCreate}
+                />
               </div>
             )}
             {showStaleRuntimeNotice && (
@@ -1858,6 +2701,20 @@ export const SessionPanel = memo(function SessionPanel({
       </div>
 
       {/* ── Input ── */}
+      {activeSessionWorkflowProgress && (
+        <div className={cn('shrink-0 border-t border-edge/25 bg-[var(--th-session-bg)] px-4 pt-3', compact && 'px-3 pt-2')}>
+          <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px]' : 'max-w-[860px]')}>
+            <WorkflowProgressStrip progress={activeSessionWorkflowProgress} />
+          </div>
+        </div>
+      )}
+      {searchContext && (
+        <div className={cn('shrink-0 border-t border-edge/25 bg-[var(--th-session-bg)] px-4 pt-3', compact && 'px-3 pt-2')}>
+          <div className={cn('mx-auto', compact ? 'w-[calc(100%_-_32px)] max-w-[640px]' : 'max-w-[860px]')}>
+            <SessionSearchContextBanner context={searchContext} compact={compact} onClear={onSearchContextClear} />
+          </div>
+        </div>
+      )}
       {readOnly ? (
         <div className={cn('shrink-0 border-t border-edge/40 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]', compact ? 'px-3 py-2' : 'px-4 py-3')}>
           <div className={cn('mx-auto flex items-center justify-center rounded-md border border-edge bg-panel-alt px-3 py-2 text-fg-5', compact ? 'w-[calc(100%_-_32px)] max-w-[640px] text-[11px]' : 'max-w-[860px] text-[12px]')}>
@@ -1866,7 +2723,7 @@ export const SessionPanel = memo(function SessionPanel({
         </div>
       ) : (
       <div className={cn(
-        'shrink-0 border-t border-edge/30 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]',
+        'pk-conversation-composer-dock shrink-0 border-t border-edge/30 bg-[var(--th-session-bg)] shadow-[0_-12px_28px_rgba(15,23,42,0.04)]',
         compact && 'border-edge/45 bg-panel/85',
       )}>
           <GoalStatusBar
@@ -1879,6 +2736,17 @@ export const SessionPanel = memo(function SessionPanel({
             onClear={() => void runGoalAction('clear')}
           />
           {hasVisiblePlanDecision && <PlanDecisionBar compact={compact} />}
+          {active && latestInteraction && interactionDismissed && (
+            <InteractionRequestDock
+              snapshot={latestInteraction}
+              count={interactions.length}
+              compact={compact}
+              onOpen={openLatestInteraction}
+              onCancel={cancelLatestInteraction}
+              t={t}
+            />
+          )}
+          <CommandStateStrip summary={commandStateSummary} compact={compact} />
           <InputComposer
             session={composerSession}
             workdir={workdir}
@@ -1963,10 +2831,12 @@ export const SessionPanel = memo(function SessionPanel({
       {/* ── Human-in-the-loop ask-user modal ──
           Renders the most recently opened active prompt; if multiple are queued,
           we resolve them in LIFO order so a fresh sub-question pops on top. */}
-      {active && interactions.length > 0 && (
+      {active && latestInteraction && !interactionDismissed && (
         <InteractionPromptModal
-          key={interactions[interactions.length - 1].promptId}
-          snapshot={interactions[interactions.length - 1]}
+          key={latestInteraction.promptId}
+          snapshot={latestInteraction}
+          queue={interactions}
+          onDismiss={dismissLatestInteraction}
         />
       )}
     </div>

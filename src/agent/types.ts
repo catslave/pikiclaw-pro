@@ -582,7 +582,16 @@ export interface SessionContextOutputSource {
   turnIndex?: number | null;
 }
 
-export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource;
+export interface SessionContextFileSource {
+  kind: 'file';
+  workdir: string;
+  path: string;
+  title?: string | null;
+  source?: string | null;
+  size?: number | null;
+}
+
+export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource | SessionContextFileSource;
 
 /** The run-state of a session: running, completed, or incomplete. */
 export type SessionRunState = 'running' | 'completed' | 'incomplete';

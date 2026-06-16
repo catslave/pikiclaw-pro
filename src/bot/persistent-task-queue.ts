@@ -26,6 +26,7 @@ export interface PersistedQueuedTask {
   attachments: string[];
   modelId?: string | null;
   thinkingEffort?: string | null;
+  claudePermissionMode?: string | null;
   handoverFrom?: HandoverRef | null;
   contextSources?: SessionContextSource[];
   goalContinuation?: { kind: 'continuation' | 'budget_wrapup'; goalId: string };

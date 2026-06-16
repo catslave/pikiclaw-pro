@@ -1,5 +1,6 @@
 import type {
   Agent,
+  SessionContextFileSource,
   SessionContextOutputSource,
   SessionContextSessionSource,
   SessionContextSource,
@@ -26,6 +27,9 @@ function nonNegativeInt(value: unknown, fallback: number | null = null): number 
 }
 
 function sourceKey(source: SessionContextSource): string {
+  if (source.kind === 'file') {
+    return `file:${source.workdir}:${source.path}`;
+  }
   if (source.kind === 'output') {
     return `output:${source.workdir}:${source.agent}:${source.sessionId}:${source.outputId}`;
   }
@@ -37,18 +41,33 @@ export function normalizeSessionContextSources(value: unknown): SessionContextSo
   const out: SessionContextSource[] = [];
   const seen = new Set<string>();
   let sessionSourceCount = 0;
+  let fileSourceCount = 0;
   for (const raw of value) {
     if (!raw || typeof raw !== 'object') continue;
     const item = raw as Record<string, unknown>;
-    const kind = item.kind === 'output' ? 'output' : item.kind === 'session' ? 'session' : null;
+    const kind = item.kind === 'output' ? 'output' : item.kind === 'session' ? 'session' : item.kind === 'file' ? 'file' : null;
     if (!kind) continue;
     const workdir = text(item.workdir, 4096);
-    const agent = text(item.agent, 80) as Agent;
-    const sessionId = text(item.sessionId, 240);
-    if (!workdir || !agent || !sessionId) continue;
+    if (!workdir) continue;
 
     let source: SessionContextSource | null = null;
-    if (kind === 'session') {
+    if (kind === 'file') {
+      if (fileSourceCount >= 20) continue;
+      const filePath = text(item.path, 4096) || text(item.filePath, 4096);
+      if (!filePath) continue;
+      source = {
+        kind,
+        workdir,
+        path: filePath,
+        title: text(item.title, 240) || null,
+        source: text(item.source, 120) || null,
+        size: nonNegativeInt(item.size, null),
+      } satisfies SessionContextFileSource;
+      fileSourceCount += 1;
+    } else if (kind === 'session') {
+      const agent = text(item.agent, 80) as Agent;
+      const sessionId = text(item.sessionId, 240);
+      if (!agent || !sessionId) continue;
       if (sessionSourceCount >= 1) continue;
       const rawMode = text(item.mode, 40) as SessionContextSourceMode;
       const mode = VALID_MODES.has(rawMode) ? rawMode : 'compact';
@@ -65,6 +84,9 @@ export function normalizeSessionContextSources(value: unknown): SessionContextSo
       } satisfies SessionContextSessionSource;
       sessionSourceCount += 1;
     } else {
+      const agent = text(item.agent, 80) as Agent;
+      const sessionId = text(item.sessionId, 240);
+      if (!agent || !sessionId) continue;
       const outputId = text(item.outputId, 180) || text(item.id, 180);
       const title = text(item.title, 240);
       if (!outputId || !title) continue;

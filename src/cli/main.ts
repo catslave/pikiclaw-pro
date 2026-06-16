@@ -10,7 +10,7 @@ process.env.CLAUDECODE = '1';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { startAgentAutoUpdate } from '../agent/auto-update.js';
-import { envBool, DEFAULT_RUN_TIMEOUT_S } from '../bot/bot.js';
+import { envBool, DEFAULT_RUN_TIMEOUT_S, setBotTurnCompleteHook, setBotTurnStartGuard } from '../bot/bot.js';
 import { DAEMON_TIMEOUTS } from '../core/constants.js';
 import { isInsideContainer } from '../core/platform.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './channels.js';
@@ -32,6 +32,10 @@ import {
 } from '../core/process-control.js';
 import { runSetupWizard } from './setup-wizard.js';
 import { FROM_LAUNCHD_ENV, maybePromptAutostart } from './autostart.js';
+import { recordCostLedgerEvent } from '../pro/cost-ledger.js';
+import { recordUsageBudgetWarnAlertsForEvent } from '../pro/usage-budget.js';
+import { evaluateCurrentUsageBudgetGate } from '../pro/usage-budget-gate.js';
+import { clearProUsageSummaryCache } from '../pro/usage-summary.js';
 import {
   applyUserConfig,
   loadUserConfig,
@@ -212,6 +216,33 @@ function processLog(message: string) {
 
 const listStartupAgents = () => listAgents().agents;
 const listVerboseAgents = () => listAgents({ includeVersion: true }).agents;
+
+function registerRuntimeHooks() {
+  setBotTurnStartGuard(async ctx => {
+    const gate = await evaluateCurrentUsageBudgetGate({ agent: ctx.agent, model: ctx.model });
+    return gate.allowed
+      ? { allowed: true }
+      : { allowed: false, message: gate.message, code: 'usage_budget_paused' };
+  });
+  setBotTurnCompleteHook(async ctx => {
+    const event = await recordCostLedgerEvent({
+      agent: ctx.agent,
+      workdir: ctx.workdir,
+      sessionId: ctx.sessionId,
+      threadId: ctx.threadId,
+      model: ctx.model,
+      channel: ctx.channel,
+      status: ctx.status,
+      inputTokens: ctx.result.inputTokens,
+      outputTokens: ctx.result.outputTokens,
+      cachedInputTokens: ctx.result.cachedInputTokens,
+      cacheCreationInputTokens: ctx.result.cacheCreationInputTokens,
+      elapsedSeconds: ctx.result.elapsedS,
+    });
+    recordUsageBudgetWarnAlertsForEvent(event);
+    clearProUsageSummaryCache();
+  });
+}
 
 /* ── Phase: early exits (MCP serve, --version, --help) ────────────── */
 
@@ -758,6 +789,7 @@ export async function main() {
 
   // Apply runtime config, env overrides, and start config sync.
   applyRuntimeConfig(args, userConfig, configOverrides, channel);
+  registerRuntimeHooks();
 
   // Launch bot channel(s).
   await launchChannels(channels, dashboard);

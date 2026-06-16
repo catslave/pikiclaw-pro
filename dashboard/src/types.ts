@@ -9,6 +9,20 @@ export interface AgentInfo {
   installCommand?: string;
 }
 
+export interface AppUpdateStatus {
+  ok: boolean;
+  packageName: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  checkedAt: string;
+  registryUrl: string;
+  packageUrl: string;
+  installCommand: string;
+  detail: string;
+  error?: string;
+}
+
 export interface ModelInfo {
   id: string;
   alias: string | null;
@@ -33,7 +47,16 @@ export interface UsageResult {
   error: string | null;
 }
 
-export interface ProUsageAgentSummary {
+export type ProUsageCostSource = 'estimated' | 'mixed' | 'unknown';
+
+export interface ProUsageCostFields {
+  estimatedCostUsd: number;
+  pricedTokens: number;
+  unpricedTokens: number;
+  costSource: ProUsageCostSource;
+}
+
+export interface ProUsageAgentSummary extends ProUsageCostFields {
   agent: string;
   chatCount: number;
   sessionCount: number;
@@ -47,7 +70,7 @@ export interface ProUsageAgentSummary {
   lifetimeSeconds: number;
 }
 
-export interface ProUsageDaySummary {
+export interface ProUsageDaySummary extends ProUsageCostFields {
   day: string;
   chatCount: number;
   turnCount: number;
@@ -57,10 +80,11 @@ export interface ProUsageDaySummary {
   totalTokens: number;
 }
 
-export interface ProUsageChatSummary {
+export interface ProUsageChatSummary extends ProUsageCostFields {
   sessionId: string;
   threadId?: string | null;
   agent: string;
+  model: string | null;
   workdir: string;
   title: string;
   isSideChat: boolean;
@@ -75,6 +99,24 @@ export interface ProUsageChatSummary {
   lifetimeSeconds: number;
 }
 
+export interface ProCostLedgerBucket extends ProUsageCostFields {
+  key: string;
+  eventCount: number;
+  turnCount: number;
+  totalTokens: number;
+}
+
+export interface ProCostLedgerSummary extends ProUsageCostFields {
+  eventCount: number;
+  totalTokens: number;
+  latestEventAt: string | null;
+  byAgent: ProCostLedgerBucket[];
+  byModel: ProCostLedgerBucket[];
+  byChannel: ProCostLedgerBucket[];
+  bySession: ProCostLedgerBucket[];
+  byDay: ProCostLedgerBucket[];
+}
+
 export interface ProUsageTaskTimingSummary {
   taskId: string;
   title: string;
@@ -87,6 +129,59 @@ export interface ProUsageTaskTimingSummary {
   userFocusSeconds: number;
   agentSeconds: number;
   totalLifecycleSeconds: number | null;
+}
+
+export type ProUsageBudgetScope = 'global' | 'agent' | 'model';
+export type ProUsageBudgetPeriod = 'day' | 'week' | 'month';
+export type ProUsageBudgetAction = 'warn' | 'pause';
+export type ProUsageBudgetState = 'ok' | 'warn' | 'over';
+export type ProUsageBudgetUnit = 'tokens' | 'usd';
+
+export interface ProUsageBudget {
+  id: string;
+  name: string;
+  scope: ProUsageBudgetScope;
+  scopeKey?: string;
+  unit: ProUsageBudgetUnit;
+  limitTokens: number;
+  limitUsd: number;
+  period: ProUsageBudgetPeriod;
+  action: ProUsageBudgetAction;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProUsageBudgetStatus extends ProUsageBudget {
+  usedTokens: number;
+  usedUsd: number;
+  usedPercent: number | null;
+  periodStart: string;
+  periodEnd: string;
+  state: ProUsageBudgetState;
+  matchedChats: number;
+  matchedEvents: number;
+}
+
+export interface ProUsageBudgetAlert {
+  id: string;
+  budgetId: string;
+  budgetName: string;
+  scope: ProUsageBudgetScope;
+  scopeKey?: string;
+  unit: ProUsageBudgetUnit;
+  limitTokens: number;
+  limitUsd: number;
+  usedTokens: number;
+  usedUsd: number;
+  period: ProUsageBudgetPeriod;
+  periodStart: string;
+  eventId: string;
+  agent: string;
+  model: string | null;
+  channel?: string | null;
+  sessionId?: string | null;
+  createdAt: string;
 }
 
 export interface ProUsageSummary {
@@ -110,6 +205,9 @@ export interface ProUsageSummary {
     totalLifecycleSeconds: number;
     tasks: ProUsageTaskTimingSummary[];
   };
+  costLedger: ProCostLedgerSummary;
+  budgets: ProUsageBudgetStatus[];
+  budgetAlerts: ProUsageBudgetAlert[];
   notes: string[];
 }
 
@@ -211,6 +309,43 @@ export interface ChannelSetupState {
   detail: string;
 }
 
+export type ChannelKey = ChannelSetupState['channel'];
+export type TerminalKey = ChannelKey | 'dashboard';
+
+export interface ChannelRuntimeDefaults {
+  agent?: Agent;
+  model?: string;
+  effort?: string;
+  workdir?: string;
+  permissionMode?: 'autopilot' | 'ask' | 'read-only';
+}
+
+export interface WorkSurfaceDefaults {
+  assistantId?: string;
+  agent?: Agent;
+  model?: string;
+  effort?: string;
+  permissionMode?: 'autopilot' | 'ask' | 'read-only';
+}
+
+export interface WorkDefaults {
+  daily?: WorkSurfaceDefaults;
+  todo?: WorkSurfaceDefaults;
+  jira?: WorkSurfaceDefaults;
+}
+
+export interface NotificationPreferences {
+  master?: boolean;
+  agentFinished?: boolean;
+  agentError?: boolean;
+  scheduledTask?: boolean;
+  channelMessage?: boolean;
+  budgetWarn?: boolean;
+  playSound?: boolean;
+  quietStart?: string;
+  quietEnd?: string;
+}
+
 export interface SetupState {
   agents: AgentInfo[];
   channel: string;
@@ -249,8 +384,54 @@ export interface BotStatus {
   sessions: number;
 }
 
+export type DashboardActivityType = 'visit' | 'chat' | 'config' | 'command' | 'paired-device-added' | 'paired-device-revoked';
+
+export interface DashboardPairedDevice {
+  id: string;
+  deviceName: string;
+  ua: string;
+  ipFirstSeen: string;
+  lastSeenAt: number;
+  createdAt: number;
+  visitCount: number;
+}
+
+export interface DashboardActivityEvent {
+  id: string;
+  type: DashboardActivityType;
+  detail: string;
+  deviceId?: string;
+  path?: string;
+  ts: number;
+}
+
+export interface DashboardAccessStatus {
+  mode: 'local-only';
+  localUrl: string;
+  currentUrl: string;
+  bindHost: string;
+  remoteAccess: 'disabled';
+  authentication: 'trusted-local';
+  qrLogin: 'not-available';
+  deviceTracking: 'enabled';
+  sessionInvalidation: 'device-list-only';
+  detail: string;
+}
+
+export interface DashboardAccessResponse {
+  ok: boolean;
+  currentDeviceId: string | null;
+  status: DashboardAccessStatus;
+  devices: DashboardPairedDevice[];
+  activity: DashboardActivityEvent[];
+  error?: string;
+}
+
 export interface UserConfig {
   defaultAgent?: Agent;
+  channelDefaults?: Partial<Record<TerminalKey, ChannelRuntimeDefaults>>;
+  workDefaults?: WorkDefaults;
+  notifications?: NotificationPreferences;
   claudeModel?: string;
   claudeReasoningEffort?: string;
   codexModel?: string;
@@ -562,7 +743,16 @@ export interface SessionContextOutputSource {
   turnIndex?: number | null;
 }
 
-export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource;
+export interface SessionContextFileSource {
+  kind: 'file';
+  workdir: string;
+  path: string;
+  title?: string | null;
+  source?: string | null;
+  size?: number | null;
+}
+
+export type SessionContextSource = SessionContextSessionSource | SessionContextOutputSource | SessionContextFileSource;
 
 export interface SessionProjectContextRef {
   source: string;
@@ -595,6 +785,169 @@ export interface WorkspaceEntry {
   instructions?: string;
   memory?: string;
   addedAt?: string;
+}
+
+export interface Project {
+  id: string;
+  path: string;
+  name: string;
+  preferredAgent?: string;
+  rules?: string;
+  instructions?: string;
+  memory?: string;
+  pinned?: boolean;
+  conversationCount?: number;
+  updatedAt?: string | null;
+}
+
+export type ChatLaunchTarget =
+  | { kind: 'agent'; agent: string }
+  | { kind: 'assistant'; assistantId: string }
+  | { kind: 'model'; agent: string; model: string };
+
+export interface ChatLaunchContext {
+  projectPath: string;
+  target: ChatLaunchTarget;
+  prompt: string;
+  effort?: string | null;
+  permissionMode?: 'autopilot' | 'ask' | 'read-only';
+  attachmentCount?: number;
+}
+
+export interface AssistantProfile {
+  id: string;
+  name: string;
+  source: 'builtin' | 'custom';
+  preferredAgents: string[];
+  enabled: boolean;
+  responsibility: string;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  builtIn?: boolean;
+}
+
+export interface CustomWorkflowRecipe extends WorkflowTemplate {
+  outputs: string[];
+  steps: string[];
+  capabilities: string[];
+  promptHint: string;
+  cadence: string;
+  defaultEffort: 'low' | 'medium' | 'high';
+  builtIn?: false;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkflowRunStatus = 'running' | 'blocked' | 'done';
+export type WorkflowRunStepStatus = 'todo' | 'now' | 'blocked' | 'done';
+export type WorkflowRunAskType = 'text' | 'number' | 'choice' | 'boolean' | 'rating';
+export type WorkflowRunAskStatus = 'pending' | 'answered' | 'skipped';
+export type WorkflowRunAskDeliveryStatus = 'not_sent' | 'sending' | 'sent' | 'failed';
+export type WorkflowRunStepAutonomousState = 'running' | 'done' | 'failed' | 'stalled';
+
+export interface WorkflowRunStepAutonomousRun {
+  dispatchId: string;
+  state: WorkflowRunStepAutonomousState;
+  startedAt: string;
+  completedAt?: string;
+  childAgent?: string;
+  childSessionId?: string;
+  childSessionKey?: string;
+  taskId?: string;
+  error?: string;
+}
+
+export interface WorkflowRunStep {
+  index: number;
+  title: string;
+  status: WorkflowRunStepStatus;
+  startedAt?: string;
+  completedAt?: string;
+  autonomousRun?: WorkflowRunStepAutonomousRun;
+}
+
+export interface WorkflowRunAsk {
+  id: string;
+  stepIndex: number;
+  question: string;
+  type: WorkflowRunAskType;
+  options?: string[];
+  max?: number;
+  placeholder?: string;
+  answer?: string;
+  status: WorkflowRunAskStatus;
+  deliveryStatus?: WorkflowRunAskDeliveryStatus;
+  deliveryError?: string;
+  deliveryTaskId?: string;
+  deliveredAt?: string;
+  askedAt: string;
+  answeredAt?: string;
+}
+
+export interface WorkflowRunRecord {
+  id: string;
+  workflowId?: string;
+  workflowName: string;
+  title: string;
+  workdir?: string;
+  agent?: string;
+  model?: string;
+  effort?: 'low' | 'medium' | 'high';
+  assistantId?: string;
+  assistantName?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  note?: string;
+  currentStep: number;
+  totalSteps: number;
+  steps: WorkflowRunStep[];
+  asks: WorkflowRunAsk[];
+  status: WorkflowRunStatus;
+  lastMarker?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface WorkflowRunAutonomousWatchdogResult {
+  scannedRuns: number;
+  scannedWorkers: number;
+  stalled: Array<{ run: WorkflowRunRecord; step: WorkflowRunStep }>;
+}
+
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  schedule: string;
+  prompt: string;
+  enabled: boolean;
+  workspacePath?: string;
+  agent?: string;
+  assistantId?: string;
+  lastRunAt?: string;
+}
+
+export interface KnowledgeConcept {
+  id: string;
+  title: string;
+  summary: string;
+  sourceCount: number;
+  workspacePaths: string[];
+  status: string;
+}
+
+export interface CapabilityItem {
+  id: string;
+  name: string;
+  kind: 'skill' | 'mcp' | 'cli' | 'voice' | 'image' | 'channel' | 'setting';
+  scope: 'global' | 'workspace' | 'builtin';
+  status: 'ready' | 'needs_auth' | 'disabled' | 'missing' | 'unknown';
 }
 
 export interface SessionHubResult {
@@ -799,7 +1152,77 @@ export interface SkillInfo {
   label: string | null;
   description: string | null;
   scope?: 'global' | 'project';
+  path?: string;
+  category?: string | null;
+  tags?: string[];
+  security?: {
+    verdict: 'clean' | 'review' | 'blocked' | 'unscanned';
+    warnings: Array<{ severity: 'warning' | 'danger'; message: string }>;
+  };
   mcpRequires?: string[];
+  pinned?: boolean;
+}
+
+export interface SkillQuarantineRecord {
+  id: string;
+  name: string;
+  scope: 'global' | 'project';
+  createdAt: string;
+  verdict: 'blocked';
+  warnings: Array<{ severity: 'warning' | 'danger'; message: string }>;
+  reason: string;
+  root: string;
+  path: string;
+  skillPath: string;
+  metaPath: string;
+  workdir?: string;
+}
+
+export interface SkillMarkdownScan {
+  name: string;
+  label: string | null;
+  description: string | null;
+  detectedType: string | null;
+  verdict: 'clean' | 'review' | 'blocked';
+  warnings: Array<{ severity: 'warning' | 'danger'; message: string }>;
+}
+
+export interface SkillFolderImportEntryResult {
+  sourcePath: string;
+  sourceName: string;
+  name: string;
+  status: 'imported' | 'needs_review' | 'blocked' | 'skipped' | 'error';
+  scan?: SkillMarkdownScan;
+  path?: string;
+  quarantine?: SkillQuarantineRecord;
+  quarantined?: boolean;
+  error?: string;
+}
+
+export interface SkillFolderImportResult {
+  ok: boolean;
+  sourcePath?: string;
+  entries: SkillFolderImportEntryResult[];
+  imported: number;
+  needsReview: number;
+  blocked: number;
+  skipped: number;
+  errors: number;
+  quarantined: number;
+  warnings: string[];
+  error?: string;
+}
+
+export interface SkillQuarantineRestoreResult {
+  ok: boolean;
+  restored?: boolean;
+  removed?: boolean;
+  blocked?: boolean;
+  name?: string;
+  path?: string;
+  scan?: SkillMarkdownScan;
+  record?: SkillQuarantineRecord;
+  error?: string;
 }
 
 export interface PlatformSkillInfo {
@@ -993,6 +1416,22 @@ export interface DirEntry {
   isDir?: boolean;
 }
 
+export interface ProjectReferenceFile {
+  name: string;
+  path: string;
+  size: number;
+  updatedAt: string;
+}
+
+export interface ProjectReferenceResult {
+  ok: boolean;
+  references?: ProjectReferenceFile[];
+  referenceDir?: string;
+  file?: ProjectReferenceFile;
+  removed?: boolean;
+  error?: string;
+}
+
 export interface LsDirResult {
   ok: boolean;
   path: string;
@@ -1100,7 +1539,7 @@ export interface TaskSpace {
 }
 
 export interface TaskOrigin {
-  type: 'manual' | 'jira' | 'jira-analyze';
+  type: 'daily' | 'jira' | 'jira-analyze' | 'manual' | 'note' | 'todo';
   key?: string;
   url?: string;
 }
@@ -1524,6 +1963,8 @@ export interface AutomationRule {
   agent?: string;
   assistantId?: string;
   enabled: boolean;
+  includeProjectReferences?: boolean;
+  projectReferenceNames?: string[];
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string;
@@ -1531,8 +1972,14 @@ export interface AutomationRule {
   runHistory?: Array<{
     id: string;
     ranAt: string;
+    scheduledFor?: string;
+    taskId?: string;
     sessionKey?: string;
-    status: 'queued' | 'failed';
+    status: 'queued' | 'failed' | 'missed';
+    error?: string;
+    code?: string;
+    budgetId?: string;
+    budgetName?: string;
   }>;
 }
 
@@ -1643,6 +2090,7 @@ export type KnowledgeEntryKind = 'knowledge-card' | 'session-digest';
 export type KnowledgeEntryStatus = 'published' | 'hidden';
 export type KnowledgeEntryConfidence = 'low' | 'medium' | 'high';
 export type KnowledgeEntryCreatedBy = 'auto' | 'manual' | 'agent';
+export type KnowledgeSourceFreshness = 'unchecked' | 'fresh' | 'stale' | 'missing' | 'unreadable' | 'unsupported';
 
 export interface KnowledgeSourceRef {
   type: 'manual' | 'chat' | 'task' | 'output' | 'file' | 'link';
@@ -1654,6 +2102,16 @@ export interface KnowledgeSourceRef {
   path?: string;
   url?: string;
   title?: string;
+  sourceFreshness?: KnowledgeSourceFreshness;
+  sourceCheckedAt?: string;
+  sourceAcceptedAt?: string;
+  sourceHash?: string;
+  sourceMtimeMs?: number;
+  sourceSize?: number;
+  sourceCurrentHash?: string;
+  sourceCurrentMtimeMs?: number;
+  sourceCurrentSize?: number;
+  sourceError?: string;
 }
 
 export interface KnowledgeArtifactRef {
@@ -1688,6 +2146,31 @@ export interface KnowledgeEntry {
   tags: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface KnowledgeSourceFreshnessCheck {
+  index: number;
+  type: KnowledgeSourceRef['type'];
+  title: string;
+  locator?: string;
+  freshness: KnowledgeSourceFreshness;
+  checkedAt: string;
+  changed: boolean;
+  size?: number;
+  mtimeMs?: number;
+  hash?: string;
+  error?: string;
+}
+
+export interface KnowledgeSourceRefreshResult {
+  entry: KnowledgeEntry;
+  aggregate: KnowledgeSourceFreshness;
+  checkedAt: string;
+  checks: KnowledgeSourceFreshnessCheck[];
+  supported: number;
+  stale: number;
+  missing: number;
+  unreadable: number;
 }
 
 export type KnowledgeTreeNodeKind = 'folder' | 'repo';

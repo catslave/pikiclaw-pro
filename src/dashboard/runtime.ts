@@ -180,8 +180,10 @@ function buildLocalChannelStates(rawConfig: Partial<UserConfig>): NonNullable<Se
  *
  * - `stream-update`    — a stream snapshot changed (new text, phase transition)
  * - `sessions-changed` — session list may have changed (stream done, status update)
+ * - `scheduled-task`   — background automation queued, missed, completed, or failed
+ * - `channel-message`  — inbound IM terminal message queued work
  */
-export type DashboardEventType = 'stream-update' | 'sessions-changed';
+export type DashboardEventType = 'stream-update' | 'sessions-changed' | 'scheduled-task' | 'channel-message';
 
 export interface DashboardEvent {
   type: DashboardEventType;
@@ -189,6 +191,18 @@ export interface DashboardEvent {
   key?: string;
   /** Inline snapshot for stream-update (avoids a round-trip fetch) */
   snapshot?: unknown;
+  automationId?: string;
+  name?: string;
+  schedule?: string;
+  status?: 'queued' | 'completed' | 'failed' | 'missed';
+  sessionKey?: string;
+  scheduledFor?: string;
+  error?: string;
+  channel?: string;
+  chatId?: string;
+  taskId?: string;
+  agent?: string;
+  workdir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +268,83 @@ class Runtime {
         this.emitDashboardEvent({ type: 'sessions-changed', key: sessionKey, snapshot: phase ? { phase } : null });
       }
     });
+    bot.onChannelMessage(event => {
+      this.emitDashboardEvent({
+        type: 'channel-message',
+        key: `${event.channel}:${event.chatId}:${event.taskId}`,
+        channel: event.channel,
+        chatId: event.chatId,
+        taskId: event.taskId,
+        sessionKey: event.sessionKey,
+        agent: event.agent,
+        workdir: event.workdir,
+      });
+    });
     bot.onSessionFinished(event => {
+      void import('../pro/workflow.js')
+        .then(({ completeWorkflowRunStepAutonomous, findAutomationRuleByRunRef, findWorkflowRunByAutonomousRunRef, ingestWorkflowRunMarkersFromMessages }) => {
+          const sessionKey = event.session.key || (event.session.sessionId ? `${event.session.agent}:${event.session.sessionId}` : '');
+          if (event.session.sessionId && (event.result.message || event.result.assistantBlocks?.length)) {
+            const markerRun = ingestWorkflowRunMarkersFromMessages({
+              workdir: event.session.workdir,
+              agent: event.session.agent,
+              sessionId: event.session.sessionId,
+              messages: [{
+                role: 'assistant',
+                text: event.result.message || '',
+                blocks: event.result.assistantBlocks,
+              }],
+            });
+            if (markerRun) {
+              this.emitDashboardEvent({
+                type: 'sessions-changed',
+                key: markerRun.sessionKey || sessionKey,
+                snapshot: {
+                  phase: 'workflow-markers-ingested',
+                  workflowRunId: markerRun.id,
+                  workflowStatus: markerRun.status,
+                  askCount: markerRun.asks.length,
+                },
+              });
+            }
+          }
+          const autonomous = findWorkflowRunByAutonomousRunRef({
+            taskId: event.taskId,
+            sessionKey,
+            agent: event.session.agent,
+            sessionId: event.session.sessionId,
+          });
+          if (autonomous?.step.autonomousRun?.state === 'running') {
+            const ok = event.result.ok && !event.result.incomplete;
+            const updated = completeWorkflowRunStepAutonomous(autonomous.run.id, autonomous.step.index, {
+              state: ok ? 'done' : 'failed',
+              taskId: event.taskId,
+              childAgent: event.session.agent,
+              childSessionId: event.session.sessionId,
+              childSessionKey: sessionKey,
+              error: ok ? undefined : (event.result.error || event.result.message || 'Autonomous worker finished incomplete.'),
+            });
+            this.emitDashboardEvent({
+              type: 'sessions-changed',
+              key: updated.run.sessionKey || updated.run.id,
+              snapshot: { phase: 'workflow-step-finished' },
+            });
+          }
+          const rule = findAutomationRuleByRunRef({ taskId: event.taskId, sessionKey });
+          if (!rule) return;
+          const ok = event.result.ok && !event.result.incomplete;
+          this.emitDashboardEvent({
+            type: 'scheduled-task',
+            key: rule.id,
+            automationId: rule.id,
+            name: rule.name,
+            schedule: rule.schedule,
+            status: ok ? 'completed' : 'failed',
+            sessionKey,
+            error: ok ? undefined : (event.result.error || event.result.message || 'Scheduled task finished incomplete.'),
+          });
+        })
+        .catch(() => {});
       if (!event.result.ok || event.result.incomplete || !event.session.sessionId) return;
       void import('./focus-service.js')
         .then(service => service.queueFocusExtractionByRef(event.session.workdir, event.session.agent, event.session.sessionId!))

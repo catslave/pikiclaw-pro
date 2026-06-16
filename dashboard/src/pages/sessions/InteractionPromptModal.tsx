@@ -20,9 +20,17 @@ import type { InteractionSnapshot } from '../../types';
 
 interface Props {
   snapshot: InteractionSnapshot;
+  queue?: InteractionSnapshot[];
+  onDismiss?: () => void;
 }
 
-export function InteractionPromptModal({ snapshot }: Props) {
+function interactionKindLabel(kind: InteractionSnapshot['kind']): string {
+  if (kind === 'permission') return 'Permission';
+  if (kind === 'confirmation') return 'Confirmation';
+  return 'Input';
+}
+
+export function InteractionPromptModal({ snapshot, queue = [], onDismiss }: Props) {
   const [currentIndex, setCurrentIndex] = useState(snapshot.currentIndex ?? 0);
   const [freeformText, setFreeformText] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -43,6 +51,7 @@ export function InteractionPromptModal({ snapshot }: Props) {
 
   const hasOptions = !!(question?.options && question.options.length);
   const allowFreeform = hasOptions ? !!question?.allowFreeform : true;
+  const queuedPrompts = queue.filter(item => item.promptId !== snapshot.promptId);
 
   const advanceOrFinish = (advanced: boolean | undefined) => {
     if (advanced) {
@@ -112,6 +121,7 @@ export function InteractionPromptModal({ snapshot }: Props) {
     } catch {}
     // The server emits `interaction-resolved`; the parent will un-render us.
   };
+  const closeWithoutCancelling = onDismiss || (() => void handleCancel());
 
   // We must call hooks at the top level, so always run the modal but render an
   // empty body if `question` is somehow missing (shouldn't happen in practice).
@@ -123,15 +133,40 @@ export function InteractionPromptModal({ snapshot }: Props) {
   }, [snapshot.hint, currentIndex, totalQuestions]);
 
   return (
-    <Modal open onClose={handleCancel} wide={hasOptions && (question?.options?.length || 0) > 3}>
+    <Modal open onClose={closeWithoutCancelling} wide={hasOptions && (question?.options?.length || 0) > 3} ariaLabel={snapshot.title || 'Pikiclaw needs your input'}>
       <ModalHeader
         title={snapshot.title || 'Pikiclaw needs your input'}
         description={description}
-        onClose={handleCancel}
+        onClose={closeWithoutCancelling}
       />
 
       {question ? (
         <div className="space-y-4">
+          <div className="rounded-lg border border-primary/20 bg-primary/[0.07] px-3 py-2">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">{interactionKindLabel(snapshot.kind)}</div>
+                <div className="mt-0.5 truncate text-xs text-fg-4">
+                  {onDismiss ? 'Close or press Esc to keep this request waiting.' : 'Answer or cancel this request to resume the agent.'}
+                </div>
+              </div>
+              {queue.length > 1 && (
+                <span className="rounded-full border border-primary/25 bg-panel px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-primary">
+                  {queue.length} waiting
+                </span>
+              )}
+            </div>
+            {queuedPrompts.length > 0 && (
+              <div className="mt-2 flex max-h-16 flex-wrap gap-1.5 overflow-y-auto">
+                {queuedPrompts.slice(-4).reverse().map(item => (
+                  <span key={item.promptId} className="min-w-0 max-w-full rounded-md border border-edge bg-inset px-2 py-1 text-[11px] text-fg-5">
+                    {interactionKindLabel(item.kind)} · {item.title || 'Pending request'}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div>
             <div className="text-xs font-medium uppercase tracking-wide text-fg-5">{question.header || 'Question'}</div>
             <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-fg">{question.prompt}</div>
@@ -185,7 +220,7 @@ export function InteractionPromptModal({ snapshot }: Props) {
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-fg-5">
               {submitting ? (
                 <span className="inline-flex items-center gap-2"><Spinner /> Submitting…</span>
@@ -193,7 +228,17 @@ export function InteractionPromptModal({ snapshot }: Props) {
                 <span>Press <kbd className="rounded border border-edge bg-panel-alt px-1.5 py-0.5 text-[10px] uppercase">Enter</kbd> to send</span>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {onDismiss && (
+                <Button variant="ghost" size="sm" onClick={onDismiss} disabled={submitting}>
+                  Dismiss
+                </Button>
+              )}
+              {onDismiss && (
+                <Button variant="ghost" size="sm" onClick={handleCancel} disabled={submitting} className="text-red-600 hover:text-red-600">
+                  Cancel request
+                </Button>
+              )}
               <Button variant="ghost" size="sm" onClick={handleSkip} disabled={submitting}>
                 Skip
               </Button>

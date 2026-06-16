@@ -12,7 +12,7 @@ vi.mock('../src/agent/index.ts', async importOriginal => {
 
 import { doStream } from '../src/agent/index.ts';
 import { ensureManagedSession } from '../src/agent/index.ts';
-import { Bot } from '../src/bot/bot.ts';
+import { Bot, setBotTurnCompleteHook, setBotTurnStartGuard } from '../src/bot/bot.ts';
 import { applyUserConfig } from '../src/core/config/user-config.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
@@ -39,10 +39,47 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setBotTurnStartGuard(null);
+  setBotTurnCompleteHook(null);
   restoreEnv(envSnapshot);
 });
 
 describe('Bot.runStream', () => {
+  it('applies channel runtime defaults to new IM chats and sessions', () => {
+    const globalWorkdir = makeTmpDir('bot-unit-global-workdir-');
+    const channelWorkdir = makeTmpDir('bot-unit-channel-workdir-');
+    applyUserConfig({
+      workdir: globalWorkdir,
+      defaultAgent: 'codex',
+      codexModel: 'gpt-5.5',
+      channelDefaults: {
+        telegram: {
+          agent: 'claude',
+          model: 'claude-sonnet-4-6',
+          effort: 'low',
+          workdir: channelWorkdir,
+        },
+      },
+    }, undefined, { notify: false });
+
+    const bot = new Bot('telegram') as any;
+    const chat = bot.chat(42);
+
+    expect(bot.defaultAgent).toBe('claude');
+    expect(bot.workdir).toBe(channelWorkdir);
+    expect(chat.agent).toBe('claude');
+    expect(chat.modelId).toBe('claude-sonnet-4-6');
+    expect(chat.thinkingEffort).toBe('low');
+    expect(chat.workdir).toBe(channelWorkdir);
+
+    const session = bot.ensureSessionForChat(42, 'Channel default session', [], { channel: 'telegram', chatId: '42' });
+
+    expect(session.agent).toBe('claude');
+    expect(session.workdir).toBe(channelWorkdir);
+    expect(session.modelId).toBe('claude-sonnet-4-6');
+    expect(session.thinkingEffort).toBe('low');
+  });
+
   it('manages codex cumulative totals across turns and workdir switches', async () => {
     // --- defaults to codex when DEFAULT_AGENT is unset ---
     delete process.env.DEFAULT_AGENT;
@@ -134,6 +171,118 @@ describe('Bot.runStream', () => {
     });
 
     await bot.runStream('continue', runtime, [], () => {});
+  });
+
+  it('blocks channel turns before starting the agent when a turn-start guard denies work', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    const bot = new Bot('telegram');
+    const chat = bot.chat(1);
+    chat.agent = 'codex';
+    setBotTurnStartGuard(async ctx => {
+      expect(ctx).toMatchObject({
+        agent: 'codex',
+        channel: 'telegram',
+      });
+      return { allowed: false, message: 'Codex pause budget is over limit.', code: 'usage_budget_paused' };
+    });
+
+    await expect(bot.runStream('blocked turn', chat, [], () => {})).rejects.toThrow('Codex pause budget is over limit.');
+    expect(doStreamMock).not.toHaveBeenCalled();
+  });
+
+  it('emits channel message events for IM tasks but not dashboard tasks', () => {
+    const imBot = new Bot('telegram') as any;
+    const imEvents: any[] = [];
+    imBot.onChannelMessage((event: any) => imEvents.push(event));
+    const imRuntime = imBot.upsertSessionRuntime({
+      agent: 'codex',
+      sessionId: 'im-session',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      workspacePath: null,
+      modelId: null,
+    });
+    imBot.beginTask({
+      taskId: 'im-task',
+      chatId: 42,
+      agent: 'codex',
+      sessionKey: imRuntime.key,
+      prompt: 'hello from im',
+      attachments: ['a.txt'],
+      startedAt: Date.now(),
+      sourceMessageId: 100,
+    });
+
+    expect(imEvents).toHaveLength(1);
+    expect(imEvents[0]).toMatchObject({
+      channel: 'telegram',
+      chatId: '42',
+      taskId: 'im-task',
+      sessionKey: 'codex:im-session',
+      agent: 'codex',
+      attachmentCount: 1,
+    });
+
+    const dashboardBot = new Bot() as any;
+    const dashboardEvents: any[] = [];
+    dashboardBot.onChannelMessage((event: any) => dashboardEvents.push(event));
+    const dashboardRuntime = dashboardBot.upsertSessionRuntime({
+      agent: 'codex',
+      sessionId: 'dashboard-session',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      workspacePath: null,
+      modelId: null,
+    });
+    dashboardBot.beginTask({
+      taskId: 'dashboard-task',
+      chatId: 'dashboard',
+      agent: 'codex',
+      sessionKey: dashboardRuntime.key,
+      prompt: 'hello from dashboard',
+      startedAt: Date.now(),
+      sourceMessageId: 'dashboard-task',
+    });
+
+    expect(dashboardEvents).toHaveLength(0);
+  });
+
+  it('reports completed turns to the runtime hook after native session metadata is synced', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    const completeHook = vi.fn(async () => {});
+    setBotTurnCompleteHook(completeHook);
+
+    doStreamMock.mockImplementationOnce(async () => makeStreamResult('codex', {
+      sessionId: 'sess-ledger',
+      model: 'gpt-costed',
+      inputTokens: 1200,
+      outputTokens: 340,
+      cachedInputTokens: 80,
+      cacheCreationInputTokens: 20,
+      elapsedS: 2.5,
+    }));
+
+    const bot = new Bot('telegram');
+    const chat = bot.chat(1);
+    chat.agent = 'codex';
+    const result = await bot.runStream('record this turn', chat, [], () => {});
+
+    expect(result.sessionId).toBe('sess-ledger');
+    expect(completeHook).toHaveBeenCalledTimes(1);
+    expect(completeHook).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'codex',
+      workdir: process.env.PIKICLAW_WORKDIR,
+      sessionId: 'sess-ledger',
+      channel: 'telegram',
+      model: 'gpt-costed',
+      status: 'ok',
+      result: expect.objectContaining({
+        inputTokens: 1200,
+        outputTokens: 340,
+        cachedInputTokens: 80,
+        cacheCreationInputTokens: 20,
+        elapsedS: 2.5,
+        ok: true,
+      }),
+    }));
   });
 });
 

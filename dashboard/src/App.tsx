@@ -6,9 +6,13 @@ import { Sidebar, type RestartPhase } from './components/Sidebar';
 import { Spinner, Toasts } from './components/ui';
 import { BrowserPanelModal } from './components/BrowserPanelModal';
 import { api } from './api';
+import { notificationEventEnabled } from './notification-preferences';
+import { showBrowserNotification } from './browser-notifications';
 import { getDashboardTabMeta, type DashboardTab } from './tabs';
 import { cn } from './utils';
+import { useDashboardEvent } from './ws';
 import type { BrowserPanelSnapshot } from './types';
+import { normalizeWorkItemDateParam } from './pages/wayland/workItemModel';
 
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
@@ -27,6 +31,7 @@ const DingtalkModal = lazy(async () => ({ default: (await import('./components/M
 const WeComModal = lazy(async () => ({ default: (await import('./components/Modals')).WeComModal }));
 const WorkdirModal = lazy(async () => ({ default: (await import('./components/Modals')).WorkdirModal }));
 const BrowserSetupModal = lazy(async () => ({ default: (await import('./components/Modals')).BrowserSetupModal }));
+const WaylandShell = lazy(async () => ({ default: (await import('./pages/wayland/WaylandShell')).WaylandShell }));
 
 type ModalState =
   | null
@@ -47,6 +52,33 @@ type HoveredLinkState = {
 };
 
 type ChatPanelRedirectTarget = 'assistants' | 'memory' | 'team' | 'workflows';
+type DashboardShellMode = 'wayland' | 'classic';
+
+const DASHBOARD_SHELL_MODE_STORAGE_KEY = 'pikiclaw:dashboard-shell-mode';
+
+function readDashboardShellMode(): DashboardShellMode {
+  try {
+    const stored = localStorage.getItem(DASHBOARD_SHELL_MODE_STORAGE_KEY);
+    if (stored === 'wayland' || stored === 'classic') return stored;
+  } catch {}
+  return 'wayland';
+}
+
+function readStreamNotificationSnapshot(snapshot: unknown): {
+  phase: string | null;
+  incomplete: boolean;
+  error: string | null;
+} | null {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const value = snapshot as Record<string, unknown>;
+  const phase = typeof value.phase === 'string' ? value.phase : null;
+  const error = typeof value.error === 'string' && value.error.trim() ? value.error.trim() : null;
+  return {
+    phase,
+    incomplete: Boolean(value.incomplete) || Boolean(error),
+    error,
+  };
+}
 
 function chatPanelRedirectState(panel: ChatPanelRedirectTarget) {
   return { openChatPanel: panel, openChatPanelNonce: Date.now() };
@@ -64,46 +96,95 @@ function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
     '/': 'sessions',
     '/chat': 'sessions',
+    '/conversations': 'sessions',
+    '/search': 'sessions',
+    '/project': 'sessions',
+    '/projects': 'sessions',
     '/sessions': 'sessions',
     '/workspace': 'sessions',
     '/focus': 'sessions',
     '/chat-workspace': 'sessions',
     '/dashboard': 'dashboard',
     '/tasks': 'dashboard',
+    '/work-items': 'dashboard',
+    '/task-diagnostics': 'dashboard',
     '/daily': 'dashboard',
     '/notes': 'notes',
     '/knowledge': 'knowledge',
     '/memory': 'knowledge',
+    '/mission-control': 'dashboard',
     '/workflows': 'workflows',
+    '/scheduled-tasks': 'workflows',
     '/jira': 'dashboard',
     '/usage': 'usage',
     '/archive': 'system',
     '/im': 'im',
+    '/channels': 'im',
     '/agents': 'agents',
     '/assistants': 'assistants',
     '/team': 'team',
     '/extensions': 'extensions',
     '/skills': 'extensions',
     '/permissions': 'system',
+    '/settings': 'system',
     '/system': 'system',
   };
   return map[pathname] || 'sessions';
+}
+
+function isWaylandShellPath(pathname: string): boolean {
+  if (pathname === '/project' || pathname.startsWith('/project/')) return true;
+  if (pathname === '/conversations/session') return true;
+  return [
+    '/',
+    '/chat',
+    '/conversations',
+    '/search',
+    '/projects',
+    '/work-items',
+    '/assistants',
+    '/workflows',
+    '/scheduled-tasks',
+    '/team',
+    '/memory',
+    '/knowledge',
+    '/mission-control',
+    '/channels',
+    '/im',
+    '/extensions',
+    '/skills',
+    '/settings',
+    '/system',
+  ].includes(pathname);
+}
+
+function dailyWorkItemsRedirect(search: string): string {
+  const params = new URLSearchParams(search);
+  const next = new URLSearchParams();
+  next.set('source', 'manual');
+  const date = normalizeWorkItemDateParam(params.get('date'));
+  if (date) next.set('date', date);
+  return `/work-items?${next.toString()}`;
 }
 
 function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/notes' || pathname.startsWith('/notes/')) return pathname;
   if (pathname === '/') return '/chat';
   if (pathname === '/chat') return '/chat';
+  if (pathname === '/conversations/session') return pathname;
   if (pathname === '/sessions') return '/chat';
-  if (pathname === '/workspace') return '/chat';
-  if (pathname === '/focus') return '/chat';
-  if (pathname === '/chat-workspace') return '/chat';
+  if (pathname === '/workspace') return '/chat-workspace';
+  if (pathname === '/focus') return '/chat-workspace';
+  if (pathname === '/chat-workspace') return '/chat-workspace';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
-  if (pathname === '/dashboard') return '/tasks';
-  if (pathname === '/jira') return '/tasks';
+  if (pathname === '/dashboard') return '/task-diagnostics';
+  if (pathname === '/jira') return '/task-diagnostics';
+  if (pathname === '/tasks') return '/work-items';
   if (pathname === '/skills') return '/extensions';
-  if (['/chat', '/tasks', '/daily', '/notes', '/knowledge', '/memory', '/workflows', '/usage', '/im', '/agents', '/assistants', '/team', '/extensions', '/system'].includes(pathname)) return pathname;
+  if (pathname === '/project' || pathname.startsWith('/project/')) return pathname;
+  if (pathname === '/daily') return '/work-items';
+  if (['/chat', '/conversations', '/search', '/projects', '/task-diagnostics', '/notes', '/knowledge', '/memory', '/mission-control', '/work-items', '/workflows', '/scheduled-tasks', '/usage', '/im', '/channels', '/agents', '/assistants', '/team', '/extensions', '/settings', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -131,6 +212,74 @@ function RouteFallback() {
         Loading...
       </div>
     </div>
+  );
+}
+
+function DashboardShellModeButton({
+  mode,
+  locale,
+  offsetForClassicHeader,
+  onClick,
+}: {
+  mode: DashboardShellMode;
+  locale: string;
+  offsetForClassicHeader: boolean;
+  onClick: () => void;
+}) {
+  const switchingToClassic = mode === 'wayland';
+  const label = locale === 'zh-CN'
+    ? (switchingToClassic ? '原始模式' : '新模式')
+    : (switchingToClassic ? 'Classic' : 'New mode');
+  const title = locale === 'zh-CN'
+    ? (switchingToClassic ? '切换到原来的模式' : '切换到新模式')
+    : (switchingToClassic ? 'Switch to classic mode' : 'Switch to new mode');
+  const eyebrow = locale === 'zh-CN' ? '模式' : 'Mode';
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      className={cn(
+        'group fixed right-0 z-[86] h-[58px] w-[72px] overflow-hidden text-left text-fg-3 transition-[width,transform,filter] duration-300 ease-out hover:w-[176px] hover:-translate-x-1 hover:text-fg focus-visible:w-[176px] focus-visible:-translate-x-1 focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)] active:translate-y-px',
+        offsetForClassicHeader ? 'top-[68px]' : 'top-0',
+      )}
+      style={{
+        clipPath: 'polygon(24px 0, 100% 0, 100% 100%, 0 100%)',
+      }}
+    >
+      <span className="absolute inset-0 bg-[var(--th-surface)]" />
+      <span className="absolute inset-0 border-b border-l border-edge/75 bg-panel shadow-[0_18px_42px_rgba(2,6,23,0.18)] backdrop-blur-xl transition-colors duration-300 group-hover:border-primary/35 group-hover:bg-panel-h" />
+      <span className="absolute left-0 top-0 h-full w-8 bg-gradient-to-br from-transparent via-white/10 to-transparent opacity-70 transition-transform duration-300 group-hover:translate-x-2" />
+      <span className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-white/45 to-white/10 opacity-60" />
+      <span className="relative z-10 flex h-full items-center justify-end gap-2 pl-8 pr-3">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-primary/25 bg-primary/[0.08] text-primary shadow-[inset_0_1px_0_rgba(255,255,255,0.10)] transition-transform duration-300 group-hover:-translate-x-1 group-hover:scale-105 group-hover:rotate-3">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {switchingToClassic ? (
+              <>
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <path d="M8 5v14" />
+                <path d="M6 9h.01" />
+                <path d="M6 12h.01" />
+                <path d="M6 15h.01" />
+              </>
+            ) : (
+              <>
+                <rect x="4" y="4" width="16" height="16" rx="3" />
+                <path d="M8 9h8" />
+                <path d="M8 13h5" />
+                <path d="M15 15l2 2 3-4" />
+              </>
+            )}
+          </svg>
+        </span>
+        <span className="flex min-w-0 flex-1 translate-x-4 flex-col leading-none opacity-0 transition-[opacity,transform] duration-300 ease-out group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100">
+          <span className="text-[9px] font-semibold text-fg-5">{eyebrow}</span>
+          <span className="mt-1 truncate text-[12px] font-semibold text-fg">{label}</span>
+        </span>
+      </span>
+    </button>
   );
 }
 
@@ -286,11 +435,14 @@ export function App() {
   const navigate = useNavigate();
   const tab = locationToTab(location.pathname);
   const normalizedDashboardPath = normalizeDashboardPath(location.pathname);
-  const sessionShellActive = normalizedDashboardPath !== null;
+  const waylandShellPath = isWaylandShellPath(location.pathname);
+  const [dashboardShellMode, setDashboardShellModeState] = useState<DashboardShellMode>(readDashboardShellMode);
+  const waylandShellActive = dashboardShellMode === 'wayland' && waylandShellPath;
+  const sessionShellActive = !waylandShellActive && normalizedDashboardPath !== null;
   const sessionWorkspaceMode = tab === 'dashboard'
     ? 'dashboard'
     : tab === 'sessions'
-      ? 'chat-workspace'
+      ? 'workspace'
       : 'settings';
   const workspaceImmersive = sessionShellActive;
   const [sessionsTabReady, setSessionsTabReady] = useState(sessionShellActive);
@@ -298,12 +450,93 @@ export function App() {
   const [browserUrlDraft, setBrowserUrlDraft] = useState('');
   const [browserTypeDraft, setBrowserTypeDraft] = useState('');
   const [browserBusy, setBrowserBusy] = useState(false);
+  const streamNotificationPhasesRef = useRef<Record<string, string | null>>({});
 
   const t = useMemo(() => createT(locale), [locale]);
   const [modal, setModal] = useState<ModalState>(null);
   const closeModal = useCallback(() => setModal(null), []);
+  const setDashboardShellMode = useCallback((mode: DashboardShellMode) => {
+    setDashboardShellModeState(mode);
+    try { localStorage.setItem(DASHBOARD_SHELL_MODE_STORAGE_KEY, mode); } catch {}
+  }, []);
+  const toggleDashboardShellMode = useCallback(() => {
+    const nextMode: DashboardShellMode = dashboardShellMode === 'wayland' ? 'classic' : 'wayland';
+    setDashboardShellMode(nextMode);
+    toast(
+      locale === 'zh-CN'
+        ? (nextMode === 'classic' ? '已切换到原始模式' : '已切换到新模式')
+        : (nextMode === 'classic' ? 'Switched to classic mode' : 'Switched to new mode'),
+    );
+  }, [dashboardShellMode, locale, setDashboardShellMode, toast]);
 
   const version = state?.version || '...';
+
+  useDashboardEvent('scheduled-task', useCallback((event) => {
+    if (!notificationEventEnabled(state?.config?.notifications, 'scheduledTask')) return;
+    if (event.status === 'queued') return;
+    const fallbackName = locale === 'zh-CN' ? '计划任务' : 'Scheduled task';
+    const name = typeof event.name === 'string' && event.name.trim() ? event.name.trim() : fallbackName;
+    if (event.status === 'failed') {
+      const message = locale === 'zh-CN'
+        ? `计划任务失败：${name}`
+        : `Scheduled task failed: ${name}`;
+      toast(message, false);
+      showBrowserNotification(state?.config?.notifications, 'scheduledTask', {
+        title: locale === 'zh-CN' ? 'Pikiclaw 计划任务失败' : 'Pikiclaw scheduled task failed',
+        body: message,
+        tag: `scheduled-task:${event.automationId || name}:failed`,
+        requireInteraction: true,
+      });
+      return;
+    }
+    const message = locale === 'zh-CN'
+      ? `计划任务已完成：${name}`
+      : `Scheduled task completed: ${name}`;
+    toast(message);
+    showBrowserNotification(state?.config?.notifications, 'scheduledTask', {
+      title: locale === 'zh-CN' ? 'Pikiclaw 计划任务完成' : 'Pikiclaw scheduled task completed',
+      body: message,
+      tag: `scheduled-task:${event.automationId || name}:completed`,
+    });
+  }, [locale, state?.config?.notifications, toast]));
+
+  useDashboardEvent('channel-message', useCallback((event) => {
+    if (!notificationEventEnabled(state?.config?.notifications, 'channelMessage')) return;
+    const rawChannel = typeof event.channel === 'string' && event.channel.trim() ? event.channel.trim() : 'IM';
+    const channel = rawChannel.slice(0, 1).toUpperCase() + rawChannel.slice(1);
+    const message = locale === 'zh-CN'
+      ? `${channel} 有新消息`
+      : `New ${channel} message`;
+    toast(message);
+    showBrowserNotification(state?.config?.notifications, 'channelMessage', {
+      title: locale === 'zh-CN' ? 'Pikiclaw 新渠道消息' : 'Pikiclaw channel message',
+      body: message,
+      tag: `channel-message:${event.channel || 'im'}:${event.chatId || event.taskId || 'latest'}`,
+    });
+  }, [locale, state?.config?.notifications, toast]));
+
+  useDashboardEvent('stream-update', useCallback((event) => {
+    const key = event.key || '';
+    if (!key) return;
+    const current = readStreamNotificationSnapshot(event.snapshot ?? null);
+    const previousPhase = streamNotificationPhasesRef.current[key] ?? null;
+    if (current?.phase === 'done' && previousPhase !== 'done') {
+      const notificationKey = current.incomplete ? 'agentError' : 'agentFinished';
+      const title = current.incomplete
+        ? (locale === 'zh-CN' ? 'Pikiclaw 任务需要注意' : 'Pikiclaw agent needs attention')
+        : (locale === 'zh-CN' ? 'Pikiclaw 任务完成' : 'Pikiclaw agent finished');
+      const body = current.incomplete
+        ? (current.error || key)
+        : key;
+      showBrowserNotification(state?.config?.notifications, notificationKey, {
+        title,
+        body,
+        tag: `stream:${key}:${current.incomplete ? 'error' : 'done'}`,
+        requireInteraction: current.incomplete,
+      });
+    }
+    streamNotificationPhasesRef.current[key] = current?.phase ?? null;
+  }, [locale, state?.config?.notifications]));
 
   const openBrowserPanel = useCallback(async (url: string) => {
     const targetUrl = url.trim();
@@ -375,18 +608,26 @@ export function App() {
       return;
     }
     if (location.pathname === '/workspace') {
-      navigate('/chat', { replace: true, state: chatProjectPickerRedirectState(location.state) });
+      navigate('/chat-workspace', { replace: true, state: chatProjectPickerRedirectState(location.state) });
       return;
     }
     if (location.pathname === '/focus' || location.pathname === '/chat-workspace') {
-      navigate('/chat', { replace: true, state: location.state });
+      if (location.pathname === '/focus') navigate('/chat-workspace', { replace: true, state: location.state });
+      return;
+    }
+    if (location.pathname === '/tasks') {
+      navigate('/work-items', { replace: true, state: location.state });
+      return;
+    }
+    if (location.pathname === '/daily') {
+      navigate(dailyWorkItemsRedirect(location.search), { replace: true, state: location.state });
       return;
     }
     if (location.pathname === '/jira' || location.pathname === '/dashboard') {
-      navigate('/tasks', { replace: true });
+      navigate('/task-diagnostics', { replace: true });
       return;
     }
-  }, [location.pathname, location.state, navigate]);
+  }, [location.pathname, location.search, location.state, navigate]);
 
   // Restart: phase-based overlay
   const [restartPhase, setRestartPhase] = useState<RestartPhase>(null);
@@ -461,6 +702,7 @@ export function App() {
         <Route path="/assistants" element={<Navigate to="/chat" replace state={chatPanelRedirectState('assistants')} />} />
         <Route path="/team" element={<Navigate to="/chat" replace state={chatPanelRedirectState('team')} />} />
         <Route path="/workflows" element={<Navigate to="/chat" replace state={chatPanelRedirectState('workflows')} />} />
+        <Route path="/scheduled-tasks" element={<Navigate to="/chat" replace state={chatPanelRedirectState('workflows')} />} />
         <Route path="/usage" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <UsageTab />
@@ -470,8 +712,9 @@ export function App() {
         <Route path="/notes/:pageId" element={<NotesTab />} />
         <Route path="/knowledge" element={<Navigate to="/chat" replace state={chatPanelRedirectState('memory')} />} />
         <Route path="/memory" element={<Navigate to="/chat" replace state={chatPanelRedirectState('memory')} />} />
-        <Route path="/jira" element={<Navigate to="/tasks" replace />} />
-        <Route path="/dashboard" element={<Navigate to="/tasks" replace />} />
+        <Route path="/jira" element={<Navigate to="/task-diagnostics" replace />} />
+        <Route path="/dashboard" element={<Navigate to="/task-diagnostics" replace />} />
+        <Route path="/channels" element={<Navigate to="/im" replace />} />
         <Route path="/archive" element={<Navigate to="/system?view=archive" replace />} />
         <Route path="/permissions" element={<Navigate to="/system" replace />} />
         <Route path="/extensions" element={
@@ -480,6 +723,7 @@ export function App() {
           </PageWrapper>
         } />
         <Route path="/skills" element={<Navigate to="/extensions" replace />} />
+        <Route path="/settings" element={<Navigate to="/system" replace />} />
         <Route path="/system" element={
           <PageWrapper title={tabMeta.title} description={tabMeta.description}>
             <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />
@@ -496,14 +740,33 @@ export function App() {
       </div>
 
       <div className="relative flex h-[100dvh] min-h-0 flex-col overflow-hidden">
-        <Sidebar
-          version={version}
-          restartPhase={restartPhase}
-          onRestartClick={onRestartClick}
-          immersive={workspaceImmersive}
-        />
+        {!waylandShellActive && (
+          <Sidebar
+            version={version}
+            restartPhase={restartPhase}
+            onRestartClick={onRestartClick}
+            immersive={workspaceImmersive}
+          />
+        )}
         <main className="min-h-0 flex-1 overflow-hidden">
-          {sessionsTabReady && (
+          {waylandShellActive ? (
+            <Suspense fallback={<RouteFallback />}>
+              <WaylandShell
+                version={version}
+                restartPhase={restartPhase}
+                onRestartClick={onRestartClick}
+                onOpenWeixin={() => setModal({ type: 'weixin' })}
+                onOpenTelegram={() => setModal({ type: 'telegram' })}
+                onOpenFeishu={() => setModal({ type: 'feishu' })}
+                onOpenSlack={() => setModal({ type: 'slack' })}
+                onOpenDiscord={() => setModal({ type: 'discord' })}
+                onOpenDingtalk={() => setModal({ type: 'dingtalk' })}
+                onOpenWeCom={() => setModal({ type: 'wecom' })}
+                onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })}
+                onOpenWorkdir={() => setModal({ type: 'workdir' })}
+              />
+            </Suspense>
+          ) : sessionsTabReady && (
             <Suspense fallback={<RouteFallback />}>
               <div
                 className={cn('h-full', !sessionShellActive && 'hidden')}
@@ -521,6 +784,15 @@ export function App() {
 
         </main>
       </div>
+
+      {waylandShellPath && normalizedDashboardPath !== null && (
+        <DashboardShellModeButton
+          mode={dashboardShellMode}
+          locale={locale}
+          offsetForClassicHeader={!waylandShellActive}
+          onClick={toggleDashboardShellMode}
+        />
+      )}
 
       {modal && (
         <Suspense fallback={null}>

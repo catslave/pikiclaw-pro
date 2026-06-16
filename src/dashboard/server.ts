@@ -21,10 +21,17 @@ import localModelsRoutes from './routes/local-models.js';
 import proRoutes from './routes/pro.js';
 import focusRoutes from './routes/focus.js';
 import knowledgeRoutes from './routes/knowledge.js';
+import dashboardAccessRoutes from './routes/dashboard-access.js';
+import appUpdateRoutes from './routes/app-update.js';
+import diagnosticsRoutes from './routes/diagnostics.js';
 import { runtime, type DashboardEvent } from './runtime.js';
 import { registerProcessRuntime } from '../core/process-control.js';
 import { VERSION } from '../core/version.js';
 import type { Bot } from '../bot/bot.js';
+import {
+  dashboardDeviceCookieHeader,
+  recordDashboardRequest,
+} from './dashboard-access-store.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -134,6 +141,18 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
   const app = new Hono();
 
+  app.use('*', async (c, next) => {
+    const record = recordDashboardRequest({
+      method: c.req.method,
+      path: c.req.path,
+      cookieHeader: c.req.header('cookie'),
+      userAgent: c.req.header('user-agent'),
+      ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || c.req.header('host') || 'local',
+    });
+    if (record?.setCookie) c.header('Set-Cookie', dashboardDeviceCookieHeader(record.deviceId));
+    await next();
+  });
+
   // -- API routes --
   app.route('/', configRoutes);
   app.route('/', agentRoutes);
@@ -146,6 +165,9 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
   app.route('/', proRoutes);
   app.route('/', focusRoutes);
   app.route('/', knowledgeRoutes);
+  app.route('/', dashboardAccessRoutes);
+  app.route('/', appUpdateRoutes);
+  app.route('/', diagnosticsRoutes);
 
   // -- Static files: serve dashboard build output --
   // Resolve path relative to this file's location (src/ or dist/)

@@ -65,6 +65,22 @@ function tokenSummary(meta: StreamPreviewMeta | null | undefined): { label: stri
   };
 }
 
+function contextSummary(meta: StreamPreviewMeta | null | undefined): { percent: number; label: string; title: string; tone: 'ok' | 'warn' | 'danger' } | null {
+  const pct = typeof meta?.contextPercent === 'number' && Number.isFinite(meta.contextPercent)
+    ? Math.max(0, Math.min(100, meta.contextPercent))
+    : null;
+  if (pct == null) return null;
+  const tokens = typeof meta?.contextUsedTokens === 'number' && Number.isFinite(meta.contextUsedTokens)
+    ? Math.max(0, meta.contextUsedTokens)
+    : 0;
+  return {
+    percent: pct,
+    label: `${pct.toFixed(1)}%`,
+    title: tokens > 0 ? `${pct.toFixed(1)}% context · ${tokens.toLocaleString()} tokens` : `${pct.toFixed(1)}% context`,
+    tone: pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : 'ok',
+  };
+}
+
 function isStoppedError(error: string | null | undefined): boolean {
   return !!error && /\b(abort|aborted|cancel|cancelled|canceled|interrupt|interrupted|stop|stopped|terminated)\b/i.test(error);
 }
@@ -74,6 +90,25 @@ function Badge({ children, title }: { children: ReactNode; title?: string }) {
     <span title={title} className="shrink-0 whitespace-nowrap rounded-md border border-edge/80 bg-inset px-1.5 py-0.5 text-[10px] leading-none font-mono tabular-nums text-fg-5/75">
       {children}
     </span>
+  );
+}
+
+function ContextRing({ context }: { context: NonNullable<ReturnType<typeof contextSummary>> }) {
+  const color = context.tone === 'danger'
+    ? 'rgba(244, 63, 94, 0.72)'
+    : context.tone === 'warn'
+      ? 'rgba(251, 146, 60, 0.68)'
+      : 'rgba(52, 211, 153, 0.62)';
+  return (
+    <span
+      className="pk-working-context-ring"
+      title={context.title}
+      aria-label={context.title}
+      style={{
+        ['--pk-working-context-pct' as string]: `${context.percent}%`,
+        ['--pk-working-context-color' as string]: color,
+      }}
+    />
   );
 }
 
@@ -334,6 +369,7 @@ export function WorkingCard({
   completedAt,
   updatedAt,
   previewMeta,
+  stepCount,
   error,
   actions,
   children,
@@ -368,9 +404,12 @@ export function WorkingCard({
     ? formatDuration(Math.max(0, (phase === 'streaming' ? now : (doneMs ?? now)) - startMs))
     : null;
   const tokens = tokenSummary(previewMeta);
-  const hasBadges = !!(elapsedLabel || tokens);
+  const context = contextSummary(previewMeta);
+  const hasSteps = typeof stepCount === 'number' && stepCount > 0;
+  const hasBadges = !!(elapsedLabel || tokens || context || hasSteps);
   const fallbackPreview = previewText?.trim() || t('hub.workingIdle');
-  const previewNode = phase === 'streaming'
+  const showStatusRail = phase === 'streaming';
+  const previewNode = phase === 'streaming' && !showStatusRail
     ? (preview ?? <span className="text-[12px] text-fg-4 truncate">{fallbackPreview}</span>)
     : null;
   const dot = phase === 'streaming'
@@ -383,6 +422,35 @@ export function WorkingCard({
     : error
       ? (isStoppedError(error) ? t('hub.statusStopped') : t('hub.statusFailed'))
       : t('hub.statusTurnDone');
+  const statusRail = showStatusRail ? (
+    <div className="pk-working-pulse mx-2.5 mb-2 mt-2 rounded-lg border border-primary/20 bg-inset/70 px-2.5 py-2 sm:mx-3">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="pk-working-pulse-orb" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/80">{t('hub.livePulse')}</span>
+            <span className="min-w-0 truncate text-[12px] text-fg-3">{fallbackPreview}</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1 overflow-hidden">
+          {elapsedLabel && <Badge title={t('hub.workingElapsed')}>{elapsedLabel}</Badge>}
+          {hasSteps && <Badge title={t('hub.activitySummary')}>{replaceVars(t('hub.workingStepCount'), { n: String(stepCount) })}</Badge>}
+          {context && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge/80 bg-inset px-1.5 py-0.5 text-[10px] font-mono leading-none tabular-nums text-fg-5/75" title={context.title}>
+              <ContextRing context={context} />
+              <span className="max-[560px]:hidden">{context.label}</span>
+            </span>
+          )}
+          {tokens && (
+            <Badge title={tokens.title}>
+              {tokens.label}
+              <span className="max-[760px]:hidden">&nbsp;{tokens.suffix}</span>
+            </Badge>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <CollapsibleCard
@@ -394,6 +462,8 @@ export function WorkingCard({
       badge={hasBadges ? (
         <span className="flex shrink-0 items-center gap-1 overflow-hidden">
           {elapsedLabel && <Badge title={t('hub.workingElapsed')}>{elapsedLabel}</Badge>}
+          {hasSteps && <Badge title={t('hub.activitySummary')}>{replaceVars(t('hub.workingStepCount'), { n: String(stepCount) })}</Badge>}
+          {context && <ContextRing context={context} />}
           {tokens && (
             <Badge title={tokens.title}>
               {tokens.label}
@@ -403,8 +473,10 @@ export function WorkingCard({
         </span>
       ) : undefined}
       actions={actions}
-      className={className}
+      collapsedContent={statusRail}
+      className={cn('pk-working-card', phase === 'streaming' && 'pk-working-card-live', className)}
     >
+      {statusRail}
       {children || (
         <div className="px-3.5 py-3 text-[12px] text-fg-5">
           {t('hub.workingIdle')}

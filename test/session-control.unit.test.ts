@@ -79,6 +79,31 @@ describe('session-control', () => {
     expect(result).toEqual({ ok: true, queued: true, taskId: 'task-display', sessionKey: 'codex:sess-1' });
   });
 
+  it('maps dashboard read-only permission to Claude plan mode', async () => {
+    const submitSessionTask = vi.fn(() => ({ ok: true, queued: true, taskId: 'task-permission', sessionKey: 'claude:sess-1' }));
+    getBotRefMock.mockReturnValue({ submitSessionTask });
+
+    const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
+    const result = await queueDashboardSessionTask({
+      workdir: '/tmp/pikiclaw',
+      agent: 'claude',
+      sessionId: 'sess-1',
+      prompt: 'review only',
+      permissionMode: 'read-only',
+      attachments: [],
+    });
+
+    expect(submitSessionTask).toHaveBeenCalledWith({
+      workdir: '/tmp/pikiclaw',
+      agent: 'claude',
+      sessionId: 'sess-1',
+      prompt: 'review only',
+      attachments: [],
+      claudePermissionMode: 'plan',
+    });
+    expect(result).toEqual({ ok: true, queued: true, taskId: 'task-permission', sessionKey: 'claude:sess-1' });
+  });
+
   it('passes context sources when creating a fresh dashboard session', async () => {
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-context-send-'));
     const sourceWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-context-source-'));

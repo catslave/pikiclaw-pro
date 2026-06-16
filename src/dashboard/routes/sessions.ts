@@ -46,6 +46,8 @@ import { DASHBOARD_PAGINATION } from '../../core/constants.js';
 import { runtime } from '../runtime.js';
 import type { Bot } from '../../bot/bot.js';
 import { listProTasks } from '../../pro/tasks.js';
+import { evaluateCurrentUsageBudgetGate } from '../../pro/usage-budget-gate.js';
+import { ingestWorkflowRunMarkersFromMessages } from '../../pro/workflow.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -217,6 +219,7 @@ async function parseSessionSendRequest(c: any): Promise<{
   displayPrompt: string;
   model: string;
   effort: string;
+  permissionMode: string;
   attachments: string[];
   previousAgent: string;
   previousSessionId: string;
@@ -236,6 +239,7 @@ async function parseSessionSendRequest(c: any): Promise<{
       displayPrompt: readStringField(form.get('displayPrompt')),
       model: readStringField(form.get('model')),
       effort: readStringField(form.get('effort')).toLowerCase(),
+      permissionMode: readStringField(form.get('permissionMode')),
       attachments: uploads.attachments,
       previousAgent: readStringField(form.get('previousAgent')),
       previousSessionId: readStringField(form.get('previousSessionId')),
@@ -254,6 +258,7 @@ async function parseSessionSendRequest(c: any): Promise<{
     displayPrompt: readStringField(body?.displayPrompt),
     model: readStringField(body?.model),
     effort: readStringField(body?.effort).toLowerCase(),
+    permissionMode: readStringField(body?.permissionMode),
     attachments: [],
     previousAgent: readStringField(body?.previousAgent),
     previousSessionId: readStringField(body?.previousSessionId),
@@ -475,6 +480,7 @@ app.post('/api/session-hub/sessions', async (c) => {
       agent: body?.agents,
       userStatus: body?.userStatus,
       limit: body?.limit,
+      managedOnly: body?.managedOnly === true,
       archiveMode: body?.archiveMode === 'archived' || body?.archiveMode === 'all' ? body.archiveMode : 'active',
     });
     const includeTaskSessions = body?.includeTaskSessions === true;
@@ -689,6 +695,21 @@ app.post('/api/session-hub/session/messages', async (c) => {
       turnLimit: Number.isFinite(turnLimit) ? turnLimit : undefined,
       rich,
     });
+    const numericTurnOffset = Number(turnOffset);
+    const hasTurnOffset = turnOffset != null && turnOffset !== '' && Number.isFinite(numericTurnOffset);
+    const shouldIngestWorkflowMarkers = !hasTurnOffset || numericTurnOffset === 0;
+    if (result.ok && shouldIngestWorkflowMarkers) {
+      try {
+        ingestWorkflowRunMarkersFromMessages({
+          workdir,
+          agent,
+          sessionId,
+          messages: result.richMessages || result.messages,
+        });
+      } catch {
+        // Chat history must remain readable even if Pro workflow state cannot be updated.
+      }
+    }
     return c.json(rewriteSessionImagesForDashboard(result, agent, sessionId, workdir));
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
@@ -849,8 +870,22 @@ app.get('/api/session-hub/skills', (c) => {
 // ==========================================================================
 
 app.post('/api/session-hub/session/send', async (c) => {
+  let cleanup: (() => Promise<void>) | null = null;
   try {
-    const { workdir, agent, sessionId, prompt, displayPrompt, model, effort, attachments, previousAgent, previousSessionId, contextSources, projectContext, cleanup } = await parseSessionSendRequest(c);
+    const parsed = await parseSessionSendRequest(c);
+    cleanup = parsed.cleanup;
+    const { workdir, agent, sessionId, prompt, displayPrompt, model, effort, permissionMode, attachments, previousAgent, previousSessionId, contextSources, projectContext } = parsed;
+    const gate = await evaluateCurrentUsageBudgetGate({ agent, model });
+    if (!gate.allowed) {
+      await cleanup().catch(() => {});
+      cleanup = null;
+      return c.json({
+        ok: false,
+        error: gate.message,
+        code: 'usage_budget_paused',
+        budget: gate.budget,
+      }, 429);
+    }
     const queued = await queueDashboardSessionTask({
       workdir,
       agent,
@@ -859,6 +894,7 @@ app.post('/api/session-hub/session/send', async (c) => {
       displayPrompt: displayPrompt || undefined,
       model,
       effort,
+      permissionMode,
       attachments,
       previousAgent: previousAgent || null,
       previousSessionId: previousSessionId || null,
@@ -866,6 +902,7 @@ app.post('/api/session-hub/session/send', async (c) => {
       projectContext,
     });
     await cleanup();
+    cleanup = null;
     if (!queued.ok) {
       const status = queued.error === 'Bot is not running' ? 503 : 400;
       return c.json(queued, status);
@@ -876,6 +913,7 @@ app.post('/api/session-hub/session/send', async (c) => {
     );
     return c.json(queued);
   } catch (e: any) {
+    if (cleanup) await cleanup().catch(() => {});
     return c.json({ ok: false, error: e.message }, 500);
   }
 });

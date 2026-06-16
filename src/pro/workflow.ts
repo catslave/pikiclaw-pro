@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DAILY_ASSISTANT_ID } from './assistant-defaults.js';
 import { DEFAULT_ANALYZE_TICKET_PROMPT } from './jira-analyze.js';
 import { syncJiraTask } from './tasks.js';
 
@@ -33,6 +34,8 @@ export interface AutomationRule {
   workdir?: string;
   agent?: string;
   enabled: boolean;
+  includeProjectReferences?: boolean;
+  projectReferenceNames?: string[];
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string;
@@ -41,9 +44,142 @@ export interface AutomationRule {
   runHistory?: Array<{
     id: string;
     ranAt: string;
+    scheduledFor?: string;
+    taskId?: string;
     sessionKey?: string;
-    status: 'queued' | 'failed';
+    status: 'queued' | 'failed' | 'missed';
+    error?: string;
+    code?: string;
+    budgetId?: string;
+    budgetName?: string;
   }>;
+}
+
+export type CustomWorkflowEffort = 'low' | 'medium' | 'high';
+
+export interface CustomWorkflowRecipe {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  outputs: string[];
+  steps: string[];
+  capabilities: string[];
+  promptHint: string;
+  cadence: string;
+  defaultEffort: CustomWorkflowEffort;
+  builtIn?: false;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkflowRunStatus = 'running' | 'blocked' | 'done';
+export type WorkflowRunStepStatus = 'todo' | 'now' | 'blocked' | 'done';
+export type WorkflowRunAskType = 'text' | 'number' | 'choice' | 'boolean' | 'rating';
+export type WorkflowRunAskStatus = 'pending' | 'answered' | 'skipped';
+export type WorkflowRunAskDeliveryStatus = 'not_sent' | 'sending' | 'sent' | 'failed';
+export type WorkflowRunStepAutonomousState = 'running' | 'done' | 'failed' | 'stalled';
+
+export interface WorkflowRunStepAutonomousRun {
+  dispatchId: string;
+  state: WorkflowRunStepAutonomousState;
+  startedAt: string;
+  completedAt?: string;
+  childAgent?: string;
+  childSessionId?: string;
+  childSessionKey?: string;
+  taskId?: string;
+  error?: string;
+}
+
+export interface WorkflowRunAutonomousWatchdogResult {
+  scannedRuns: number;
+  scannedWorkers: number;
+  stalled: Array<{ run: WorkflowRunRecord; step: WorkflowRunStep }>;
+}
+
+export interface WorkflowRunStep {
+  index: number;
+  title: string;
+  status: WorkflowRunStepStatus;
+  startedAt?: string;
+  completedAt?: string;
+  autonomousRun?: WorkflowRunStepAutonomousRun;
+}
+
+export interface WorkflowRunAsk {
+  id: string;
+  stepIndex: number;
+  question: string;
+  type: WorkflowRunAskType;
+  options?: string[];
+  max?: number;
+  placeholder?: string;
+  answer?: string;
+  status: WorkflowRunAskStatus;
+  deliveryStatus?: WorkflowRunAskDeliveryStatus;
+  deliveryError?: string;
+  deliveryTaskId?: string;
+  deliveredAt?: string;
+  askedAt: string;
+  answeredAt?: string;
+}
+
+export interface WorkflowRunRecord {
+  id: string;
+  workflowId?: string;
+  workflowName: string;
+  title: string;
+  workdir?: string;
+  agent?: string;
+  model?: string;
+  effort?: CustomWorkflowEffort;
+  assistantId?: string;
+  assistantName?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  note?: string;
+  currentStep: number;
+  totalSteps: number;
+  steps: WorkflowRunStep[];
+  asks: WorkflowRunAsk[];
+  status: WorkflowRunStatus;
+  lastMarker?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface WorkflowMarkerAsk {
+  question: string;
+  type: WorkflowRunAskType;
+  options?: string[];
+  max?: number;
+  placeholder?: string;
+}
+
+export interface WorkflowMarkerProgress {
+  currentStep: number;
+  totalSteps: number;
+  title: string;
+  status: WorkflowRunStatus;
+  raw: string;
+}
+
+export interface WorkflowMarkerReconcileResult {
+  run: WorkflowRunRecord | null;
+  scannedMessages: number;
+  scannedAssistantMessages: number;
+  markerMessages: number;
+  progressMarkers: number;
+  askMarkers: number;
+}
+
+export interface WorkflowMarkerMessage {
+  role?: unknown;
+  text?: unknown;
+  blocks?: Array<{ type?: unknown; content?: unknown; phase?: unknown }>;
 }
 
 export interface JiraSyncRunEvent {
@@ -153,6 +289,7 @@ export type KnowledgeEntryKind = 'knowledge-card' | 'session-digest';
 export type KnowledgeEntryStatus = 'published' | 'hidden';
 export type KnowledgeEntryConfidence = 'low' | 'medium' | 'high';
 export type KnowledgeEntryCreatedBy = 'auto' | 'manual' | 'agent';
+export type KnowledgeSourceFreshness = 'unchecked' | 'fresh' | 'stale' | 'missing' | 'unreadable' | 'unsupported';
 
 export interface KnowledgeSourceRef {
   type: 'manual' | 'chat' | 'task' | 'output' | 'file' | 'link';
@@ -164,6 +301,16 @@ export interface KnowledgeSourceRef {
   path?: string;
   url?: string;
   title?: string;
+  sourceFreshness?: KnowledgeSourceFreshness;
+  sourceCheckedAt?: string;
+  sourceAcceptedAt?: string;
+  sourceHash?: string;
+  sourceMtimeMs?: number;
+  sourceSize?: number;
+  sourceCurrentHash?: string;
+  sourceCurrentMtimeMs?: number;
+  sourceCurrentSize?: number;
+  sourceError?: string;
 }
 
 export interface KnowledgeArtifactRef {
@@ -243,6 +390,8 @@ interface WorkflowFile {
   version: 1;
   assistants: AgentAssistant[];
   deletedAssistantIds?: string[];
+  customWorkflows?: CustomWorkflowRecipe[];
+  workflowRuns?: WorkflowRunRecord[];
   automations: AutomationRule[];
   jiraSyncRuns?: JiraSyncRun[];
   jiraRemoteUpdateRuns?: JiraRemoteUpdateRun[];
@@ -354,6 +503,23 @@ const DEFAULT_ASSISTANTS: AgentAssistant[] = [
     enabled: true,
     createdAt: '2026-05-30T00:00:00.000Z',
     updatedAt: '2026-05-30T00:00:00.000Z',
+  },
+  {
+    id: DAILY_ASSISTANT_ID,
+    name: 'Daily Assistant',
+    kind: 'task-stage',
+    surfaceId: 'daily',
+    objectTypes: ['daily-item', 'todo', 'task', 'task-stage'],
+    responsibility: 'Turn daily plan items and inbox Todos into focused execution work: clarify the goal, confirm the plan, execute with progress updates, and ask for review before marking work done.',
+    prompt: 'You are the Daily Assistant for Pikiclaw. Help the user turn today’s Todo or Daily item into a focused work session. First clarify the concrete goal and missing context. Then propose a short Goal & Plan with assumptions, risks, and acceptance checks. Start execution only after the user confirms or the request is already explicit. During execution, report concrete progress, files or sources checked, commands or checks run, changed artifacts, and remaining risk. When finished, ask the user to review. If the user rejects the result, continue iterating; if they accept it, help mark the work done.',
+    defaultPrompt: 'You are the Daily Assistant for Pikiclaw. Help the user turn today’s Todo or Daily item into a focused work session. First clarify the concrete goal and missing context. Then propose a short Goal & Plan with assumptions, risks, and acceptance checks. Start execution only after the user confirms or the request is already explicit. During execution, report concrete progress, files or sources checked, commands or checks run, changed artifacts, and remaining risk. When finished, ask the user to review. If the user rejects the result, continue iterating; if they accept it, help mark the work done.',
+    preferredAgents: ['codex'],
+    allowedActions: ['chat', 'clarify', 'plan-today', 'start-working', 'run-tests', 'request-review', 'mark-done', 'edit-prompt', 'history'],
+    labels: ['builtin', 'task', 'daily'],
+    builtIn: true,
+    enabled: true,
+    createdAt: '2026-06-16T00:00:00.000Z',
+    updatedAt: '2026-06-16T00:00:00.000Z',
   },
   {
     id: 'assistant_refinement',
@@ -718,6 +884,22 @@ function normalizeKnowledgeCreatedBy(value: unknown): KnowledgeEntryCreatedBy {
   return value === 'auto' || value === 'agent' ? value : 'manual';
 }
 
+function normalizeKnowledgeSourceFreshness(value: unknown): KnowledgeSourceFreshness | undefined {
+  return value === 'fresh'
+    || value === 'stale'
+    || value === 'missing'
+    || value === 'unreadable'
+    || value === 'unsupported'
+    || value === 'unchecked'
+    ? value
+    : undefined;
+}
+
+function normalizeOptionalNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function normalizeKnowledgeSourceRef(value: unknown): KnowledgeSourceRef | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
@@ -733,6 +915,12 @@ function normalizeKnowledgeSourceRef(value: unknown): KnowledgeSourceRef | null 
   const filePath = normalizeText(raw.path, 2_000);
   const url = normalizeText(raw.url, 2_000);
   const title = normalizeText(raw.title, 240);
+  const sourceFreshness = normalizeKnowledgeSourceFreshness(raw.sourceFreshness);
+  const sourceCheckedAt = normalizeText(raw.sourceCheckedAt, 80);
+  const sourceAcceptedAt = normalizeText(raw.sourceAcceptedAt, 80);
+  const sourceHash = normalizeText(raw.sourceHash, 160);
+  const sourceCurrentHash = normalizeText(raw.sourceCurrentHash, 160);
+  const sourceError = normalizeText(raw.sourceError, 500);
   if (workdir) ref.workdir = workdir;
   if (agent) ref.agent = agent;
   if (sessionId) ref.sessionId = sessionId;
@@ -741,6 +929,20 @@ function normalizeKnowledgeSourceRef(value: unknown): KnowledgeSourceRef | null 
   if (filePath) ref.path = filePath;
   if (url) ref.url = url;
   if (title) ref.title = title;
+  if (sourceFreshness) ref.sourceFreshness = sourceFreshness;
+  if (sourceCheckedAt) ref.sourceCheckedAt = sourceCheckedAt;
+  if (sourceAcceptedAt) ref.sourceAcceptedAt = sourceAcceptedAt;
+  if (sourceHash) ref.sourceHash = sourceHash;
+  if (sourceCurrentHash) ref.sourceCurrentHash = sourceCurrentHash;
+  const sourceMtimeMs = normalizeOptionalNumber(raw.sourceMtimeMs);
+  const sourceSize = normalizeOptionalNumber(raw.sourceSize);
+  const sourceCurrentMtimeMs = normalizeOptionalNumber(raw.sourceCurrentMtimeMs);
+  const sourceCurrentSize = normalizeOptionalNumber(raw.sourceCurrentSize);
+  if (sourceMtimeMs !== undefined) ref.sourceMtimeMs = sourceMtimeMs;
+  if (sourceSize !== undefined) ref.sourceSize = sourceSize;
+  if (sourceCurrentMtimeMs !== undefined) ref.sourceCurrentMtimeMs = sourceCurrentMtimeMs;
+  if (sourceCurrentSize !== undefined) ref.sourceCurrentSize = sourceCurrentSize;
+  if (sourceError) ref.sourceError = sourceError;
   return ref;
 }
 
@@ -818,6 +1020,211 @@ function normalizeKnowledgeEntry(raw: any): KnowledgeEntry | null {
   };
 }
 
+function normalizeCustomWorkflowEffort(value: unknown): CustomWorkflowEffort {
+  return value === 'low' || value === 'high' ? value : 'medium';
+}
+
+function normalizeCustomWorkflowRecipe(raw: any): CustomWorkflowRecipe | null {
+  const id = normalizeText(raw?.id, 160);
+  const name = normalizeText(raw?.name, 160);
+  const description = normalizeText(raw?.description, 1_000);
+  if (!id || !name || !description) return null;
+  const now = new Date().toISOString();
+  return {
+    id,
+    name,
+    description,
+    category: normalizeText(raw?.category, 120) || 'Custom',
+    tags: normalizeStringList(raw?.tags, 24, 80),
+    outputs: normalizeStringList(raw?.outputs, 12, 160),
+    steps: normalizeStringList(raw?.steps, 20, 240),
+    capabilities: normalizeStringList(raw?.capabilities, 12, 120),
+    promptHint: normalizeText(raw?.promptHint, 4_000) || description,
+    cadence: normalizeText(raw?.cadence, 80) || 'On demand',
+    defaultEffort: normalizeCustomWorkflowEffort(raw?.defaultEffort),
+    builtIn: false,
+    createdAt: typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : now,
+    updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : now,
+  };
+}
+
+function normalizeWorkflowRunStatus(value: unknown): WorkflowRunStatus {
+  const raw = normalizeText(value, 40).toLowerCase();
+  if (raw === 'blocked') return 'blocked';
+  if (raw === 'done' || raw === 'complete' || raw === 'completed') return 'done';
+  return 'running';
+}
+
+function normalizeWorkflowRunStepStatus(value: unknown): WorkflowRunStepStatus {
+  const raw = normalizeText(value, 40).toLowerCase();
+  if (raw === 'blocked') return 'blocked';
+  if (raw === 'done' || raw === 'complete' || raw === 'completed') return 'done';
+  if (raw === 'now' || raw === 'running' || raw === 'active') return 'now';
+  return 'todo';
+}
+
+function normalizeWorkflowRunStepAutonomousState(value: unknown): WorkflowRunStepAutonomousState {
+  const raw = normalizeText(value, 40).toLowerCase();
+  if (raw === 'done' || raw === 'complete' || raw === 'completed' || raw === 'success') return 'done';
+  if (raw === 'stalled' || raw === 'stale' || raw === 'timeout' || raw === 'timed_out') return 'stalled';
+  if (raw === 'failed' || raw === 'error' || raw === 'errored') return 'failed';
+  return 'running';
+}
+
+function clampWorkflowStep(value: unknown, totalSteps: number): number {
+  const numeric = Number(value);
+  const total = Math.max(1, Math.floor(totalSteps));
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.max(1, Math.min(Math.floor(numeric), total));
+}
+
+function normalizeWorkflowRunStepAutonomousRun(raw: unknown, now: string): WorkflowRunStepAutonomousRun | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const item = raw as Record<string, unknown>;
+  const childAgent = normalizeText(item.childAgent ?? item.child_agent, 120);
+  const childSessionId = normalizeText(item.childSessionId ?? item.child_session_id, 260);
+  const childSessionKey = normalizeText(item.childSessionKey ?? item.child_session_key, 260) || workflowRunSessionKey(childAgent, childSessionId);
+  const dispatchId = normalizeText(item.dispatchId ?? item.dispatch_id, 160)
+    || normalizeText(item.taskId ?? item.task_id, 160)
+    || normalizeText(item.id, 160);
+  if (!dispatchId && !childSessionKey) return undefined;
+  return {
+    dispatchId: dispatchId || `workflow_dispatch_${crypto.randomBytes(8).toString('hex')}`,
+    state: normalizeWorkflowRunStepAutonomousState(item.state ?? item.status),
+    startedAt: normalizeText(item.startedAt ?? item.started_at, 80) || now,
+    completedAt: normalizeText(item.completedAt ?? item.completed_at, 80) || undefined,
+    childAgent: childAgent || undefined,
+    childSessionId: childSessionId || undefined,
+    childSessionKey: childSessionKey || undefined,
+    taskId: normalizeText(item.taskId ?? item.task_id, 160) || undefined,
+    error: normalizeText(item.error ?? item.message, 1_000) || undefined,
+  };
+}
+
+function normalizeWorkflowRunStep(raw: unknown, index: number): WorkflowRunStep | null {
+  const item = raw && typeof raw === 'object' ? raw as Record<string, unknown> : { title: raw };
+  const title = normalizeText(item.title ?? item.name ?? item.label, 240) || `Step ${index + 1}`;
+  const rawIndex = Number(item.index ?? item.n ?? index + 1);
+  const now = new Date().toISOString();
+  return {
+    index: Number.isFinite(rawIndex) && rawIndex > 0 ? Math.floor(rawIndex) : index + 1,
+    title,
+    status: normalizeWorkflowRunStepStatus(item.status),
+    startedAt: normalizeText(item.startedAt, 80) || undefined,
+    completedAt: normalizeText(item.completedAt, 80) || undefined,
+    autonomousRun: normalizeWorkflowRunStepAutonomousRun(item.autonomousRun ?? item.autonomous_run, now),
+  };
+}
+
+function normalizeWorkflowRunAskType(value: unknown): WorkflowRunAskType {
+  const raw = normalizeText(value, 40).toLowerCase();
+  if (raw === 'number' || raw === 'choice' || raw === 'boolean' || raw === 'rating') return raw;
+  return 'text';
+}
+
+function normalizeWorkflowRunAskStatus(value: unknown, answer?: string): WorkflowRunAskStatus {
+  const raw = normalizeText(value, 40).toLowerCase();
+  if (raw === 'skipped' || raw === 'skip') return 'skipped';
+  if (raw === 'answered' || raw === 'done' || raw === 'complete' || answer) return 'answered';
+  return 'pending';
+}
+
+function normalizeWorkflowRunAskDeliveryStatus(value: unknown, askStatus: WorkflowRunAskStatus): WorkflowRunAskDeliveryStatus | undefined {
+  const raw = normalizeText(value, 40).toLowerCase();
+  if (raw === 'not_sent' || raw === 'not-sent' || raw === 'unsent') return 'not_sent';
+  if (raw === 'sending' || raw === 'queued' || raw === 'pending') return 'sending';
+  if (raw === 'sent' || raw === 'delivered' || raw === 'done') return 'sent';
+  if (raw === 'failed' || raw === 'error') return 'failed';
+  if (askStatus === 'answered' || askStatus === 'skipped') return 'sent';
+  return undefined;
+}
+
+function normalizeWorkflowRunAsk(raw: unknown, index: number, totalSteps: number, now: string): WorkflowRunAsk | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const item = raw as Record<string, unknown>;
+  const question = normalizeText(item.question ?? item.prompt ?? item.text, 2_000);
+  if (!question) return null;
+  const answer = normalizeText(item.answer, 4_000) || undefined;
+  const id = normalizeText(item.id, 160) || newId('workflow_ask');
+  const options = normalizeStringList(item.options, 12, 160);
+  const max = Math.max(1, Math.min(10, Math.floor(Number(item.max) || 0)));
+  const status = normalizeWorkflowRunAskStatus(item.status, answer);
+  const deliveryStatus = normalizeWorkflowRunAskDeliveryStatus(item.deliveryStatus ?? item.delivery_status, status);
+  return {
+    id,
+    stepIndex: clampWorkflowStep(item.stepIndex ?? item.step_n ?? item.step ?? index + 1, totalSteps),
+    question,
+    type: normalizeWorkflowRunAskType(item.type),
+    options: options.length ? options : undefined,
+    max: Number.isFinite(max) && max > 0 ? max : undefined,
+    placeholder: normalizeText(item.placeholder, 240) || undefined,
+    answer,
+    status,
+    deliveryStatus,
+    deliveryError: normalizeText(item.deliveryError ?? item.delivery_error, 1_000) || undefined,
+    deliveryTaskId: normalizeText(item.deliveryTaskId ?? item.delivery_task_id, 220) || undefined,
+    deliveredAt: normalizeText(item.deliveredAt ?? item.delivered_at, 80) || (deliveryStatus === 'sent' && answer ? now : undefined),
+    askedAt: normalizeText(item.askedAt ?? item.asked_at, 80) || now,
+    answeredAt: normalizeText(item.answeredAt ?? item.answered_at, 80) || (answer ? now : undefined),
+  };
+}
+
+function normalizeWorkflowRunAsks(raw: unknown, totalSteps: number, now: string): WorkflowRunAsk[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, index) => normalizeWorkflowRunAsk(item, index, totalSteps, now))
+    .filter((item): item is WorkflowRunAsk => !!item)
+    .slice(0, 40);
+}
+
+function workflowRunAskBlocksProgress(ask: WorkflowRunAsk): boolean {
+  if (ask.status === 'pending') return true;
+  return !!ask.deliveryStatus && ask.deliveryStatus !== 'sent';
+}
+
+function normalizeWorkflowRunRecord(raw: any): WorkflowRunRecord | null {
+  const id = normalizeText(raw?.id, 160);
+  const workflowName = normalizeText(raw?.workflowName ?? raw?.name, 160);
+  if (!id || !workflowName) return null;
+  const now = new Date().toISOString();
+  const rawSteps: WorkflowRunStep[] = Array.isArray(raw?.steps)
+    ? raw.steps
+      .map((item: unknown, index: number) => normalizeWorkflowRunStep(item, index))
+      .filter((item: WorkflowRunStep | null): item is WorkflowRunStep => !!item)
+    : [];
+  const totalSteps = Math.max(
+    1,
+    Math.floor(Number(raw?.totalSteps) || 0),
+    rawSteps.length,
+  );
+  const currentStep = clampWorkflowStep(raw?.currentStep, totalSteps);
+  const status = normalizeWorkflowRunStatus(raw?.status);
+  return {
+    id,
+    workflowId: normalizeText(raw?.workflowId, 160) || undefined,
+    workflowName,
+    title: normalizeText(raw?.title, 200) || workflowName,
+    workdir: normalizeText(raw?.workdir, 2_048) || undefined,
+    agent: normalizeText(raw?.agent, 120) || undefined,
+    model: normalizeText(raw?.model, 240) || undefined,
+    effort: normalizeCustomWorkflowEffort(raw?.effort),
+    assistantId: normalizeText(raw?.assistantId, 160) || undefined,
+    assistantName: normalizeText(raw?.assistantName, 160) || undefined,
+    sessionKey: normalizeText(raw?.sessionKey, 260) || undefined,
+    sessionId: normalizeText(raw?.sessionId, 260) || undefined,
+    note: normalizeText(raw?.note, 2_000) || undefined,
+    currentStep,
+    totalSteps,
+    steps: rawSteps.length ? rawSteps : buildWorkflowRunSteps([], [], currentStep, totalSteps, status, now),
+    asks: normalizeWorkflowRunAsks(raw?.asks, totalSteps, now),
+    status,
+    lastMarker: normalizeText(raw?.lastMarker, 1_000) || undefined,
+    createdAt: normalizeText(raw?.createdAt, 80) || now,
+    updatedAt: normalizeText(raw?.updatedAt, 80) || now,
+    completedAt: normalizeText(raw?.completedAt, 80) || (status === 'done' ? now : undefined),
+  };
+}
+
 function readFile(): WorkflowFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(workflowFilePath(), 'utf-8')) as WorkflowFile;
@@ -825,6 +1232,12 @@ function readFile(): WorkflowFile {
       version: 1,
       assistants: Array.isArray(parsed?.assistants) ? parsed.assistants.filter(item => item?.id && item?.name) : [],
       deletedAssistantIds: Array.isArray(parsed?.deletedAssistantIds) ? parsed.deletedAssistantIds.map(String).filter(Boolean) : [],
+      customWorkflows: Array.isArray(parsed?.customWorkflows)
+        ? parsed.customWorkflows.map(normalizeCustomWorkflowRecipe).filter((item): item is CustomWorkflowRecipe => !!item)
+        : [],
+      workflowRuns: Array.isArray(parsed?.workflowRuns)
+        ? parsed.workflowRuns.map(normalizeWorkflowRunRecord).filter((item): item is WorkflowRunRecord => !!item)
+        : [],
       automations: Array.isArray(parsed?.automations) ? parsed.automations.filter(item => item?.id && item?.name) : [],
       jiraSyncRuns: Array.isArray(parsed?.jiraSyncRuns) ? parsed.jiraSyncRuns.filter(item => item?.id) : [],
       jiraRemoteUpdateRuns: Array.isArray(parsed?.jiraRemoteUpdateRuns) ? parsed.jiraRemoteUpdateRuns.filter(item => item?.id && item?.taskId) : [],
@@ -834,7 +1247,7 @@ function readFile(): WorkflowFile {
       jira: parsed?.jira && typeof parsed.jira === 'object' ? parsed.jira : undefined,
     };
   } catch {
-    return { version: 1, assistants: [], deletedAssistantIds: [], automations: [], jiraSyncRuns: [], jiraRemoteUpdateRuns: [], knowledge: [] };
+    return { version: 1, assistants: [], deletedAssistantIds: [], customWorkflows: [], workflowRuns: [], automations: [], jiraSyncRuns: [], jiraRemoteUpdateRuns: [], knowledge: [] };
   }
 }
 
@@ -876,6 +1289,413 @@ function titleFromPrompt(prompt: string): string {
   return prompt.split(/\s+/).filter(Boolean).slice(0, 10).join(' ').slice(0, 120) || 'Automation job';
 }
 
+function workflowNameSlug(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+}
+
+function normalizeWorkflowDraft(input: {
+  name?: unknown;
+  description?: unknown;
+  category?: unknown;
+  tags?: unknown;
+  outputs?: unknown;
+  steps?: unknown;
+  capabilities?: unknown;
+  promptHint?: unknown;
+  cadence?: unknown;
+  defaultEffort?: unknown;
+}) {
+  const name = normalizeText(input.name, 160);
+  const description = normalizeText(input.description, 1_000);
+  if (!name) throw new Error('workflow name is required');
+  if (!description) throw new Error('workflow description is required');
+  const steps = normalizeStringList(input.steps, 20, 240);
+  if (!steps.length) throw new Error('workflow steps are required');
+  const outputs = normalizeStringList(input.outputs, 12, 160);
+  return {
+    name,
+    description,
+    category: normalizeText(input.category, 120) || 'Custom',
+    tags: normalizeStringList(input.tags, 24, 80),
+    outputs: outputs.length ? outputs : ['workflow output'],
+    steps,
+    capabilities: normalizeStringList(input.capabilities, 12, 120),
+    promptHint: normalizeText(input.promptHint, 4_000) || description,
+    cadence: normalizeText(input.cadence, 80) || 'On demand',
+    defaultEffort: normalizeCustomWorkflowEffort(input.defaultEffort),
+  };
+}
+
+function buildWorkflowRunSteps(
+  existingSteps: WorkflowRunStep[],
+  inputSteps: string[],
+  currentStep: number,
+  totalSteps: number,
+  status: WorkflowRunStatus,
+  now: string,
+): WorkflowRunStep[] {
+  const existingByIndex = new Map(existingSteps.map(step => [step.index, step]));
+  const titles = inputSteps.length ? inputSteps : existingSteps.map(step => step.title);
+  return Array.from({ length: Math.max(1, totalSteps) }, (_, index) => {
+    const stepIndex = index + 1;
+    const existing = existingByIndex.get(stepIndex);
+    const title = normalizeText(titles[index], 240) || existing?.title || `Step ${stepIndex}`;
+    let stepStatus: WorkflowRunStepStatus = 'todo';
+    if (status === 'done') stepStatus = 'done';
+    else if (stepIndex < currentStep) stepStatus = 'done';
+    else if (stepIndex === currentStep) stepStatus = status === 'blocked' ? 'blocked' : 'now';
+    const startedAt = existing?.startedAt || (stepStatus === 'now' || stepStatus === 'blocked' || stepStatus === 'done' ? now : undefined);
+    const completedAt = existing?.completedAt || (stepStatus === 'done' ? now : undefined);
+    return {
+      index: stepIndex,
+      title,
+      status: stepStatus,
+      startedAt,
+      completedAt,
+      autonomousRun: existing?.autonomousRun,
+    };
+  });
+}
+
+function workflowRunSessionKey(agent: string | undefined, sessionId: string | undefined): string | undefined {
+  return agent && sessionId ? `${agent}:${sessionId}` : undefined;
+}
+
+const WORKFLOW_MARKER_FENCE_RE = /^\s*```/;
+const DEFAULT_WORKFLOW_AUTONOMOUS_STALL_MS = 45 * 60 * 1000;
+const WORKFLOW_LEGACY_PROGRESS_RE = /^Workflow progress:\s*Step\s+(\d+)\s*\/\s*(\d+)\s*(.*)$/i;
+const WORKFLOW_PIPE_PROGRESS_RE = /^Workflow progress:\s*(.+)$/i;
+const WORKFLOW_COMPLETE_RE = /^Workflow complete\b/i;
+const WORKFLOW_STATUS_RE = /(?:[-–—:]\s*)?(running|blocked|done|completed|complete)\.?\s*$/i;
+const WORKFLOW_ASK_SOURCE_RE = /<ask\s+[^>]*?>[\s\S]*?<\/ask>|&lt;ask\s+[\s\S]*?&gt;[\s\S]*?&lt;\/ask&gt;/gi;
+const WORKFLOW_ASK_RE = /^<ask\s+([^>]*?)>([\s\S]*?)<\/ask>$/i;
+const WORKFLOW_ASK_ATTR_RE = /(\w+)\s*=\s*"([^"]*)"/g;
+
+function normalizeWorkflowMarkerStatus(value: string | null | undefined): WorkflowRunStatus {
+  const raw = value?.trim().toLowerCase();
+  if (raw === 'blocked') return 'blocked';
+  if (raw === 'done' || raw === 'completed' || raw === 'complete') return 'done';
+  return 'running';
+}
+
+function parseWorkflowProgressLine(line: string): WorkflowMarkerProgress | null {
+  const legacy = line.trim().match(WORKFLOW_LEGACY_PROGRESS_RE);
+  if (legacy) {
+    const rawCurrent = Number(legacy[1]);
+    const rawTotal = Number(legacy[2]);
+    const totalSteps = Math.max(1, Number.isFinite(rawTotal) ? Math.floor(rawTotal) : 1);
+    const currentStep = clampWorkflowStep(rawCurrent, totalSteps);
+    let rest = (legacy[3] || '').trim().replace(/^[-–—:\s]+/, '');
+    const statusMatch = rest.match(WORKFLOW_STATUS_RE);
+    const status = normalizeWorkflowMarkerStatus(statusMatch?.[1]);
+    if (statusMatch) rest = rest.slice(0, statusMatch.index).replace(/[-–—:\s]+$/, '').trim();
+    return { currentStep, totalSteps, title: rest || `Step ${currentStep}`, status, raw: line.trim() };
+  }
+
+  const pipe = line.trim().match(WORKFLOW_PIPE_PROGRESS_RE);
+  if (!pipe) return null;
+  const parts = pipe[1].split('|').map(part => part.trim()).filter(Boolean);
+  let title = '';
+  let stepMatch: RegExpMatchArray | null = null;
+  let status: WorkflowRunStatus = 'running';
+  for (const part of parts) {
+    const maybeStep = part.match(/^step\s+(\d+)\s*\/\s*(\d+)/i) || part.match(/^(\d+)\s*\/\s*(\d+)$/);
+    if (maybeStep) {
+      stepMatch = maybeStep;
+      continue;
+    }
+    const maybeStatus = part.match(/^status\s+(.+)$/i);
+    if (maybeStatus) {
+      status = normalizeWorkflowMarkerStatus(maybeStatus[1]);
+      continue;
+    }
+    if (!title) title = part;
+  }
+  if (!stepMatch) return null;
+  const rawCurrent = Number(stepMatch[1]);
+  const rawTotal = Number(stepMatch[2]);
+  const totalSteps = Math.max(1, Number.isFinite(rawTotal) ? Math.floor(rawTotal) : 1);
+  const currentStep = clampWorkflowStep(rawCurrent, totalSteps);
+  return { currentStep, totalSteps, title: title || `Step ${currentStep}`, status, raw: line.trim() };
+}
+
+function normalizeWorkflowAskMarkerType(value: string | undefined): WorkflowRunAskType | null {
+  const raw = value?.trim().toLowerCase();
+  if (raw === 'text' || raw === 'number' || raw === 'choice' || raw === 'boolean' || raw === 'rating') return raw;
+  return null;
+}
+
+function parseWorkflowAskAttrs(value: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  WORKFLOW_ASK_ATTR_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = WORKFLOW_ASK_ATTR_RE.exec(value)) !== null) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+}
+
+function decodeWorkflowHtmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function parseWorkflowAskMarker(attrsText: string, questionText: string): WorkflowMarkerAsk | null {
+  const attrs = parseWorkflowAskAttrs(attrsText);
+  const type = normalizeWorkflowAskMarkerType(attrs.type);
+  const question = normalizeText(questionText, 2_000);
+  if (!type || !question) return null;
+  const rawMax = Number(attrs.max);
+  const ask: WorkflowMarkerAsk = {
+    question,
+    type,
+  };
+  const options = attrs.options ? attrs.options.split(',').map(item => normalizeText(item, 160)).filter(Boolean).slice(0, 12) : [];
+  if (options.length) ask.options = options;
+  if (Number.isFinite(rawMax) && rawMax > 0) ask.max = Math.min(10, Math.floor(rawMax));
+  const placeholder = normalizeText(attrs.placeholder, 240);
+  if (placeholder) ask.placeholder = placeholder;
+  return ask;
+}
+
+function collectWorkflowInlineCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== '`') {
+      index += 1;
+      continue;
+    }
+    let tickCount = 1;
+    while (text[index + tickCount] === '`') tickCount += 1;
+    const marker = '`'.repeat(tickCount);
+    const close = text.indexOf(marker, index + tickCount);
+    if (close < 0) {
+      index += tickCount;
+      continue;
+    }
+    ranges.push([index, close + tickCount]);
+    index = close + tickCount;
+  }
+  return ranges;
+}
+
+function workflowOffsetInRanges(offset: number, ranges: Array<[number, number]>): boolean {
+  return ranges.some(([start, end]) => offset >= start && offset < end);
+}
+
+function extractWorkflowAskMarkersFromSource(text: string): WorkflowMarkerAsk[] {
+  const asks: WorkflowMarkerAsk[] = [];
+  const inlineCodeRanges = collectWorkflowInlineCodeRanges(text);
+  WORKFLOW_ASK_SOURCE_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = WORKFLOW_ASK_SOURCE_RE.exec(text)) !== null) {
+    if (workflowOffsetInRanges(match.index, inlineCodeRanges)) continue;
+    const source = match[0];
+    const decoded = source.includes('&lt;') ? decodeWorkflowHtmlEntities(source) : source;
+    const markerMatch = decoded.match(WORKFLOW_ASK_RE);
+    if (!markerMatch) continue;
+    const ask = parseWorkflowAskMarker(markerMatch[1], markerMatch[2]);
+    if (ask) asks.push(ask);
+  }
+  return asks;
+}
+
+function splitWorkflowTextOutsideFences(text: string): Array<{ text: string; inFence: boolean }> {
+  const out: Array<{ text: string; inFence: boolean }> = [];
+  const lines = String(text || '').split('\n');
+  let inFence = false;
+  let current: string[] = [];
+  let currentFence = false;
+  const flush = () => {
+    if (current.length) out.push({ text: current.join('\n'), inFence: currentFence });
+    current = [];
+  };
+  for (const line of lines) {
+    if (WORKFLOW_MARKER_FENCE_RE.test(line)) {
+      flush();
+      out.push({ text: line, inFence });
+      inFence = !inFence;
+      currentFence = inFence;
+      continue;
+    }
+    if (current.length && currentFence !== inFence) flush();
+    currentFence = inFence;
+    current.push(line);
+  }
+  flush();
+  return out;
+}
+
+export function extractWorkflowRunMarkersFromText(text: string): { progress: WorkflowMarkerProgress | null; asks: WorkflowMarkerAsk[] } {
+  let progress: WorkflowMarkerProgress | null = null;
+  let sawComplete = false;
+  const asks: WorkflowMarkerAsk[] = [];
+
+  for (const part of splitWorkflowTextOutsideFences(text)) {
+    if (part.inFence) continue;
+    for (const line of part.text.split('\n')) {
+      const parsed = parseWorkflowProgressLine(line);
+      if (parsed) {
+        progress = parsed;
+        continue;
+      }
+      if (WORKFLOW_COMPLETE_RE.test(line.trim())) sawComplete = true;
+    }
+    asks.push(...extractWorkflowAskMarkersFromSource(part.text));
+  }
+
+  if (progress && sawComplete) {
+    progress = { ...progress, currentStep: progress.totalSteps, status: 'done' };
+  }
+  return { progress, asks };
+}
+
+function workflowMarkerMessageText(message: WorkflowMarkerMessage): string {
+  const blocks = Array.isArray(message.blocks) ? message.blocks : [];
+  const blockText = blocks
+    .filter(block => block?.type === 'text' || block?.type == null)
+    .map(block => typeof block.content === 'string' ? block.content : '')
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  if (blockText) return blockText;
+  return typeof message.text === 'string' ? message.text : '';
+}
+
+function workflowAskMarkerStableId(sessionKey: string, stepIndex: number, ask: WorkflowMarkerAsk): string {
+  const hash = crypto
+    .createHash('sha1')
+    .update(`${sessionKey}\n${stepIndex}\n${ask.type}\n${ask.question}`)
+    .digest('hex')
+    .slice(0, 16);
+  return `workflow_ask_${hash}`;
+}
+
+function workflowMarkerStepTitles(progress: WorkflowMarkerProgress | null): string[] {
+  const total = Math.max(1, progress?.totalSteps || 1);
+  return Array.from({ length: total }, (_, index) => {
+    const stepIndex = index + 1;
+    if (progress && stepIndex === progress.currentStep) return progress.title;
+    return `Step ${stepIndex}`;
+  });
+}
+
+export function ingestWorkflowRunMarkersFromMessages(input: {
+  workdir?: unknown;
+  agent?: unknown;
+  sessionId?: unknown;
+  messages?: WorkflowMarkerMessage[];
+}): WorkflowRunRecord | null {
+  const agent = normalizeText(input.agent, 120);
+  const sessionId = normalizeText(input.sessionId, 260);
+  const sessionKey = workflowRunSessionKey(agent, sessionId);
+  if (!sessionKey) return null;
+  const workdir = normalizeText(input.workdir, 2_048);
+  const messages = Array.isArray(input.messages) ? input.messages : [];
+
+  let latestProgress: WorkflowMarkerProgress | null = null;
+  const askByKey = new Map<string, { stepIndex: number; ask: WorkflowMarkerAsk }>();
+  for (const message of messages) {
+    if (message?.role !== 'assistant') continue;
+    const text = workflowMarkerMessageText(message);
+    if (!text) continue;
+    const markers = extractWorkflowRunMarkersFromText(text);
+    if (markers.progress) latestProgress = markers.progress;
+    for (const ask of markers.asks) {
+      const markerStep = latestProgress?.currentStep || 1;
+      askByKey.set(`${markerStep}:${ask.type}:${ask.question}`, { stepIndex: markerStep, ask });
+    }
+  }
+
+  const askEntries = [...askByKey.values()];
+  if (!latestProgress && !askEntries.length) return null;
+
+  const existingRun = (readFile().workflowRuns || []).find(run => run.sessionKey === sessionKey) || null;
+  const currentStep = latestProgress?.currentStep || existingRun?.currentStep || 1;
+  const totalSteps = Math.max(1, latestProgress?.totalSteps || existingRun?.totalSteps || currentStep);
+  const allMarkerAsksAnswered = askEntries.length > 0 && askEntries.every(({ stepIndex, ask }) => {
+    const askId = workflowAskMarkerStableId(sessionKey, stepIndex, ask);
+    const existingAsk = existingRun?.asks?.find(item => item.id === askId);
+    return existingAsk?.status === 'answered' || existingAsk?.status === 'skipped';
+  });
+  const markerStatus = latestProgress?.status || (askEntries.length ? 'blocked' : existingRun?.status || 'running');
+  const status = markerStatus === 'blocked' && allMarkerAsksAnswered
+    ? (existingRun?.status || 'running')
+    : markerStatus;
+  let run = recordWorkflowRun({
+    workflowName: latestProgress?.title || existingRun?.workflowName || 'Chat workflow',
+    title: latestProgress?.title || existingRun?.title || 'Chat workflow',
+    workdir,
+    agent,
+    sessionId,
+    sessionKey,
+    currentStep,
+    totalSteps,
+    steps: latestProgress ? workflowMarkerStepTitles(latestProgress) : existingRun?.steps?.map(step => step.title),
+    status,
+    lastMarker: latestProgress?.raw,
+  });
+
+  for (const { stepIndex, ask } of askEntries) {
+    const askId = workflowAskMarkerStableId(sessionKey, stepIndex, ask);
+    const existingAsk = run.asks.find(item => item.id === askId);
+    if (existingAsk?.status === 'answered' || existingAsk?.status === 'skipped') continue;
+    run = recordWorkflowRunAsk(run.id, {
+      id: askId,
+      stepIndex,
+      question: ask.question,
+      type: ask.type,
+      options: ask.options,
+      max: ask.max,
+      placeholder: ask.placeholder,
+    }).run;
+  }
+  return run;
+}
+
+export function reconcileWorkflowRunMarkersFromMessages(input: {
+  workdir?: unknown;
+  agent?: unknown;
+  sessionId?: unknown;
+  messages?: WorkflowMarkerMessage[];
+}): WorkflowMarkerReconcileResult {
+  const messages = Array.isArray(input.messages) ? input.messages : [];
+  let scannedAssistantMessages = 0;
+  let markerMessages = 0;
+  let progressMarkers = 0;
+  let askMarkers = 0;
+
+  for (const message of messages) {
+    if (message?.role !== 'assistant') continue;
+    scannedAssistantMessages += 1;
+    const text = workflowMarkerMessageText(message);
+    if (!text) continue;
+    const markers = extractWorkflowRunMarkersFromText(text);
+    if (markers.progress) progressMarkers += 1;
+    askMarkers += markers.asks.length;
+    if (markers.progress || markers.asks.length) markerMessages += 1;
+  }
+
+  const run = ingestWorkflowRunMarkersFromMessages(input);
+  return {
+    run,
+    scannedMessages: messages.length,
+    scannedAssistantMessages,
+    markerMessages,
+    progressMarkers,
+    askMarkers,
+  };
+}
+
 function writeFile(file: WorkflowFile) {
   const filePath = workflowFilePath();
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -912,6 +1732,576 @@ export function getAssistantPrompt(id: string): { assistant: AgentAssistant; pro
     defaultPrompt,
     customized: prompt.trim() !== defaultPrompt.trim(),
   };
+}
+
+export function listCustomWorkflowRecipes(): CustomWorkflowRecipe[] {
+  return (readFile().customWorkflows || []).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+export function createCustomWorkflowRecipe(input: {
+  name?: unknown;
+  description?: unknown;
+  category?: unknown;
+  tags?: unknown;
+  outputs?: unknown;
+  steps?: unknown;
+  capabilities?: unknown;
+  promptHint?: unknown;
+  cadence?: unknown;
+  defaultEffort?: unknown;
+}): CustomWorkflowRecipe {
+  const draft = normalizeWorkflowDraft(input);
+  const file = readFile();
+  const now = new Date().toISOString();
+  const baseSlug = workflowNameSlug(draft.name) || 'workflow';
+  let id = `workflow_${baseSlug}`;
+  const existingIds = new Set((file.customWorkflows || []).map(item => item.id));
+  if (existingIds.has(id)) id = `${id}_${crypto.randomBytes(3).toString('hex')}`;
+  const recipe: CustomWorkflowRecipe = {
+    id,
+    ...draft,
+    builtIn: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+  file.customWorkflows = [recipe, ...(file.customWorkflows || [])];
+  writeFile(file);
+  return recipe;
+}
+
+export function updateCustomWorkflowRecipe(id: string, input: {
+  name?: unknown;
+  description?: unknown;
+  category?: unknown;
+  tags?: unknown;
+  outputs?: unknown;
+  steps?: unknown;
+  capabilities?: unknown;
+  promptHint?: unknown;
+  cadence?: unknown;
+  defaultEffort?: unknown;
+}): CustomWorkflowRecipe {
+  const recipeId = normalizeText(id, 160);
+  if (!recipeId) throw new Error('workflow id is required');
+  const file = readFile();
+  const recipe = (file.customWorkflows || []).find(item => item.id === recipeId);
+  if (!recipe) throw new Error('workflow not found');
+  const has = (key: keyof typeof input) => Object.prototype.hasOwnProperty.call(input, key);
+  const draft = normalizeWorkflowDraft({
+    name: has('name') ? input.name : recipe.name,
+    description: has('description') ? input.description : recipe.description,
+    category: has('category') ? input.category : recipe.category,
+    tags: has('tags') ? input.tags : recipe.tags,
+    outputs: has('outputs') ? input.outputs : recipe.outputs,
+    steps: has('steps') ? input.steps : recipe.steps,
+    capabilities: has('capabilities') ? input.capabilities : recipe.capabilities,
+    promptHint: has('promptHint') ? input.promptHint : recipe.promptHint,
+    cadence: has('cadence') ? input.cadence : recipe.cadence,
+    defaultEffort: has('defaultEffort') ? input.defaultEffort : recipe.defaultEffort,
+  });
+  Object.assign(recipe, draft, { updatedAt: new Date().toISOString() });
+  writeFile(file);
+  return recipe;
+}
+
+export function deleteCustomWorkflowRecipe(id: string): CustomWorkflowRecipe {
+  const recipeId = normalizeText(id, 160);
+  if (!recipeId) throw new Error('workflow id is required');
+  const file = readFile();
+  const index = (file.customWorkflows || []).findIndex(item => item.id === recipeId);
+  if (index < 0) throw new Error('workflow not found');
+  const [removed] = file.customWorkflows!.splice(index, 1);
+  writeFile(file);
+  return removed;
+}
+
+export function listWorkflowRuns(input: { activeOnly?: unknown; limit?: unknown } = {}): WorkflowRunRecord[] {
+  const activeOnly = input.activeOnly === true || input.activeOnly === 'true';
+  const limit = Math.max(1, Math.min(200, Math.floor(Number(input.limit) || 75)));
+  return [...(readFile().workflowRuns || [])]
+    .filter(run => !activeOnly || run.status === 'running' || run.status === 'blocked')
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, limit);
+}
+
+export function getWorkflowRun(id: string): WorkflowRunRecord | null {
+  const runId = normalizeText(id, 160);
+  if (!runId) return null;
+  return (readFile().workflowRuns || []).find(run => run.id === runId) || null;
+}
+
+export function recordWorkflowRun(input: {
+  id?: unknown;
+  workflowId?: unknown;
+  workflowName?: unknown;
+  title?: unknown;
+  workdir?: unknown;
+  agent?: unknown;
+  model?: unknown;
+  effort?: unknown;
+  assistantId?: unknown;
+  assistantName?: unknown;
+  sessionKey?: unknown;
+  sessionId?: unknown;
+  note?: unknown;
+  currentStep?: unknown;
+  totalSteps?: unknown;
+  steps?: unknown;
+  asks?: unknown;
+  status?: unknown;
+  lastMarker?: unknown;
+}): WorkflowRunRecord {
+  const file = readFile();
+  const id = normalizeText(input.id, 160);
+  const agent = normalizeText(input.agent, 120);
+  const sessionId = normalizeText(input.sessionId, 260);
+  const incomingSessionKey = normalizeText(input.sessionKey, 260) || workflowRunSessionKey(agent, sessionId);
+  const runs = file.workflowRuns || [];
+  const existing = (id ? runs.find(run => run.id === id) : null)
+    || (incomingSessionKey ? runs.find(run => run.sessionKey === incomingSessionKey) : null)
+    || null;
+  const sessionKey = incomingSessionKey || existing?.sessionKey;
+  const workflowId = normalizeText(input.workflowId, 160) || existing?.workflowId;
+  const workflowName = normalizeText(input.workflowName, 160)
+    || normalizeText(input.title, 160)
+    || existing?.workflowName
+    || 'Workflow run';
+  const requestedStatus = normalizeWorkflowRunStatus(input.status ?? existing?.status);
+  const inputSteps = normalizeStringList(input.steps, 40, 240);
+  const existingSteps = existing?.steps || [];
+  const totalSteps = Math.max(
+    1,
+    Math.floor(Number(input.totalSteps) || 0),
+    inputSteps.length,
+    existing?.totalSteps || 0,
+  );
+  const now = new Date().toISOString();
+  const inputAsks = Object.prototype.hasOwnProperty.call(input, 'asks')
+    ? normalizeWorkflowRunAsks(input.asks, totalSteps, now)
+    : null;
+  const asks = inputAsks ?? existing?.asks ?? [];
+  const status = requestedStatus !== 'done' && asks.some(workflowRunAskBlocksProgress) ? 'blocked' : requestedStatus;
+  const currentStep = status === 'done'
+    ? totalSteps
+    : clampWorkflowStep(input.currentStep ?? existing?.currentStep ?? 1, totalSteps);
+  const run: WorkflowRunRecord = {
+    id: existing?.id || id || newId('workflow_run'),
+    workflowId,
+    workflowName,
+    title: normalizeText(input.title, 200) || existing?.title || workflowName,
+    workdir: normalizeText(input.workdir, 2_048) || existing?.workdir,
+    agent: agent || existing?.agent,
+    model: normalizeText(input.model, 240) || existing?.model,
+    effort: normalizeCustomWorkflowEffort(input.effort ?? existing?.effort),
+    assistantId: normalizeText(input.assistantId, 160) || existing?.assistantId,
+    assistantName: normalizeText(input.assistantName, 160) || existing?.assistantName,
+    sessionKey,
+    sessionId: sessionId || existing?.sessionId,
+    note: normalizeText(input.note, 2_000) || existing?.note,
+    currentStep,
+    totalSteps,
+    steps: buildWorkflowRunSteps(existingSteps, inputSteps, currentStep, totalSteps, status, now),
+    asks,
+    status,
+    lastMarker: normalizeText(input.lastMarker, 1_000) || existing?.lastMarker,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    completedAt: status === 'done' ? (existing?.completedAt || now) : undefined,
+  };
+  file.workflowRuns = [run, ...runs.filter(item => item.id !== run.id)].slice(0, 75);
+  writeFile(file);
+  return run;
+}
+
+export function recordWorkflowRunStepAutonomousDispatch(runId: string, stepIndexInput: unknown, input: {
+  dispatchId?: unknown;
+  childAgent?: unknown;
+  childSessionId?: unknown;
+  childSessionKey?: unknown;
+  taskId?: unknown;
+  startedAt?: unknown;
+} = {}): { run: WorkflowRunRecord; step: WorkflowRunStep } {
+  const id = normalizeText(runId, 160);
+  if (!id) throw new Error('workflow run id is required');
+  const file = readFile();
+  const runs = file.workflowRuns || [];
+  const run = runs.find(item => item.id === id);
+  if (!run) throw new Error('workflow run not found');
+  const stepIndex = clampWorkflowStep(stepIndexInput, run.totalSteps);
+  const target = run.steps.find(step => step.index === stepIndex);
+  if (!target) throw new Error('workflow step not found');
+  if (target.status === 'done') throw new Error('workflow step is already done');
+
+  const now = new Date().toISOString();
+  const requestedDispatchId = normalizeText(input.dispatchId, 160);
+  if (
+    target.autonomousRun?.state === 'running'
+    && (!requestedDispatchId || target.autonomousRun.dispatchId !== requestedDispatchId)
+  ) {
+    throw new Error('workflow step already has a running autonomous worker');
+  }
+  const childAgent = normalizeText(input.childAgent, 120);
+  const childSessionId = normalizeText(input.childSessionId, 260);
+  const childSessionKey = normalizeText(input.childSessionKey, 260) || workflowRunSessionKey(childAgent, childSessionId);
+  const reuseRunningDispatch = target.autonomousRun?.state === 'running';
+  const autonomousRun: WorkflowRunStepAutonomousRun = {
+    dispatchId: requestedDispatchId || (reuseRunningDispatch ? target.autonomousRun?.dispatchId : undefined) || newId('workflow_dispatch'),
+    state: 'running',
+    startedAt: normalizeText(input.startedAt, 80) || (reuseRunningDispatch ? (target.autonomousRun?.startedAt || now) : now),
+    childAgent: childAgent || undefined,
+    childSessionId: childSessionId || undefined,
+    childSessionKey: childSessionKey || undefined,
+    taskId: normalizeText(input.taskId, 160) || undefined,
+  };
+
+  const steps = buildWorkflowRunSteps(run.steps, run.steps.map(step => step.title), stepIndex, run.totalSteps, 'running', now)
+    .map(step => step.index === stepIndex ? { ...step, autonomousRun } : step);
+  const updated: WorkflowRunRecord = {
+    ...run,
+    currentStep: stepIndex,
+    status: 'running',
+    steps,
+    lastMarker: `Workflow progress: Step ${stepIndex}/${run.totalSteps} - ${target.title} - running`,
+    updatedAt: now,
+    completedAt: undefined,
+  };
+  file.workflowRuns = [updated, ...runs.filter(item => item.id !== updated.id)].slice(0, 75);
+  writeFile(file);
+  return { run: updated, step: steps.find(step => step.index === stepIndex)! };
+}
+
+export function completeWorkflowRunStepAutonomous(runId: string, stepIndexInput: unknown, input: {
+  state?: unknown;
+  error?: unknown;
+  taskId?: unknown;
+  childAgent?: unknown;
+  childSessionId?: unknown;
+  childSessionKey?: unknown;
+} = {}): { run: WorkflowRunRecord; step: WorkflowRunStep } {
+  const id = normalizeText(runId, 160);
+  if (!id) throw new Error('workflow run id is required');
+  const file = readFile();
+  const runs = file.workflowRuns || [];
+  const run = runs.find(item => item.id === id);
+  if (!run) throw new Error('workflow run not found');
+  const stepIndex = clampWorkflowStep(stepIndexInput, run.totalSteps);
+  const target = run.steps.find(step => step.index === stepIndex);
+  if (!target) throw new Error('workflow step not found');
+
+  const now = new Date().toISOString();
+  const requestedState = normalizeWorkflowRunStepAutonomousState(input.state);
+  const state: WorkflowRunStepAutonomousState = input.state == null && requestedState === 'running' ? 'done' : requestedState;
+  const existingRun = target.autonomousRun;
+  const childAgent = normalizeText(input.childAgent, 120) || existingRun?.childAgent || '';
+  const childSessionId = normalizeText(input.childSessionId, 260) || existingRun?.childSessionId || '';
+  const childSessionKey = normalizeText(input.childSessionKey, 260)
+    || existingRun?.childSessionKey
+    || workflowRunSessionKey(childAgent, childSessionId);
+  const taskId = normalizeText(input.taskId, 160) || existingRun?.taskId;
+  const autonomousRun: WorkflowRunStepAutonomousRun = {
+    dispatchId: existingRun?.dispatchId || taskId || newId('workflow_dispatch'),
+    state,
+    startedAt: existingRun?.startedAt || now,
+    completedAt: now,
+    childAgent: childAgent || undefined,
+    childSessionId: childSessionId || undefined,
+    childSessionKey: childSessionKey || undefined,
+    taskId: taskId || undefined,
+    error: state === 'failed' || state === 'stalled'
+      ? (
+          normalizeText(input.error, 1_000)
+          || existingRun?.error
+          || (state === 'stalled'
+            ? 'Autonomous worker appears stalled. Retry the worker or resume the step in the parent chat.'
+            : 'Autonomous worker failed.')
+        )
+      : undefined,
+  };
+
+  const nextStatus: WorkflowRunStatus = state === 'done'
+    ? (stepIndex >= run.totalSteps ? 'done' : 'running')
+    : 'blocked';
+  const nextCurrentStep = state === 'done'
+    ? Math.max(run.currentStep, Math.min(run.totalSteps, stepIndex + 1))
+    : stepIndex;
+  const completedStepStatus: WorkflowRunStepStatus = state === 'done' ? 'done' : 'blocked';
+  const steps: WorkflowRunStep[] = buildWorkflowRunSteps(
+    run.steps,
+    run.steps.map(step => step.title),
+    nextCurrentStep,
+    run.totalSteps,
+    nextStatus,
+    now,
+  ).map((step): WorkflowRunStep => {
+    if (step.index !== stepIndex) return step;
+    return {
+      ...step,
+      status: completedStepStatus,
+      completedAt: state === 'done' ? now : step.completedAt,
+      autonomousRun,
+    };
+  });
+  const updated: WorkflowRunRecord = {
+    ...run,
+    currentStep: nextCurrentStep,
+    status: nextStatus,
+    steps,
+    lastMarker: `Workflow progress: Step ${stepIndex}/${run.totalSteps} - ${target.title} - ${state === 'done' ? 'done' : 'blocked'}`,
+    updatedAt: now,
+    completedAt: nextStatus === 'done' ? (run.completedAt || now) : undefined,
+  };
+  file.workflowRuns = [updated, ...runs.filter(item => item.id !== updated.id)].slice(0, 75);
+  writeFile(file);
+  return { run: updated, step: steps.find(step => step.index === stepIndex)! };
+}
+
+export function markStalledWorkflowRunAutonomousWorkers(input: {
+  now?: unknown;
+  timeoutMs?: unknown;
+  limit?: unknown;
+} = {}): WorkflowRunAutonomousWatchdogResult {
+  const timeoutMs = Math.max(
+    1_000,
+    Math.min(24 * 60 * 60 * 1000, Math.floor(Number(input.timeoutMs) || DEFAULT_WORKFLOW_AUTONOMOUS_STALL_MS)),
+  );
+  const limit = Math.max(1, Math.min(200, Math.floor(Number(input.limit) || 200)));
+  const rawNow = typeof input.now === 'number'
+    ? input.now
+    : typeof input.now === 'string' && input.now.trim()
+      ? Date.parse(input.now)
+      : Date.now();
+  const nowMs = Number.isFinite(rawNow) ? rawNow : Date.now();
+  const candidates: Array<{ runId: string; stepIndex: number; ageMs: number }> = [];
+  const runs = listWorkflowRuns({ activeOnly: true, limit });
+  let scannedWorkers = 0;
+
+  for (const run of runs) {
+    for (const step of run.steps || []) {
+      const autonomousRun = step.autonomousRun;
+      if (autonomousRun?.state !== 'running') continue;
+      scannedWorkers += 1;
+      const startedAtMs = Date.parse(autonomousRun.startedAt || '');
+      if (!Number.isFinite(startedAtMs)) continue;
+      const ageMs = nowMs - startedAtMs;
+      if (ageMs >= timeoutMs) candidates.push({ runId: run.id, stepIndex: step.index, ageMs });
+    }
+  }
+
+  const stalled: WorkflowRunAutonomousWatchdogResult['stalled'] = [];
+  for (const candidate of candidates) {
+    const minutes = Math.max(1, Math.round(candidate.ageMs / 60_000));
+    stalled.push(completeWorkflowRunStepAutonomous(candidate.runId, candidate.stepIndex, {
+      state: 'stalled',
+      error: `Autonomous worker has not completed after ${minutes} minutes. Retry the worker or resume this step in the parent chat.`,
+    }));
+  }
+
+  return {
+    scannedRuns: runs.length,
+    scannedWorkers,
+    stalled,
+  };
+}
+
+export function findWorkflowRunByAutonomousRunRef(input: {
+  taskId?: unknown;
+  sessionKey?: unknown;
+  agent?: unknown;
+  sessionId?: unknown;
+}): { run: WorkflowRunRecord; step: WorkflowRunStep } | null {
+  const taskId = normalizeText(input.taskId, 160);
+  const directSessionKey = normalizeText(input.sessionKey, 260);
+  const agent = normalizeText(input.agent, 120);
+  const sessionId = normalizeText(input.sessionId, 260);
+  const sessionKey = directSessionKey || workflowRunSessionKey(agent, sessionId);
+  if (!taskId && !sessionKey) return null;
+  for (const run of listWorkflowRuns({ limit: 200 })) {
+    for (const step of run.steps || []) {
+      const autonomousRun = step.autonomousRun;
+      if (!autonomousRun) continue;
+      if (taskId && autonomousRun.taskId === taskId) return { run, step };
+      if (sessionKey && autonomousRun.childSessionKey === sessionKey) return { run, step };
+    }
+  }
+  return null;
+}
+
+export function recordWorkflowRunAsk(runId: string, input: {
+  id?: unknown;
+  stepIndex?: unknown;
+  question?: unknown;
+  type?: unknown;
+  options?: unknown;
+  max?: unknown;
+  placeholder?: unknown;
+}): { run: WorkflowRunRecord; ask: WorkflowRunAsk } {
+  const targetRunId = normalizeText(runId, 160);
+  if (!targetRunId) throw new Error('workflow run id is required');
+  const file = readFile();
+  const runs = file.workflowRuns || [];
+  const index = runs.findIndex(item => item.id === targetRunId);
+  if (index < 0) throw new Error('workflow run not found');
+  const run = runs[index];
+  const now = new Date().toISOString();
+  const question = normalizeText(input.question, 2_000);
+  if (!question) throw new Error('ask question is required');
+  const stepIndex = clampWorkflowStep(input.stepIndex ?? run.currentStep, run.totalSteps);
+  const askId = normalizeText(input.id, 160);
+  const options = normalizeStringList(input.options, 12, 160);
+  const max = Math.max(1, Math.min(10, Math.floor(Number(input.max) || 0)));
+  const existingAsk = (run.asks || []).find(item => (
+    (askId && item.id === askId)
+    || (item.status === 'pending' && item.stepIndex === stepIndex && item.question === question)
+  ));
+  const ask: WorkflowRunAsk = {
+    id: existingAsk?.id || askId || newId('workflow_ask'),
+    stepIndex,
+    question,
+    type: normalizeWorkflowRunAskType(input.type),
+    options: options.length ? options : existingAsk?.options,
+    max: Number.isFinite(max) && max > 0 ? max : existingAsk?.max,
+    placeholder: normalizeText(input.placeholder, 240) || existingAsk?.placeholder,
+    answer: existingAsk?.answer,
+    status: existingAsk?.status && existingAsk.status !== 'answered' && existingAsk.status !== 'skipped' ? existingAsk.status : 'pending',
+    deliveryStatus: existingAsk?.deliveryStatus,
+    deliveryError: existingAsk?.deliveryError,
+    deliveryTaskId: existingAsk?.deliveryTaskId,
+    deliveredAt: existingAsk?.deliveredAt,
+    askedAt: existingAsk?.askedAt || now,
+    answeredAt: existingAsk?.answeredAt,
+  };
+  const asks = [ask, ...(run.asks || []).filter(item => item.id !== ask.id)].slice(0, 40);
+  const updated: WorkflowRunRecord = {
+    ...run,
+    currentStep: stepIndex,
+    status: 'blocked',
+    steps: buildWorkflowRunSteps(run.steps, run.steps.map(step => step.title), stepIndex, run.totalSteps, 'blocked', now),
+    asks,
+    lastMarker: `Workflow ask: Step ${stepIndex}/${run.totalSteps} - ${question}`,
+    updatedAt: now,
+  };
+  file.workflowRuns = [updated, ...runs.filter(item => item.id !== updated.id)].slice(0, 75);
+  writeFile(file);
+  return { run: updated, ask };
+}
+
+export function answerWorkflowRunAsk(runId: string, askId: string, input: {
+  answer?: unknown;
+  skipped?: unknown;
+}): { run: WorkflowRunRecord; ask: WorkflowRunAsk } {
+  const targetRunId = normalizeText(runId, 160);
+  const targetAskId = normalizeText(askId, 160);
+  if (!targetRunId) throw new Error('workflow run id is required');
+  if (!targetAskId) throw new Error('workflow ask id is required');
+  const answer = normalizeText(input.answer, 4_000);
+  const skipped = input.skipped === true || input.skipped === 'true';
+  if (!answer && !skipped) throw new Error('workflow ask answer is required');
+  const file = readFile();
+  const runs = file.workflowRuns || [];
+  const index = runs.findIndex(item => item.id === targetRunId);
+  if (index < 0) throw new Error('workflow run not found');
+  const run = runs[index];
+  const now = new Date().toISOString();
+  const ask = (run.asks || []).find(item => item.id === targetAskId);
+  if (!ask) throw new Error('workflow ask not found');
+  const answered: WorkflowRunAsk = {
+    ...ask,
+    answer: skipped ? (answer || 'skip') : answer,
+    status: skipped ? 'skipped' : 'answered',
+    deliveryStatus: 'sending',
+    deliveryError: undefined,
+    deliveryTaskId: undefined,
+    deliveredAt: undefined,
+    answeredAt: now,
+  };
+  const asks = (run.asks || []).map(item => item.id === targetAskId ? answered : item);
+  const stillBlocked = asks.some(workflowRunAskBlocksProgress);
+  const updated: WorkflowRunRecord = {
+    ...run,
+    currentStep: answered.stepIndex,
+    status: stillBlocked ? 'blocked' : 'running',
+    steps: buildWorkflowRunSteps(
+      run.steps,
+      run.steps.map(step => step.title),
+      answered.stepIndex,
+      run.totalSteps,
+      stillBlocked ? 'blocked' : 'running',
+      now,
+    ),
+    asks,
+    lastMarker: `Workflow answer: Step ${answered.stepIndex}/${run.totalSteps} - ${answered.question}`,
+    updatedAt: now,
+  };
+  file.workflowRuns = [updated, ...runs.filter(item => item.id !== updated.id)].slice(0, 75);
+  writeFile(file);
+  return { run: updated, ask: answered };
+}
+
+export function updateWorkflowRunAskDelivery(runId: string, askId: string, input: {
+  deliveryStatus?: unknown;
+  status?: unknown;
+  error?: unknown;
+  taskId?: unknown;
+}): { run: WorkflowRunRecord; ask: WorkflowRunAsk } {
+  const targetRunId = normalizeText(runId, 160);
+  const targetAskId = normalizeText(askId, 160);
+  if (!targetRunId) throw new Error('workflow run id is required');
+  if (!targetAskId) throw new Error('workflow ask id is required');
+  const file = readFile();
+  const runs = file.workflowRuns || [];
+  const index = runs.findIndex(item => item.id === targetRunId);
+  if (index < 0) throw new Error('workflow run not found');
+  const run = runs[index];
+  const ask = (run.asks || []).find(item => item.id === targetAskId);
+  if (!ask) throw new Error('workflow ask not found');
+  const rawDeliveryStatus = input.deliveryStatus ?? input.status;
+  const deliveryStatus = normalizeWorkflowRunAskDeliveryStatus(rawDeliveryStatus, ask.status);
+  if (rawDeliveryStatus == null || !deliveryStatus) throw new Error('workflow ask delivery status is required');
+  const now = new Date().toISOString();
+  const taskId = normalizeText(input.taskId, 220);
+  const error = normalizeText(input.error, 1_000);
+  const updatedAsk: WorkflowRunAsk = {
+    ...ask,
+    deliveryStatus,
+    deliveryError: deliveryStatus === 'failed' ? (error || 'Delivery failed') : undefined,
+    deliveryTaskId: taskId || (deliveryStatus === 'sent' ? ask.deliveryTaskId : undefined),
+    deliveredAt: deliveryStatus === 'sent' ? now : undefined,
+  };
+  const asks = (run.asks || []).map(item => item.id === targetAskId ? updatedAsk : item);
+  const stillBlocked = asks.some(workflowRunAskBlocksProgress);
+  const updated: WorkflowRunRecord = {
+    ...run,
+    status: stillBlocked ? 'blocked' : 'running',
+    steps: buildWorkflowRunSteps(
+      run.steps,
+      run.steps.map(step => step.title),
+      updatedAsk.stepIndex,
+      run.totalSteps,
+      stillBlocked ? 'blocked' : 'running',
+      now,
+    ),
+    asks,
+    lastMarker: deliveryStatus === 'failed'
+      ? `Workflow answer delivery failed: Step ${updatedAsk.stepIndex}/${run.totalSteps} - ${updatedAsk.question}`
+      : deliveryStatus === 'sent'
+        ? `Workflow answer delivered: Step ${updatedAsk.stepIndex}/${run.totalSteps} - ${updatedAsk.question}`
+        : run.lastMarker,
+    updatedAt: now,
+  };
+  file.workflowRuns = [updated, ...runs.filter(item => item.id !== updated.id)].slice(0, 75);
+  writeFile(file);
+  return { run: updated, ask: updatedAsk };
+}
+
+export function deleteWorkflowRun(id: string): WorkflowRunRecord {
+  const runId = normalizeText(id, 160);
+  if (!runId) throw new Error('workflow run id is required');
+  const file = readFile();
+  const index = (file.workflowRuns || []).findIndex(item => item.id === runId);
+  if (index < 0) throw new Error('workflow run not found');
+  const [removed] = file.workflowRuns!.splice(index, 1);
+  writeFile(file);
+  return removed;
 }
 
 export function getJiraWorkflowConfig(): JiraWorkflowConfig {
@@ -1106,7 +2496,17 @@ export function listAutomationRules(): AutomationRule[] {
   return readFile().automations.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
-export function createAutomationRule(input: { key?: unknown; name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
+function normalizeReferenceNames(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  for (const item of value) {
+    const name = normalizeText(item, 240);
+    if (name && !name.includes('/') && !name.includes('\\')) seen.add(name);
+  }
+  return [...seen].slice(0, 20);
+}
+
+export function createAutomationRule(input: { key?: unknown; name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown; includeProjectReferences?: unknown; projectReferenceNames?: unknown }): AutomationRule {
   const prompt = normalizeText(input.prompt, 24_000);
   if (!prompt) throw new Error('prompt is required');
   const name = normalizeText(input.name, 160) || titleFromPrompt(prompt);
@@ -1122,6 +2522,8 @@ export function createAutomationRule(input: { key?: unknown; name: unknown; sche
     agent: normalizeText(input.agent, 80) || undefined,
     assistantId: normalizeText(input.assistantId, 120) || undefined,
     enabled: input.enabled !== false,
+    includeProjectReferences: input.includeProjectReferences === true,
+    projectReferenceNames: normalizeReferenceNames(input.projectReferenceNames),
     createdAt: now,
     updatedAt: now,
   };
@@ -1131,7 +2533,7 @@ export function createAutomationRule(input: { key?: unknown; name: unknown; sche
   return rule;
 }
 
-export function upsertAutomationRuleByKey(keyInput: string, input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown }): AutomationRule {
+export function upsertAutomationRuleByKey(keyInput: string, input: { name: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown; includeProjectReferences?: unknown; projectReferenceNames?: unknown }): AutomationRule {
   const key = normalizeText(keyInput, 160);
   if (!key) throw new Error('automation key is required');
   const prompt = normalizeText(input.prompt, 24_000);
@@ -1150,6 +2552,8 @@ export function upsertAutomationRuleByKey(keyInput: string, input: { name: unkno
       agent: normalizeText(input.agent, 80) || undefined,
       assistantId: normalizeText(input.assistantId, 120) || undefined,
       enabled: input.enabled !== false,
+      includeProjectReferences: input.includeProjectReferences === true,
+      projectReferenceNames: normalizeReferenceNames(input.projectReferenceNames),
       createdAt: now,
       updatedAt: now,
     };
@@ -1162,13 +2566,57 @@ export function upsertAutomationRuleByKey(keyInput: string, input: { name: unkno
     rule.agent = normalizeText(input.agent, 80) || undefined;
     rule.assistantId = normalizeText(input.assistantId, 120) || undefined;
     rule.enabled = input.enabled !== false;
+    rule.includeProjectReferences = input.includeProjectReferences === true;
+    rule.projectReferenceNames = normalizeReferenceNames(input.projectReferenceNames);
     rule.updatedAt = now;
   }
   writeFile(file);
   return rule;
 }
 
-export function markAutomationRun(id: string, sessionKey: string | undefined): AutomationRule {
+export function updateAutomationRule(id: string, input: { name?: unknown; schedule?: unknown; prompt?: unknown; workdir?: unknown; agent?: unknown; assistantId?: unknown; enabled?: unknown; includeProjectReferences?: unknown; projectReferenceNames?: unknown }): AutomationRule {
+  const automationId = normalizeText(id, 160);
+  if (!automationId) throw new Error('automation id is required');
+  const file = readFile();
+  const rule = file.automations.find(item => item.id === automationId);
+  if (!rule) throw new Error('automation not found');
+  const has = (key: keyof typeof input) => Object.prototype.hasOwnProperty.call(input, key);
+  if (has('name')) {
+    const name = normalizeText(input.name, 160);
+    if (name) rule.name = name;
+  }
+  if (has('schedule')) {
+    rule.schedule = normalizeText(input.schedule, 160) || 'manual';
+  }
+  if (has('prompt')) {
+    const prompt = normalizeText(input.prompt, 24_000);
+    if (!prompt) throw new Error('prompt is required');
+    rule.prompt = prompt;
+    if (!rule.name) rule.name = titleFromPrompt(prompt);
+  }
+  if (has('workdir')) rule.workdir = normalizeText(input.workdir, 2048) || undefined;
+  if (has('agent')) rule.agent = normalizeText(input.agent, 80) || undefined;
+  if (has('assistantId')) rule.assistantId = normalizeText(input.assistantId, 120) || undefined;
+  if (has('enabled')) rule.enabled = input.enabled !== false;
+  if (has('includeProjectReferences')) rule.includeProjectReferences = input.includeProjectReferences === true;
+  if (has('projectReferenceNames')) rule.projectReferenceNames = normalizeReferenceNames(input.projectReferenceNames);
+  rule.updatedAt = new Date().toISOString();
+  writeFile(file);
+  return rule;
+}
+
+export function deleteAutomationRule(id: string): AutomationRule {
+  const automationId = normalizeText(id, 160);
+  if (!automationId) throw new Error('automation id is required');
+  const file = readFile();
+  const index = file.automations.findIndex(item => item.id === automationId);
+  if (index < 0) throw new Error('automation not found');
+  const [removed] = file.automations.splice(index, 1);
+  writeFile(file);
+  return removed;
+}
+
+export function markAutomationRun(id: string, sessionKey: string | undefined, details?: { taskId?: unknown; error?: unknown; code?: unknown; budgetId?: unknown; budgetName?: unknown }): AutomationRule {
   const file = readFile();
   const rule = file.automations.find(item => item.id === id);
   if (!rule) throw new Error('automation not found');
@@ -1176,13 +2624,65 @@ export function markAutomationRun(id: string, sessionKey: string | undefined): A
   rule.lastRunAt = now;
   rule.lastSessionKey = sessionKey;
   const status: 'queued' | 'failed' = sessionKey ? 'queued' : 'failed';
+  const entry: NonNullable<AutomationRule['runHistory']>[number] = { id: newId('run'), ranAt: now, sessionKey, status };
+  const taskId = normalizeText(details?.taskId, 160);
+  if (taskId) entry.taskId = taskId;
+  if (status === 'failed') {
+    const error = normalizeText(details?.error, 1_000);
+    const code = normalizeText(details?.code, 120);
+    const budgetId = normalizeText(details?.budgetId, 160);
+    const budgetName = normalizeText(details?.budgetName, 160);
+    if (error) entry.error = error;
+    if (code) entry.code = code;
+    if (budgetId) entry.budgetId = budgetId;
+    if (budgetName) entry.budgetName = budgetName;
+  }
   rule.runHistory = [
-    { id: newId('run'), ranAt: now, sessionKey, status },
+    entry,
     ...(rule.runHistory || []),
   ].slice(0, 20);
   rule.updatedAt = now;
   writeFile(file);
   return rule;
+}
+
+export function markAutomationMissedRun(id: string, scheduledForInput: unknown, details?: { error?: unknown }): AutomationRule {
+  const file = readFile();
+  const rule = file.automations.find(item => item.id === id);
+  if (!rule) throw new Error('automation not found');
+  const scheduledFor = normalizeText(scheduledForInput, 80);
+  if (!scheduledFor) throw new Error('scheduledFor is required');
+  const existing = (rule.runHistory || []).find(item => item.status === 'missed' && item.scheduledFor === scheduledFor);
+  if (existing) return rule;
+  const now = new Date().toISOString();
+  const error = normalizeText(details?.error, 1_000) || `Missed scheduled run at ${scheduledFor}.`;
+  const entry: NonNullable<AutomationRule['runHistory']>[number] = {
+    id: newId('run'),
+    ranAt: now,
+    scheduledFor,
+    status: 'missed',
+    error,
+  };
+  rule.runHistory = [
+    entry,
+    ...(rule.runHistory || []),
+  ].slice(0, 20);
+  rule.updatedAt = now;
+  writeFile(file);
+  return rule;
+}
+
+export function findAutomationRuleByRunRef(input: { taskId?: unknown; sessionKey?: unknown }): AutomationRule | null {
+  const taskId = normalizeText(input.taskId, 160);
+  const sessionKey = normalizeText(input.sessionKey, 260);
+  if (!taskId && !sessionKey) return null;
+  for (const rule of listAutomationRules()) {
+    for (const run of rule.runHistory || []) {
+      if (taskId && run.taskId === taskId) return rule;
+      if (sessionKey && run.sessionKey === sessionKey) return rule;
+    }
+  }
+  return null;
 }
 
 export function createJiraSyncRun(input: { assistantId?: unknown; assistantName?: unknown; agent?: unknown; workdir?: unknown }): JiraSyncRun {

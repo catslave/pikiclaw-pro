@@ -60,7 +60,7 @@ export class WeComBot extends Bot {
   private processRuntimeCleanup: (() => void) | null = null;
 
   constructor() {
-    super();
+    super('wecom');
     const config = getActiveUserConfig();
     if (process.env.WECOM_ALLOWED_USER_IDS) {
       for (const id of parseAllowedChatIds(process.env.WECOM_ALLOWED_USER_IDS)) this.allowedChatIds.add(id);

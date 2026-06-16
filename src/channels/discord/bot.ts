@@ -62,7 +62,7 @@ export class DiscordBot extends Bot {
   private processRuntimeCleanup: (() => void) | null = null;
 
   constructor() {
-    super();
+    super('discord');
     const config = getActiveUserConfig();
     if (process.env.DISCORD_ALLOWED_CHANNEL_IDS) {
       for (const id of parseAllowedChatIds(process.env.DISCORD_ALLOWED_CHANNEL_IDS)) this.allowedChatIds.add(id);

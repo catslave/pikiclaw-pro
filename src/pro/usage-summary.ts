@@ -1,8 +1,11 @@
 import { querySessionMessages, querySessions, type RichMessage, type SessionInfo } from '../bot/session-hub.js';
 import { loadUserConfig, loadWorkspaces } from '../core/config/user-config.js';
+import { buildCostLedgerSummary, listCostLedgerEvents, type CostLedgerSummary } from './cost-ledger.js';
 import { listProTasks, type ProTask } from './tasks.js';
+import { createUsageCostEstimator, emptyUsageCostFields, mergeUsageCostFields, type UsageCostFields, type UsageCostEstimator } from './usage-cost.js';
+import { buildUsageBudgetStatuses, listUsageBudgetAlerts, type UsageBudgetAlert, type UsageBudgetStatus } from './usage-budget.js';
 
-export interface UsageAgentSummary {
+export interface UsageAgentSummary extends UsageCostFields {
   agent: string;
   chatCount: number;
   sessionCount: number;
@@ -16,7 +19,7 @@ export interface UsageAgentSummary {
   lifetimeSeconds: number;
 }
 
-export interface UsageDaySummary {
+export interface UsageDaySummary extends UsageCostFields {
   day: string;
   chatCount: number;
   turnCount: number;
@@ -26,9 +29,11 @@ export interface UsageDaySummary {
   totalTokens: number;
 }
 
-export interface UsageChatSummary {
+export interface UsageChatSummary extends UsageCostFields {
   sessionId: string;
+  threadId?: string | null;
   agent: string;
+  model: string | null;
   workdir: string;
   title: string;
   isSideChat: boolean;
@@ -78,13 +83,34 @@ export interface ProUsageSummary {
     totalLifecycleSeconds: number;
     tasks: UsageTaskTimingSummary[];
   };
+  costLedger: CostLedgerSummary;
+  budgets: UsageBudgetStatus[];
+  budgetAlerts: UsageBudgetAlert[];
   notes: string[];
 }
 
 interface SessionScanResult {
   chat: UsageChatSummary;
   dayTurns: Map<string, number>;
-  dayUsage: Map<string, Pick<UsageDaySummary, 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'totalTokens'>>;
+  dayUsage: Map<string, UsageAggregateFields>;
+}
+
+export interface ProUsageSummaryBuildOptions {
+  cache?: boolean;
+}
+
+type UsageAggregateFields = Pick<
+  UsageDaySummary,
+  'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'totalTokens' | 'estimatedCostUsd' | 'pricedTokens' | 'unpricedTokens' | 'costSource'
+>;
+
+const USAGE_SUMMARY_CACHE_TTL_MS = 60_000;
+const usageSummaryCache = new Map<string, { cachedAt: number; summary: ProUsageSummary }>();
+const usageSummaryInflight = new Map<string, Promise<ProUsageSummary>>();
+
+export function clearProUsageSummaryCache(): void {
+  usageSummaryCache.clear();
+  usageSummaryInflight.clear();
 }
 
 const EMPTY_AGENT_SUMMARY: UsageAgentSummary = {
@@ -99,6 +125,7 @@ const EMPTY_AGENT_SUMMARY: UsageAgentSummary = {
   totalTokens: 0,
   activeSeconds: 0,
   lifetimeSeconds: 0,
+  ...emptyUsageCostFields(),
 };
 
 function parseLimit(value: unknown): number {
@@ -123,6 +150,16 @@ function emptyAgent(agent: string): UsageAgentSummary {
   return { ...EMPTY_AGENT_SUMMARY, agent };
 }
 
+function emptyUsageAggregate(): UsageAggregateFields {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    totalTokens: 0,
+    ...emptyUsageCostFields(),
+  };
+}
+
 function addUsage(target: Pick<UsageAgentSummary, 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'totalTokens'>, usage: RichMessage['usage']) {
   if (!usage) return;
   const input = Math.max(0, Math.floor(Number(usage.inputTokens || 0)));
@@ -145,11 +182,13 @@ function mergeAgent(target: UsageAgentSummary, chat: UsageChatSummary) {
   target.totalTokens += chat.totalTokens;
   target.activeSeconds += chat.activeSeconds;
   target.lifetimeSeconds += chat.lifetimeSeconds;
+  mergeUsageCostFields(target, chat);
 }
 
-function incrementDayUsage(map: Map<string, Pick<UsageDaySummary, 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'totalTokens'>>, key: string, usage: RichMessage['usage']) {
-  const current = map.get(key) || { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 };
+function incrementDayUsage(map: Map<string, UsageAggregateFields>, key: string, usage: RichMessage['usage'], model: string | null, costEstimator: UsageCostEstimator) {
+  const current = map.get(key) || emptyUsageAggregate();
   addUsage(current, usage);
+  mergeUsageCostFields(current, costEstimator.estimate(model, usage));
   map.set(key, current);
 }
 
@@ -166,13 +205,16 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
   return results;
 }
 
-async function scanSession(session: SessionInfo): Promise<SessionScanResult> {
+async function scanSession(session: SessionInfo, costEstimator: UsageCostEstimator): Promise<SessionScanResult> {
   const agent = session.agent || 'unknown';
   const workdir = session.workdir || session.workspacePath || '';
   const sessionId = session.sessionId || '';
+  const model = session.model || null;
   const base: UsageChatSummary = {
     sessionId,
+    threadId: session.threadId || null,
     agent,
+    model,
     workdir,
     title: session.title || session.lastQuestion || sessionId,
     isSideChat: !!session.sideChatOf,
@@ -185,9 +227,10 @@ async function scanSession(session: SessionInfo): Promise<SessionScanResult> {
     totalTokens: 0,
     activeSeconds: 0,
     lifetimeSeconds: addSeconds(session.createdAt, session.runUpdatedAt || session.createdAt),
+    ...emptyUsageCostFields(),
   };
   const dayTurns = new Map<string, number>();
-  const dayUsage = new Map<string, Pick<UsageDaySummary, 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'totalTokens'>>();
+  const dayUsage = new Map<string, UsageAggregateFields>();
 
   if (!workdir || !sessionId) {
     const key = dayKey(base.createdAt);
@@ -209,7 +252,8 @@ async function scanSession(session: SessionInfo): Promise<SessionScanResult> {
         if (message.role === 'user') dayTurns.set(key, (dayTurns.get(key) || 0) + 1);
         if (message.role === 'assistant') {
           addUsage(base, message.usage);
-          incrementDayUsage(dayUsage, key, message.usage);
+          mergeUsageCostFields(base, costEstimator.estimate(model, message.usage));
+          incrementDayUsage(dayUsage, key, message.usage, model, costEstimator);
         }
       }
     }
@@ -257,8 +301,7 @@ function taskTimingSummary(task: ProTask): UsageTaskTimingSummary {
   };
 }
 
-export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsageSummary> {
-  const limit = parseLimit(rawLimit);
+async function buildProUsageSummaryFresh(limit: number): Promise<ProUsageSummary> {
   const config = loadUserConfig();
   const workspaces = loadWorkspaces();
   if (config.workdir && !workspaces.some(workspace => workspace.path === config.workdir)) {
@@ -274,6 +317,10 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
   }
   const sessionMap = new Map<string, SessionInfo>();
   const notes = ['Historical token totals are best-effort; some agents do not expose per-turn token usage in saved transcripts.'];
+  const costEstimator = await createUsageCostEstimator();
+  notes.push(costEstimator.catalogReady
+    ? 'Estimated USD uses models.dev pricing where a saved session model can be matched; unmatched tokens stay unpriced.'
+    : 'Estimated USD is unavailable until model pricing metadata is cached; token totals still scan normally.');
 
   for (const workspace of workspaces) {
     try {
@@ -291,7 +338,7 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
     .sort((a, b) => Date.parse(b.runUpdatedAt || b.createdAt || '') - Date.parse(a.runUpdatedAt || a.createdAt || ''))
     .slice(0, limit);
   const truncated = sessionMap.size > sessions.length;
-  const scanned = await mapWithConcurrency(sessions, 4, scanSession);
+  const scanned = await mapWithConcurrency(sessions, 4, session => scanSession(session, costEstimator));
   const totals = emptyAgent('all');
   const byAgent = new Map<string, UsageAgentSummary>();
   const byDay = new Map<string, UsageDaySummary>();
@@ -302,17 +349,18 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
     mergeAgent(agent, result.chat);
     byAgent.set(result.chat.agent, agent);
     for (const [day, turns] of result.dayTurns) {
-      const row = byDay.get(day) || { day, chatCount: 0, turnCount: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 };
+      const row = byDay.get(day) || { day, chatCount: 0, turnCount: 0, ...emptyUsageAggregate() };
       row.turnCount += turns;
       row.chatCount += 1;
       byDay.set(day, row);
     }
     for (const [day, usage] of result.dayUsage) {
-      const row = byDay.get(day) || { day, chatCount: 0, turnCount: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 };
+      const row = byDay.get(day) || { day, chatCount: 0, turnCount: 0, ...emptyUsageAggregate() };
       row.inputTokens += usage.inputTokens;
       row.outputTokens += usage.outputTokens;
       row.cachedInputTokens += usage.cachedInputTokens;
       row.totalTokens += usage.totalTokens;
+      mergeUsageCostFields(row, usage);
       byDay.set(day, row);
     }
   }
@@ -326,7 +374,9 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
   const agentSeconds = taskRows.reduce((sum, task) => sum + task.agentSeconds, 0);
   const totalLifecycleSeconds = taskRows.reduce((sum, task) => sum + (task.totalLifecycleSeconds || 0), 0);
 
-  return {
+  const costLedgerEvents = listCostLedgerEvents(1000);
+  const budgetChats = scanned.map(result => result.chat);
+  const summary: Omit<ProUsageSummary, 'budgets' | 'budgetAlerts'> = {
     generatedAt: new Date().toISOString(),
     scanned: {
       workspaceCount: workspaces.length,
@@ -337,7 +387,7 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
     totals,
     byAgent: [...byAgent.values()].sort((a, b) => b.totalTokens - a.totalTokens || b.turnCount - a.turnCount),
     byDay: [...byDay.values()].sort((a, b) => b.day.localeCompare(a.day)).slice(0, 30),
-    topChats: scanned.map(result => result.chat).sort((a, b) => b.totalTokens - a.totalTokens || b.turnCount - a.turnCount).slice(0, 20),
+    topChats: budgetChats.sort((a, b) => b.totalTokens - a.totalTokens || b.turnCount - a.turnCount).slice(0, 20),
     taskTimings: {
       count: taskRows.length,
       resolvedCount: resolvedTaskRows.length,
@@ -349,6 +399,34 @@ export async function buildProUsageSummary(rawLimit?: unknown): Promise<ProUsage
         .sort((a, b) => b.userFocusSeconds - a.userFocusSeconds || (b.refinementToResolvedSeconds || 0) - (a.refinementToResolvedSeconds || 0))
         .slice(0, 20),
     },
+    costLedger: buildCostLedgerSummary(costLedgerEvents),
     notes: truncated ? [...notes, `Only the latest ${limit} chats were scanned.`] : notes,
   };
+  return {
+    ...summary,
+    budgets: buildUsageBudgetStatuses({ ...summary, topChats: budgetChats }, new Date(), { costLedgerEvents }),
+    budgetAlerts: listUsageBudgetAlerts(20),
+  };
+}
+
+export async function buildProUsageSummary(rawLimit?: unknown, opts: ProUsageSummaryBuildOptions = {}): Promise<ProUsageSummary> {
+  const limit = parseLimit(rawLimit);
+  if (opts.cache !== false) {
+    const key = String(limit);
+    const cached = usageSummaryCache.get(key);
+    if (cached && Date.now() - cached.cachedAt < USAGE_SUMMARY_CACHE_TTL_MS) return cached.summary;
+    const inflight = usageSummaryInflight.get(key);
+    if (inflight) return inflight;
+    const promise = buildProUsageSummaryFresh(limit)
+      .then(summary => {
+        usageSummaryCache.set(key, { cachedAt: Date.now(), summary });
+        return summary;
+      })
+      .finally(() => {
+        usageSummaryInflight.delete(key);
+      });
+    usageSummaryInflight.set(key, promise);
+    return promise;
+  }
+  return buildProUsageSummaryFresh(limit);
 }

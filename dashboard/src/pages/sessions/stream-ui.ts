@@ -43,6 +43,94 @@ export function willQueueSendOnStart(ctx: SendQueueContext): boolean {
   return hasRunningTurnForQueue(ctx) || ctx.queuedTaskCount > 0;
 }
 
+export type SessionCommandStateInput = {
+  pendingPrompt: string | null | undefined;
+  pendingTaskId: string | null | undefined;
+  pendingImageCount: number;
+  streamPhase: StreamPhase;
+  streamTaskId: string | null | undefined;
+  streaming: boolean;
+  sessionRunning?: boolean;
+  streamStateChecked?: boolean;
+  queuedTaskCount: number;
+  pendingQueuedSendCount: number;
+  activity?: string | null;
+};
+
+export type SessionCommandStateKind =
+  | 'pending-send'
+  | 'provider-wake'
+  | 'queued'
+  | 'streaming'
+  | 'command-queue';
+
+export type SessionCommandStateSummary = {
+  kind: SessionCommandStateKind;
+  title: string;
+  detail: string;
+  count: number;
+  activeTaskId: string | null;
+};
+
+export function summarizeSessionCommandState(input: SessionCommandStateInput): SessionCommandStateSummary | null {
+  const pendingText = input.pendingPrompt?.trim() || '';
+  const hasPendingContent = !!pendingText || input.pendingImageCount > 0;
+  const queuedCount = Math.max(0, input.queuedTaskCount + input.pendingQueuedSendCount);
+  const activeTaskId = input.streamTaskId || input.pendingTaskId || null;
+
+  if (input.streaming || input.streamPhase === 'streaming') {
+    return {
+      kind: queuedCount > 0 ? 'command-queue' : 'streaming',
+      title: queuedCount > 0 ? 'Command queue active' : 'Agent is working',
+      detail: input.activity?.trim() || (queuedCount > 0 ? 'Running current command with follow-ups waiting.' : 'Streaming response and tool activity.'),
+      count: queuedCount,
+      activeTaskId,
+    };
+  }
+
+  if (input.streamPhase === 'queued') {
+    return {
+      kind: 'queued',
+      title: 'Command queued',
+      detail: queuedCount > 1 ? `${queuedCount} commands waiting for this session.` : 'Waiting for the active session turn to finish.',
+      count: Math.max(1, queuedCount),
+      activeTaskId,
+    };
+  }
+
+  if (hasPendingContent && !input.pendingTaskId && input.streamPhase !== 'done') {
+    return {
+      kind: 'pending-send',
+      title: 'Sending command',
+      detail: 'Handing the message to the selected agent.',
+      count: queuedCount,
+      activeTaskId: null,
+    };
+  }
+
+  if (input.sessionRunning && !input.streamStateChecked) {
+    return {
+      kind: 'provider-wake',
+      title: 'Reconnecting runtime',
+      detail: 'Checking the provider stream for the latest command state.',
+      count: queuedCount,
+      activeTaskId,
+    };
+  }
+
+  if (queuedCount > 0) {
+    return {
+      kind: 'command-queue',
+      title: 'Command queue',
+      detail: `${queuedCount} follow-up${queuedCount === 1 ? '' : 's'} waiting behind the active turn.`,
+      count: queuedCount,
+      activeTaskId,
+    };
+  }
+
+  return null;
+}
+
 export type EffectiveLiveStreamInput = {
   liveStream: {
     taskId?: string | null;

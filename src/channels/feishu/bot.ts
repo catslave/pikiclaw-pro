@@ -185,7 +185,7 @@ export class FeishuBot extends Bot {
   private processRuntimeCleanup: (() => void) | null = null;
 
   constructor() {
-    super();
+    super('feishu');
     const config = getActiveUserConfig();
     // Merge Feishu-specific allowed IDs into base
     if (process.env.FEISHU_ALLOWED_CHAT_IDS) {

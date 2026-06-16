@@ -20,7 +20,10 @@ import {
   getCatalogItems, buildInstalledConfigFromRecommended,
   checkMcpHealth, getCachedHealth, cacheHealth,
   getRecommendedMcpServer,
-  listSkills, installSkill, removeSkill,
+  listSkills, installSkill, removeSkill, importSkillFolder, importSkillGit, importSkillMarkdown, importSkillZip,
+  restoreSkillQuarantine,
+  setSkillPinned,
+  listSkillQuarantine, removeSkillQuarantine,
   getGlobalSkillsRoot,
   getRecommendedSkillRepos, searchSkillRepos, searchMcpServers,
   startAuthorization, completeAuthorization, deleteMcpToken, getMcpToken,
@@ -955,6 +958,48 @@ app.get('/api/extensions/skills/catalog', async (c) => {
   return c.json({ ok: true, items, installed });
 });
 
+/** GET /api/extensions/skills/quarantine — blocked Skill imports kept out of live Skills. */
+app.get('/api/extensions/skills/quarantine', async (c) => {
+  try {
+    const workdir = c.req.query('workdir') || runtime.getRequestWorkdir();
+    const result = listSkillQuarantine(isValidWorkdir(workdir) ? workdir : undefined);
+    return c.json({ ok: true, ...result });
+  } catch (e: any) {
+    return c.json({ ok: false, records: [], error: e?.message || 'failed to list skill quarantine' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/quarantine/remove — delete a quarantined Skill import. */
+app.post('/api/extensions/skills/quarantine/remove', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { id, workdir: reqWorkdir } = body as { id?: string; workdir?: string };
+    if (!id?.trim()) return c.json({ ok: false, error: 'id is required' }, 400);
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    const result = removeSkillQuarantine(id.trim(), isValidWorkdir(workdir) ? workdir : undefined);
+    return c.json(result, result.ok ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'failed to remove quarantined skill' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/quarantine/restore — retry a quarantined SKILL.md through Skill Guard and restore if safe. */
+app.post('/api/extensions/skills/quarantine/restore', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { id, workdir: reqWorkdir, overwrite } = body as { id?: string; workdir?: string; overwrite?: boolean };
+    if (!id?.trim()) return c.json({ ok: false, error: 'id is required' }, 400);
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    const result = restoreSkillQuarantine(id.trim(), {
+      workdir: isValidWorkdir(workdir) ? workdir : undefined,
+      overwrite,
+    });
+    return c.json(result, result.ok || result.blocked ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'failed to restore quarantined skill' }, 500);
+  }
+});
+
 /** POST /api/extensions/skills/install — install a skill via npx skills add. */
 app.post('/api/extensions/skills/install', async (c) => {
   try {
@@ -989,6 +1034,186 @@ app.post('/api/extensions/skills/install', async (c) => {
   }
 });
 
+/** POST /api/extensions/skills/import-markdown — import a pasted or uploaded SKILL.md. */
+app.post('/api/extensions/skills/import-markdown', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      content,
+      global: isGlobal,
+      workdir: reqWorkdir,
+      name,
+      confirmed,
+      overwrite,
+    } = body as {
+      content?: string;
+      global?: boolean;
+      workdir?: string;
+      name?: string;
+      confirmed?: boolean;
+      overwrite?: boolean;
+    };
+    if (typeof content !== 'string' || !content.trim()) {
+      return c.json({ ok: false, error: 'content is required' }, 400);
+    }
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    if (!isGlobal && !isValidWorkdir(workdir)) {
+      return c.json({ ok: false, error: 'valid workdir is required for project-scoped skill import' }, 400);
+    }
+    const result = importSkillMarkdown(content, {
+      global: isGlobal,
+      workdir,
+      name,
+      confirmed,
+      overwrite,
+    });
+    return c.json(result, result.ok || result.needsReview || result.blocked ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'skill import failed' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/import-folder — scan and import a local folder of SKILL.md files. */
+app.post('/api/extensions/skills/import-folder', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      path: sourcePath,
+      global: isGlobal,
+      workdir: reqWorkdir,
+      overwrite,
+      includeClean,
+      includeReview,
+      quarantineBlocked,
+      selectedReviewNames,
+    } = body as {
+      path?: string;
+      global?: boolean;
+      workdir?: string;
+      overwrite?: boolean;
+      includeClean?: boolean;
+      includeReview?: boolean;
+      quarantineBlocked?: boolean;
+      selectedReviewNames?: string[];
+    };
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
+      return c.json({ ok: false, entries: [], error: 'source path is required' }, 400);
+    }
+    if (!path.isAbsolute(sourcePath.trim())) {
+      return c.json({ ok: false, entries: [], error: 'source path must be absolute' }, 400);
+    }
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    if (!isGlobal && !isValidWorkdir(workdir)) {
+      return c.json({ ok: false, entries: [], error: 'valid workdir is required for project-scoped skill import' }, 400);
+    }
+    const result = importSkillFolder(sourcePath.trim(), {
+      global: isGlobal,
+      workdir,
+      overwrite,
+      includeClean,
+      includeReview,
+      quarantineBlocked,
+      selectedReviewNames,
+    });
+    return c.json(result, result.ok || result.entries.length > 0 ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, entries: [], error: e?.message || 'skill folder import failed' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/import-git — clone a Git repo, then scan/import its Skills. */
+app.post('/api/extensions/skills/import-git', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      url,
+      global: isGlobal,
+      workdir: reqWorkdir,
+      overwrite,
+      includeClean,
+      includeReview,
+      quarantineBlocked,
+      selectedReviewNames,
+    } = body as {
+      url?: string;
+      global?: boolean;
+      workdir?: string;
+      overwrite?: boolean;
+      includeClean?: boolean;
+      includeReview?: boolean;
+      quarantineBlocked?: boolean;
+      selectedReviewNames?: string[];
+    };
+    if (typeof url !== 'string' || !url.trim()) {
+      return c.json({ ok: false, entries: [], error: 'git URL is required' }, 400);
+    }
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    if (!isGlobal && !isValidWorkdir(workdir)) {
+      return c.json({ ok: false, entries: [], error: 'valid workdir is required for project-scoped skill import' }, 400);
+    }
+    const result = await importSkillGit(url.trim(), {
+      global: isGlobal,
+      workdir,
+      overwrite,
+      includeClean,
+      includeReview,
+      quarantineBlocked,
+      selectedReviewNames,
+    });
+    return c.json(result, result.ok || result.entries.length > 0 ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, entries: [], error: e?.message || 'skill git import failed' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/import-zip — extract a single-Skill ZIP and scan/import it. */
+app.post('/api/extensions/skills/import-zip', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      path: sourcePath,
+      global: isGlobal,
+      workdir: reqWorkdir,
+      overwrite,
+      includeClean,
+      includeReview,
+      quarantineBlocked,
+      selectedReviewNames,
+    } = body as {
+      path?: string;
+      global?: boolean;
+      workdir?: string;
+      overwrite?: boolean;
+      includeClean?: boolean;
+      includeReview?: boolean;
+      quarantineBlocked?: boolean;
+      selectedReviewNames?: string[];
+    };
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
+      return c.json({ ok: false, entries: [], error: 'zip path is required' }, 400);
+    }
+    if (!path.isAbsolute(sourcePath.trim())) {
+      return c.json({ ok: false, entries: [], error: 'zip path must be absolute' }, 400);
+    }
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    if (!isGlobal && !isValidWorkdir(workdir)) {
+      return c.json({ ok: false, entries: [], error: 'valid workdir is required for project-scoped skill import' }, 400);
+    }
+    const result = await importSkillZip(sourcePath.trim(), {
+      global: isGlobal,
+      workdir,
+      overwrite,
+      includeClean,
+      includeReview,
+      quarantineBlocked,
+      selectedReviewNames,
+    });
+    return c.json(result, result.ok || result.entries.length > 0 ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, entries: [], error: e?.message || 'skill zip import failed' }, 500);
+  }
+});
+
 /** POST /api/extensions/skills/remove — remove an installed skill. */
 app.post('/api/extensions/skills/remove', async (c) => {
   try {
@@ -1005,6 +1230,38 @@ app.post('/api/extensions/skills/remove', async (c) => {
     return c.json(result);
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || 'removal failed' }, 500);
+  }
+});
+
+/** POST /api/extensions/skills/pin — mark a Skill as always-at-hand in chats. */
+app.post('/api/extensions/skills/pin', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      name,
+      pinned,
+      global: isGlobal,
+      workdir: reqWorkdir,
+    } = body as {
+      name?: string;
+      pinned?: boolean;
+      global?: boolean;
+      workdir?: string;
+    };
+    if (typeof name !== 'string' || !name.trim()) {
+      return c.json({ ok: false, error: 'name is required' }, 400);
+    }
+    const workdir = reqWorkdir || runtime.getRequestWorkdir();
+    if (!isGlobal && !isValidWorkdir(workdir)) {
+      return c.json({ ok: false, error: 'valid workdir is required for project-scoped skill pinning' }, 400);
+    }
+    const result = setSkillPinned(name.trim(), pinned !== false, {
+      global: !!isGlobal,
+      workdir,
+    });
+    return c.json(result, result.ok ? 200 : 400);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'skill pin failed' }, 500);
   }
 });
 

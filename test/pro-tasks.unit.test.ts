@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { makeTmpDir } from './support/env.ts';
 import {
   ANALYZE_TASK_SPACE_ID,
+  appendProTaskSourceEvidence,
   confirmStageRunOutput,
   createProTask,
   createTaskSpace,
@@ -100,6 +101,17 @@ describe('Pro task spaces', () => {
     expect(manual.origin).toMatchObject({ type: 'manual' });
     expect(listProTasks({ spaceId: 'jira' }).map(task => task.id)).toEqual([jira.id]);
     expect(listProTasks({ spaceId: 'personal' }).map(task => task.id)).toEqual([manual.id]);
+  });
+
+  it('preserves native source origins for promoted work items', () => {
+    const task = createProTask({
+      title: 'Promote captured image todo',
+      kind: 'todo',
+      origin: { type: 'todo', key: 'todo_123' },
+    });
+
+    expect(task.origin).toEqual({ type: 'todo', key: 'todo_123' });
+    expect(listProTasks()[0].origin).toEqual({ type: 'todo', key: 'todo_123' });
   });
 
   it('assigns global MY local keys to non-Jira tasks without consuming keys for Jira sync', () => {
@@ -293,6 +305,44 @@ describe('Pro task spaces', () => {
 
     expect(withRun.stageRuns[0].prompt).toContain('Raw ticket context');
     expect(withRun.stageRuns[0].displayPrompt).toBe('Start background');
+  });
+});
+
+describe('Pro task source evidence', () => {
+  it('appends normalized source evidence to the task description', () => {
+    const task = createProTask({
+      title: 'Repair source evidence',
+      description: 'Existing context',
+      kind: 'todo',
+    });
+
+    const updated = appendProTaskSourceEvidence(task.id, {
+      kind: 'session',
+      value: 'codex:session-1 turn 3',
+    });
+
+    expect(updated.description).toBe('Existing context\n\nSource session: codex:session-1 turn 3');
+    expect(updated.events[0]?.summary).toBe('Source evidence attached: Source session.');
+  });
+
+  it('does not duplicate the same source evidence block', () => {
+    const task = createProTask({
+      title: 'Repair source evidence',
+      description: 'Source workspace: /repo/pikiclaw',
+      kind: 'todo',
+    });
+
+    appendProTaskSourceEvidence(task.id, {
+      kind: 'workspace',
+      value: '/repo/pikiclaw',
+    });
+    const updated = appendProTaskSourceEvidence(task.id, {
+      kind: 'workspace',
+      value: '/repo/pikiclaw',
+    });
+
+    expect(updated.description).toBe('Source workspace: /repo/pikiclaw');
+    expect(updated.events.filter(event => event.summary.includes('Source evidence attached'))).toHaveLength(0);
   });
 });
 

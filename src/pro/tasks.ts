@@ -33,7 +33,7 @@ export interface TaskSpace {
 }
 
 export interface TaskOrigin {
-  type: 'manual' | 'jira' | 'jira-analyze';
+  type: 'daily' | 'jira' | 'jira-analyze' | 'manual' | 'note' | 'todo';
   key?: string;
   url?: string;
 }
@@ -268,6 +268,13 @@ export interface UpdateTaskSpaceInput {
   defaultAgent?: unknown;
   defaultAssistantId?: unknown;
   archived?: unknown;
+}
+
+export type ProTaskSourceEvidenceKind = 'inbox-note' | 'quote' | 'session' | 'workspace' | 'linked-chat';
+
+export interface AppendTaskSourceEvidenceInput {
+  kind?: unknown;
+  value?: unknown;
 }
 
 export interface CreateProTaskInput {
@@ -605,8 +612,8 @@ function normalizeTaskOrigin(value: unknown, task: Pick<ProTask, 'kind' | 'jiraK
     ? 'jira-analyze'
     : origin.type === 'jira'
       ? 'jira'
-      : origin.type === 'manual'
-        ? 'manual'
+      : origin.type === 'todo' || origin.type === 'note' || origin.type === 'daily' || origin.type === 'manual'
+        ? origin.type
         : defaultOriginForTask(task).type;
   return {
     type,
@@ -1811,6 +1818,49 @@ export function updateProTaskMeta(taskId: string, input: UpdateTaskMetaInput): P
     });
     writeFile(file);
   }
+  return task;
+}
+
+function normalizeTaskSourceEvidenceKind(value: unknown): ProTaskSourceEvidenceKind {
+  const kind = normalizeText(value, 40);
+  if (kind === 'inbox-note' || kind === 'quote' || kind === 'session' || kind === 'workspace' || kind === 'linked-chat') return kind;
+  throw new Error('unsupported source evidence kind');
+}
+
+function taskSourceEvidenceLabel(kind: ProTaskSourceEvidenceKind): string {
+  if (kind === 'inbox-note') return 'Inbox note';
+  if (kind === 'quote') return 'Quoted source';
+  if (kind === 'session') return 'Source session';
+  if (kind === 'workspace') return 'Source workspace';
+  return 'Linked chat';
+}
+
+function formatTaskSourceEvidenceBlock(kind: ProTaskSourceEvidenceKind, value: string): string {
+  const label = taskSourceEvidenceLabel(kind);
+  if (kind === 'session' || kind === 'workspace' || kind === 'linked-chat') return `${label}: ${value}`;
+  return `${label}:\n${value}`;
+}
+
+export function appendProTaskSourceEvidence(taskId: string, input: AppendTaskSourceEvidenceInput): ProTask {
+  const file = readFile();
+  const task = file.tasks.find(candidate => candidate.id === taskId);
+  if (!task) throw new Error('task not found');
+  const kind = normalizeTaskSourceEvidenceKind(input.kind);
+  const value = normalizeText(input.value, 8000);
+  if (!value) throw new Error('source evidence value is required');
+  const block = formatTaskSourceEvidenceBlock(kind, value);
+  const current = normalizeText(task.description, 24_000);
+  if (current.includes(block)) return task;
+  const nextDescription = [current, block].filter(Boolean).join('\n\n');
+  if (nextDescription.length > 24_000) throw new Error('task description is too long to append source evidence');
+  task.description = nextDescription;
+  task.updatedAt = new Date().toISOString();
+  appendEvent(task, {
+    type: 'comment',
+    actor: 'user',
+    summary: `Source evidence attached: ${taskSourceEvidenceLabel(kind)}.`,
+  });
+  writeFile(file);
   return task;
 }
 

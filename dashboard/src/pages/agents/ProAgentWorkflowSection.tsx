@@ -1076,6 +1076,8 @@ export function ProAutomationSection({
                     </Badge>
                   </div>
                   <div className="mt-1 text-[11px] text-fg-5">{fmt(run.ranAt)}</div>
+                  {run.error && <div className="mt-1 line-clamp-2 break-words text-[11px] leading-snug text-red-500/80">{run.error}</div>}
+                  {run.budgetName && <div className="mt-1 truncate text-[10px] text-fg-5">Budget: {run.budgetName}</div>}
                   {run.sessionKey && (
                     <div className="mt-2 flex min-w-0 items-center gap-2">
                       <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-4">{run.sessionKey}</div>

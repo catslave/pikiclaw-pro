@@ -13,6 +13,13 @@ export interface Toast {
 
 export type Theme = 'dark' | 'light';
 
+export const CHAT_FONT_SCALE_MIN = 0.9;
+export const CHAT_FONT_SCALE_MAX = 1.18;
+export const CHAT_FONT_SCALE_STEP = 0.04;
+export const CHAT_FONT_SCALE_DEFAULT = 1;
+
+const CHAT_FONT_SCALE_KEY = 'pikiclaw-chat-font-scale';
+
 /* ── sessionStorage cache for instant restore on refresh ── */
 
 const CACHE_KEY = 'pikiclaw-store-cache';
@@ -40,13 +47,21 @@ function writeCache(slices: Partial<CachedSlices>) {
 
 /* ── Helpers ── */
 let _toastId = 0;
+let _lastReloadStateWarningAt = 0;
+
+function warnReloadStateFailure(error: unknown) {
+  const now = Date.now();
+  if (now - _lastReloadStateWarningAt < 60_000) return;
+  _lastReloadStateWarningAt = now;
+  console.warn('loadState:', error);
+}
 
 function getInitialTheme(): Theme {
   try {
     const stored = localStorage.getItem('pikiclaw-theme');
     if (stored === 'light' || stored === 'dark') return stored;
   } catch {}
-  return 'dark';
+  return 'light';
 }
 
 function getInitialLocale(): Locale {
@@ -55,6 +70,24 @@ function getInitialLocale(): Locale {
     if (stored === 'en' || stored === 'zh-CN') return stored;
   } catch {}
   return 'zh-CN';
+}
+
+export function normalizeChatFontScale(value: number): number {
+  if (!Number.isFinite(value)) return CHAT_FONT_SCALE_DEFAULT;
+  const clamped = Math.min(CHAT_FONT_SCALE_MAX, Math.max(CHAT_FONT_SCALE_MIN, value));
+  return Number(clamped.toFixed(2));
+}
+
+function getInitialChatFontScale(): number {
+  try {
+    const stored = localStorage.getItem(CHAT_FONT_SCALE_KEY);
+    if (stored) return normalizeChatFontScale(Number(stored));
+  } catch {}
+  return CHAT_FONT_SCALE_DEFAULT;
+}
+
+function applyChatFontScale(scale: number) {
+  document.documentElement.style.setProperty('--pk-chat-font-scale', String(normalizeChatFontScale(scale)));
 }
 
 /* ── Store shape ── */
@@ -67,11 +100,13 @@ interface StoreState {
   allSessions: Record<string, { sessions: SessionInfo[] }>;
   theme: Theme;
   locale: Locale;
+  chatFontScale: number;
 
   /* ── Actions ── */
   toast: (msg: string, ok?: boolean) => void;
   setTheme: (t: Theme) => void;
   setLocale: (l: Locale) => void;
+  setChatFontScale: (scale: number) => void;
   reload: () => Promise<AppState | null>;
   refreshAgentStatus: () => Promise<AgentStatusResponse | null>;
   setAgentStatus: (status: AgentStatusResponse) => void;
@@ -84,7 +119,9 @@ interface StoreState {
 
 /* ── Apply theme to DOM once at module load ── */
 const initialTheme = getInitialTheme();
+const initialChatFontScale = getInitialChatFontScale();
 document.documentElement.dataset.theme = initialTheme;
+applyChatFontScale(initialChatFontScale);
 
 /* ══════════════════════════════════════════════════════
    Zustand Store — selector-based, no Provider needed.
@@ -103,6 +140,7 @@ export const useStore = create<StoreState>()((set, get) => ({
   allSessions: {},
   theme: initialTheme,
   locale: getInitialLocale(),
+  chatFontScale: initialChatFontScale,
 
   /* ── Toast ── */
   toast: (message, ok = true) => {
@@ -126,21 +164,35 @@ export const useStore = create<StoreState>()((set, get) => ({
     set({ locale: l });
   },
 
+  /* ── Chat readability ── */
+  setChatFontScale: (scale) => {
+    const next = normalizeChatFontScale(scale);
+    applyChatFontScale(next);
+    try { localStorage.setItem(CHAT_FONT_SCALE_KEY, String(next)); } catch {}
+    set({ chatFontScale: next });
+  },
+
   /* ── Reload app state + host + agent status ── */
   reload: async () => {
+    const commitSlice = (slice: Partial<CachedSlices>) => {
+      set(slice);
+      writeCache(slice);
+    };
+
+    const hostPromise = api.getHost()
+      .then((host) => { if (host) commitSlice({ host }); })
+      .catch(() => null);
+
+    let latestState: AppState | null = null;
     try {
-      const [d, h, agents] = await Promise.all([
-        api.getState(),
-        api.getHost().catch(() => null),
-        api.getAgentStatus().catch(() => null),
-      ]);
-      set({ state: d, ...(h ? { host: h } : {}), ...(agents ? { agentStatus: agents } : {}) });
-      writeCache({ state: d, ...(h ? { host: h } : {}), ...(agents ? { agentStatus: agents } : {}) });
-      return d;
+      latestState = await api.getState({ timeoutMs: 30_000 });
+      if (latestState) commitSlice({ state: latestState });
     } catch (e) {
-      console.error('loadState:', e);
-      return null;
+      warnReloadStateFailure(e);
     }
+
+    void hostPromise;
+    return latestState;
   },
 
   refreshAgentStatus: async () => {
@@ -174,7 +226,7 @@ export const useStore = create<StoreState>()((set, get) => ({
   loadSessions: async () => {
     try {
       const [s, h, ses] = await Promise.all([
-        api.getState(),
+        api.getState({ timeoutMs: 30_000 }),
         api.getHost(),
         api.getSessions(),
       ]);
@@ -185,13 +237,15 @@ export const useStore = create<StoreState>()((set, get) => ({
       });
       writeCache({ state: s, host: h });
     } catch (e) {
-      console.error('loadSessions:', e);
+      console.warn('loadSessions:', e);
     }
   },
 }));
 
-/* ── Kick off initial load ── */
-void useStore.getState().reload();
+/* ── Kick off initial load after the first route can request its own chunk. ── */
+const startInitialReload = () => { void useStore.getState().reload(); };
+if (typeof window !== 'undefined') window.setTimeout(startInitialReload, 1200);
+else startInitialReload();
 
 /* ══════════════════════════════════════════════════════
    Channel validation polling — runs as a store subscription.

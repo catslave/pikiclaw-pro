@@ -158,6 +158,14 @@ function resolveSkillFromPrompt(workdir: string, prompt: string): { resolvedProm
   return { resolvedPrompt, skillName: skill.name };
 }
 
+function claudePermissionModeFromDashboard(value: unknown): string {
+  const mode = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (mode === 'autopilot') return 'bypassPermissions';
+  if (mode === 'ask') return 'default';
+  if (mode === 'read-only' || mode === 'readonly' || mode === 'plan') return 'plan';
+  return '';
+}
+
 export interface QueueSessionTaskRequest {
   workdir: string;
   agent?: Agent | string | null;
@@ -166,6 +174,7 @@ export interface QueueSessionTaskRequest {
   displayPrompt?: string | null;
   model?: string | null;
   effort?: string | null;
+  permissionMode?: string | null;
   attachments?: string[];
   /**
    * When the user just switched agent from a live session, pass the source
@@ -217,6 +226,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     ? request.agent as Agent
     : runtime.getRuntimeDefaultAgent(config);
   const modelId = typeof request.model === 'string' ? request.model.trim() : '';
+  const requestedClaudePermissionMode = claudePermissionModeFromDashboard(request.permissionMode);
   let effectiveAgent = resolvedAgent;
   let capabilityRoute: CapabilityRouteDecision | null = null;
   let thinkingEffort = effectiveAgent === 'gemini'
@@ -359,6 +369,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     attachments,
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
+    ...(effectiveAgent === 'claude' && requestedClaudePermissionMode ? { claudePermissionMode: requestedClaudePermissionMode } : {}),
     ...(handoverFrom ? { handoverFrom } : {}),
     ...(contextSources.length ? { contextSources } : {}),
     ...(capabilityRoute ? { capabilityRoute } : {}),

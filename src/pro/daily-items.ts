@@ -2,8 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DAILY_ASSISTANT_ID } from './assistant-defaults.js';
 import { createProTask, getProTask, updateProTaskMeta } from './tasks.js';
 import { getTodoItems, updateTodoItem } from './todos.js';
+import { todoToWorkItemDescription } from './todo-work-item-evidence.js';
 
 export type DailyItemStatus = 'open' | 'task-created' | 'done' | 'archived';
 
@@ -207,10 +209,12 @@ export function addTodoToDaily(date: string, todoId: string): { item: DailyItem;
   if (!todo) throw new Error('todo not found');
   const task = createProTask({
     title: todo.title,
-    description: todo.body,
-    kind: 'manual',
+    description: todoToWorkItemDescription(todo) || todo.body,
+    kind: 'todo',
     status: 'backlog',
     plannedDate: normalizedDate,
+    origin: { type: 'todo', key: todo.id },
+    defaultAssistantId: DAILY_ASSISTANT_ID,
   });
   updateTodoItem(todo.id, { status: 'archived' });
   const now = new Date().toISOString();
@@ -250,7 +254,9 @@ export function promoteDailyItemsToTasks(date: string, dailyItemIds: string[], o
       status: 'backlog',
       plannedDate: normalizedDate,
       linkedTaskId: item.relatedTaskId,
+      origin: { type: 'daily', key: item.id },
       workdir,
+      defaultAssistantId: DAILY_ASSISTANT_ID,
     });
     item.taskId = task.id;
     item.taskKey = task.jiraKey || task.localKey;

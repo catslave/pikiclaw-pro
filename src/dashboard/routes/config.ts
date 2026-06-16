@@ -185,6 +185,7 @@ function openExternalUrl(url: string) {
 
 const INLINE_FILE_MAX_BYTES = 512 * 1024;
 const INLINE_DIFF_MAX_BYTES = 1024 * 1024;
+const PROJECT_REFERENCE_MAX_BYTES = 25 * 1024 * 1024;
 
 function isPathInside(root: string, target: string): boolean {
   return target === root || target.startsWith(root + path.sep);
@@ -217,6 +218,61 @@ function resolveWorkspacePreviewPath(workdir: string, requestedPath: string) {
       ? path.relative(logicalRoot, logicalTarget)
       : logicalTarget,
   };
+}
+
+function resolveProjectReferenceDir(workdir: string): { root: string; referenceDir: string } {
+  const logicalRoot = path.resolve(workdir);
+  if (!fs.existsSync(logicalRoot) || !fs.statSync(logicalRoot).isDirectory()) {
+    throw new Error('workspace not found');
+  }
+  const root = fs.realpathSync(logicalRoot);
+  const referenceDir = path.join(root, '.pikiclaw', 'reference');
+  return { root, referenceDir };
+}
+
+function safeProjectReferenceName(rawName: string): string {
+  const parsed = path.parse(path.basename(rawName || 'reference'));
+  const stem = (parsed.name || 'reference')
+    .replace(/[^A-Za-z0-9._ -]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+$/, 'reference')
+    .slice(0, 120) || 'reference';
+  const ext = parsed.ext.replace(/[^A-Za-z0-9.]+/g, '').slice(0, 24);
+  return `${stem}${ext}`;
+}
+
+function uniqueProjectReferencePath(referenceDir: string, name: string): { name: string; abs: string } {
+  const parsed = path.parse(name);
+  let candidate = name;
+  let index = 2;
+  while (fs.existsSync(path.join(referenceDir, candidate))) {
+    candidate = `${parsed.name}-${index}${parsed.ext}`;
+    index += 1;
+  }
+  return { name: candidate, abs: path.join(referenceDir, candidate) };
+}
+
+function projectReferenceFile(referenceDir: string, name: string) {
+  const base = path.basename(name || '');
+  if (!base || base !== name) throw new Error('invalid reference name');
+  const abs = path.resolve(referenceDir, base);
+  if (!isPathInside(path.resolve(referenceDir), abs)) throw new Error('invalid reference path');
+  const stat = fs.statSync(abs);
+  return {
+    name: base,
+    path: abs,
+    size: stat.size,
+    updatedAt: stat.mtime.toISOString(),
+  };
+}
+
+function listProjectReferenceFiles(referenceDir: string) {
+  if (!fs.existsSync(referenceDir)) return [];
+  return fs.readdirSync(referenceDir, { withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => projectReferenceFile(referenceDir, entry.name))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.name.localeCompare(b.name));
 }
 
 function looksBinary(buffer: Buffer): boolean {
@@ -488,7 +544,7 @@ app.get('/api/health', (c) => c.json({ ok: true, version: VERSION }));
 // Full state (config from file only)
 app.get('/api/state', async (c) => {
   const config = loadUserConfig();
-  const setupState = await runtime.buildValidatedSetupState(config);
+  const setupState = runtime.getSetupState(config);
   const permissions = checkPermissions();
   const botRef = runtime.getBotRef();
   const activeTasks = botRef ? countLiveSessionTasks(botRef) : 0;
@@ -767,6 +823,63 @@ app.get('/api/ls-dir', (c) => {
       });
     const isGit = fs.existsSync(path.join(dir, '.git'));
     return c.json({ ok: true, path: dir, parent: path.dirname(dir), dirs, isGit });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.get('/api/project-reference', (c) => {
+  const workdir = c.req.query('workdir');
+  if (!workdir) return c.json({ ok: false, error: 'workdir is required' }, 400);
+  try {
+    const { referenceDir } = resolveProjectReferenceDir(workdir);
+    return c.json({ ok: true, referenceDir, references: listProjectReferenceFiles(referenceDir) });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+app.post('/api/project-reference', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
+    const sourcePath = typeof body?.sourcePath === 'string' ? body.sourcePath.trim() : '';
+    if (!workdir || !sourcePath) return c.json({ ok: false, error: 'workdir and sourcePath are required' }, 400);
+
+    const { referenceDir } = resolveProjectReferenceDir(workdir);
+    const expandedSource = sourcePath.startsWith('~/') ? expandTilde(sourcePath) : sourcePath;
+    const source = path.resolve(expandedSource);
+    if (!fs.existsSync(source)) return c.json({ ok: false, error: 'source file not found' }, 404);
+    const sourceStat = fs.statSync(source);
+    if (!sourceStat.isFile()) return c.json({ ok: false, error: 'source path must be a file' }, 400);
+    if (sourceStat.size > PROJECT_REFERENCE_MAX_BYTES) {
+      return c.json({ ok: false, error: `Reference file is too large (${Math.round(sourceStat.size / 1024 / 1024)} MB)` }, 413);
+    }
+
+    fs.mkdirSync(referenceDir, { recursive: true });
+    const target = uniqueProjectReferencePath(referenceDir, safeProjectReferenceName(source));
+    fs.copyFileSync(source, target.abs);
+    return c.json({
+      ok: true,
+      referenceDir,
+      file: projectReferenceFile(referenceDir, target.name),
+      references: listProjectReferenceFiles(referenceDir),
+    });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.delete('/api/project-reference', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    if (!workdir || !name) return c.json({ ok: false, error: 'workdir and name are required' }, 400);
+    const { referenceDir } = resolveProjectReferenceDir(workdir);
+    const file = projectReferenceFile(referenceDir, name);
+    fs.unlinkSync(file.path);
+    return c.json({ ok: true, removed: true, referenceDir, references: listProjectReferenceFiles(referenceDir) });
   } catch (err) {
     return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
   }

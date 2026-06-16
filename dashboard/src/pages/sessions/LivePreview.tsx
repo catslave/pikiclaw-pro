@@ -5,9 +5,11 @@ import { type OpenFileLinkHandler } from './markdown';
 import { stripOaiMemoryCitations } from './messageSanitizers';
 import { lastNLines } from './utils';
 import { shortenModel } from '../../utils';
-import { GeneratedChatTextOutput } from './AssistantContent';
+import { GeneratedChatTextOutput, type ScheduleProposalActionHandler, type WorkflowAskAnswerHandler } from './AssistantContent';
 import { CompletedWorkDisclosure, WorkingActivityDetails, WorkingActivitySummary, WorkingCard, WorkingDiagnostics, WorkingPlanList, WorkingSubAgentList, WorkingThinkingBlock, formatActivityForDisplay, summarizeWorkingActivity } from './WorkingCard';
-import type { StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
+import { WorkflowProgressRail } from './WorkflowProgressRail';
+import { parseWorkflowProgress } from './workflowProgress';
+import type { StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent, WorkflowRunRecord } from '../../types';
 
 export interface LiveStreamView {
   taskId?: string | null;
@@ -64,6 +66,11 @@ export function LivePreview({
   onOpenFileLink,
   workdir,
   onStopAll,
+  workflowRun,
+  workflowAskBusyId,
+  onWorkflowAskAnswer,
+  scheduleProposalBusyKey,
+  onScheduleProposalCreate,
 }: {
   stream: LiveStreamView;
   /** True while the session still owns an in-flight task. Keeps the live card on
@@ -74,6 +81,11 @@ export function LivePreview({
   onOpenFileLink?: OpenFileLinkHandler;
   workdir?: string;
   onStopAll?: () => void | Promise<void>;
+  workflowRun?: WorkflowRunRecord | null;
+  workflowAskBusyId?: string | null;
+  onWorkflowAskAnswer?: WorkflowAskAnswerHandler;
+  scheduleProposalBusyKey?: string | null;
+  onScheduleProposalCreate?: ScheduleProposalActionHandler;
 }) {
   const [stoppingAll, setStoppingAll] = useState(false);
   const handleStop = async () => {
@@ -84,8 +96,10 @@ export function LivePreview({
   };
   const showPlan = hasPlan(stream.plan);
   const visibleText = stripOaiMemoryCitations(stream.text || '');
-  const sanitizedStream = visibleText === stream.text ? stream : { ...stream, text: visibleText };
-  const hasAnyBody = liveStreamHasBody(sanitizedStream);
+  const workflowProgress = useMemo(() => parseWorkflowProgress(visibleText), [visibleText]);
+  const displayText = visibleText;
+  const sanitizedStream = displayText === stream.text ? stream : { ...stream, text: displayText };
+  const hasAnyBody = liveStreamHasBody(sanitizedStream) || !!workflowProgress;
   // Stream finished with no body — surface the error inline so the user sees
   // *why* the assistant turn is empty instead of a silent phantom.
   const renderEmptyFailure = stream.phase === 'done' && !hasAnyBody;
@@ -195,18 +209,39 @@ export function LivePreview({
       )}
 
       {/* Response text with thinking dots */}
-      {visibleText && (
+      {workflowProgress && (
+        <WorkflowProgressRail progress={workflowProgress} compact />
+      )}
+
+      {displayText && (
         stream.phase === 'streaming' ? (
           <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
-            <div className="whitespace-pre-wrap break-words">{visibleText}</div>
+            <GeneratedChatTextOutput
+              text={displayText}
+              t={t}
+              onOpenFileLink={onOpenFileLink}
+              workdir={workdir}
+              workflowRun={workflowRun}
+              workflowAskBusyId={workflowAskBusyId}
+              onWorkflowAskAnswer={onWorkflowAskAnswer}
+              scheduleProposalBusyKey={scheduleProposalBusyKey}
+              onScheduleProposalCreate={onScheduleProposalCreate}
+              suppressWorkflowProgressRail
+            />
             <ThinkingDots className="ml-1 inline-flex align-text-bottom text-fg-4" />
           </div>
         ) : (
           <GeneratedChatTextOutput
-            text={visibleText}
+            text={displayText}
             t={t}
             onOpenFileLink={onOpenFileLink}
             workdir={workdir}
+            workflowRun={workflowRun}
+            workflowAskBusyId={workflowAskBusyId}
+            onWorkflowAskAnswer={onWorkflowAskAnswer}
+            scheduleProposalBusyKey={scheduleProposalBusyKey}
+            onScheduleProposalCreate={onScheduleProposalCreate}
+            suppressWorkflowProgressRail
           />
         )
       )}
@@ -215,7 +250,7 @@ export function LivePreview({
           rendered yet. Inline dots (above) only appear once stream.text exists,
           so this fills the gap when activity / thinking / plan are shown alone
           or when no content has arrived at all. */}
-      {!visibleText && stream.phase === 'streaming' && !showWorking && (
+      {!displayText && stream.phase === 'streaming' && !showWorking && !workflowProgress && (
         <div className="py-1">
           <ThinkingDots className="text-fg-5" />
         </div>

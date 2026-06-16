@@ -7,11 +7,11 @@
 import os from 'node:os';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
+import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig, type ChannelName } from '../core/config/user-config.js';
 import {
   doStream, ensureManagedSession, findManagedThreadSession, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
   reconcileAndCollectOrphanedRunningSessions,
-  getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
+  getAgentBoundModelId, setAgentBoundModelId, buildPinnedSkillsPrompt, buildRelevantSkillsPrompt, collapseSkillPrompt,
   readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
   extractProposedPlan, readSessionPlan, writeSessionPlan, createSessionPlanView, getDriverCapabilities,
@@ -188,6 +188,8 @@ export interface ChatState {
   workspacePath?: string | null;
   codexCumulative?: CodexCumulativeUsage;
   modelId?: string | null;
+  thinkingEffort?: string | null;
+  claudePermissionMode?: string | null;
   activeSessionKey?: string | null;
   activeThreadId?: string | null;
   /** Per-chat workdir override; null = use global bot.workdir. */
@@ -210,6 +212,7 @@ export interface SessionRuntime {
   codexCumulative?: CodexCumulativeUsage;
   modelId?: string | null;
   thinkingEffort?: string | null;
+  claudePermissionMode?: string | null;
   runningTaskIds: Set<string>;
   origin?: SessionOrigin | null;
   /**
@@ -231,6 +234,16 @@ export interface SessionFinishedEvent {
     sessionId: string | null;
   };
   result: StreamResult;
+}
+
+export interface ChannelMessageEvent {
+  channel: ChannelName;
+  chatId: string;
+  taskId: string;
+  sessionKey: string;
+  agent: Agent;
+  workdir: string;
+  attachmentCount: number;
 }
 
 /** Events emitted to dashboard listeners during a stream. */
@@ -415,6 +428,7 @@ export interface SubmitSessionTaskOpts {
   attachments?: string[];
   modelId?: string | null;
   thinkingEffort?: string | null;
+  claudePermissionMode?: string | null;
   sourceMessageId?: number | string;
   chatId?: ChatId;
   /**
@@ -454,6 +468,48 @@ export interface SubmittedSessionTask {
   taskId: string;
   sessionKey: string;
   queued: true;
+}
+
+export interface BotTurnStartGuardContext {
+  agent: Agent;
+  workdir: string;
+  sessionId: string | null;
+  channel?: ChannelName;
+  model?: string | null;
+}
+
+export type BotTurnStartGuardResult =
+  | { allowed: true }
+  | { allowed: false; message: string; code?: string };
+
+export type BotTurnStartGuard = (ctx: BotTurnStartGuardContext) => Promise<BotTurnStartGuardResult> | BotTurnStartGuardResult;
+
+let botTurnStartGuard: BotTurnStartGuard | null = null;
+
+export function setBotTurnStartGuard(guard: BotTurnStartGuard | null): void {
+  botTurnStartGuard = guard;
+}
+
+export interface BotTurnCompleteContext {
+  agent: Agent;
+  workdir: string;
+  sessionId: string | null;
+  threadId?: string | null;
+  channel?: ChannelName;
+  model?: string | null;
+  status: 'ok' | 'failed';
+  result: Pick<
+    StreamResult,
+    'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'cacheCreationInputTokens' | 'elapsedS' | 'ok'
+  >;
+}
+
+export type BotTurnCompleteHook = (ctx: BotTurnCompleteContext) => Promise<void> | void;
+
+let botTurnCompleteHook: BotTurnCompleteHook | null = null;
+
+export function setBotTurnCompleteHook(hook: BotTurnCompleteHook | null): void {
+  botTurnCompleteHook = hook;
 }
 
 /**
@@ -500,6 +556,7 @@ export class Bot {
   defaultAgent: Agent;
   runTimeout: number;
   allowedChatIds: Set<ChatId>;
+  protected readonly terminalChannel?: ChannelName;
 
   // Per-agent config — keyed by agent id
   agentConfigs: Record<string, Record<string, any>> = {};
@@ -788,6 +845,7 @@ export class Bot {
   /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
   private _onStreamSnapshot: ((sessionKey: string, snapshot: StreamSnapshot | null) => void) | null = null;
   private _onSessionFinished: ((event: SessionFinishedEvent) => void | Promise<void>) | null = null;
+  private _onChannelMessage: ((event: ChannelMessageEvent) => void | Promise<void>) | null = null;
   private streamPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private streamPushPending = new Map<string, boolean>();
   private streamTextDebugState = new Map<string, { loggedAt: number; textBytes: number; thinkingBytes: number; phase: string }>();
@@ -810,6 +868,21 @@ export class Bot {
       });
     } catch (error: any) {
       this.debug(`[session-finished] listener failed: ${error?.message || error}`);
+    }
+  }
+
+  onChannelMessage(cb: (event: ChannelMessageEvent) => void | Promise<void>): void {
+    this._onChannelMessage = cb;
+  }
+
+  private emitChannelMessage(event: ChannelMessageEvent) {
+    if (!this._onChannelMessage) return;
+    try {
+      void Promise.resolve(this._onChannelMessage(event)).catch((error: any) => {
+        this.debug(`[channel-message] listener failed: ${error?.message || error}`);
+      });
+    } catch (error: any) {
+      this.debug(`[channel-message] listener failed: ${error?.message || error}`);
     }
   }
 
@@ -1240,7 +1313,8 @@ export class Bot {
   private nextHumanLoopPromptId = 1;
   private restoredPersistedQueue = false;
 
-  constructor() {
+  constructor(terminalChannel?: ChannelName) {
+    this.terminalChannel = terminalChannel;
     this.workdir = resolveUserWorkdir();
     ensureGitignore(this.workdir);
     initializeProjectSkills(this.workdir);
@@ -1329,6 +1403,7 @@ export class Bot {
           sourceMessageId: task.sourceMessageId,
           modelId: task.modelId ?? undefined,
           thinkingEffort: task.thinkingEffort ?? undefined,
+          claudePermissionMode: task.claudePermissionMode ?? undefined,
           handoverFrom: task.handoverFrom ?? undefined,
           contextSources: task.contextSources ?? undefined,
           goalContinuation: task.goalContinuation,
@@ -1359,9 +1434,41 @@ export class Bot {
     this.log(msg, 'error');
   }
 
+  private resolveTerminalRuntimeDefaults(config: Record<string, any>): {
+    agent: Agent | null;
+    modelId: string | null;
+    thinkingEffort: string | null;
+    workdir: string | null;
+  } {
+    const defaults = this.terminalChannel
+      ? (config.channelDefaults?.[this.terminalChannel] || null)
+      : null;
+    const requestedAgent = String(defaults?.agent || '').trim().toLowerCase();
+    const agent = requestedAgent && hasDriver(requestedAgent)
+      ? normalizeAgent(requestedAgent)
+      : null;
+    const modelId = String(defaults?.model || '').trim() || null;
+    const thinkingEffort = String(defaults?.effort || '').trim().toLowerCase() || null;
+    const rawWorkdir = String(defaults?.workdir || '').trim();
+    const workdir = rawWorkdir ? path.resolve(expandTilde(rawWorkdir)) : null;
+    return { agent, modelId, thinkingEffort, workdir };
+  }
+
   chat(chatId: ChatId): ChatState {
     let s = this.chats.get(chatId);
-    if (!s) { s = { agent: this.defaultAgent, sessionId: null, activeSessionKey: null, activeThreadId: null, modelId: null }; this.chats.set(chatId, s); }
+    if (!s) {
+      const defaults = this.resolveTerminalRuntimeDefaults(getActiveUserConfig());
+      s = {
+        agent: defaults.agent || this.defaultAgent,
+        sessionId: null,
+        activeSessionKey: null,
+        activeThreadId: null,
+        modelId: defaults.modelId ?? null,
+        thinkingEffort: defaults.thinkingEffort ?? null,
+        workdir: defaults.workdir ?? null,
+      };
+      this.chats.set(chatId, s);
+    }
     return s;
   }
 
@@ -1395,6 +1502,7 @@ export class Bot {
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
     thinkingEffort?: string | null;
+    claudePermissionMode?: string | null;
     handoverFrom?: HandoverRef | null;
     contextSources?: SessionContextSource[];
     origin?: SessionOrigin | null;
@@ -1409,6 +1517,7 @@ export class Bot {
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
       thinkingEffort: session.thinkingEffort ?? null,
+      claudePermissionMode: session.claudePermissionMode ?? null,
       handoverFrom: session.handoverFrom ?? null,
       contextSources: session.contextSources ?? [],
       origin: session.origin ?? null,
@@ -1423,6 +1532,7 @@ export class Bot {
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
     thinkingEffort?: string | null;
+    claudePermissionMode?: string | null;
     workdir?: string;
     handoverFrom?: HandoverRef | null;
     contextSources?: SessionContextSource[];
@@ -1446,6 +1556,7 @@ export class Bot {
       if (session.codexCumulative !== undefined) existing.codexCumulative = session.codexCumulative;
       if (session.modelId !== undefined) existing.modelId = session.modelId ?? null;
       if (session.thinkingEffort !== undefined) existing.thinkingEffort = session.thinkingEffort ?? null;
+      if (session.claudePermissionMode !== undefined) existing.claudePermissionMode = session.claudePermissionMode ?? null;
       // handoverFrom is one-shot: only set if not already set (the first staging wins).
       if (session.handoverFrom !== undefined && !existing.handoverFrom) {
         existing.handoverFrom = session.handoverFrom;
@@ -1467,6 +1578,7 @@ export class Bot {
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
       thinkingEffort: session.thinkingEffort ?? null,
+      claudePermissionMode: session.claudePermissionMode ?? null,
       runningTaskIds: new Set<string>(),
       handoverFrom: session.handoverFrom ?? null,
       contextSources: normalizeSessionContextSources(session.contextSources),
@@ -1486,6 +1598,8 @@ export class Bot {
       cs.activeThreadId = session.threadId;
       cs.codexCumulative = session.codexCumulative;
       cs.modelId = session.modelId ?? null;
+      cs.thinkingEffort = session.thinkingEffort ?? null;
+      cs.claudePermissionMode = session.claudePermissionMode ?? null;
       cs.workdir = session.workdir;
       if (previousSessionKey && previousSessionKey !== session.key) this.maybeEvictSessionRuntime(previousSessionKey);
       return;
@@ -1495,6 +1609,8 @@ export class Bot {
     if (!opts.preserveThread) cs.activeThreadId = null;
     cs.codexCumulative = undefined;
     cs.modelId = null;
+    cs.thinkingEffort = null;
+    cs.claudePermissionMode = null;
     if (previousSessionKey) this.maybeEvictSessionRuntime(previousSessionKey);
   }
 
@@ -1581,6 +1697,7 @@ export class Bot {
       session.codexCumulative = session.codexCumulative ?? existing.codexCumulative;
       session.modelId = session.modelId ?? existing.modelId ?? null;
       session.thinkingEffort = session.thinkingEffort ?? existing.thinkingEffort ?? null;
+      session.claudePermissionMode = session.claudePermissionMode ?? existing.claudePermissionMode ?? null;
       for (const taskId of existing.runningTaskIds) session.runningTaskIds.add(taskId);
     }
 
@@ -1730,8 +1847,8 @@ export class Bot {
       sessionId: staged.sessionId,
       workspacePath: staged.workspacePath,
       threadId: staged.threadId,
-      modelId: this.modelForAgent(cs.agent),
-      thinkingEffort: this.effortForAgent(cs.agent),
+      modelId: cs.modelId || this.modelForAgent(cs.agent),
+      thinkingEffort: cs.thinkingEffort || this.effortForAgent(cs.agent),
       handoverFrom: staged.handoverFrom,
       contextSources: staged.contextSources,
     });
@@ -1763,6 +1880,7 @@ export class Bot {
       attachments,
       modelId: opts.modelId ?? null,
       thinkingEffort: opts.thinkingEffort ?? null,
+      claudePermissionMode: opts.claudePermissionMode ?? session.claudePermissionMode ?? null,
       handoverFrom: opts.handoverFrom ?? session.handoverFrom ?? null,
       contextSources: normalizeSessionContextSources(opts.contextSources ?? session.contextSources),
       ...(opts.goalContinuation ? { goalContinuation: opts.goalContinuation } : {}),
@@ -1802,6 +1920,17 @@ export class Bot {
     this.taskKeysByActionId.set(String(nextTask.actionId), nextTask.taskId);
     const session = this.getSessionRuntimeByKey(task.sessionKey, { allowAnyWorkdir: true });
     session?.runningTaskIds.add(nextTask.taskId);
+    if (this.terminalChannel && nextTask.chatId !== 'dashboard' && session) {
+      this.emitChannelMessage({
+        channel: this.terminalChannel,
+        chatId: String(nextTask.chatId),
+        taskId: nextTask.taskId,
+        sessionKey: session.key,
+        agent: session.agent,
+        workdir: session.workdir,
+        attachmentCount: nextTask.attachments?.length || 0,
+      });
+    }
     if (session) {
       this.persistQueuedTaskRecord({
         version: 1,
@@ -2322,6 +2451,7 @@ export class Bot {
       // Only override when explicitly provided — undefined skips the overwrite in upsertSessionRuntime
       ...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
       ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+      ...(opts.claudePermissionMode !== undefined ? { claudePermissionMode: opts.claudePermissionMode } : {}),
       ...(opts.handoverFrom !== undefined ? { handoverFrom: opts.handoverFrom } : {}),
       ...(opts.contextSources !== undefined ? { contextSources: opts.contextSources } : {}),
     });
@@ -2906,6 +3036,7 @@ export class Bot {
   switchEffortForChat(chatId: ChatId, effort: string) {
     const cs = this.chat(chatId);
     this.setEffortForAgent(cs.agent, effort);
+    cs.thinkingEffort = effort;
     const session = this.getSelectedSession(cs);
     if (session) session.thinkingEffort = effort;
     this.persistAgentPreference(cs.agent, 'effort', effort);
@@ -3184,7 +3315,8 @@ export class Bot {
   }
 
   private refreshManagedConfig(config: Record<string, any>, opts: { initial?: boolean } = {}) {
-    const nextWorkdir = resolveUserWorkdir({ config });
+    const terminalDefaults = this.resolveTerminalRuntimeDefaults(config);
+    const nextWorkdir = terminalDefaults.workdir || resolveUserWorkdir({ config });
     if (opts.initial) {
       this.workdir = nextWorkdir;
       ensureGitignore(this.workdir);
@@ -3194,7 +3326,7 @@ export class Bot {
       this.switchWorkdir(nextWorkdir, { persist: false });
     }
 
-    const requestedDefaultAgent = String(config.defaultAgent || 'codex').trim().toLowerCase() || 'codex';
+    const requestedDefaultAgent = String(terminalDefaults.agent || config.defaultAgent || 'codex').trim().toLowerCase() || 'codex';
     const nextDefaultAgent = hasDriver(requestedDefaultAgent) ? normalizeAgent(requestedDefaultAgent) : normalizeAgent('codex');
     if (opts.initial) this.defaultAgent = nextDefaultAgent;
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
@@ -3213,11 +3345,26 @@ export class Bot {
       }
     }
 
+    if (terminalDefaults.modelId) {
+      const current = this.modelForAgent(nextDefaultAgent);
+      if (current !== terminalDefaults.modelId) {
+        if (opts.initial) this.agentConfigs[nextDefaultAgent].model = terminalDefaults.modelId;
+        else this.setModelForAgent(nextDefaultAgent, terminalDefaults.modelId);
+      }
+    }
+    if (terminalDefaults.thinkingEffort) {
+      const current = this.effortForAgent(nextDefaultAgent);
+      if (current !== terminalDefaults.thinkingEffort) {
+        if (opts.initial) this.agentConfigs[nextDefaultAgent].reasoningEffort = terminalDefaults.thinkingEffort;
+        else this.setEffortForAgent(nextDefaultAgent, terminalDefaults.thinkingEffort);
+      }
+    }
+
     if (!opts.initial) this.onManagedConfigChange(config, opts);
   }
 
   async runStream(
-    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'threadId' | 'handoverFrom' | 'contextSources'> | ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'claudePermissionMode' | 'threadId' | 'handoverFrom' | 'contextSources'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
     mcpSendFile?: import('../agent/mcp/bridge.js').McpSendFileCallback,
@@ -3238,13 +3385,30 @@ export class Bot {
     const resolvedThinkingEffort = ('thinkingEffort' in cs && typeof cs.thinkingEffort === 'string' && cs.thinkingEffort.trim())
       ? cs.thinkingEffort.trim().toLowerCase()
       : (storedConfig?.thinkingEffort || agentConfig.reasoningEffort || 'high');
+    const resolvedClaudePermissionMode = ('claudePermissionMode' in cs && typeof cs.claudePermissionMode === 'string' && cs.claudePermissionMode.trim())
+      ? cs.claudePermissionMode.trim()
+      : this.claudePermissionMode;
     const extraArgs: string[] = agentConfig.extraArgs || [];
     const guiIntegration = resolveGuiIntegrationConfig(getActiveUserConfig());
     const sessionWorkdir = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir
       ? path.resolve(cs.workdir)
       : this.workdir;
+    const skillRetrievalQuery = prompt;
     this.debug(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${sessionWorkdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     this.debug(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
+    if (botTurnStartGuard) {
+      const guard = await botTurnStartGuard({
+        agent: cs.agent,
+        workdir: sessionWorkdir,
+        sessionId: cs.sessionId || null,
+        channel: this.terminalChannel,
+        model: resolvedModel || null,
+      });
+      if (!guard.allowed) {
+        this.warn(`[runStream] blocked by turn-start guard agent=${cs.agent} channel=${this.terminalChannel || 'dashboard'} code=${guard.code || 'blocked'}`);
+        throw new Error(guard.message || 'This turn is blocked by a runtime guard.');
+      }
+    }
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
 
     const contextSources = 'contextSources' in cs ? normalizeSessionContextSources(cs.contextSources) : [];
@@ -3310,8 +3474,14 @@ export class Bot {
     const mcpSystemPrompt = appendExtraPrompt(
       appendExtraPrompt(
         appendExtraPrompt(
-          mcpSendFile ? buildMcpDeliveryPrompt() : '',
-          buildSessionOutputsPrompt(),
+          appendExtraPrompt(
+            mcpSendFile ? buildMcpDeliveryPrompt() : '',
+            buildPinnedSkillsPrompt(sessionWorkdir),
+          ),
+          appendExtraPrompt(
+            buildRelevantSkillsPrompt(sessionWorkdir, skillRetrievalQuery),
+            buildSessionOutputsPrompt(),
+          ),
         ),
         onInteraction && cs.agent === 'claude' ? buildClaudeAskUserPrompt() : '',
       ),
@@ -3358,7 +3528,7 @@ export class Bot {
       codexPrevCumulative: cs.codexCumulative,
       // claude-specific
       claudeModel: cs.agent === 'claude' ? resolvedModel : this.claudeModel,
-      claudePermissionMode: this.claudePermissionMode,
+      claudePermissionMode: resolvedClaudePermissionMode,
       claudeAppendSystemPrompt: effectiveSystemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
       // gemini-specific
@@ -3407,6 +3577,29 @@ export class Bot {
     if (result.sessionId) syncNativeSessionId(result.sessionId);
     if (result.workspacePath) cs.workspacePath = result.workspacePath;
     if (result.model) cs.modelId = result.model;
+    if (botTurnCompleteHook) {
+      try {
+        await botTurnCompleteHook({
+          agent: cs.agent,
+          workdir: sessionWorkdir,
+          sessionId: result.sessionId || cs.sessionId || null,
+          threadId: 'threadId' in cs ? cs.threadId ?? null : null,
+          channel: this.terminalChannel,
+          model: result.model || cs.modelId || resolvedModel || null,
+          status: result.ok ? 'ok' : 'failed',
+          result: {
+            ok: result.ok,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            cachedInputTokens: result.cachedInputTokens,
+            cacheCreationInputTokens: result.cacheCreationInputTokens,
+            elapsedS: result.elapsedS,
+          },
+        });
+      } catch (e: any) {
+        this.warn(`[runStream] turn-complete hook failed: ${e?.message || e}`);
+      }
+    }
     if ('key' in cs && typeof cs.key === 'string') {
       const runtime = this.getSessionRuntimeByKey(cs.key, { allowAnyWorkdir: true });
       if (runtime) this.syncSelectedChats(runtime);

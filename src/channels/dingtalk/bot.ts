@@ -59,7 +59,7 @@ export class DingtalkBot extends Bot {
   private processRuntimeCleanup: (() => void) | null = null;
 
   constructor() {
-    super();
+    super('dingtalk');
     const config = getActiveUserConfig();
     if (process.env.DINGTALK_ALLOWED_CHAT_IDS) {
       for (const id of parseAllowedChatIds(process.env.DINGTALK_ALLOWED_CHAT_IDS)) this.allowedChatIds.add(id);

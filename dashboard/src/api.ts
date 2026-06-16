@@ -2,6 +2,7 @@ import type {
   AgentStatusResponse,
   AgentHealthResult,
   AgentAssistant,
+  AppUpdateStatus,
   AssistantPromptInfo,
   AssistantHistoryItem,
   AppState,
@@ -11,7 +12,9 @@ import type {
   BrowserStatusResponse,
   CliCatalogItem,
   CliStatus,
+  CustomWorkflowRecipe,
   DailyItem,
+  DashboardAccessResponse,
   FileContentResult,
   FocusOverviewResponse,
   FocusSandboxRecord,
@@ -24,6 +27,7 @@ import type {
   GitRemoteBranchUrlResult,
   HostInfo,
   KnowledgeEntry,
+  KnowledgeSourceRefreshResult,
   KnowledgeTreeNode,
   JiraSyncRun,
   JiraRemoteUpdateFields,
@@ -44,6 +48,13 @@ import type {
   NoteSearchResult,
   NoteTree,
   PermissionRequestResult,
+  ProUsageBudget,
+  ProUsageBudgetAction,
+  ProUsageBudgetAlert,
+  ProUsageBudgetPeriod,
+  ProUsageBudgetScope,
+  ProUsageBudgetStatus,
+  ProUsageBudgetUnit,
   PlatformSkillInfo,
   ProUsageSummary,
   ProTask,
@@ -52,6 +63,7 @@ import type {
   ProTaskStage,
   ProTaskStatus,
   ProSubtaskStatus,
+  ProjectReferenceResult,
   TaskSpace,
   TodoItem,
   TodoItemKind,
@@ -59,6 +71,11 @@ import type {
   VerificationResult,
   VerificationRun,
   SkillCatalogItem,
+  SkillFolderImportResult,
+  SkillQuarantineRecord,
+  SkillQuarantineRestoreResult,
+  WorkflowRunRecord,
+  WorkflowRunAutonomousWatchdogResult,
   RemoteSkillInfo,
   SessionHubResult,
   SessionGoalView,
@@ -97,6 +114,7 @@ export interface SessionSendRequestOptions extends ApiRequestOptions {
   contextSources?: SessionContextSource[];
   projectContext?: { source: string; hash: string; title?: string | null } | null;
   displayPrompt?: string | null;
+  permissionMode?: 'autopilot' | 'ask' | 'read-only' | string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -164,12 +182,63 @@ function del<T>(url: string, opts: ApiRequestOptions = {}): Promise<T> {
   });
 }
 
+function filenameFromContentDisposition(value: string | null, fallback: string): string {
+  if (!value) return fallback;
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]).replace(/[\\/]+/g, '-');
+    } catch {
+      return utf8Match[1].replace(/[\\/]+/g, '-');
+    }
+  }
+  const match = value.match(/filename="?([^";]+)"?/i);
+  return (match?.[1] || fallback).replace(/[\\/]+/g, '-');
+}
+
+async function download(url: string, fallbackFilename: string, opts: ApiRequestOptions = {}): Promise<{ blob: Blob; filename: string }> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal, ...rest } = opts;
+  const controller = new AbortController();
+  const cleanupAbort = forwardAbort(signal, controller);
+  const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
+
+  try {
+    const res = await fetch(url, { ...rest, signal: controller.signal });
+    if (!res.ok) {
+      let message = `Request failed (${res.status})`;
+      try {
+        const raw = await res.text();
+        const parsed = raw ? JSON.parse(raw) as { error?: string } : null;
+        if (parsed?.error) message = parsed.error;
+      } catch {}
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    return {
+      blob,
+      filename: filenameFromContentDisposition(res.headers.get('content-disposition'), fallbackFilename),
+    };
+  } catch (err) {
+    if (controller.signal.aborted && !signal?.aborted) {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+    if (err instanceof Error) throw err;
+    throw new Error(String(err ?? 'Request failed'));
+  } finally {
+    clearTimeout(timer);
+    cleanupAbort();
+  }
+}
+
 export const api = {
   health: (opts?: ApiRequestOptions) => json<{ ok: boolean; version?: string }>('/api/health', opts),
-  getState: () => json<AppState>('/api/state'),
+  getAppUpdate: (opts?: ApiRequestOptions) => json<AppUpdateStatus>('/api/app-update', { timeoutMs: 20_000, ...opts }),
+  downloadDiagnosticsBundle: (opts?: ApiRequestOptions) =>
+    download('/api/diagnostics/bundle', 'pikiclaw-diagnostics.json.gz', { timeoutMs: 30_000, ...opts }),
+  getState: (opts?: ApiRequestOptions) => json<AppState>('/api/state', opts),
   getHost: () => json<HostInfo>('/api/host'),
   getAgentStatus: () => json<AgentStatusResponse>('/api/agent-status'),
-  getSessions: () => json<Record<string, { sessions: unknown[] }>>('/api/sessions'),
+  getSessions: (opts?: ApiRequestOptions) => json<Record<string, { sessions: SessionInfo[] }>>('/api/sessions', opts),
   getSessionsPage: (agent: string, page = 0, limit = 6, opts: ApiRequestOptions = {}) =>
     json<SessionsPageResult>(
       `/api/sessions/${agent}?page=${page}&limit=${limit}`,
@@ -197,6 +266,10 @@ export const api = {
   startAgentService: (agent: string, opts?: ApiRequestOptions) =>
     post<AgentHealthResult>('/api/agent-service', { agent, action: 'start' }, { timeoutMs: 120_000, ...opts }),
   saveConfig: (patch: Record<string, unknown>) => post<{ ok: boolean; configPath?: string }>('/api/config', patch),
+  getDashboardAccess: (opts?: ApiRequestOptions) =>
+    json<DashboardAccessResponse>('/api/dashboard/access', opts),
+  revokeDashboardDevice: (id: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; revoked?: boolean; error?: string }>(`/api/dashboard/access/devices/${encodeURIComponent(id)}/revoke`, {}, opts),
   validateTelegramConfig: (token: string, allowedChatIds = '', opts?: ApiRequestOptions) =>
     post<{ ok: boolean; error?: string | null; bot?: { username: string; displayName?: string }; normalizedAllowedChatIds?: string }>(
       '/api/validate-telegram-token',
@@ -262,6 +335,12 @@ export const api = {
     const qs = params.toString();
     return json<LsDirResult>(`/api/ls-dir${qs ? '?' + qs : ''}`);
   },
+  listProjectReferences: (workdir: string) =>
+    json<ProjectReferenceResult>(`/api/project-reference?workdir=${encodeURIComponent(workdir)}`),
+  addProjectReference: (workdir: string, sourcePath: string) =>
+    post<ProjectReferenceResult>('/api/project-reference', { workdir, sourcePath }),
+  removeProjectReference: (workdir: string, name: string) =>
+    json<ProjectReferenceResult>('/api/project-reference', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workdir, name }) }),
   gitChanges: (dir: string) =>
     json<GitChangesResult>(`/api/git-changes?path=${encodeURIComponent(dir)}`),
   gitRemoteBranchUrl: (workdir: string, ref: string) => {
@@ -344,6 +423,87 @@ export const api = {
       '/api/extensions/skills/install',
       { source, global, skill, workdir },
       { timeoutMs: 90_000 },
+    ),
+  importSkillMarkdown: (
+    content: string,
+    global?: boolean,
+    workdir?: string,
+    opts: { name?: string; confirmed?: boolean; overwrite?: boolean } = {},
+  ) =>
+    post<{
+      ok: boolean;
+      error?: string;
+      needsReview?: boolean;
+      blocked?: boolean;
+      name?: string;
+      path?: string;
+      output?: string;
+      quarantined?: boolean;
+      quarantine?: SkillQuarantineRecord;
+      scan?: {
+        name: string;
+        label: string | null;
+        description: string | null;
+        detectedType: string | null;
+        verdict: 'clean' | 'review' | 'blocked';
+        warnings: Array<{ severity: 'warning' | 'danger'; message: string }>;
+      };
+    }>(
+      '/api/extensions/skills/import-markdown',
+      { content, global, workdir, ...opts },
+    ),
+  importSkillFolder: (
+    sourcePath: string,
+    global?: boolean,
+    workdir?: string,
+    opts: { overwrite?: boolean; includeClean?: boolean; includeReview?: boolean; quarantineBlocked?: boolean; selectedReviewNames?: string[] } = {},
+  ) =>
+    post<SkillFolderImportResult>(
+      '/api/extensions/skills/import-folder',
+      { path: sourcePath, global, workdir, ...opts },
+    ),
+  importSkillGit: (
+    url: string,
+    global?: boolean,
+    workdir?: string,
+    opts: { overwrite?: boolean; includeClean?: boolean; includeReview?: boolean; quarantineBlocked?: boolean; selectedReviewNames?: string[] } = {},
+  ) =>
+    post<SkillFolderImportResult>(
+      '/api/extensions/skills/import-git',
+      { url, global, workdir, ...opts },
+      { timeoutMs: 120_000 },
+    ),
+  importSkillZip: (
+    sourcePath: string,
+    global?: boolean,
+    workdir?: string,
+    opts: { overwrite?: boolean; includeClean?: boolean; includeReview?: boolean; quarantineBlocked?: boolean; selectedReviewNames?: string[] } = {},
+  ) =>
+    post<SkillFolderImportResult>(
+      '/api/extensions/skills/import-zip',
+      { path: sourcePath, global, workdir, ...opts },
+    ),
+  getSkillQuarantine: (workdir?: string) => {
+    const params = new URLSearchParams();
+    if (workdir) params.set('workdir', workdir);
+    return json<{ ok: boolean; records: SkillQuarantineRecord[]; error?: string }>(
+      `/api/extensions/skills/quarantine?${params.toString()}`,
+    );
+  },
+  removeSkillQuarantine: (id: string, workdir?: string) =>
+    post<{ ok: boolean; removed?: boolean; error?: string }>(
+      '/api/extensions/skills/quarantine/remove',
+      { id, workdir },
+    ),
+  restoreSkillQuarantine: (id: string, workdir?: string, overwrite?: boolean) =>
+    post<SkillQuarantineRestoreResult>(
+      '/api/extensions/skills/quarantine/restore',
+      { id, workdir, overwrite },
+    ),
+  setSkillPinned: (name: string, pinned: boolean, global?: boolean, workdir?: string) =>
+    post<{ ok: boolean; name?: string; pinned?: boolean; scope?: 'global' | 'project'; error?: string }>(
+      '/api/extensions/skills/pin',
+      { name, pinned, global, workdir },
     ),
   removeExtensionSkill: (name: string, global?: boolean, workdir?: string) =>
     post<{ ok: boolean; error?: string }>('/api/extensions/skills/remove', { name, global, workdir }),
@@ -440,12 +600,17 @@ export const api = {
   getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),
   getWorkspaceSessions: (
     workdir: string,
-    params: { archiveMode?: 'active' | 'archived' | 'all' } = {},
+    params: { archiveMode?: 'active' | 'archived' | 'all'; limit?: number; managedOnly?: boolean } = {},
     opts?: ApiRequestOptions,
   ) =>
     post<SessionHubResult>(
       '/api/session-hub/sessions',
-      { workdir, ...(params.archiveMode ? { archiveMode: params.archiveMode } : {}) },
+      {
+        workdir,
+        ...(params.archiveMode ? { archiveMode: params.archiveMode } : {}),
+        ...(typeof params.limit === 'number' ? { limit: params.limit } : {}),
+        ...(params.managedOnly ? { managedOnly: true } : {}),
+      },
       opts,
     ),
   getSessionMessages: (
@@ -507,6 +672,18 @@ export const api = {
       '/api/session-hub/session/pinned',
       { workdir, agent, sessionId, pinned },
       opts,
+    ),
+  exportSession: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    format: 'markdown' | 'json' | 'text' = 'markdown',
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; content: string; filename: string; error: string | null }>(
+      '/api/session-hub/export',
+      { workdir, agent, sessionId, format },
+      { timeoutMs: 60_000, ...opts },
     ),
   updateSessionArchived: (
     workdir: string,
@@ -614,6 +791,7 @@ export const api = {
       contextSources = [],
       projectContext = null,
       displayPrompt,
+      permissionMode,
       ...opts
     } = options;
     const prevAgent = typeof previousAgent === 'string' ? previousAgent.trim() : '';
@@ -630,6 +808,7 @@ export const api = {
       ...(contextSources.length ? { contextSources } : {}),
       ...(projectContext?.source && projectContext.hash ? { projectContext } : {}),
       ...(visiblePrompt ? { displayPrompt: visiblePrompt } : {}),
+      ...(typeof permissionMode === 'string' && permissionMode.trim() ? { permissionMode: permissionMode.trim() } : {}),
     };
 
     if (!attachments.length) {
@@ -648,6 +827,7 @@ export const api = {
     if (visiblePrompt) body.set('displayPrompt', visiblePrompt);
     if (typeof model === 'string' && model.trim()) body.set('model', model.trim());
     if (typeof effort === 'string' && effort.trim()) body.set('effort', effort.trim());
+    if (typeof permissionMode === 'string' && permissionMode.trim()) body.set('permissionMode', permissionMode.trim());
     if (prevAgent && prevSessionId) {
       body.set('previousAgent', prevAgent);
       body.set('previousSessionId', prevSessionId);
@@ -1052,7 +1232,7 @@ export const api = {
     ),
   runProAssistant: (
     assistantId: string,
-    body: { prompt: string; displayPrompt?: string | null; workdir?: string; agent?: string | null; projectContext?: { source: string; hash: string; title?: string | null } | null },
+    body: { prompt: string; displayPrompt?: string | null; workdir?: string; agent?: string | null; permissionMode?: string | null; projectContext?: { source: string; hash: string; title?: string | null } | null; contextSources?: SessionContextSource[] },
     opts?: ApiRequestOptions,
   ) =>
     post<{
@@ -1075,6 +1255,31 @@ export const api = {
     json<{ ok: boolean; summary: ProUsageSummary; error?: string }>(
       `/api/pro/usage-summary?limit=${encodeURIComponent(String(limit))}`,
       { timeoutMs: 90_000, ...opts },
+    ),
+  getProUsageBudgetAlerts: (limit = 20, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; alerts: ProUsageBudgetAlert[]; error?: string }>(
+      `/api/pro/usage-budget-alerts?limit=${encodeURIComponent(String(limit))}`,
+      opts,
+    ),
+  upsertProUsageBudget: (
+    body: {
+      id?: string;
+      name?: string;
+      scope?: ProUsageBudgetScope;
+      scopeKey?: string;
+      unit?: ProUsageBudgetUnit;
+      limitTokens?: number;
+      limitUsd?: number;
+      period?: ProUsageBudgetPeriod;
+      action?: ProUsageBudgetAction;
+      enabled?: boolean;
+    },
+    opts?: ApiRequestOptions,
+  ) => post<{ ok: boolean; budget?: ProUsageBudget; error?: string }>('/api/pro/usage-budgets', body, opts),
+  deleteProUsageBudget: (budgetId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; deleted?: boolean; error?: string }>(
+      `/api/pro/usage-budgets/${encodeURIComponent(budgetId)}`,
+      { method: 'DELETE', ...opts },
     ),
   getJiraWorkflowConfig: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; config: JiraWorkflowConfig; error?: string }>('/api/pro/jira/config', opts),
@@ -1157,15 +1362,216 @@ export const api = {
       `/api/pro/assistants/${encodeURIComponent(assistantId)}`,
       { method: 'DELETE', ...opts },
     ),
+  getProWorkflowRecipes: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; workflows: CustomWorkflowRecipe[]; error?: string }>('/api/pro/workflow-recipes', opts),
+  createProWorkflowRecipe: (
+    body: {
+      name: string;
+      description: string;
+      category?: string;
+      tags?: string[];
+      outputs?: string[];
+      steps: string[];
+      capabilities?: string[];
+      promptHint?: string;
+      cadence?: string;
+      defaultEffort?: 'low' | 'medium' | 'high';
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; workflow?: CustomWorkflowRecipe; error?: string }>('/api/pro/workflow-recipes', body, opts),
+  updateProWorkflowRecipe: (
+    workflowId: string,
+    body: {
+      name?: string;
+      description?: string;
+      category?: string;
+      tags?: string[];
+      outputs?: string[];
+      steps?: string[];
+      capabilities?: string[];
+      promptHint?: string;
+      cadence?: string;
+      defaultEffort?: 'low' | 'medium' | 'high';
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    patch<{ ok: boolean; workflow?: CustomWorkflowRecipe; error?: string }>(
+      `/api/pro/workflow-recipes/${encodeURIComponent(workflowId)}`,
+      body,
+      opts,
+    ),
+  deleteProWorkflowRecipe: (workflowId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; workflow?: CustomWorkflowRecipe; error?: string }>(
+      `/api/pro/workflow-recipes/${encodeURIComponent(workflowId)}`,
+      { method: 'DELETE', ...opts },
+    ),
+  getProWorkflowRuns: (
+    params: { activeOnly?: boolean; limit?: number } = {},
+    opts?: ApiRequestOptions,
+  ) => {
+    const query = new URLSearchParams();
+    if (params.activeOnly != null) query.set('activeOnly', String(params.activeOnly));
+    if (params.limit != null) query.set('limit', String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return json<{ ok: boolean; runs: WorkflowRunRecord[]; error?: string }>(`/api/pro/workflow-runs${suffix}`, opts);
+  },
+  recordProWorkflowRun: (
+    body: {
+      id?: string;
+      workflowId?: string;
+      workflowName?: string;
+      title?: string;
+      workdir?: string;
+      agent?: string;
+      model?: string;
+      effort?: 'low' | 'medium' | 'high';
+      assistantId?: string;
+      assistantName?: string;
+      sessionKey?: string;
+      sessionId?: string;
+      note?: string;
+      currentStep?: number;
+      totalSteps?: number;
+      steps?: string[];
+      asks?: Array<{
+        id?: string;
+        stepIndex?: number;
+        question: string;
+        type?: 'text' | 'number' | 'choice' | 'boolean' | 'rating';
+        options?: string[];
+        max?: number;
+        placeholder?: string;
+        answer?: string;
+        status?: 'pending' | 'answered' | 'skipped';
+      }>;
+      status?: 'running' | 'blocked' | 'done';
+      lastMarker?: string;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; run?: WorkflowRunRecord; error?: string }>('/api/pro/workflow-runs', body, opts),
+  ingestProWorkflowRunMarkers: (
+    body: {
+      workdir?: string;
+      agent?: string;
+      sessionId?: string;
+      text: string;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; run?: WorkflowRunRecord | null; error?: string }>('/api/pro/workflow-runs/ingest-markers', body, opts),
+  reconcileProWorkflowRunSession: (
+    body: {
+      workdir?: string;
+      agent?: string;
+      sessionId?: string;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{
+      ok: boolean;
+      run?: WorkflowRunRecord | null;
+      scannedMessages?: number;
+      scannedAssistantMessages?: number;
+      markerMessages?: number;
+      progressMarkers?: number;
+      askMarkers?: number;
+      totalTurns?: number;
+      error?: string;
+    }>('/api/pro/workflow-runs/reconcile-session', body, opts),
+  recordProWorkflowRunAsk: (
+    runId: string,
+    body: {
+      id?: string;
+      stepIndex?: number;
+      question: string;
+      type?: 'text' | 'number' | 'choice' | 'boolean' | 'rating';
+      options?: string[];
+      max?: number;
+      placeholder?: string;
+    },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; run?: WorkflowRunRecord; ask?: WorkflowRunRecord['asks'][number]; error?: string }>(
+      `/api/pro/workflow-runs/${encodeURIComponent(runId)}/asks`,
+      body,
+      opts,
+    ),
+  runProWorkflowStepAutonomously: (
+    runId: string,
+    stepIndex: number,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{
+      ok: boolean;
+      run?: WorkflowRunRecord;
+      step?: WorkflowRunRecord['steps'][number];
+      queued?: { ok: boolean; taskId: string; sessionKey: string; queued?: boolean; error?: string };
+      child?: { ok: boolean; sessionKey?: string; error?: string };
+      error?: string;
+    }>(
+      `/api/pro/workflow-runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(String(stepIndex))}/autonomous`,
+      {},
+      { timeoutMs: 30_000, ...opts },
+    ),
+  watchProWorkflowAutonomousWorkers: (
+    body: { timeoutMs?: number; limit?: number } = {},
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; result?: WorkflowRunAutonomousWatchdogResult; error?: string }>(
+      '/api/pro/workflow-runs/watchdog',
+      body,
+      { timeoutMs: 15_000, ...opts },
+    ),
+  answerProWorkflowRunAsk: (
+    runId: string,
+    askId: string,
+    body: { answer?: string; skipped?: boolean },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; run?: WorkflowRunRecord; ask?: WorkflowRunRecord['asks'][number]; error?: string }>(
+      `/api/pro/workflow-runs/${encodeURIComponent(runId)}/asks/${encodeURIComponent(askId)}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...opts },
+    ),
+  updateProWorkflowRunAskDelivery: (
+    runId: string,
+    askId: string,
+    body: { deliveryStatus: 'not_sent' | 'sending' | 'sent' | 'failed'; error?: string; taskId?: string },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; run?: WorkflowRunRecord; ask?: WorkflowRunRecord['asks'][number]; error?: string }>(
+      `/api/pro/workflow-runs/${encodeURIComponent(runId)}/asks/${encodeURIComponent(askId)}/delivery`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...opts },
+    ),
+  deleteProWorkflowRun: (runId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; run?: WorkflowRunRecord; error?: string }>(
+      `/api/pro/workflow-runs/${encodeURIComponent(runId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   getProAutomations: (opts?: ApiRequestOptions) =>
     json<{ ok: boolean; automations: AutomationRule[]; error?: string }>('/api/pro/automations', opts),
   createProAutomation: (
-    body: { key?: string; name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; assistantId?: string | null; enabled?: boolean },
+    body: { key?: string; name: string; schedule?: string; prompt: string; workdir?: string; agent?: string | null; assistantId?: string | null; enabled?: boolean; includeProjectReferences?: boolean; projectReferenceNames?: string[] },
     opts?: ApiRequestOptions,
   ) =>
     post<{ ok: boolean; automation?: AutomationRule; error?: string }>('/api/pro/automations', body, opts),
+  updateProAutomation: (
+    automationId: string,
+    body: { name?: string; schedule?: string; prompt?: string; workdir?: string | null; agent?: string | null; assistantId?: string | null; enabled?: boolean; includeProjectReferences?: boolean; projectReferenceNames?: string[] },
+    opts?: ApiRequestOptions,
+  ) =>
+    json<{ ok: boolean; automation?: AutomationRule; error?: string }>(
+      `/api/pro/automations/${encodeURIComponent(automationId)}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...opts },
+    ),
+  deleteProAutomation: (automationId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; automation?: AutomationRule; error?: string }>(
+      `/api/pro/automations/${encodeURIComponent(automationId)}`,
+      { method: 'DELETE', ...opts },
+    ),
   runProAutomation: (automationId: string, opts?: ApiRequestOptions) =>
-    post<{ ok: boolean; automation?: AutomationRule; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string }>(
+    post<{ ok: boolean; automation?: AutomationRule; queued?: { taskId?: string; sessionKey?: string; queued?: boolean }; error?: string; code?: string; budget?: ProUsageBudgetStatus }>(
       `/api/pro/automations/${encodeURIComponent(automationId)}/run`,
       {},
       { timeoutMs: 30_000, ...opts },
@@ -1289,6 +1695,25 @@ export const api = {
     patch<{ ok: boolean; entry?: KnowledgeEntry; error?: string }>(`/api/pro/knowledge/${encodeURIComponent(id)}`, body, opts),
   deleteProKnowledge: (id: string, opts?: ApiRequestOptions) =>
     del<{ ok: boolean; entry?: KnowledgeEntry | null; error?: string }>(`/api/pro/knowledge/${encodeURIComponent(id)}`, opts),
+  importProjectReferencesAsKnowledge: (
+    body: { workdir: string; status?: KnowledgeEntry['status']; maxFiles?: number },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; imported: KnowledgeEntry[]; skipped: Array<{ path: string; reason: string }>; scanned: number; error?: string }>(
+      '/api/pro/knowledge/import-project-references',
+      body,
+      opts,
+    ),
+  refreshProKnowledgeSources: (
+    id: string,
+    body?: { acceptCurrent?: boolean },
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; error?: string } & KnowledgeSourceRefreshResult>(
+      `/api/pro/knowledge/${encodeURIComponent(id)}/source-refresh`,
+      body || {},
+      opts,
+    ),
   getFocusOverview: (opts?: ApiRequestOptions & { orchestrate?: boolean }) =>
     json<FocusOverviewResponse>(`/api/focus/overview${opts?.orchestrate ? '?orchestrate=1' : ''}`, opts),
   orchestrateFocus: (body?: { userIntent?: string | null }, opts?: ApiRequestOptions) =>
@@ -1343,6 +1768,7 @@ export const api = {
       plannedDate?: string;
       linkedTaskId?: string;
       spaceId?: string;
+      origin?: ProTask['origin'];
       workdir?: string;
       prUrl?: string;
       defaultAgent?: string | null;
@@ -1501,6 +1927,12 @@ export const api = {
         body: JSON.stringify(meta),
         ...opts,
       },
+    ),
+  appendProTaskSourceEvidence: (taskId: string, body: { kind: 'inbox-note' | 'quote' | 'session' | 'workspace' | 'linked-chat'; value: string }, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; task?: ProTask; error?: string }>(
+      `/api/pro/tasks/${encodeURIComponent(taskId)}/source-evidence`,
+      body,
+      opts,
     ),
   updateProTaskBackground: (taskId: string, summary: string, opts?: ApiRequestOptions) =>
     patch<{ ok: boolean; task?: ProTask; error?: string }>(

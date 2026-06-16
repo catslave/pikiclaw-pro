@@ -61,6 +61,35 @@ export function cn(...classes: (string | false | undefined | null)[]): string {
   return classes.filter(Boolean).join(' ');
 }
 
+type ImeKeyboardEventLike = {
+  key: string;
+  keyCode?: number;
+  nativeEvent?: {
+    isComposing?: boolean;
+    keyCode?: number;
+  };
+};
+
+const IME_COMPOSITION_ENTER_GUARD_MS = 120;
+
+export function isImeCompositionKeyEvent(
+  event: ImeKeyboardEventLike,
+  isComposing: boolean,
+  compositionEndedAt = 0,
+): boolean {
+  if (
+    isComposing
+    || event.nativeEvent?.isComposing
+    || event.keyCode === 229
+    || event.nativeEvent?.keyCode === 229
+  ) {
+    return true;
+  }
+  return event.key === 'Enter'
+    && compositionEndedAt > 0
+    && Date.now() - compositionEndedAt < IME_COMPOSITION_ENTER_GUARD_MS;
+}
+
 export interface AgentMeta {
   label: string;
   /** Shortened label for compact UI (sidebar cards, etc.) */

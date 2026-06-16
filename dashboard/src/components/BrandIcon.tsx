@@ -60,6 +60,7 @@ const brandIcons: Record<string, string> = {
 const letterFallbacks: Record<string, { letter: string; color: string; bg: string }> = {
   custom: { letter: '+', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' },
   copilot: { letter: 'GH', color: '#f0f6fc', bg: 'rgba(36,41,47,0.9)' },
+  dashboard: { letter: 'D', color: '#38bdf8', bg: 'rgba(14,165,233,0.12)' },
   openclaw: { letter: 'OC', color: '#5eead4', bg: 'rgba(20,184,166,0.14)' },
 };
 
