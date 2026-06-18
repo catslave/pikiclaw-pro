@@ -1,8 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type Dispatch, type KeyboardEvent, type ReactNode, type Ref, type SetStateAction } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type Dispatch, type DragEvent, type KeyboardEvent, type ReactNode, type Ref, type SetStateAction } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { resolveAppStatusBadge } from '../../app-status';
 import { api } from '../../api';
 import { getBrowserNotificationPermission, requestBrowserNotificationPermission, showBrowserNotification, type BrowserNotificationPermission } from '../../browser-notifications';
+import { prefetchSessionMessages } from '../../session-preload';
 import { BrandIcon } from '../../components/BrandIcon';
 import { Button, Dot, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT, type Locale } from '../../i18n';
@@ -78,7 +79,7 @@ import type {
   WorkSurfaceDefaults,
   WorkspaceEntry,
 } from '../../types';
-import { cn, fmtRelative, getAgentMeta, isImeCompositionKeyEvent, sessionDisplayState, shortenModel } from '../../utils';
+import { cn, fmtRelative, getAgentMeta, isImeCompositionKeyEvent, isUnreadCompletedSession, sessionDisplayState, shortenModel } from '../../utils';
 import { AssistantsTab } from '../assistants/AssistantsTab';
 import { ExtensionsTab } from '../extensions/ExtensionsTab';
 import { IMAccessTab } from '../im/IMAccessTab';
@@ -293,9 +294,11 @@ import {
 import { scheduledTaskNotificationRequest } from './scheduledTaskNotification';
 
 const FocusSessionPanel = lazy(async () => ({ default: (await import('../sessions/SessionPanel')).SessionPanel }));
+const CONVERSATION_PANEL_PREFETCH_TURNS = 12;
 
 type WaylandView =
   | 'chat'
+  | 'dashboard'
   | 'conversations'
   | 'search'
   | 'projects'
@@ -359,7 +362,19 @@ type RecentConversation = {
   workspaceName: string;
 };
 
+type AssistantDockSessionRef = {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+  assistantId?: string;
+};
+
 type ConversationFilter = 'all' | 'running' | 'pinned' | 'incomplete' | 'completed';
+type ConversationAttentionTone = 'running' | 'review' | 'unread';
+type ConversationAttentionItem = {
+  item: RecentConversation;
+  tone: ConversationAttentionTone;
+};
 
 function normalizeConversationFilter(value: string | null | undefined): ConversationFilter {
   return value === 'running'
@@ -400,6 +415,8 @@ const SEARCH_SNIPPET_MAX = 190;
 const SEARCH_SNIPPET_PREFIX = 54;
 const SEARCH_SNIPPET_SUFFIX = 96;
 const WORK_ITEM_NOTE_INTAKE_LIMIT = 32;
+const CHAT_LAUNCH_TRANSITION_MS = 760;
+const CHAT_LAUNCH_SETTLE_MS = 520;
 
 const WORK_DEFAULT_SURFACES: Array<{
   id: WorkDefaultSurface;
@@ -453,9 +470,31 @@ type ChatSlashCommandKind = 'prompt' | 'mode' | 'target' | 'project' | 'workflow
 const CHAT_PERMISSION_MODES = ['autopilot', 'ask', 'read-only'] as const;
 type ChatPermissionMode = (typeof CHAT_PERMISSION_MODES)[number];
 
+type ChatLaunchTransition = {
+  id: number;
+  phase: 'launching' | 'settling';
+  prompt: string;
+  workspaceLabel: string;
+  targetLabel: string;
+  theme: CSSProperties;
+};
+
+type ChatLaunchTransitionDraft = Omit<ChatLaunchTransition, 'id' | 'phase'>;
+
 function normalizeChatPermissionMode(value: unknown): ChatPermissionMode {
   const raw = String(value || '').trim();
   return (CHAT_PERMISSION_MODES as readonly string[]).includes(raw) ? raw as ChatPermissionMode : 'autopilot';
+}
+
+function chatLaunchMotionEnabled(): boolean {
+  return typeof window !== 'undefined'
+    && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
+
+function waitForChatLaunchMotion(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function chatPermissionModeLabel(value: ChatPermissionMode): string {
@@ -775,6 +814,10 @@ function copyFor(locale: Locale) {
     brand: 'Pikiclaw',
     subtitle: zh ? 'PERCEIVES · REASONS · ACTS · EVOLVES' : 'PERCEIVES · REASONS · ACTS · EVOLVES',
     newChat: zh ? 'New Chat' : 'New Chat',
+    dashboard: zh ? '我的工作台' : '我的工作台',
+    dashboardDescription: zh
+      ? '把 Jira、Work Items、最近对话和执行入口放在同一个工作面上。'
+      : '把 Jira、Work Items、最近对话和执行入口放在同一个工作面上。',
     conversation: zh ? 'conversation' : 'conversation',
     conversations: zh ? 'Conversations' : 'Conversations',
     search: zh ? 'Search' : 'Search',
@@ -938,11 +981,19 @@ function copyFor(locale: Locale) {
     attachments: zh ? 'Attachments' : 'Attachments',
     voice: zh ? 'Voice' : 'Voice',
     voiceListening: zh ? 'Listening' : 'Listening',
-    voiceUnsupported: zh ? 'Voice input is not supported in this browser.' : 'Voice input is not supported in this browser.',
-    voiceReady: zh ? 'Speak now; final text will be appended to the message.' : 'Speak now; final text will be appended to the message.',
-    voiceNoSpeech: zh ? 'No speech captured.' : 'No speech captured.',
-    voiceAdded: zh ? 'Voice text added to the message.' : 'Voice text added to the message.',
-    voiceFailed: zh ? 'Voice input failed.' : 'Voice input failed.',
+    voiceTitle: zh ? 'Voice Dock' : 'Voice Dock',
+    voiceSubtitle: zh ? '面向这个窗口说话，识别完成后会直接发送给 Chat。' : 'Speak to this dock; final speech sends straight to Chat.',
+    voiceUnsupported: zh ? '当前浏览器不支持语音输入。' : 'Voice input is not supported in this browser.',
+    voiceReady: zh ? '正在听，说完后自动发送。' : 'Listening. I will send when your sentence lands.',
+    voiceNoSpeech: zh ? '没有捕获到语音。' : 'No speech captured.',
+    voiceAdded: zh ? '已识别，正在发送。' : 'Voice captured. Sending.',
+    voiceFailed: zh ? '语音输入失败。' : 'Voice input failed.',
+    voiceTapToStart: zh ? '点击开始说话' : 'Tap to speak',
+    voiceSending: zh ? '正在发送到 Chat...' : 'Sending to Chat...',
+    voiceFinal: zh ? '最终识别' : 'Final transcript',
+    voiceLive: zh ? '实时识别' : 'Live transcript',
+    voiceEmpty: zh ? '说点什么，我会在这里浮现文字。' : 'Say something and the transcript will surface here.',
+    voiceCancel: zh ? '关闭 Voice' : 'Close Voice',
     autopilot: zh ? 'Autopilot' : 'Autopilot',
     ask: zh ? 'Ask first' : 'Ask first',
     readonly: zh ? 'Read only' : 'Read only',
@@ -1359,6 +1410,8 @@ function copyFor(locale: Locale) {
 }
 
 function viewFromPath(pathname: string): WaylandView {
+  if (pathname === '/workbench') return 'dashboard';
+  if (pathname === '/dashboard') return 'dashboard';
   if (pathname === '/conversations/session') return 'conversations';
   if (pathname === '/conversations') return 'conversations';
   if (pathname === '/search') return 'search';
@@ -1425,7 +1478,15 @@ function projectDetailUrl(workspacePath: string): string {
   return `/project?path=${encodeURIComponent(workspacePath)}`;
 }
 
+function projectChatWorkbenchUrl(workspacePath: string, fresh = false): string {
+  const params = new URLSearchParams();
+  params.set('workdir', workspacePath);
+  if (fresh) params.set('newChat', String(Date.now()));
+  return `/projects?${params.toString()}`;
+}
+
 function selectedProjectPathFromLocation(location: ReturnType<typeof useLocation>): string {
+  if (location.pathname !== '/project') return '';
   const params = new URLSearchParams(location.search);
   return params.get('path') || params.get('project') || '';
 }
@@ -1586,6 +1647,13 @@ type ChatFocusTarget = {
   nonce: number;
   searchContext: SessionPanelSearchContext | null;
   scrollRequest: SessionPanelScrollRequest | null;
+};
+
+type PendingProjectChat = {
+  id: string;
+  workdir: string;
+  agent: string;
+  createdAt: string;
 };
 
 function parseNavNumber(value: unknown): number | null {
@@ -2566,6 +2634,36 @@ function conversationMatchesFilter(item: RecentConversation, filter: Conversatio
   return true;
 }
 
+function conversationAttentionTone(session: SessionInfo): ConversationAttentionTone | null {
+  if (session.userStatus === 'done' || session.userStatus === 'parked') return null;
+  const displayState = sessionDisplayState(session);
+  if (displayState === 'running') return 'running';
+  if (displayState === 'incomplete' || session.userStatus === 'review' || session.classification?.outcome === 'blocked') return 'review';
+  return isUnreadCompletedSession(session) ? 'unread' : null;
+}
+
+function conversationAttentionWeight(tone: ConversationAttentionTone): number {
+  if (tone === 'running') return 0;
+  if (tone === 'review') return 1;
+  return 2;
+}
+
+function conversationAttentionLabel(tone: ConversationAttentionTone): string {
+  if (tone === 'running') return 'Live';
+  if (tone === 'review') return 'Review';
+  return 'Unread';
+}
+
+function conversationAttentionPreview(session: SessionInfo): string {
+  return [
+    session.lastMessageText,
+    session.lastAnswer,
+    session.classification?.summary,
+    session.runDetail,
+    session.lastQuestion,
+  ].map(value => String(value || '').replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+}
+
 function buildModelOptions(agents: AgentRuntimeStatus[] | undefined, defaultAgent: string): ModelTargetOption[] {
   const out: ModelTargetOption[] = [];
   const seen = new Set<string>();
@@ -2621,6 +2719,7 @@ function parseTarget(value: string): ChatLaunchTarget | null {
 function Icon({ name }: { name: string }) {
   const path = {
     chat: <><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H11l-4.5 4v-4A2.5 2.5 0 0 1 4 13.5z" /><path d="M8 9h8" /><path d="M8 12h5" /></>,
+    dashboard: <><rect x="4" y="4" width="7" height="7" rx="2" /><rect x="13" y="4" width="7" height="4.5" rx="2" /><rect x="13" y="10.5" width="7" height="9.5" rx="2" /><rect x="4" y="13" width="7" height="7" rx="2" /></>,
     search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></>,
     folder: <><path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6A2.5 2.5 0 0 1 3.5 16.5z" /></>,
     assistant: <><circle cx="12" cy="8" r="3.2" /><path d="M5.8 20c.9-3.6 3-5.4 6.2-5.4s5.3 1.8 6.2 5.4" /><path d="M19 4v3" /><path d="M20.5 5.5h-3" /></>,
@@ -2634,6 +2733,7 @@ function Icon({ name }: { name: string }) {
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z" /></>,
     plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
     mic: <><path d="M12 4a3 3 0 0 1 3 3v5a3 3 0 1 1-6 0V7a3 3 0 0 1 3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><path d="M12 19v2" /></>,
+    close: <><path d="M6 6l12 12" /><path d="M18 6 6 18" /></>,
     arrow: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
     'arrow-left': <><path d="M19 12H5" /><path d="m11 6-6 6 6 6" /></>,
   }[name] || null;
@@ -2685,11 +2785,15 @@ function ShellSidebar({
   version,
   restartPhase,
   onRestartClick,
+  assistantDockOpen,
+  onOpenAssistantDock,
 }: {
   view: WaylandView;
   version: string;
   restartPhase: RestartPhase;
   onRestartClick: () => void;
+  assistantDockOpen: boolean;
+  onOpenAssistantDock: () => void;
 }) {
   const locale = useStore(s => s.locale);
   const state = useStore(s => s.state);
@@ -2717,6 +2821,31 @@ function ShellSidebar({
           <Icon name="plus" />
           {sidebarTooltip(copy.newChat)}
         </NavLink>
+        <NavLink
+          to="/workbench"
+          title={copy.dashboard}
+          aria-label={copy.dashboard}
+          className={cn(
+            'pk-nav-item pk-sidebar-action relative mt-2 flex h-11 w-11 items-center justify-center rounded-xl text-[13px] font-semibold transition-colors',
+            view === 'dashboard' ? 'pk-nav-active bg-panel-h text-fg shadow-[inset_0_0_0_1px_var(--color-edge)]' : 'bg-panel-h text-fg hover:bg-primary/[0.10] hover:text-primary',
+          )}
+        >
+          <Icon name="dashboard" />
+          {sidebarTooltip(copy.dashboard)}
+        </NavLink>
+        <button
+          type="button"
+          onClick={onOpenAssistantDock}
+          aria-pressed={assistantDockOpen}
+          title={copy.assistant}
+          className={cn(
+            'pk-nav-item pk-sidebar-action relative mt-2 flex h-11 w-11 items-center justify-center rounded-xl text-[13px] font-semibold transition-colors',
+            assistantDockOpen ? 'bg-primary/[0.12] text-primary shadow-[inset_0_0_0_1px_var(--color-primary)]' : 'bg-panel-h text-fg hover:bg-primary/[0.10] hover:text-primary',
+          )}
+        >
+          <Icon name="assistant" />
+          {sidebarTooltip(copy.assistant)}
+        </button>
       </div>
       <nav className="min-h-0 w-full flex-1 space-y-1 overflow-y-auto px-3" aria-label="Wayland-style product navigation">
         {navItems.map(item => (
@@ -3118,6 +3247,351 @@ function AssistantLaunchpadBar({
         </div>
       )}
     </section>
+  );
+}
+
+function AssistantSideDock({
+  assistants,
+  workspaces,
+  agentStatus,
+  recent,
+  selectedAssistantId,
+  onSelectedAssistantChange,
+  onClose,
+  reloadRecent,
+}: {
+  assistants: AgentAssistant[];
+  workspaces: WorkspaceEntry[];
+  agentStatus: AgentStatusResponse | null;
+  recent: RecentConversation[];
+  selectedAssistantId: string;
+  onSelectedAssistantChange: (assistantId: string) => void;
+  onClose: () => void;
+  reloadRecent: () => Promise<void>;
+}) {
+  const locale = useStore(s => s.locale);
+  const toast = useStore(s => s.toast);
+  const copy = useMemo(() => copyFor(locale), [locale]);
+  const assistantOptions = useMemo(
+    () => assistants.filter(item => item.kind !== 'page-owner' && item.enabled !== false),
+    [assistants],
+  );
+  const selectedAssistant = assistantOptions.find(item => item.id === selectedAssistantId)
+    || assistantOptions.find(item => item.id === CHAT_HOME_DAILY_ASSISTANT_ID)
+    || assistantOptions[0]
+    || null;
+  const defaultWorkdir = useMemo(() => {
+    const configured = agentStatus?.workdir || '';
+    return workspaces.find(item => item.path === configured)?.path
+      || workspaces[0]?.path
+      || configured
+      || '';
+  }, [agentStatus?.workdir, workspaces]);
+  const [dockWorkdir, setDockWorkdir] = useState(defaultWorkdir);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [history, setHistory] = useState<Record<string, AssistantHistoryItem[]>>({});
+  const [sessionRef, setSessionRef] = useState<AssistantDockSessionRef | null>(null);
+
+  useEffect(() => {
+    if (!selectedAssistant) return;
+    if (selectedAssistant.id !== selectedAssistantId) onSelectedAssistantChange(selectedAssistant.id);
+  }, [onSelectedAssistantChange, selectedAssistant, selectedAssistantId]);
+
+  useEffect(() => {
+    if (!dockWorkdir && defaultWorkdir) setDockWorkdir(defaultWorkdir);
+  }, [defaultWorkdir, dockWorkdir]);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.getProAssistantHistory(8);
+      if (res.ok) setHistory(res.history || {});
+    } catch {
+      setHistory({});
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
+
+  const assistantHistory = selectedAssistant ? (history[selectedAssistant.id] || []) : [];
+  const recentProjectChats = useMemo(
+    () => recent
+      .filter(item => !dockWorkdir || item.workdir === dockWorkdir)
+      .sort((a, b) => sessionTime(b.session) - sessionTime(a.session))
+      .slice(0, 4),
+    [dockWorkdir, recent],
+  );
+  const activeSession = useMemo(() => {
+    if (!sessionRef) return null;
+    const match = recent.find(item => (
+      item.workdir === sessionRef.workdir
+      && item.session.agent === sessionRef.agent
+      && item.session.sessionId === sessionRef.sessionId
+    ));
+    return match?.session || {
+      sessionId: sessionRef.sessionId,
+      agent: sessionRef.agent,
+      workdir: sessionRef.workdir,
+      runState: 'running' as const,
+    };
+  }, [recent, sessionRef]);
+
+  const availableAgentIds = useMemo(() => new Set(
+    (agentStatus?.agents || [])
+      .filter(item => item.installed !== false && item.agent && item.agent !== 'openclaw')
+      .map(item => item.agent),
+  ), [agentStatus?.agents]);
+
+  const preferredAssistantAgent = useMemo(() => {
+    if (!selectedAssistant) return agentStatus?.defaultAgent || null;
+    const preferred = (selectedAssistant.preferredAgents || []).find(agent => (
+      agent && agent !== 'openclaw' && (!availableAgentIds.size || availableAgentIds.has(agent))
+    ));
+    return preferred || agentStatus?.defaultAgent || Array.from(availableAgentIds)[0] || null;
+  }, [agentStatus?.defaultAgent, availableAgentIds, selectedAssistant]);
+
+  const runAssistant = useCallback(async () => {
+    const cleanPrompt = draft.trim();
+    if (!cleanPrompt || !selectedAssistant || !dockWorkdir || sending) return;
+    setSending(true);
+    try {
+      const workspace = workspaces.find(item => item.path === dockWorkdir) || null;
+      const projectContext = workspace ? buildProjectContext(workspace, locale) : null;
+      const contextEnvelope = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
+      const promptWithContext = [contextEnvelope, cleanPrompt].filter(Boolean).join('\n\n');
+      const res = await api.runProAssistant(selectedAssistant.id, {
+        prompt: promptWithContext,
+        displayPrompt: promptWithContext !== cleanPrompt ? cleanPrompt : undefined,
+        workdir: dockWorkdir,
+        agent: preferredAssistantAgent,
+        permissionMode: 'ask',
+        projectContext: projectContext?.ref || null,
+      });
+      if (!res.ok) throw new Error(res.error || copy.launchFailed);
+      const parsed = res.session || parseSessionKeyValue(res.queued?.sessionKey);
+      if (!parsed?.agent || !parsed.sessionId) throw new Error(copy.launchFailed);
+      const runWorkdir = 'workdir' in parsed && parsed.workdir ? parsed.workdir : dockWorkdir;
+      setSessionRef({
+        workdir: runWorkdir,
+        agent: parsed.agent,
+        sessionId: parsed.sessionId,
+        assistantId: selectedAssistant.id,
+      });
+      setDraft('');
+      await Promise.allSettled([reloadRecent(), loadHistory()]);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : copy.launchFailed, false);
+    } finally {
+      setSending(false);
+    }
+  }, [copy.launchFailed, dockWorkdir, draft, loadHistory, locale, preferredAssistantAgent, reloadRecent, selectedAssistant, sending, toast, workspaces]);
+
+  const openHistoryItem = useCallback((item: AssistantHistoryItem) => {
+    setSessionRef({
+      workdir: item.workdir,
+      agent: item.agent,
+      sessionId: item.sessionId,
+      assistantId: item.assistantId,
+    });
+  }, []);
+
+  const openRecentConversation = useCallback((item: RecentConversation) => {
+    if (!item.session.agent) return;
+    setSessionRef({
+      workdir: item.workdir,
+      agent: item.session.agent,
+      sessionId: item.session.sessionId,
+      assistantId: selectedAssistant?.id,
+    });
+  }, [selectedAssistant?.id]);
+
+  const handleSessionChange = useCallback((next: SessionPanelChange) => {
+    setSessionRef({
+      workdir: next.workdir || sessionRef?.workdir || dockWorkdir,
+      agent: next.agent || sessionRef?.agent || preferredAssistantAgent || '',
+      sessionId: next.sessionId || sessionRef?.sessionId || '',
+      assistantId: selectedAssistant?.id,
+    });
+    void Promise.allSettled([reloadRecent(), loadHistory()]);
+  }, [dockWorkdir, loadHistory, preferredAssistantAgent, reloadRecent, selectedAssistant?.id, sessionRef?.agent, sessionRef?.sessionId, sessionRef?.workdir]);
+
+  return (
+    <aside
+      className="absolute inset-y-0 left-0 z-40 flex w-[min(100%,390px)] min-w-0 flex-col border-r border-edge/70 bg-panel/96 shadow-[20px_0_70px_rgba(2,6,23,0.22)] backdrop-blur-xl sm:relative sm:z-auto sm:w-[360px] sm:shadow-none xl:w-[390px]"
+      data-testid="assistant-side-dock"
+    >
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-edge/60 px-3 py-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-primary/25 bg-primary/[0.10] text-primary">
+              <Icon name="assistant" />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-semibold text-fg">Assistant</div>
+              <div className="truncate text-[11px] text-fg-5">{selectedAssistant?.name || copy.assistant}</div>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-edge bg-inset text-[16px] text-fg-5 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+          aria-label="Close assistant"
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <div className="space-y-2">
+          <label className="block">
+            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant</span>
+            <select
+              value={selectedAssistant?.id || ''}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                onSelectedAssistantChange(event.target.value);
+                setSessionRef(null);
+              }}
+              className="h-9 w-full rounded-lg border border-control-border bg-control px-3 text-[12px] font-semibold text-fg outline-none transition-colors focus:border-control-border-h focus:bg-control-h"
+              data-testid="assistant-side-dock-select"
+            >
+              {assistantOptions.map(assistant => (
+                <option key={assistant.id} value={assistant.id}>{assistant.name}</option>
+              ))}
+              {!assistantOptions.length && <option value="">No assistant</option>}
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">{copy.project}</span>
+            <select
+              value={dockWorkdir}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) => setDockWorkdir(event.target.value)}
+              className="h-9 w-full rounded-lg border border-control-border bg-control px-3 text-[12px] font-semibold text-fg outline-none transition-colors focus:border-control-border-h focus:bg-control-h"
+              data-testid="assistant-side-dock-project"
+            >
+              {workspaces.map(workspace => (
+                <option key={workspace.path} value={workspace.path}>{workspaceDisplayName(workspace)}</option>
+              ))}
+              {!workspaces.length && dockWorkdir && <option value={dockWorkdir}>{workspaceBaseName(dockWorkdir)}</option>}
+            </select>
+          </label>
+        </div>
+
+        <div className="mt-3 rounded-[18px] border border-edge/70 bg-inset/74 p-2.5">
+          <textarea
+            value={draft}
+            onChange={event => setDraft(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                void runAssistant();
+              }
+            }}
+            rows={3}
+            disabled={sending || !selectedAssistant}
+            placeholder="Ask this assistant without leaving the current conversation..."
+            className="min-h-[86px] w-full resize-none rounded-xl border-0 bg-transparent px-2 py-2 text-[13px] leading-relaxed text-fg outline-none placeholder:text-fg-5/65 disabled:opacity-60"
+            data-testid="assistant-side-dock-input"
+          />
+          <div className="mt-2 flex min-w-0 items-center justify-between gap-2 border-t border-edge/55 pt-2">
+            <span className="min-w-0 truncate text-[11px] text-fg-5">{preferredAssistantAgent ? assistantAgentLabel(preferredAssistantAgent) : 'Runtime default'}</span>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void runAssistant()}
+              disabled={!draft.trim() || !selectedAssistant || !dockWorkdir || sending}
+              data-testid="assistant-side-dock-send"
+            >
+              {sending ? <Spinner /> : <Icon name="arrow" />}
+              Send
+            </Button>
+          </div>
+        </div>
+
+        {activeSession && sessionRef ? (
+          <div className="mt-3 h-[520px] min-h-[420px] overflow-hidden rounded-[18px] border border-edge bg-[var(--th-chat-window-bg)]" data-testid="assistant-side-dock-session">
+            <Suspense fallback={<div className="flex h-full items-center justify-center gap-2 text-[12px] text-fg-5"><Spinner />Loading assistant...</div>}>
+              <FocusSessionPanel
+                key={`${sessionRef.workdir}:${sessionRef.agent}:${sessionRef.sessionId}`}
+                session={activeSession}
+                workdir={sessionRef.workdir}
+                active
+                compact
+                onSessionChange={handleSessionChange}
+              />
+            </Suspense>
+          </div>
+        ) : (
+          <div className="mt-3 rounded-[18px] border border-dashed border-edge bg-panel/66 p-4 text-[12px] leading-relaxed text-fg-5" data-testid="assistant-side-dock-empty">
+            Pick an assistant, ask a focused question, or view a prior assistant run. Your current conversation stays open on the right.
+          </div>
+        )}
+
+        <div className="mt-4 space-y-2">
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Assistant History</h2>
+            {historyLoading && <Spinner />}
+          </div>
+          <div className="space-y-1.5" data-testid="assistant-side-dock-history">
+            {assistantHistory.map(item => (
+              <button
+                key={`${item.workdir}:${item.agent}:${item.sessionId}`}
+                type="button"
+                onClick={() => openHistoryItem(item)}
+                className="flex w-full min-w-0 items-center gap-2 rounded-xl border border-edge bg-panel/76 p-2.5 text-left transition-colors hover:border-edge-h hover:bg-panel-h"
+              >
+                <Dot variant={item.runState === 'running' ? 'running' : item.runState === 'incomplete' ? 'warn' : 'idle'} pulse={item.runState === 'running'} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12px] font-semibold text-fg">{assistantHistoryTitle(item)}</span>
+                  <span className="mt-0.5 block truncate text-[10.5px] text-fg-5">{assistantHistorySourceLabel(item)} · {assistantAgentLabel(item.agent)}</span>
+                </span>
+                <span className="shrink-0 text-[10px] font-semibold text-primary">View</span>
+              </button>
+            ))}
+            {!assistantHistory.length && (
+              <div className="rounded-xl border border-dashed border-edge bg-inset/55 p-3 text-center text-[12px] text-fg-5">
+                No assistant history yet.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 space-y-2">
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Project Chats</h2>
+          <div className="space-y-1.5">
+            {recentProjectChats.map(item => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => openRecentConversation(item)}
+                disabled={!item.session.agent}
+                className="flex w-full min-w-0 items-center gap-2 rounded-xl border border-edge bg-panel/58 p-2.5 text-left transition-colors hover:border-edge-h hover:bg-panel-h disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-edge bg-inset text-[10px] font-semibold text-fg-5">
+                  {item.session.agent ? getAgentMeta(item.session.agent).letter : 'C'}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12px] font-semibold text-fg">{sessionTitle(item.session)}</span>
+                  <span className="mt-0.5 block truncate text-[10.5px] text-fg-5">{item.workspaceName} · {formatShortDate(item.session.runUpdatedAt || item.session.createdAt)}</span>
+                </span>
+                <span className="shrink-0 text-[10px] font-semibold text-fg-5">View</span>
+              </button>
+            ))}
+            {!recentProjectChats.length && (
+              <div className="rounded-xl border border-dashed border-edge bg-inset/55 p-3 text-center text-[12px] text-fg-5">
+                No project chats yet.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </aside>
   );
 }
 
@@ -3856,6 +4330,46 @@ function buildChatWorkItemLaunchPrompt(context: ChatWorkItemLaunchContext, instr
   return `${context.rawPrompt.trimEnd()}\n\nUser instruction:\n${cleanInstruction}`;
 }
 
+function ChatLaunchTransitionOverlay({ transition }: { transition: ChatLaunchTransition }) {
+  return (
+    <div
+      className="pk-chat-launch-transition pk-chat-handoff"
+      style={transition.theme}
+      aria-live="polite"
+      data-phase={transition.phase}
+      data-testid="chat-home-launch-transition"
+    >
+      <div className="pk-chat-handoff-stream">
+        <div className="pk-chat-handoff-context">
+          <span className="truncate">{transition.workspaceLabel}</span>
+          <span className="h-1 w-1 shrink-0 rounded-full bg-fg-5/45" aria-hidden="true" />
+          <span className="truncate">{transition.targetLabel}</span>
+        </div>
+        <div className="pk-chat-handoff-message" data-testid="chat-home-launch-message-preview">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">You</span>
+            <span className="text-[11px] text-fg-5">Opening conversation</span>
+          </div>
+          <p className="line-clamp-5 whitespace-pre-wrap text-[15px] leading-relaxed text-fg">{transition.prompt}</p>
+        </div>
+        <div className="pk-chat-handoff-thinking">
+          <span className="thinking-dots text-primary" aria-hidden="true"><span /><span /><span /></span>
+          <span className="text-[12px] font-medium text-fg-5">Agent is joining the thread</span>
+        </div>
+      </div>
+      <div className="pk-chat-handoff-dock" data-testid="chat-home-launch-composer-preview">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="pk-route-dot h-2.5 w-2.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate text-[13px] text-fg-4">{transition.prompt}</span>
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary text-primary-fg shadow-[0_0_0_4px_var(--th-glow-a)]">
+            <Spinner />
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChatHome({
   workspaces,
   assistants,
@@ -3874,6 +4388,10 @@ function ChatHome({
   reloadAutomations,
   reloadWorkItems,
   onOpenCommandPalette,
+  chatLaunchTransition,
+  onChatLaunchTransitionStart,
+  onChatLaunchTransitionSettle,
+  onChatLaunchTransitionClear,
 }: {
   workspaces: WorkspaceEntry[];
   assistants: AgentAssistant[];
@@ -3892,6 +4410,10 @@ function ChatHome({
   reloadAutomations: () => Promise<void>;
   reloadWorkItems: () => Promise<void>;
   onOpenCommandPalette: () => void;
+  chatLaunchTransition: ChatLaunchTransition | null;
+  onChatLaunchTransitionStart: (transition: ChatLaunchTransitionDraft) => void;
+  onChatLaunchTransitionSettle: () => void;
+  onChatLaunchTransitionClear: () => void;
 }) {
   const state = useStore(s => s.state);
   const locale = useStore(s => s.locale);
@@ -3908,6 +4430,7 @@ function ChatHome({
   const appliedPromptNonceRef = useRef<unknown>(null);
   const appliedDashboardEffortRef = useRef(false);
   const appliedDashboardPermissionRef = useRef(false);
+  const launchTransitionStartedAtRef = useRef(0);
   const launchState = (location.state && typeof location.state === 'object')
     ? location.state as { chatPromptDraft?: unknown; chatPromptNonce?: unknown }
     : null;
@@ -4002,9 +4525,15 @@ function ChatHome({
     ...DEFAULT_CHAT_SCHEDULE_PROPOSAL_DRAFT,
     includeProjectReferences: true,
   }));
+  const [speechDialogOpen, setSpeechDialogOpen] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [speechState, setSpeechState] = useState<'idle' | 'listening'>('idle');
   const [speechStatus, setSpeechStatus] = useState('');
+  const [speechTranscript, setSpeechTranscript] = useState('');
+  const [speechInterim, setSpeechInterim] = useState('');
+  const [speechAutoSending, setSpeechAutoSending] = useState(false);
+  const speechFinalTextRef = useRef('');
+  const speechSubmittedRef = useRef(false);
   const [projectReferenceFiles, setProjectReferenceFiles] = useState<ProjectReferenceFile[]>([]);
   const [selectedProjectReferenceKeys, setSelectedProjectReferenceKeys] = useState<string[]>([]);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
@@ -4690,10 +5219,27 @@ function ChatHome({
   }, [projectMentionQuery, filteredProjectMentionWorkspaces.length]);
 
   const openCreatedSession = useCallback((workdir: string, agent: string, sessionId: string) => {
-    navigate(buildChatFocusUrl({ workdir, agent, sessionId }), {
+    navigate('/chat', {
       state: chatFocusState({ workdir, agent, sessionId }),
     });
   }, [navigate]);
+
+  const beginLaunchTransition = useCallback((transition: ChatLaunchTransitionDraft) => {
+    if (!chatLaunchMotionEnabled()) {
+      onChatLaunchTransitionClear();
+      launchTransitionStartedAtRef.current = 0;
+      return;
+    }
+    launchTransitionStartedAtRef.current = Date.now();
+    onChatLaunchTransitionStart(transition);
+  }, [onChatLaunchTransitionClear, onChatLaunchTransitionStart]);
+
+  const waitForLaunchTransition = useCallback(async () => {
+    const startedAt = launchTransitionStartedAtRef.current;
+    if (!startedAt) return;
+    const remainingMs = CHAT_LAUNCH_TRANSITION_MS - (Date.now() - startedAt);
+    if (remainingMs > 0) await waitForChatLaunchMotion(remainingMs);
+  }, []);
 
   const ticketQuickLaunchAgent = useMemo(() => {
     const target = parseTarget(targetValue);
@@ -4759,7 +5305,7 @@ function ChatHome({
     }
     if (action.type === 'permission') {
       setPermissionMode(action.value);
-      setPrompt('');
+      if (!hasOverridePrompt) setPrompt('');
       setSlashDismissedValue('');
       return;
     }
@@ -4829,77 +5375,9 @@ function ChatHome({
     });
   }, [projectReferenceFiles]);
 
-  const toggleSpeechInput = useCallback(() => {
-    if (sending) return;
-
-    if (speechState === 'listening') {
-      speechRecognitionRef.current?.stop();
-      return;
-    }
-
-    const SpeechRecognition = getBrowserSpeechRecognitionConstructor();
-    if (!SpeechRecognition) {
-      setSpeechSupported(false);
-      setSpeechStatus(copy.voiceUnsupported);
-      toast(copy.voiceUnsupported, false);
-      return;
-    }
-
-    let appendedText = false;
-    let endedWithError = false;
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.lang = getBrowserSpeechRecognitionLanguage(locale);
-    recognition.onstart = () => {
-      setSpeechSupported(true);
-      setSpeechState('listening');
-      setSpeechStatus(copy.voiceReady);
-    };
-    recognition.onresult = (event) => {
-      const finalParts: string[] = [];
-      const interimParts: string[] = [];
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const transcript = result?.[0]?.transcript?.trim();
-        if (!transcript) continue;
-        if (result.isFinal) finalParts.push(transcript);
-        else interimParts.push(transcript);
-      }
-      if (finalParts.length) {
-        appendedText = true;
-        setPrompt(prev => appendTranscriptToPrompt(prev, finalParts.join(' ')));
-        setSpeechStatus(copy.voiceAdded);
-      } else if (interimParts.length) {
-        setSpeechStatus(interimParts.join(' '));
-      }
-    };
-    recognition.onerror = (event) => {
-      endedWithError = true;
-      const detail = event.error ? `${copy.voiceFailed} ${event.error}` : copy.voiceFailed;
-      setSpeechState('idle');
-      setSpeechStatus(detail);
-      toast(detail, false);
-    };
-    recognition.onend = () => {
-      setSpeechState('idle');
-      speechRecognitionRef.current = null;
-      if (!appendedText && !endedWithError) setSpeechStatus(copy.voiceNoSpeech);
-    };
-    speechRecognitionRef.current = recognition;
-
-    try {
-      recognition.start();
-    } catch {
-      speechRecognitionRef.current = null;
-      setSpeechState('idle');
-      setSpeechStatus(copy.voiceFailed);
-      toast(copy.voiceFailed, false);
-    }
-  }, [copy, locale, sending, speechState, toast]);
-
-  const submit = useCallback(async () => {
-    const cleanPrompt = prompt.trim();
+  const submit = useCallback(async (overridePrompt?: string) => {
+    const hasOverridePrompt = typeof overridePrompt === 'string';
+    const cleanPrompt = (hasOverridePrompt ? overridePrompt : prompt).trim();
     const activeWorkflowContext = launchWorkflowContext;
     const workflowNote = activeWorkflowContext && cleanPrompt !== activeWorkflowContext.visiblePrompt
       ? cleanPrompt
@@ -4911,11 +5389,17 @@ function ChatHome({
       : cleanPrompt;
     const target = parseTarget(targetValue);
     const workspace = selectedWorkspace;
-    if (!cleanPrompt || !target || !workspace || sending) return;
+    if (!cleanPrompt || !target || !workspace || sending) return false;
     if (target.kind === 'assistant' && attachments.length) {
       toast(copy.attachmentsWithAssistant, false);
-      return;
+      return false;
     }
+    beginLaunchTransition({
+      prompt: cleanPrompt,
+      workspaceLabel: workspaceDisplayName(workspace),
+      targetLabel: selectedTargetLabel,
+      theme: chatHomeActiveAgentTheme,
+    });
     setSending(true);
     try {
       const contextEnvelope = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
@@ -4947,7 +5431,9 @@ function ChatHome({
             assistantName: assistant.name,
           }, workflowNote);
         }
+        await waitForLaunchTransition();
         openCreatedSession(runWorkdir, parsed.agent, parsed.sessionId);
+        onChatLaunchTransitionSettle();
       } else {
         const agent = target.agent || defaultAgent;
         if (!agent) throw new Error(copy.launchFailed);
@@ -4971,19 +5457,135 @@ function ChatHome({
             model: target.kind === 'model' ? target.model : undefined,
           }, workflowNote);
         }
+        await waitForLaunchTransition();
         openCreatedSession(workspace.path, parsed.agent, parsed.sessionId);
+        onChatLaunchTransitionSettle();
       }
       setPrompt('');
       setAttachments([]);
       setLaunchWorkItemContext(null);
       setLaunchWorkflowContext(null);
       await reloadRecent();
+      return true;
     } catch (err) {
+      onChatLaunchTransitionClear();
+      launchTransitionStartedAtRef.current = 0;
       toast(err instanceof Error ? err.message : copy.launchFailed, false);
+      return false;
     } finally {
       setSending(false);
     }
-  }, [assistantOptions, attachments, copy, defaultAgent, effort, launchWorkflowContext, launchWorkItemContext, openCreatedSession, permissionMode, projectContext, prompt, reloadRecent, rememberChatWorkflowRun, selectedProjectReferences, selectedWorkspace, sending, targetValue, toast]);
+  }, [assistantOptions, attachments, beginLaunchTransition, chatHomeActiveAgentTheme, copy, defaultAgent, effort, launchWorkflowContext, launchWorkItemContext, onChatLaunchTransitionClear, onChatLaunchTransitionSettle, openCreatedSession, permissionMode, projectContext, prompt, reloadRecent, rememberChatWorkflowRun, selectedProjectReferences, selectedTargetLabel, selectedWorkspace, sending, targetValue, toast, waitForLaunchTransition]);
+
+  const closeSpeechDialog = useCallback(() => {
+    speechRecognitionRef.current?.abort();
+    speechRecognitionRef.current = null;
+    speechFinalTextRef.current = '';
+    speechSubmittedRef.current = false;
+    setSpeechDialogOpen(false);
+    setSpeechState('idle');
+    setSpeechInterim('');
+    setSpeechAutoSending(false);
+  }, []);
+
+  const openSpeechDialog = useCallback(() => {
+    if (sending || speechAutoSending) return;
+    if (speechState === 'listening') {
+      speechRecognitionRef.current?.stop();
+      return;
+    }
+
+    setSpeechDialogOpen(true);
+    setSpeechTranscript('');
+    setSpeechInterim('');
+    setSpeechStatus(copy.voiceReady);
+    speechFinalTextRef.current = '';
+    speechSubmittedRef.current = false;
+
+    const SpeechRecognition = getBrowserSpeechRecognitionConstructor();
+    if (!SpeechRecognition) {
+      setSpeechSupported(false);
+      setSpeechStatus(copy.voiceUnsupported);
+      toast(copy.voiceUnsupported, false);
+      return;
+    }
+
+    let capturedText = false;
+    let endedWithError = false;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = getBrowserSpeechRecognitionLanguage(locale);
+    recognition.onstart = () => {
+      setSpeechSupported(true);
+      setSpeechState('listening');
+      setSpeechStatus(copy.voiceReady);
+    };
+    recognition.onresult = (event) => {
+      const finalParts: string[] = [];
+      const interimParts: string[] = [];
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result?.[0]?.transcript?.trim();
+        if (!transcript) continue;
+        if (result.isFinal) finalParts.push(transcript);
+        else interimParts.push(transcript);
+      }
+      if (interimParts.length) {
+        setSpeechInterim(interimParts.join(' '));
+        setSpeechStatus(interimParts.join(' '));
+      }
+      if (!finalParts.length) return;
+
+      capturedText = true;
+      const finalTranscript = appendTranscriptToPrompt(speechFinalTextRef.current, finalParts.join(' '));
+      speechFinalTextRef.current = finalTranscript;
+      setSpeechTranscript(finalTranscript);
+      setSpeechInterim('');
+      setSpeechStatus(copy.voiceAdded);
+
+      if (speechSubmittedRef.current || !finalTranscript.trim()) return;
+      speechSubmittedRef.current = true;
+      setSpeechAutoSending(true);
+      void submit(finalTranscript).then(ok => {
+        if (ok) {
+          setSpeechDialogOpen(false);
+          setSpeechTranscript('');
+          setSpeechInterim('');
+          setSpeechAutoSending(false);
+          speechFinalTextRef.current = '';
+          return;
+        }
+        speechSubmittedRef.current = false;
+        setSpeechAutoSending(false);
+      });
+    };
+    recognition.onerror = (event) => {
+      endedWithError = true;
+      const detail = event.error ? `${copy.voiceFailed} ${event.error}` : copy.voiceFailed;
+      setSpeechState('idle');
+      setSpeechAutoSending(false);
+      setSpeechStatus(detail);
+      toast(detail, false);
+    };
+    recognition.onend = () => {
+      setSpeechState('idle');
+      speechRecognitionRef.current = null;
+      if (!capturedText && !endedWithError) setSpeechStatus(copy.voiceNoSpeech);
+    };
+    speechRecognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+    } catch {
+      speechRecognitionRef.current = null;
+      setSpeechState('idle');
+      setSpeechAutoSending(false);
+      setSpeechStatus(copy.voiceFailed);
+      toast(copy.voiceFailed, false);
+    }
+  }, [copy, locale, sending, speechAutoSending, speechState, submit, toast]);
+
   const workItemContextDetailId = launchWorkItemContext?.taskId || launchWorkItemId;
   const launchpadPreset = useMemo<WorkObjectLaunchPreset>(() => ({
     projectPath: selectedWorkspacePath || undefined,
@@ -5149,12 +5751,15 @@ function ChatHome({
 
   return (
     <div
-      className="pk-chat-agent-ambient flex h-full min-h-0 flex-col overflow-y-auto px-3 py-5 sm:px-6 sm:py-8"
+      className={cn(
+        'pk-chat-agent-ambient flex h-full min-h-0 flex-col overflow-y-auto px-3 py-5 sm:px-6 sm:py-8',
+        chatLaunchTransition && 'pk-chat-launching',
+      )}
       style={chatHomeActiveAgentTheme}
       data-agent={chatHomeActiveAgentId}
       data-testid="chat-home-agent-ambient"
     >
-      <div className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center">
+      <div className="pk-chat-home-content mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center">
         <div className="pk-chat-home-head mb-4 flex flex-col items-center text-center" data-testid="chat-home-head">
           <div className="pk-agent-rail flex max-w-full items-center gap-1.5 overflow-x-auto rounded-full border border-edge/72 bg-panel/88 px-2 py-2 shadow-[0_16px_44px_rgba(0,0,0,0.18)] ring-1 ring-white/[0.035]" data-testid="chat-home-agent-rail">
             {chatHomeAgentRail.map((item, index) => (
@@ -6206,24 +6811,24 @@ function ChatHome({
                 </button>
                 <button
                   type="button"
-                  onClick={toggleSpeechInput}
+                  onClick={openSpeechDialog}
                   disabled={sending}
-                  aria-pressed={speechState === 'listening'}
-                  title={speechSupported ? copy.voiceReady : copy.voiceUnsupported}
+                  aria-pressed={speechDialogOpen}
+                  title={copy.voiceSubtitle}
                   data-testid="chat-home-voice-input"
                   className={cn(
                     'pk-tool-button inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-full border px-3 text-[12px] font-medium transition-[transform,border-color,background-color,color,box-shadow] active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-45',
-                    speechState === 'listening'
+                    speechDialogOpen || speechState === 'listening'
                       ? 'border-primary/45 bg-primary/10 text-fg shadow-[0_0_0_4px_var(--th-glow-a)]'
                       : 'border-edge/72 bg-transparent text-fg-4 hover:border-edge-h hover:bg-panel-alt hover:text-fg-2',
                   )}
                 >
                   <Icon name="mic" />
-                  {speechState === 'listening' ? copy.voiceListening : copy.voice}
+                  {speechAutoSending ? copy.sending : speechState === 'listening' ? copy.voiceListening : copy.voice}
                   <span
                     className={cn(
                       'h-1.5 w-1.5 rounded-full',
-                      speechState === 'listening' ? 'animate-pulse bg-primary' : speechSupported ? 'bg-ok/70' : 'bg-fg-5/40',
+                      speechAutoSending ? 'animate-pulse bg-ok' : speechState === 'listening' ? 'animate-pulse bg-primary' : speechSupported ? 'bg-ok/70' : 'bg-fg-5/40',
                     )}
                     aria-hidden="true"
                   />
@@ -6276,6 +6881,88 @@ function ChatHome({
                 <span className="sr-only">{sending ? copy.sending : copy.send}</span>
               </Button>
             </div>
+            {speechDialogOpen && (
+              <div
+                className="fixed inset-x-3 bottom-4 z-[70] mx-auto max-w-[420px] rounded-[24px] border border-primary/24 bg-[linear-gradient(145deg,rgba(255,255,255,0.96),rgba(248,250,252,0.92))] p-4 shadow-[0_24px_80px_rgba(15,23,42,0.22)] backdrop-blur-2xl dark:border-primary/30 dark:bg-[linear-gradient(145deg,rgba(15,23,42,0.94),rgba(2,6,23,0.90))] dark:shadow-[0_24px_80px_rgba(0,0,0,0.46)] sm:bottom-8"
+                data-testid="chat-home-voice-dock"
+              >
+                <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-[24px]" aria-hidden="true">
+                  <div className="absolute -left-16 -top-20 h-40 w-40 rounded-full bg-primary/18 blur-3xl" />
+                  <div className="absolute -bottom-16 right-2 h-32 w-32 rounded-full bg-ok/14 blur-3xl" />
+                </div>
+                <div className="relative flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-primary/24 bg-primary/[0.10] text-primary shadow-[0_0_0_6px_rgba(249,115,22,0.06)]">
+                        <Icon name="mic" />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="truncate text-[13px] font-semibold text-fg">{copy.voiceTitle}</div>
+                        <div className="truncate text-[11px] text-fg-5">{selectedWorkspaceLabel} · {selectedTargetLabel}</div>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-[12px] leading-relaxed text-fg-5">{copy.voiceSubtitle}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeSpeechDialog}
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-edge bg-panel/70 text-fg-5 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg"
+                    aria-label={copy.voiceCancel}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </div>
+                <div className="relative mt-4 flex items-center justify-center py-3">
+                  <div className={cn(
+                    'absolute h-28 w-28 rounded-full border transition-all duration-300',
+                    speechState === 'listening'
+                      ? 'animate-ping border-primary/30 bg-primary/[0.06]'
+                      : 'border-edge/60 bg-inset/40',
+                  )} aria-hidden="true" />
+                  <button
+                    type="button"
+                    onClick={openSpeechDialog}
+                    disabled={speechAutoSending || sending}
+                    className={cn(
+                      'relative grid h-24 w-24 place-items-center rounded-full border text-primary transition-[transform,box-shadow,border-color,background-color] active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70',
+                      speechState === 'listening'
+                        ? 'border-primary/45 bg-primary/[0.13] shadow-[0_0_0_10px_rgba(249,115,22,0.08),0_22px_60px_rgba(249,115,22,0.22)]'
+                        : 'border-edge bg-panel/78 shadow-[0_18px_50px_rgba(15,23,42,0.12)] hover:border-primary/32 hover:bg-primary/[0.08]',
+                    )}
+                    aria-label={copy.voiceTapToStart}
+                  >
+                    {speechAutoSending ? <Spinner /> : <Icon name="mic" />}
+                  </button>
+                </div>
+                <div className="relative rounded-[16px] border border-edge/70 bg-inset/72 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">
+                      {speechTranscript ? copy.voiceFinal : copy.voiceLive}
+                    </span>
+                    <span className={cn(
+                      'rounded-full border px-2 py-0.5 text-[10px] font-semibold',
+                      speechAutoSending
+                        ? 'border-ok/30 bg-ok/10 text-ok'
+                        : speechState === 'listening'
+                          ? 'border-primary/30 bg-primary/[0.10] text-primary'
+                          : 'border-edge bg-panel text-fg-5',
+                    )}>
+                      {speechAutoSending ? copy.voiceSending : speechState === 'listening' ? copy.voiceListening : copy.voiceTapToStart}
+                    </span>
+                  </div>
+                  <div className="min-h-[72px] text-[15px] font-medium leading-relaxed text-fg">
+                    {speechTranscript || speechInterim || (
+                      <span className="text-[13px] font-normal text-fg-5">{copy.voiceEmpty}</span>
+                    )}
+                  </div>
+                  {speechStatus && (
+                    <div className="mt-3 truncate border-t border-edge/60 pt-2 text-[11px] text-fg-5" title={speechStatus}>
+                      {speechStatus}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {quickToolsMoreOpen && (
               <div className="mt-2 grid grid-cols-2 gap-1.5 md:hidden" data-testid="chat-home-quick-tools-more-panel">
                 <button
@@ -7238,7 +7925,7 @@ function ProjectWorkspaceView({
             <span className="sm:hidden">{copy.projects}</span>
             <span className="hidden sm:inline">{copy.backToProjects}</span>
           </Link>
-          <Link to={`/chat?project=${encodeURIComponent(workspace.path)}`} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
+          <Link to={projectChatWorkbenchUrl(workspace.path, true)} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
             {copy.newChat}
           </Link>
           <Button variant="secondary" onClick={() => onEdit(workspace, 'general')}>
@@ -7260,7 +7947,7 @@ function ProjectWorkspaceView({
                 {workspace.preferredAgent}
               </span>
             )}
-            <Link to={`/chat?project=${encodeURIComponent(workspace.path)}`} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
+            <Link to={projectChatWorkbenchUrl(workspace.path, true)} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
               {copy.launchWithProject}
             </Link>
           </div>
@@ -7331,7 +8018,7 @@ function ProjectWorkspaceView({
               Open queue
             </Link>
             <Link
-              to={`/chat?project=${encodeURIComponent(workspace.path)}`}
+              to={projectChatWorkbenchUrl(workspace.path, true)}
               className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-semibold text-primary-fg transition-colors hover:bg-primary-hover"
             >
               Launch chat
@@ -7458,7 +8145,7 @@ function ProjectWorkspaceView({
           <aside className="min-w-0 rounded-xl border border-edge bg-panel/82 p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-[14px] font-semibold text-fg">{copy.launchContext}</h2>
-              <Link to={`/chat?project=${encodeURIComponent(workspace.path)}`} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
+              <Link to={projectChatWorkbenchUrl(workspace.path, true)} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
                 {copy.newChat}
               </Link>
             </div>
@@ -7661,7 +8348,7 @@ function ProjectWorkspaceView({
                 <Link to="/work-items" className="inline-flex h-8 items-center justify-center rounded-md border border-edge bg-control px-3 text-[12px] font-semibold text-fg-4 transition-colors hover:border-edge-h hover:bg-panel-h hover:text-fg">
                   {copy.viewAll}
                 </Link>
-                <Link to={`/chat?project=${encodeURIComponent(workspace.path)}`} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
+                <Link to={projectChatWorkbenchUrl(workspace.path, true)} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
                   {copy.newChat}
                 </Link>
               </div>
@@ -7824,7 +8511,7 @@ function ProjectWorkspaceView({
               </div>
               <div className="flex shrink-0 flex-wrap gap-2">
                 <Button variant="secondary" size="sm" onClick={() => void loadReferences()} disabled={referenceLoading}>{copy.refresh}</Button>
-                <Link to={`/chat?project=${encodeURIComponent(workspace.path)}`} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
+                <Link to={projectChatWorkbenchUrl(workspace.path, true)} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
                   {copy.launchWithProject}
                 </Link>
               </div>
@@ -8083,16 +8770,955 @@ function ProjectWorkspaceView({
   );
 }
 
+function dashboardDateMs(value?: string | null): number {
+  const time = Date.parse(value || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function dashboardJiraTask(task: ProTask): boolean {
+  return workItemSourceKind(task) === 'ticket';
+}
+
+function dashboardFocusTimeLabel(seconds: number): string {
+  const safe = Math.max(0, Math.round(seconds || 0));
+  if (safe < 60) return '0m';
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.round((safe % 3600) / 60);
+  if (!hours) return `${minutes}m`;
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function dashboardTicketKey(task: ProTask): string {
+  return task.jiraKey || task.localKey || task.origin?.key || 'Ticket';
+}
+
+const WORKBENCH_TICKET_DND_TYPE = 'application/x-pikiclaw-ticket-ids';
+
+function dashboardTicketTags(task: ProTask): string[] {
+  const inlineTags = `${task.title} ${task.description || ''}`.match(/#[A-Za-z0-9_-]+/g) || [];
+  const labelTags = (task.jiraFields?.labels || []).map(item => `#${item.replace(/^#/, '')}`);
+  const seen = new Set<string>();
+  return [...inlineTags, ...labelTags]
+    .map(item => item.trim())
+    .filter(Boolean)
+    .filter(item => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 2);
+}
+
+function dashboardTicketDescription(task: ProTask): string {
+  return (task.description || task.jiraFields?.status || 'No description captured yet.').trim();
+}
+
+function dashboardTicketHasLinkedChat(task: ProTask): boolean {
+  return workItemSourceEvidence(task).some(item => item.kind === 'linked-chat');
+}
+
+function dashboardTicketInProgress(task: ProTask): boolean {
+  return dashboardTicketHasLinkedChat(task)
+    || task.status === 'coding'
+    || task.status === 'refinement'
+    || task.stageRuns.some(run => run.status === 'running' || run.status === 'queued' || run.status === 'waiting-user');
+}
+
+function dashboardTicketPromptBlock(task: ProTask): string {
+  const key = dashboardTicketKey(task);
+  const description = dashboardTicketDescription(task);
+  return [
+    `- ${key}: ${task.title}`,
+    description ? `  Description: ${description}` : '',
+    task.jiraUrl ? `  Jira: ${task.jiraUrl}` : '',
+    task.workdir ? `  Workspace: ${task.workdir}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function buildWorkbenchLinkedChatUrl(args: { workdir: string; agent: string; sessionId: string }): string {
+  const params = new URLSearchParams();
+  params.set('workdir', args.workdir);
+  params.set('agent', args.agent);
+  params.set('session', args.sessionId);
+  params.set('nonce', String(Date.now()));
+  return `/chat?${params.toString()}`;
+}
+
+type DashboardTodoCard = {
+  id: string;
+  kind: 'daily' | 'todo';
+  title: string;
+  body: string;
+  sourceLabel: string;
+  updatedAt: string;
+  icon: string;
+  toneClass: string;
+  source?: TodoItem | DailyItem;
+};
+
+function dashboardTicketRank(task: ProTask, runs: JiraRemoteUpdateRun[]): number {
+  let rank = dashboardDateMs(task.updatedAt) / 1_000_000_000_000;
+  if (task.status !== 'done' && task.status !== 'resolved') rank += 10;
+  if (workItemNeedsAttention(task)) rank += 20;
+  if (runs.some(run => run.status === 'failed')) rank += 30;
+  if (runs.some(run => run.status === 'draft' || run.status === 'applying')) rank += 24;
+  if (task.stageRuns.some(run => run.status === 'running' || run.status === 'queued')) rank += 12;
+  return rank;
+}
+
+function PersonalDashboardView({
+  assistants,
+  workflowRuns,
+  workItems,
+  inboxItems,
+  dailyItems,
+  notePages,
+  jiraRemoteRuns,
+  recent,
+  agentStatus,
+  reloadRecent,
+  reloadWorkItems,
+  onOpenCommandPalette,
+  onOpenAssistantDock,
+}: {
+  assistants: AgentAssistant[];
+  workflowRuns: WorkflowRunRecord[];
+  workItems: ProTask[];
+  inboxItems: TodoItem[];
+  dailyItems: DailyItem[];
+  notePages: NotePage[];
+  jiraRemoteRuns: JiraRemoteUpdateRun[];
+  recent: RecentConversation[];
+  agentStatus: AgentStatusResponse | null;
+  reloadRecent: () => Promise<void>;
+  reloadWorkItems: () => Promise<void>;
+  onOpenCommandPalette: () => void;
+  onOpenAssistantDock: (assistantId?: string) => void;
+}) {
+  const toast = useStore(s => s.toast);
+  const [activeWorkbenchChat, setActiveWorkbenchChat] = useState<RecentConversation | null>(null);
+  const [activeWorkbenchTickets, setActiveWorkbenchTickets] = useState<ProTask[]>([]);
+  const [activeWorkbenchTicket, setActiveWorkbenchTicket] = useState<ProTask | null>(null);
+  const [activeWorkbenchTodo, setActiveWorkbenchTodo] = useState<DashboardTodoCard | null>(null);
+  const [attachedTickets, setAttachedTickets] = useState<ProTask[]>([]);
+  const [localWorkbenchChats, setLocalWorkbenchChats] = useState<RecentConversation[]>([]);
+  const [ticketDropActive, setTicketDropActive] = useState(false);
+  const [workbenchChatDraft, setWorkbenchChatDraft] = useState('');
+  const [workbenchChatSending, setWorkbenchChatSending] = useState(false);
+  const workbenchComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  const jiraRunsByTask = useMemo(() => jiraRemoteRuns.reduce<Record<string, JiraRemoteUpdateRun[]>>((acc, run) => {
+    if (!acc[run.taskId]) acc[run.taskId] = [];
+    acc[run.taskId].push(run);
+    return acc;
+  }, {}), [jiraRemoteRuns]);
+  const jiraTasks = useMemo(
+    () => workItems
+      .filter(dashboardJiraTask)
+      .sort((a, b) => dashboardTicketRank(b, jiraRunsByTask[b.id] || []) - dashboardTicketRank(a, jiraRunsByTask[a.id] || [])),
+    [jiraRunsByTask, workItems],
+  );
+  const topJiraTickets = jiraTasks.slice(0, 6);
+  const jiraReviewCount = jiraTasks.filter(task => (jiraRunsByTask[task.id] || []).some(run => run.status === 'draft' || run.status === 'applying' || run.status === 'failed')).length;
+  const primaryAgent = agentStatus?.defaultAgent || 'codex';
+  const primaryAgentLabel = getAgentMeta(primaryAgent).label;
+  const mergedRecent = useMemo(() => {
+    const byKey = new Map<string, RecentConversation>();
+    for (const item of [...recent, ...localWorkbenchChats]) byKey.set(item.key, item);
+    return Array.from(byKey.values()).sort((a, b) => sessionTime(b.session) - sessionTime(a.session)).slice(0, 18);
+  }, [localWorkbenchChats, recent]);
+
+  useEffect(() => {
+    if (!localWorkbenchChats.length || !recent.length) return;
+    const remoteKeys = new Set(recent.map(item => item.key));
+    setLocalWorkbenchChats(prev => prev.filter(item => !remoteKeys.has(item.key)));
+  }, [localWorkbenchChats.length, recent]);
+
+  const recentChatItems = useMemo(() => {
+    return mergedRecent.slice(0, 7).map(item => {
+      const agent = item.session.agent || primaryAgent;
+      const meta = getAgentMeta(agent);
+      return {
+        id: `chat:${item.key}`,
+        title: sessionTitle(item.session),
+        detail: `${item.workspaceName} · ${meta.label}`,
+        when: item.session.runUpdatedAt || item.session.runStartedAt || item.session.createdAt,
+        tone: sessionDisplayState(item.session) === 'running' ? 'running' as const : 'idle' as const,
+        conversation: item,
+      };
+    });
+  }, [mergedRecent, primaryAgent]);
+
+  const todoCards = useMemo<DashboardTodoCard[]>(() => {
+    const dailyCards = dailyItems
+      .filter(item => item.status === 'open' && !item.taskId)
+      .map(item => ({
+        id: `daily:${item.id}`,
+        kind: 'daily' as const,
+        title: item.title,
+        body: 'Planned for today',
+        sourceLabel: 'Today',
+        updatedAt: item.updatedAt || item.createdAt,
+        icon: 'calendar',
+        toneClass: 'border-blue-100 bg-blue-50 text-blue-600',
+        source: item,
+      }));
+    const inboxCards = inboxItems
+      .filter(item => item.status === 'open')
+      .map(item => ({
+        id: `todo:${item.id}`,
+        kind: 'todo' as const,
+        title: item.title,
+        body: item.body || item.source?.quote || 'No extra detail captured yet.',
+        sourceLabel: todoSourceLabel(item),
+        updatedAt: item.updatedAt || item.createdAt,
+        icon: item.kind === 'review-comment' ? 'chat' : 'workitem',
+        toneClass: item.kind === 'review-comment' ? 'border-rose-100 bg-rose-50 text-rose-600' : 'border-emerald-100 bg-emerald-50 text-emerald-600',
+        source: item,
+      }));
+    return [...dailyCards, ...inboxCards]
+      .sort((a, b) => dashboardDateMs(b.updatedAt) - dashboardDateMs(a.updatedAt))
+      .slice(0, 6);
+  }, [dailyItems, inboxItems]);
+
+  const favoriteAssistants = useMemo(() => {
+    const enabled = assistants.filter(item => item.enabled !== false && item.kind !== 'task-stage');
+    const daily = enabled.find(item => item.id === CHAT_HOME_DAILY_ASSISTANT_ID) || null;
+    return [
+      ...(daily ? [daily] : []),
+      ...enabled.filter(item => item.id !== daily?.id),
+    ].slice(0, 2);
+  }, [assistants]);
+
+  const attachedTicketIds = useMemo(() => new Set(attachedTickets.map(task => task.id)), [attachedTickets]);
+  const activeWorkbenchTicketIds = useMemo(() => new Set(activeWorkbenchTickets.map(task => task.id)), [activeWorkbenchTickets]);
+  const focusWorkbenchComposer = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => workbenchComposerRef.current?.focus(), 0);
+    });
+  }, []);
+  const attachWorkbenchTickets = useCallback((tickets: ProTask[]) => {
+    if (!tickets.length) return;
+    setAttachedTickets(prev => {
+      const next = [...prev];
+      for (const ticket of tickets) {
+        if (!next.some(item => item.id === ticket.id)) next.push(ticket);
+      }
+      return next.slice(0, 5);
+    });
+    focusWorkbenchComposer();
+  }, [focusWorkbenchComposer]);
+  const detachWorkbenchTicket = useCallback((ticketId: string) => {
+    setAttachedTickets(prev => prev.filter(ticket => ticket.id !== ticketId));
+  }, []);
+  const handleTicketDragStart = useCallback((event: DragEvent<HTMLElement>, task: ProTask) => {
+    const selectedIds = attachedTicketIds.has(task.id) && attachedTickets.length
+      ? attachedTickets.map(ticket => ticket.id)
+      : [task.id];
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData(WORKBENCH_TICKET_DND_TYPE, JSON.stringify(selectedIds));
+    event.dataTransfer.setData('text/plain', selectedIds.map(id => dashboardTicketKey(jiraTasks.find(ticket => ticket.id === id) || task)).join(', '));
+  }, [attachedTicketIds, attachedTickets, jiraTasks]);
+  const handleTicketDropTargetDragOver = useCallback((event: DragEvent<HTMLElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(WORKBENCH_TICKET_DND_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setTicketDropActive(true);
+  }, []);
+  const handleTicketDropTargetDragLeave = useCallback((event: DragEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setTicketDropActive(false);
+  }, []);
+  const handleTicketDrop = useCallback((event: DragEvent<HTMLElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(WORKBENCH_TICKET_DND_TYPE)) return;
+    event.preventDefault();
+    setTicketDropActive(false);
+    try {
+      const ids = JSON.parse(event.dataTransfer.getData(WORKBENCH_TICKET_DND_TYPE)) as unknown;
+      const idList = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
+      const tickets = idList
+        .map(id => jiraTasks.find(task => task.id === id))
+        .filter((task): task is ProTask => !!task);
+      attachWorkbenchTickets(tickets);
+    } catch {
+      toast('Ticket attach failed.', false);
+    }
+  }, [attachWorkbenchTickets, jiraTasks, toast]);
+  const startWorkbenchChat = useCallback(async () => {
+    const selectedTickets = [...attachedTickets];
+    const cleanDraft = workbenchChatDraft.trim();
+    if (workbenchChatSending || (!cleanDraft && !selectedTickets.length)) return;
+    const workdir = selectedTickets.find(task => task.workdir)?.workdir || agentStatus?.workdir || '';
+    if (!workdir) {
+      toast('Please choose a project before starting this work.', false);
+      focusWorkbenchComposer();
+      return;
+    }
+    const ticketAgent = selectedTickets.find(task => task.execution?.agent || task.defaultAgent);
+    const agent = ticketAgent?.execution?.agent || ticketAgent?.defaultAgent || primaryAgent;
+    const ticketContext = selectedTickets.map(dashboardTicketPromptBlock).join('\n');
+    const visiblePrompt = cleanDraft || `开始推进 ${selectedTickets.map(dashboardTicketKey).join(', ')}`;
+    const prompt = selectedTickets.length
+      ? [
+        '下面这些 Jira tickets 已经由 Pikiclaw 工作台关联到当前 chat。请把它们作为本轮工作的上下文。',
+        '',
+        ticketContext,
+        '',
+        `User message:\n${cleanDraft || '请基于这些 ticket 梳理下一步，并开始推进。'}`,
+      ].join('\n')
+      : cleanDraft;
+    setWorkbenchChatSending(true);
+    try {
+      const result = await api.sendSessionMessage(workdir, agent, '', prompt, {
+        displayPrompt: prompt !== visiblePrompt ? visiblePrompt : undefined,
+      });
+      if (!result.ok) throw new Error(result.error || 'Failed to start chat.');
+      const parsed = parseSessionKeyValue(result.sessionKey);
+      if (!parsed) throw new Error('Failed to open the new chat.');
+      const linkedChatUrl = buildWorkbenchLinkedChatUrl({ workdir, agent: parsed.agent, sessionId: parsed.sessionId });
+      if (selectedTickets.length) {
+        await Promise.allSettled(selectedTickets.map(task => api.appendProTaskSourceEvidence(task.id, {
+          kind: 'linked-chat',
+          value: linkedChatUrl,
+        })));
+        await Promise.allSettled(selectedTickets
+          .filter(task => task.status !== 'coding' && task.status !== 'done' && task.status !== 'resolved')
+          .map(task => api.updateProTaskStatus(task.id, 'coding')));
+      }
+      const now = new Date().toISOString();
+      const nextConversation: RecentConversation = {
+        key: `${workdir}:${parsed.agent}:${parsed.sessionId}`,
+        workdir,
+        workspaceName: workspaceBaseName(workdir) || 'Workspace',
+        session: {
+          sessionId: parsed.sessionId,
+          agent: parsed.agent,
+          workdir,
+          title: visiblePrompt,
+          titleSource: 'prompt',
+          createdAt: now,
+          runStartedAt: now,
+          runUpdatedAt: now,
+          runState: 'running',
+          running: true,
+        },
+      };
+      setActiveWorkbenchTickets(selectedTickets);
+      setLocalWorkbenchChats(prev => [nextConversation, ...prev.filter(item => item.key !== nextConversation.key)].slice(0, 8));
+      setActiveWorkbenchChat(nextConversation);
+      setAttachedTickets([]);
+      setWorkbenchChatDraft('');
+      prefetchSessionMessages({
+        workdir,
+        agent: parsed.agent,
+        sessionId: parsed.sessionId,
+        rich: true,
+        turnOffset: 0,
+        turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+      });
+      await Promise.allSettled([reloadRecent(), reloadWorkItems()]);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Failed to start chat.', false);
+    } finally {
+      setWorkbenchChatSending(false);
+    }
+  }, [
+    agentStatus?.workdir,
+    attachedTickets,
+    focusWorkbenchComposer,
+    primaryAgent,
+    reloadRecent,
+    reloadWorkItems,
+    toast,
+    workbenchChatDraft,
+    workbenchChatSending,
+  ]);
+  const handleWorkbenchComposerKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      void startWorkbenchChat();
+    }
+  }, [startWorkbenchChat]);
+  const openWorkbenchChat = useCallback((item: RecentConversation) => {
+    const agent = item.session.agent || primaryAgent;
+    const sessionId = item.session.sessionId;
+    if (!agent || !sessionId) return;
+    const normalized = item.session.agent && item.session.workdir ? item : {
+      ...item,
+      session: {
+        ...item.session,
+        agent,
+        workdir: item.session.workdir || item.workdir,
+      },
+    };
+    setActiveWorkbenchTickets([]);
+    setActiveWorkbenchChat(normalized);
+    prefetchSessionMessages({
+      workdir: item.workdir,
+      agent,
+      sessionId,
+      rich: true,
+      turnOffset: 0,
+      turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+    });
+  }, [primaryAgent]);
+  const handleWorkbenchSessionChange = useCallback((next: SessionPanelChange) => {
+    setActiveWorkbenchChat(current => {
+      if (!current) return current;
+      return {
+        ...current,
+        key: `${next.workdir}:${next.agent}:${next.sessionId}`,
+        workdir: next.workdir || current.workdir,
+        session: {
+          ...current.session,
+          agent: next.agent || current.session.agent,
+          sessionId: next.sessionId || current.session.sessionId,
+          workdir: next.workdir || current.session.workdir || current.workdir,
+        },
+      };
+    });
+  }, []);
+  const activeWorkbenchSession = activeWorkbenchChat ? {
+    ...activeWorkbenchChat.session,
+    agent: activeWorkbenchChat.session.agent || primaryAgent,
+    workdir: activeWorkbenchChat.session.workdir || activeWorkbenchChat.workdir,
+  } : null;
+  const activeWorkbenchChatKey = activeWorkbenchChat && activeWorkbenchSession
+    ? `${activeWorkbenchChat.workdir}:${activeWorkbenchSession.agent}:${activeWorkbenchSession.sessionId}`
+    : '';
+  const activeWorkbenchChatStyle = useMemo(() => {
+    const meta = getAgentMeta(activeWorkbenchSession?.agent || primaryAgent);
+    return {
+      '--pk-session-agent-color': meta.color,
+      '--pk-session-agent-bg': meta.bg,
+      '--pk-session-agent-border': meta.border,
+      '--pk-session-agent-glow': meta.glow,
+    } as CSSProperties;
+  }, [activeWorkbenchSession?.agent, primaryAgent]);
+
+  return (
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#eef1f4] px-4 py-4 text-slate-950 sm:px-6" data-testid="personal-dashboard">
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-48 bg-[radial-gradient(circle_at_18%_0%,rgba(96,165,250,0.18),transparent_32%),radial-gradient(circle_at_70%_8%,rgba(244,114,182,0.14),transparent_28%)]" />
+      <div className="relative z-[1] mx-auto flex h-full min-h-0 w-full max-w-[1180px] flex-col gap-3">
+        <header className="grid shrink-0 gap-3 lg:grid-cols-[minmax(220px,0.72fr)_minmax(300px,1fr)_minmax(180px,0.5fr)] lg:items-center" data-testid="workbench-home-head">
+          <div className="min-w-0">
+            <p className="text-[10px] font-semibold tracking-[0.18em] text-slate-400">我的工作台</p>
+            <h1 className="mt-1 truncate text-[22px] font-semibold leading-tight text-slate-950">Good Morning, Pikiclaw</h1>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenCommandPalette}
+            className="flex h-11 min-w-0 items-center gap-3 rounded-full border border-white/70 bg-white/92 px-4 text-left text-[13px] text-slate-500 shadow-[0_14px_34px_rgba(15,23,42,0.06)] transition hover:-translate-y-0.5 hover:border-slate-200 hover:bg-white hover:text-slate-700"
+            data-testid="personal-dashboard-command-search"
+          >
+            <span className="text-slate-400"><Icon name="search" /></span>
+            <span className="min-w-0 truncate">Search task, project, notes</span>
+          </button>
+          <div className="hidden min-w-0 justify-end lg:flex">
+            <button
+              type="button"
+              onClick={() => onOpenAssistantDock(favoriteAssistants[0]?.id)}
+              className="flex h-11 min-w-0 items-center gap-2 rounded-full border border-white/80 bg-white px-3 text-left shadow-[0_12px_30px_rgba(15,23,42,0.06)] transition hover:-translate-y-0.5 hover:border-blue-100"
+              aria-label="Open assistant"
+            >
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-700">{assistantInitials(favoriteAssistants[0]?.name || primaryAgentLabel)}</span>
+              <span className="min-w-0">
+                <span className="block truncate text-[13px] font-semibold text-slate-900">{favoriteAssistants[0]?.name || 'Pikiclaw'}</span>
+                <span className="block truncate text-[10.5px] text-slate-500">{primaryAgentLabel}</span>
+              </span>
+            </button>
+          </div>
+        </header>
+
+        <div className="grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[minmax(0,1fr)_360px]">
+          <main className="relative grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-[30px] border border-white/70 bg-[#e6eaef] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_22px_55px_rgba(15,23,42,0.08)]" data-testid="personal-dashboard-chat-list">
+            <div className="pointer-events-none absolute inset-x-10 top-0 h-28 bg-[linear-gradient(90deg,rgba(96,165,250,0.13),rgba(251,113,133,0.10),rgba(255,255,255,0))]" />
+            <div className="relative z-[1] flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="inline-flex h-8 items-center gap-2 rounded-full bg-white/62 px-3 text-[12px] font-semibold text-slate-800 shadow-sm">
+                  <Icon name="tools" />
+                  Work Mode
+                </div>
+                <h2 className="mt-3 text-[19px] font-semibold leading-tight text-slate-950">最近 Chat</h2>
+                <p className="mt-1 max-w-[520px] text-[12px] leading-relaxed text-slate-500">新建的 chat 会直接进入这里，点击任意一条继续深度工作。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenAssistantDock(favoriteAssistants[0]?.id)}
+                className="hidden h-10 shrink-0 items-center gap-2 rounded-full bg-white/80 px-3 text-[12px] font-semibold text-slate-700 shadow-sm transition hover:-translate-y-0.5 hover:bg-white hover:text-blue-600 sm:inline-flex"
+              >
+                <Icon name="assistant" />
+                Assistant
+              </button>
+            </div>
+
+            <div className="relative z-[1] mt-3 grid min-h-0 gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+              <section className="min-h-0 overflow-y-auto pr-1">
+                <div className="space-y-2">
+                  {recentChatItems.map(item => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      data-testid="personal-dashboard-chat-row"
+                      onClick={() => openWorkbenchChat(item.conversation)}
+                      className="group grid min-h-[64px] w-full min-w-0 grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3 rounded-[18px] bg-white/72 px-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_12px_26px_rgba(15,23,42,0.08)]"
+                    >
+                      <span className={cn(
+                        'grid h-9 w-9 place-items-center rounded-xl border text-slate-700',
+                        item.tone === 'running' ? 'border-blue-100 bg-blue-50 text-blue-600' : 'border-slate-100 bg-slate-50',
+                      )}>
+                        <Icon name="chat" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="min-w-0 truncate text-[13px] font-semibold text-slate-900">{item.title}</span>
+                          {item.tone === 'running' && <span className="shrink-0 rounded-full bg-blue-50 px-1.5 py-0.5 text-[9px] font-semibold text-blue-600">in progress</span>}
+                        </span>
+                        <span className="mt-1 block truncate text-[11px] text-slate-500">{item.detail}</span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-2 text-[11px] font-semibold text-slate-500 group-hover:text-blue-600">
+                        {fmtRelative(item.when)}
+                        <Icon name="arrow" />
+                      </span>
+                    </button>
+                  ))}
+                  {!recentChatItems.length && (
+                    <button
+                      type="button"
+                      onClick={onOpenCommandPalette}
+                      className="flex h-[132px] w-full items-center justify-center rounded-[18px] border border-dashed border-slate-300 bg-white/56 text-[12px] font-semibold text-slate-500 transition hover:border-blue-200 hover:bg-white hover:text-blue-600"
+                    >
+                      还没有最近 Chat，先开始一项工作
+                    </button>
+                  )}
+                </div>
+              </section>
+
+              <aside className="hidden min-h-0 overflow-hidden md:block">
+                <div className="flex h-full min-h-0 flex-col rounded-[22px] bg-white/55 p-3 shadow-sm">
+                  <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-emerald-100 bg-emerald-50 text-emerald-600">
+                        <Icon name="workitem" />
+                      </span>
+                      <div className="min-w-0">
+                        <h3 className="truncate text-[14px] font-semibold text-slate-950">Todo</h3>
+                        <p className="truncate text-[10.5px] text-slate-500">{todoCards.length} open</p>
+                      </div>
+                    </div>
+                    <button type="button" onClick={onOpenCommandPalette} className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white text-slate-500 transition hover:text-blue-600" aria-label="Add todo">
+                      <Icon name="plus" />
+                    </button>
+                  </div>
+                  <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+                    {todoCards.map(todo => (
+                      <button
+                        key={todo.id}
+                        type="button"
+                        onClick={() => setActiveWorkbenchTodo(todo)}
+                        className="group flex min-h-[58px] w-full min-w-0 items-start gap-2 rounded-[15px] bg-white/72 px-2.5 py-2 text-left transition hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_10px_22px_rgba(15,23,42,0.06)]"
+                        data-testid="personal-dashboard-todo-card"
+                      >
+                        <span className={cn('mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg border', todo.toneClass)}>
+                          <Icon name={todo.icon} />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[12px] font-semibold text-slate-900">{todo.title}</span>
+                          <span className="mt-0.5 block truncate text-[10.5px] text-slate-500">{todo.sourceLabel} · {fmtRelative(todo.updatedAt)}</span>
+                        </span>
+                      </button>
+                    ))}
+                    {!todoCards.length && (
+                      <button
+                        type="button"
+                        onClick={onOpenCommandPalette}
+                        className="flex h-24 w-full items-center justify-center rounded-[16px] border border-dashed border-slate-200 bg-white/58 text-[11px] font-semibold text-slate-500 transition hover:border-blue-200 hover:text-blue-600"
+                      >
+                        Capture Todo
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </aside>
+            </div>
+
+            <div
+              className={cn(
+                'relative z-[1] mt-3 shrink-0 rounded-[24px] border bg-white px-3 py-2 shadow-[0_18px_46px_rgba(96,165,250,0.18),0_10px_34px_rgba(251,113,133,0.08)] transition',
+                ticketDropActive ? 'border-blue-300 ring-4 ring-blue-200/45' : 'border-white',
+              )}
+              onDragOver={handleTicketDropTargetDragOver}
+              onDragLeave={handleTicketDropTargetDragLeave}
+              onDrop={handleTicketDrop}
+              data-testid="personal-dashboard-ticket-dropzone"
+            >
+              {attachedTickets.length > 0 && (
+                <div className="mb-2 flex max-h-[34px] flex-wrap gap-1.5 overflow-hidden">
+                  {attachedTickets.map(ticket => (
+                    <span key={ticket.id} className="inline-flex h-7 max-w-[190px] items-center gap-1.5 rounded-full border border-blue-100 bg-blue-50 px-2 text-[10.5px] font-semibold text-blue-700">
+                      <span className="truncate">{dashboardTicketKey(ticket)}</span>
+                      <button
+                        type="button"
+                        onClick={() => detachWorkbenchTicket(ticket.id)}
+                        className="grid h-4 w-4 shrink-0 place-items-center rounded-full text-blue-500 transition hover:bg-blue-100 hover:text-blue-700"
+                        aria-label={`Remove ${dashboardTicketKey(ticket)}`}
+                      >
+                        <Icon name="close" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onOpenCommandPalette}
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-900 transition hover:bg-slate-100"
+                  aria-label="Attach"
+                >
+                  <Icon name="plus" />
+                </button>
+                <textarea
+                  ref={workbenchComposerRef}
+                  value={workbenchChatDraft}
+                  onChange={event => setWorkbenchChatDraft(event.target.value)}
+                  onKeyDown={handleWorkbenchComposerKeyDown}
+                  className="h-11 min-w-0 flex-1 resize-none bg-transparent py-3 text-[12.5px] leading-5 text-slate-900 outline-none placeholder:text-slate-400"
+                  placeholder={attachedTickets.length ? 'Type a message to start this ticket work' : 'Type a message or drag Jira tickets here'}
+                  data-testid="personal-dashboard-chat-input"
+                />
+                <button
+                  type="button"
+                  onClick={() => void startWorkbenchChat()}
+                  disabled={workbenchChatSending || (!workbenchChatDraft.trim() && !attachedTickets.length)}
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#fff0ed] text-slate-900 transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45"
+                  aria-label="Start chat"
+                  data-testid="personal-dashboard-start-chat"
+                >
+                  {workbenchChatSending ? <Spinner className="h-4 w-4" /> : <Icon name="arrow" />}
+                </button>
+              </div>
+            </div>
+          </main>
+
+          <aside className="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_minmax(180px,0.44fr)] gap-4 overflow-hidden">
+            <section className="flex min-h-0 min-w-0 max-w-full flex-col overflow-hidden rounded-[26px] bg-white p-4 shadow-[0_18px_42px_rgba(15,23,42,0.06)]" data-testid="personal-dashboard-jira-list">
+              <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-blue-100 bg-blue-50 text-blue-600">
+                    <Icon name="dashboard" />
+                  </span>
+                  <div className="min-w-0">
+                    <h2 className="truncate text-[18px] font-semibold text-slate-950">Jira Tickets</h2>
+                    <p className="truncate text-[10.5px] text-slate-500">{jiraTasks.length} linked</p>
+                  </div>
+                </div>
+                <span className="text-[11px] font-semibold text-slate-500">{jiraReviewCount} review</span>
+              </div>
+              <div className="min-h-0 min-w-0 max-w-full flex-1 space-y-2 overflow-y-auto overflow-x-hidden pr-1">
+                {topJiraTickets.map(task => {
+                  const tags = dashboardTicketTags(task);
+                  const description = dashboardTicketDescription(task);
+                  const inProgress = dashboardTicketInProgress(task) || attachedTicketIds.has(task.id) || activeWorkbenchTicketIds.has(task.id);
+                  const count = Math.max(task.stageRuns.length, task.subTasks.length, task.outputs?.length || 0);
+                  return (
+                    <div
+                      key={task.id}
+                      role="button"
+                      tabIndex={0}
+                      draggable
+                      onClick={() => setActiveWorkbenchTicket(task)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setActiveWorkbenchTicket(task);
+                        }
+                      }}
+                      onDragStart={event => handleTicketDragStart(event, task)}
+                      className={cn(
+                        'group h-[70px] w-full min-w-0 max-w-full cursor-pointer overflow-hidden rounded-[15px] border px-2.5 py-2 text-left transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-[0_12px_26px_rgba(15,23,42,0.08)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-100',
+                        attachedTicketIds.has(task.id) ? 'border-blue-200 bg-blue-50/70' : 'border-slate-100 bg-slate-50',
+                      )}
+                      data-testid="personal-dashboard-jira-card"
+                    >
+                      <span className="flex min-w-0 items-center justify-between gap-2">
+                        <span className="min-w-0 truncate text-[10px] font-semibold uppercase text-slate-400">{dashboardTicketKey(task)}</span>
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          <span className={cn('inline-flex h-5 items-center gap-1 rounded-full px-1.5 text-[9.5px] font-semibold', inProgress ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600')}>
+                            <span className={cn('h-1.5 w-1.5 rounded-full', inProgress ? 'bg-blue-500' : 'bg-amber-400')} />
+                            {inProgress ? 'inProgress' : 'attach'}
+                          </span>
+                          <span className="rounded-full bg-white px-1.5 text-[9.5px] font-semibold text-slate-500 shadow-sm">{count}</span>
+                          <button
+                            type="button"
+                            onClick={event => {
+                              event.stopPropagation();
+                              attachWorkbenchTickets([task]);
+                            }}
+                            className="grid h-6 w-6 place-items-center rounded-full bg-white text-slate-500 shadow-sm transition hover:bg-blue-50 hover:text-blue-600"
+                            aria-label={`Add ${dashboardTicketKey(task)} to chat`}
+                            title="Add to chat"
+                          >
+                            <Icon name="arrow" />
+                          </button>
+                        </span>
+                      </span>
+                      <span className="mt-0.5 flex min-w-0 items-baseline gap-1 text-[11.5px] leading-4">
+                        {tags.map(tag => (
+                          <span key={tag} className="shrink-0 font-semibold text-blue-500">{tag}</span>
+                        ))}
+                        <span className="min-w-0 flex-1 truncate font-medium text-slate-800">{task.title}</span>
+                      </span>
+                      <span
+                        className="block text-[10px] leading-3.5 text-slate-500"
+                        style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 1, overflow: 'hidden' }}
+                      >
+                        {description}
+                      </span>
+                    </div>
+                  );
+                })}
+                {!topJiraTickets.length && (
+                  <div className="rounded-[16px] border border-dashed border-slate-200 bg-slate-50 p-4 text-center text-[11px] text-slate-500">No Jira tickets yet.</div>
+                )}
+              </div>
+            </section>
+
+            <section className="flex min-h-0 min-w-0 max-w-full flex-col overflow-hidden rounded-[26px] bg-white p-4 shadow-[0_18px_42px_rgba(15,23,42,0.06)]" data-testid="personal-dashboard-todo-list">
+              <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-emerald-100 bg-emerald-50 text-emerald-600">
+                    <Icon name="workitem" />
+                  </span>
+                  <div className="min-w-0">
+                    <h2 className="truncate text-[18px] font-semibold text-slate-950">Todo</h2>
+                    <p className="truncate text-[10.5px] text-slate-500">{todoCards.length} open</p>
+                  </div>
+                </div>
+                <button type="button" onClick={onOpenCommandPalette} className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-50 text-slate-500 transition hover:text-blue-600" aria-label="Add todo">
+                  <Icon name="plus" />
+                </button>
+              </div>
+              <div className="min-h-0 min-w-0 max-w-full flex-1 space-y-2 overflow-y-auto overflow-x-hidden pr-1">
+                {todoCards.map(todo => (
+                  <button
+                    key={todo.id}
+                    type="button"
+                    onClick={() => setActiveWorkbenchTodo(todo)}
+                    className="group flex min-h-[58px] w-full min-w-0 items-start gap-2 rounded-[15px] bg-slate-50 px-2.5 py-2 text-left transition hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_10px_22px_rgba(15,23,42,0.06)]"
+                  >
+                    <span className={cn('mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg border', todo.toneClass)}>
+                      <Icon name={todo.icon} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-semibold text-slate-900">{todo.title}</span>
+                      <span className="mt-0.5 block truncate text-[10.5px] text-slate-500">{todo.sourceLabel} · {fmtRelative(todo.updatedAt)}</span>
+                    </span>
+                    <span className="mt-1 text-slate-400 transition group-hover:text-blue-600"><Icon name="arrow" /></span>
+                  </button>
+                ))}
+                {!todoCards.length && (
+                  <button
+                    type="button"
+                    onClick={onOpenCommandPalette}
+                    className="flex h-24 w-full items-center justify-center rounded-[16px] border border-dashed border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 transition hover:border-blue-200 hover:text-blue-600"
+                  >
+                    Capture Todo
+                  </button>
+                )}
+              </div>
+            </section>
+          </aside>
+        </div>
+      </div>
+      <div className="absolute bottom-5 right-5 z-[3] hidden flex-col gap-2 rounded-full border border-white/80 bg-white/78 p-2 shadow-[0_18px_42px_rgba(15,23,42,0.12)] backdrop-blur md:flex" data-testid="personal-dashboard-assistant-tool">
+        {[
+          { icon: 'assistant', label: 'Open assistant', action: () => onOpenAssistantDock(favoriteAssistants[0]?.id) },
+          { icon: 'tools', label: 'Commands', action: onOpenCommandPalette },
+          { icon: 'settings', label: 'Settings', action: onOpenCommandPalette },
+        ].map(item => (
+          <button
+            key={item.icon}
+            type="button"
+            onClick={item.action}
+            title={item.label}
+            aria-label={item.label}
+            className="grid h-9 w-9 place-items-center rounded-full text-slate-600 transition hover:-translate-y-0.5 hover:bg-white hover:text-blue-600"
+          >
+            <Icon name={item.icon} />
+          </button>
+        ))}
+      </div>
+      <Modal
+        open={!!activeWorkbenchTicket}
+        onClose={() => setActiveWorkbenchTicket(null)}
+        panelClassName="max-w-[min(680px,calc(100vw-28px))]"
+      >
+        <ModalHeader
+          title={activeWorkbenchTicket ? dashboardTicketKey(activeWorkbenchTicket) : 'Jira Ticket'}
+          description={activeWorkbenchTicket?.jiraFields?.status || activeWorkbenchTicket?.status || undefined}
+          onClose={() => setActiveWorkbenchTicket(null)}
+        />
+        {activeWorkbenchTicket && (
+          <div className="space-y-4">
+            <div className="rounded-[22px] border border-slate-100 bg-slate-50/80 p-4">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-blue-100 bg-blue-50 text-blue-600">
+                  <Icon name="dashboard" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-[17px] font-semibold leading-snug text-slate-950">{activeWorkbenchTicket.title}</h3>
+                  <p className="mt-2 text-[13px] leading-relaxed text-slate-600">{dashboardTicketDescription(activeWorkbenchTicket)}</p>
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {dashboardTicketTags(activeWorkbenchTicket).map(tag => (
+                  <span key={tag} className="rounded-full border border-blue-100 bg-white px-2.5 py-1 text-[11px] font-semibold text-blue-600">{tag}</span>
+                ))}
+                {activeWorkbenchTicket.jiraFields?.priority && (
+                  <span className="rounded-full border border-amber-100 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-600">{activeWorkbenchTicket.jiraFields.priority}</span>
+                )}
+                {dashboardTicketInProgress(activeWorkbenchTicket) && (
+                  <span className="rounded-full border border-emerald-100 bg-white px-2.5 py-1 text-[11px] font-semibold text-emerald-600">inProgress</span>
+                )}
+              </div>
+            </div>
+            <div className="grid gap-2 text-[12px] text-slate-600 sm:grid-cols-2">
+              <div className="rounded-[16px] border border-slate-100 bg-white px-3 py-2">
+                <span className="block text-[10px] font-semibold uppercase text-slate-400">Workspace</span>
+                <span className="mt-1 block truncate font-medium text-slate-800">{activeWorkbenchTicket.workdir || 'No workspace'}</span>
+              </div>
+              <div className="rounded-[16px] border border-slate-100 bg-white px-3 py-2">
+                <span className="block text-[10px] font-semibold uppercase text-slate-400">Updated</span>
+                <span className="mt-1 block font-medium text-slate-800">{formatShortDate(activeWorkbenchTicket.updatedAt)}</span>
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              {activeWorkbenchTicket.jiraUrl && (
+                <a
+                  href={activeWorkbenchTicket.jiraUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-[12px] font-semibold text-slate-700 transition hover:-translate-y-0.5 hover:border-blue-100 hover:text-blue-600"
+                >
+                  <Icon name="arrow" />
+                  Open Jira
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  attachWorkbenchTickets([activeWorkbenchTicket]);
+                  setActiveWorkbenchTicket(null);
+                }}
+                className="inline-flex h-9 items-center gap-2 rounded-full bg-slate-950 px-4 text-[12px] font-semibold text-white transition hover:-translate-y-0.5 hover:bg-slate-800"
+              >
+                <Icon name="plus" />
+                Add to chat
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+      <Modal
+        open={!!activeWorkbenchTodo}
+        onClose={() => setActiveWorkbenchTodo(null)}
+        panelClassName="max-w-[min(620px,calc(100vw-28px))]"
+      >
+        <ModalHeader
+          title={activeWorkbenchTodo?.title || 'Todo'}
+          description={activeWorkbenchTodo ? `${activeWorkbenchTodo.sourceLabel} · ${fmtRelative(activeWorkbenchTodo.updatedAt)}` : undefined}
+          onClose={() => setActiveWorkbenchTodo(null)}
+        />
+        {activeWorkbenchTodo && (
+          <div className="space-y-4">
+            <div className="rounded-[22px] border border-slate-100 bg-slate-50/80 p-4">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl border', activeWorkbenchTodo.toneClass)}>
+                  <Icon name={activeWorkbenchTodo.icon} />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-[17px] font-semibold leading-snug text-slate-950">{activeWorkbenchTodo.title}</h3>
+                  <p className="mt-2 text-[13px] leading-relaxed text-slate-600">{activeWorkbenchTodo.body}</p>
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveWorkbenchTodo(null);
+                  onOpenCommandPalette();
+                }}
+                className="inline-flex h-9 items-center gap-2 rounded-full bg-slate-950 px-4 text-[12px] font-semibold text-white transition hover:-translate-y-0.5 hover:bg-slate-800"
+              >
+                <Icon name="arrow" />
+                Continue
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+      <Modal
+        open={!!activeWorkbenchChat}
+        onClose={() => {
+          setActiveWorkbenchChat(null);
+          setActiveWorkbenchTickets([]);
+        }}
+        wide
+        panelClassName="max-w-[min(1120px,calc(100vw-28px))]"
+      >
+        <ModalHeader
+          title={activeWorkbenchSession ? sessionTitle(activeWorkbenchSession) : 'Chat'}
+          description={activeWorkbenchChat ? `${activeWorkbenchChat.workspaceName} · ${getAgentMeta(activeWorkbenchSession?.agent || primaryAgent).label}` : undefined}
+          onClose={() => {
+            setActiveWorkbenchChat(null);
+            setActiveWorkbenchTickets([]);
+          }}
+        />
+        {activeWorkbenchTickets.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {activeWorkbenchTickets.map(ticket => (
+              <span key={ticket.id} className="inline-flex h-7 max-w-[240px] items-center gap-1.5 rounded-full border border-blue-100 bg-blue-50 px-2.5 text-[11px] font-semibold text-blue-700">
+                <span className="truncate">{dashboardTicketKey(ticket)}</span>
+                <span className="min-w-0 truncate text-blue-500">{ticket.title}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="h-[min(76vh,760px)] min-h-[520px] overflow-hidden rounded-[18px] border border-edge bg-[var(--th-chat-window-bg)]" style={activeWorkbenchChatStyle} data-testid="personal-dashboard-chat-window">
+          {activeWorkbenchChat && activeWorkbenchSession ? (
+            <Suspense fallback={<div className="flex h-full items-center justify-center gap-2 text-sm text-fg-5"><Spinner /> Loading conversation...</div>}>
+              <FocusSessionPanel
+                key={activeWorkbenchChatKey}
+                session={activeWorkbenchSession}
+                workdir={activeWorkbenchChat.workdir}
+                active
+                onSessionChange={handleWorkbenchSessionChange}
+              />
+            </Suspense>
+          ) : (
+            <div className="flex h-full items-center justify-center text-[12px] text-fg-5">No chat selected.</div>
+          )}
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 function ProjectLibrary({
   workspaces,
   recent,
   jiraRemoteRuns,
+  agentStatus,
   reloadWorkspaces,
   reloadRecent,
 }: {
   workspaces: WorkspaceEntry[];
   recent: RecentConversation[];
   jiraRemoteRuns: JiraRemoteUpdateRun[];
+  agentStatus: AgentStatusResponse | null;
   reloadWorkspaces: () => Promise<void>;
   reloadRecent: () => Promise<void>;
 }) {
@@ -8100,8 +9726,24 @@ function ProjectLibrary({
   const toast = useStore(s => s.toast);
   const copy = useMemo(() => copyFor(locale), [locale]);
   const location = useLocation();
+  const projectWorkbenchTargetPath = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get('workdir') || params.get('project') || '';
+  }, [location.search]);
+  const projectWorkbenchFreshKey = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const targetPath = params.get('workdir') || params.get('project') || '';
+    const nonce = params.get('newChat') || '';
+    return targetPath && nonce ? `${targetPath}:${nonce}` : '';
+  }, [location.search]);
   const { pinned, togglePinned, removePinned } = usePinnedProjects();
+  const appliedProjectNewChatKeyRef = useRef('');
   const [projectQuery, setProjectQuery] = useState('');
+  const [activeProjectPath, setActiveProjectPath] = useState('');
+  const [projectChatDraft, setProjectChatDraft] = useState('');
+  const [focusedProjectSession, setFocusedProjectSession] = useState<ChatFocusTarget | null>(null);
+  const [pendingProjectChat, setPendingProjectChat] = useState<PendingProjectChat | null>(null);
+  const [projectChatSending, setProjectChatSending] = useState(false);
   const [editing, setEditing] = useState<WorkspaceEntry | null>(null);
   const [removing, setRemoving] = useState<WorkspaceEntry | null>(null);
   const [editSection, setEditSection] = useState<ProjectEditSection>('general');
@@ -8141,6 +9783,20 @@ function ProjectLibrary({
       workspace.preferredAgent || '',
     ].join(' ').toLowerCase().includes(normalizedProjectQuery));
   }, [normalizedProjectQuery, sorted]);
+  useEffect(() => {
+    if (!filteredProjects.length) {
+      if (activeProjectPath) setActiveProjectPath('');
+      return;
+    }
+    if (!activeProjectPath || !filteredProjects.some(workspace => workspace.path === activeProjectPath)) {
+      setActiveProjectPath(filteredProjects[0].path);
+    }
+  }, [activeProjectPath, filteredProjects]);
+  useEffect(() => {
+    if (!projectWorkbenchTargetPath) return;
+    if (!workspaces.some(workspace => workspace.path === projectWorkbenchTargetPath)) return;
+    setActiveProjectPath(projectWorkbenchTargetPath);
+  }, [projectWorkbenchTargetPath, workspaces]);
   const taskCounts = useMemo(() => {
     const map = new Map<string, number>();
     for (const task of projectTasks) {
@@ -8150,15 +9806,225 @@ function ProjectLibrary({
     return map;
   }, [projectTasks]);
   const readyProjectCount = useMemo(() => workspaces.filter(workspaceHasProjectContext).length, [workspaces]);
-  const pinnedProjectCount = useMemo(() => workspaces.filter(workspace => pinned.has(workspace.path)).length, [pinned, workspaces]);
-  const visibleConversationCount = useMemo(
-    () => filteredProjects.reduce((sum, workspace) => sum + (counts.get(workspace.path) || 0), 0),
-    [counts, filteredProjects],
-  );
   const visibleWorkItemCount = useMemo(
     () => filteredProjects.reduce((sum, workspace) => sum + (taskCounts.get(workspace.path) || 0), 0),
     [filteredProjects, taskCounts],
   );
+  const activeWorkspace = useMemo(
+    () => filteredProjects.find(workspace => workspace.path === activeProjectPath)
+      || sorted.find(workspace => workspace.path === activeProjectPath)
+      || filteredProjects[0]
+      || sorted[0]
+      || null,
+    [activeProjectPath, filteredProjects, sorted],
+  );
+  const activeContextItems = useMemo(() => {
+    if (!activeWorkspace) return [];
+    return [
+      { key: 'rules', label: copy.rules, ready: hasProjectText(activeWorkspace.rules) },
+      { key: 'instructions', label: copy.instructions, ready: hasProjectText(activeWorkspace.instructions) },
+      { key: 'memory', label: copy.projectMemory, ready: hasProjectText(activeWorkspace.memory) },
+    ];
+  }, [activeWorkspace, copy.instructions, copy.projectMemory, copy.rules]);
+  const activeContextCount = activeContextItems.filter(item => item.ready).length;
+  const activeProjectChats = useMemo(() => {
+    if (!activeWorkspace) return [];
+    return recent
+      .filter(item => item.workdir === activeWorkspace.path)
+      .sort((a, b) => sessionTime(b.session) - sessionTime(a.session))
+      .slice(0, 12);
+  }, [activeWorkspace, recent]);
+  const activeProjectLatestChat = activeProjectChats[0] || null;
+  const activeProjectWorkItems = activeWorkspace ? taskCounts.get(activeWorkspace.path) || 0 : 0;
+  const defaultProjectAgent = useMemo(() => {
+    const agents = agentStatus?.agents || [];
+    const configured = agentStatus?.defaultAgent || '';
+    return agents.find(item => item.agent === configured && item.installed && item.agent !== 'openclaw')?.agent
+      || agents.find(item => item.installed && item.agent !== 'openclaw')?.agent
+      || configured
+      || 'codex';
+  }, [agentStatus]);
+  const beginFreshProjectChat = useCallback((workspace: WorkspaceEntry) => {
+    const agent = defaultProjectAgent || 'codex';
+    setPendingProjectChat({
+      id: `pending:${workspace.path}:${Date.now()}`,
+      workdir: workspace.path,
+      agent,
+      createdAt: new Date().toISOString(),
+    });
+    setFocusedProjectSession(null);
+    setProjectChatDraft('');
+  }, [defaultProjectAgent]);
+  useEffect(() => {
+    if (!projectWorkbenchFreshKey || appliedProjectNewChatKeyRef.current === projectWorkbenchFreshKey) return;
+    const workspace = workspaces.find(item => item.path === projectWorkbenchTargetPath);
+    if (!workspace) return;
+    appliedProjectNewChatKeyRef.current = projectWorkbenchFreshKey;
+    setActiveProjectPath(workspace.path);
+    beginFreshProjectChat(workspace);
+  }, [
+    beginFreshProjectChat,
+    projectWorkbenchFreshKey,
+    projectWorkbenchTargetPath,
+    workspaces,
+  ]);
+  const activePendingProjectChat = useMemo(() => {
+    if (!activeWorkspace || pendingProjectChat?.workdir !== activeWorkspace.path) return null;
+    return pendingProjectChat;
+  }, [activeWorkspace, pendingProjectChat]);
+  const activeProjectChatCount = activeProjectChats.length + (activePendingProjectChat ? 1 : 0);
+  const focusProjectConversation = useCallback((item: RecentConversation) => {
+    const agent = item.session.agent || defaultProjectAgent;
+    const sessionId = item.session.sessionId;
+    if (!agent || !sessionId) return;
+    setPendingProjectChat(null);
+    setFocusedProjectSession({
+      workdir: item.workdir,
+      agent,
+      sessionId,
+      nonce: Date.now(),
+      searchContext: null,
+      scrollRequest: null,
+    });
+    prefetchSessionMessages({
+      workdir: item.workdir,
+      agent,
+      sessionId,
+      rich: true,
+      turnOffset: 0,
+      turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+    });
+  }, [defaultProjectAgent]);
+  useEffect(() => {
+    if (!activeWorkspace) {
+      setFocusedProjectSession(null);
+      return;
+    }
+    if (activePendingProjectChat) {
+      if (focusedProjectSession) setFocusedProjectSession(null);
+      return;
+    }
+    if (focusedProjectSession?.workdir === activeWorkspace.path) return;
+    if (activeProjectLatestChat) {
+      focusProjectConversation(activeProjectLatestChat);
+      return;
+    }
+    setFocusedProjectSession(null);
+  }, [
+    activeProjectLatestChat,
+    activePendingProjectChat,
+    activeWorkspace,
+    focusProjectConversation,
+    focusedProjectSession,
+  ]);
+  const focusedProjectSessionInfo = useMemo((): SessionInfo | null => {
+    if (!focusedProjectSession) return null;
+    return recent.find(item => (
+      item.workdir === focusedProjectSession.workdir
+      && (item.session.agent || '') === focusedProjectSession.agent
+      && item.session.sessionId === focusedProjectSession.sessionId
+    ))?.session || {
+      sessionId: focusedProjectSession.sessionId,
+      agent: focusedProjectSession.agent,
+      workdir: focusedProjectSession.workdir,
+      runState: 'completed' as const,
+    };
+  }, [focusedProjectSession, recent]);
+  const focusedProjectSessionKey = focusedProjectSession
+    ? `${focusedProjectSession.workdir}:${focusedProjectSession.agent}:${focusedProjectSession.sessionId}`
+    : '';
+  const focusedProjectTheme = useMemo(() => {
+    const meta = getAgentMeta(focusedProjectSession?.agent || defaultProjectAgent);
+    return {
+      '--pk-session-agent-color': meta.color,
+      '--pk-session-agent-bg': meta.bg,
+      '--pk-session-agent-border': meta.border,
+      '--pk-session-agent-glow': meta.glow,
+    } as CSSProperties;
+  }, [defaultProjectAgent, focusedProjectSession?.agent]);
+  const handleProjectPanelSessionChange = useCallback((next: SessionPanelChange) => {
+    const nextWorkdir = next.workdir || focusedProjectSession?.workdir || activeWorkspace?.path || '';
+    const nextAgent = next.agent || focusedProjectSession?.agent || defaultProjectAgent;
+    const nextSessionId = next.sessionId || focusedProjectSession?.sessionId || '';
+    if (!nextWorkdir || !nextAgent || !nextSessionId) return;
+    setFocusedProjectSession({
+      workdir: nextWorkdir,
+      agent: nextAgent,
+      sessionId: nextSessionId,
+      nonce: Date.now(),
+      searchContext: null,
+      scrollRequest: null,
+    });
+    void reloadRecent();
+  }, [activeWorkspace?.path, defaultProjectAgent, focusedProjectSession, reloadRecent]);
+  const launchActiveProjectChat = useCallback(async () => {
+    if (!activeWorkspace) return;
+    const promptDraft = projectChatDraft.trim();
+    if (!promptDraft || projectChatSending) return;
+    const agent = defaultProjectAgent;
+    if (!agent) {
+      toast(copy.launchFailed, false);
+      return;
+    }
+    setProjectChatSending(true);
+    try {
+      const projectContext = buildProjectContext(activeWorkspace, locale);
+      const contextEnvelope = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
+      const promptWithContext = [contextEnvelope, promptDraft].filter(Boolean).join('\n\n');
+      const result = await api.sendSessionMessage(activeWorkspace.path, agent, '', promptWithContext, {
+        displayPrompt: promptWithContext !== promptDraft ? promptDraft : undefined,
+        projectContext: projectContext?.ref || null,
+      });
+      if (!result.ok) throw new Error(result.error || copy.launchFailed);
+      const parsed = parseSessionKeyValue(result.sessionKey);
+      if (!parsed) throw new Error(copy.launchFailed);
+      setFocusedProjectSession({
+        workdir: activeWorkspace.path,
+        agent: parsed.agent,
+        sessionId: parsed.sessionId,
+        nonce: Date.now(),
+        searchContext: null,
+        scrollRequest: null,
+      });
+      setPendingProjectChat(null);
+      setProjectChatDraft('');
+      await reloadRecent();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : copy.launchFailed, false);
+    } finally {
+      setProjectChatSending(false);
+    }
+  }, [
+    activeWorkspace,
+    copy.launchFailed,
+    defaultProjectAgent,
+    locale,
+    projectChatDraft,
+    projectChatSending,
+    reloadRecent,
+    toast,
+  ]);
+  const startFreshProjectChat = useCallback(() => {
+    if (!activeWorkspace) return;
+    beginFreshProjectChat(activeWorkspace);
+  }, [activeWorkspace, beginFreshProjectChat]);
+  useEffect(() => {
+    if (!focusedProjectSession) return;
+    prefetchSessionMessages({
+      workdir: focusedProjectSession.workdir,
+      agent: focusedProjectSession.agent,
+      sessionId: focusedProjectSession.sessionId,
+      rich: true,
+      turnOffset: 0,
+      turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+    });
+  }, [focusedProjectSession]);
+  const handleProjectChatKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      void launchActiveProjectChat();
+    }
+  }, [launchActiveProjectChat]);
   const reloadProjectTasks = useCallback(async () => {
     setProjectTasksLoading(true);
     try {
@@ -8582,164 +10448,272 @@ function ProjectLibrary({
   return (
     <ProductPage
       title={copy.projects}
-      description="Workspace-backed project library for context, conversations, work items, and launch defaults."
-      headerClassName="pk-directory-header pk-directory-header-projects"
-      action={(
-        <>
-          <Button variant="secondary" onClick={() => void reloadWorkspaces()}>{copy.refresh}</Button>
-          <Button variant="primary" onClick={openCreate}><Icon name="plus" />{copy.addProject}</Button>
-        </>
-      )}
+      description="Pick a project, write the next instruction, and keep its chat history beside the work."
+      flush
+      stableFrame
     >
-      <section className="pk-project-library-surface mb-4 rounded-2xl border border-edge bg-panel/86 p-3 shadow-sm">
-        <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="relative min-w-0 flex-1">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-5"><Icon name="search" /></span>
-            <Input
-              value={projectQuery}
-              onChange={event => setProjectQuery(event.target.value)}
-              placeholder={copy.searchProjects}
-              className="h-9 pl-9 text-[13px]"
-            />
+      <section className="pk-project-workbench">
+        <aside className="pk-project-drawer">
+          <div className="pk-project-drawer-head">
+            <div className="pk-project-drawer-brand">
+              <span><Icon name="folder" /></span>
+              <div className="min-w-0">
+                <strong>{copy.projects}</strong>
+                <small>{workspaces.length} loaded workspaces</small>
+              </div>
+            </div>
+            <button type="button" onClick={openCreate} className="pk-project-drawer-icon" aria-label={copy.addProject}>
+              <Icon name="plus" />
+            </button>
           </div>
-          <div className="grid min-w-0 grid-cols-2 gap-2 md:grid-cols-5 xl:w-[700px]">
-            <div className="pk-project-library-stat">
-              <span>{copy.projects}</span>
-              <strong>{filteredProjects.length}</strong>
-            </div>
-            <div className="pk-project-library-stat">
-              <span>{copy.pin}</span>
-              <strong>{pinnedProjectCount}</strong>
-            </div>
-            <div className="pk-project-library-stat">
-              <span>{copy.chats}</span>
-              <strong>{visibleConversationCount}</strong>
-            </div>
-            <div className="pk-project-library-stat">
-              <span>{copy.projectReady}</span>
-              <strong>{readyProjectCount}</strong>
-            </div>
-            <div className="pk-project-library-stat">
-              <span>{copy.workItems}</span>
-              <strong>{projectTasksLoading ? '...' : visibleWorkItemCount}</strong>
-            </div>
-          </div>
-        </div>
-        <DirectoryPulse tone="projects" />
-      </section>
 
-      <div className="pk-project-library-list overflow-hidden rounded-2xl border border-edge bg-panel/88">
-        {filteredProjects.map((workspace, index) => {
-          const contextReady = workspaceHasProjectContext(workspace);
-          const contextItems = [
-            { key: 'rules', label: copy.rules, ready: hasProjectText(workspace.rules) },
-            { key: 'instructions', label: copy.instructions, ready: hasProjectText(workspace.instructions) },
-            { key: 'memory', label: copy.projectMemory, ready: hasProjectText(workspace.memory) },
-          ];
-          const contextCount = contextItems.filter(item => item.ready).length;
-          const recentCount = counts.get(workspace.path) || 0;
-          const workItemCount = taskCounts.get(workspace.path) || 0;
-          return (
-            <article
-              key={workspace.path}
-              style={{ '--pk-row-index': index } as CSSProperties}
-              className="pk-project-library-row pk-directory-row group flex min-w-0 flex-col gap-3 border-b border-edge/55 bg-transparent px-3 py-3 transition-[background-color,box-shadow] last:border-b-0 hover:bg-panel-h/82 lg:flex-row lg:items-center lg:gap-4"
-            >
-              <div className="flex min-w-0 flex-1 items-center gap-3">
-                <div className={cn(
-                  'grid h-10 w-10 shrink-0 place-items-center rounded-xl border text-[12px] font-semibold transition-colors',
-                  contextReady ? 'border-primary/25 bg-primary/[0.10] text-primary' : 'border-edge bg-inset text-fg-3',
-                )}>
-                  {workspaceDisplayName(workspace).slice(0, 2).toUpperCase()}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <Link to={projectDetailUrl(workspace.path)} className="group/title block min-w-0">
-                    <h2 className="truncate text-[14px] font-semibold text-fg group-hover/title:text-primary">{workspaceDisplayName(workspace)}</h2>
-                    <p className="mt-0.5 truncate font-mono text-[11px] text-fg-5">{workspace.path}</p>
-                  </Link>
-                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-fg-5">
-                    <span className={cn(
-                      'inline-flex h-6 items-center rounded-full border px-2 font-semibold',
-                      contextReady ? 'border-primary/25 bg-primary/[0.08] text-primary' : 'border-edge bg-inset text-fg-5',
-                    )}>
-                      {copy.projectContext} {contextCount}/3
-                    </span>
-                    {pinned.has(workspace.path) && (
-                      <span className="inline-flex h-6 items-center rounded-full border border-primary/20 bg-primary/[0.06] px-2 font-semibold text-primary">
-                        {copy.pin}
-                      </span>
-                    )}
-                    <span className="truncate">{workspace.preferredAgent || 'Runtime default'}</span>
-                  </div>
-                </div>
-              </div>
-              <div className="grid min-w-0 grid-cols-3 gap-2 text-[11px] lg:w-[310px]">
-                <div className="pk-project-library-metric">
-                  <span>{copy.chats}</span>
-                  <strong>{recentCount}</strong>
-                </div>
-                <div className="pk-project-library-metric">
-                  <span>{copy.workItems}</span>
-                  <strong>{projectTasksLoading ? '...' : workItemCount}</strong>
-                </div>
-                <div className="pk-project-library-metric">
-                  <span>{copy.projectContext}</span>
-                  <strong>{contextCount}/3</strong>
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
-                <Link to={projectDetailUrl(workspace.path)} className="inline-flex h-8 items-center justify-center rounded-md border border-transparent bg-primary px-3 text-[12px] font-medium text-primary-fg transition-colors hover:bg-primary-hover">
-                  {copy.open}
-                </Link>
-                <Link to={`/chat?project=${encodeURIComponent(workspace.path)}`} className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-edge bg-transparent px-2.5 text-[12px] font-medium text-fg-3 transition-colors hover:bg-panel-alt hover:text-fg">
-                  <Icon name="chat" />
-                  {copy.newChat}
-                </Link>
+          <div className="pk-project-drawer-search">
+            <div className="relative min-w-0">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-5"><Icon name="search" /></span>
+              <Input
+                value={projectQuery}
+                onChange={event => setProjectQuery(event.target.value)}
+                placeholder={copy.searchProjects}
+                className="h-10 rounded-xl border-edge/70 bg-control pl-9 text-[13px]"
+              />
+            </div>
+          </div>
+
+          <div className="pk-project-drawer-label">
+            <span>Loaded projects</span>
+            <button type="button" onClick={() => void reloadWorkspaces()}>{copy.refresh}</button>
+          </div>
+
+          <div className="pk-project-drawer-list">
+            {filteredProjects.map((workspace, index) => {
+              const contextReady = workspaceHasProjectContext(workspace);
+              const contextCount = [
+                workspace.rules,
+                workspace.instructions,
+                workspace.memory,
+              ].filter(hasProjectText).length;
+              const recentCount = counts.get(workspace.path) || 0;
+              const workItemCount = taskCounts.get(workspace.path) || 0;
+              const isActive = activeWorkspace?.path === workspace.path;
+              return (
                 <button
+                  key={workspace.path}
                   type="button"
-                  onClick={() => togglePinned(workspace.path)}
-                  className="inline-flex h-8 items-center justify-center rounded-md border border-edge bg-transparent px-2.5 text-[12px] font-medium text-fg-4 transition-colors hover:bg-panel-alt hover:text-fg"
+                  data-active={isActive}
+                  onClick={() => setActiveProjectPath(workspace.path)}
+                  style={{ '--pk-row-index': index } as CSSProperties}
+                  className="pk-project-drawer-item"
                 >
-                  {pinned.has(workspace.path) ? copy.unpin : copy.pin}
+                  <span className={cn(
+                    'pk-project-drawer-avatar',
+                    contextReady ? 'pk-project-drawer-avatar-ready' : '',
+                  )}>
+                    {workspaceDisplayName(workspace).slice(0, 2).toUpperCase()}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-[13px] font-semibold text-fg">{workspaceDisplayName(workspace)}</span>
+                      {pinned.has(workspace.path) && (
+                        <span className="pk-project-drawer-pin">{copy.pin}</span>
+                      )}
+                    </span>
+                    <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
+                      <span className="truncate font-mono">{workspaceBaseName(workspace.path)}</span>
+                      <span className="shrink-0">{contextCount}/3</span>
+                      {workItemCount > 0 && <span className="shrink-0">{workItemCount} work</span>}
+                    </span>
+                  </span>
+                  <span className="pk-project-drawer-count">{recentCount}</span>
                 </button>
-                <details className="relative z-20">
-                  <summary
-                    aria-label="Manage project"
-                    className="pk-details-summary inline-flex h-8 cursor-pointer select-none items-center justify-center rounded-md border border-edge bg-transparent px-2.5 text-[13px] font-semibold text-fg-4 transition-colors hover:bg-panel-alt hover:text-fg"
-                    style={{ listStyle: 'none' }}
-                  >
-                    ...
-                  </summary>
-                  <div className="mt-1 w-44 overflow-hidden rounded-lg border border-edge bg-panel p-1 shadow-xl sm:absolute sm:right-0 sm:z-50">
-                    <Link to="/chat-workspace" className="inline-flex h-7 items-center rounded-md px-2 text-[11px] font-medium text-fg-4 transition-colors hover:bg-panel-h hover:text-fg">
-                      {copy.openAdvanced}
-                    </Link>
-                    <button
-                      type="button"
-                      onClick={() => openEdit(workspace)}
-                      className="h-7 rounded-md px-2 text-left text-[11px] font-medium text-fg-4 transition-colors hover:bg-panel-h hover:text-fg"
-                    >
+              );
+            })}
+            {!filteredProjects.length && (
+              <div className="flex h-32 items-center justify-center px-4 text-center text-[13px] text-fg-5">
+                {copy.noResults}
+              </div>
+            )}
+          </div>
+
+          <div className="pk-project-drawer-foot">
+            <span>{readyProjectCount}/{workspaces.length} context ready</span>
+            <span>{projectTasksLoading ? '...' : visibleWorkItemCount} work items</span>
+          </div>
+        </aside>
+
+        <main className="pk-project-room">
+          {activeWorkspace ? (
+            <>
+              <section className="pk-project-chat-main">
+                <div className="pk-project-room-topbar">
+                  <div className="pk-project-room-identity">
+                    <span className="pk-project-room-badge"><Icon name="folder" /></span>
+                    <div className="min-w-0">
+                      <strong>{workspaceDisplayName(activeWorkspace)}</strong>
+                      <span>{activeWorkspace.path}</span>
+                    </div>
+                  </div>
+                  <div className="pk-project-room-actions">
+                    <button type="button" onClick={() => togglePinned(activeWorkspace.path)}>
+                      {pinned.has(activeWorkspace.path) ? copy.unpin : copy.pin}
+                    </button>
+                    <button type="button" onClick={() => openEdit(activeWorkspace)}>
                       {copy.editProject}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setRemoving(workspace)}
-                      className="h-7 rounded-md px-2 text-left text-[11px] font-medium text-red-600 transition-colors hover:bg-red-50 hover:text-red-700 dark:text-red-300 dark:hover:bg-red-500/10"
-                    >
-                      {copy.removeProject}
+                    <button type="button" onClick={startFreshProjectChat} data-primary="true" data-testid="project-new-chat-button">
+                      {copy.newChat}
                     </button>
+                    <Link to={projectDetailUrl(activeWorkspace.path)}>Project console</Link>
                   </div>
-                </details>
-              </div>
-            </article>
-          );
-        })}
-        {!filteredProjects.length && (
-          <div className="flex h-32 items-center justify-center px-4 text-center text-[13px] text-fg-5">
-            {copy.noResults}
-          </div>
-        )}
-      </div>
+                </div>
+
+                <div className="pk-project-chat-window">
+                  {focusedProjectSession && focusedProjectSessionInfo ? (
+                    <div className="pk-project-session-frame" style={focusedProjectTheme}>
+                      <Suspense fallback={<div className="flex h-full items-center justify-center gap-2 text-sm text-fg-5"><Spinner /> Loading conversation...</div>}>
+                        <FocusSessionPanel
+                          key={focusedProjectSessionKey}
+                          session={focusedProjectSessionInfo}
+                          workdir={focusedProjectSession.workdir}
+                          active
+                          onSessionChange={handleProjectPanelSessionChange}
+                        />
+                      </Suspense>
+                    </div>
+                  ) : (
+                    <>
+	                      <div className="pk-project-chat-hero">
+	                        <div className="pk-project-chat-orb">{workspaceDisplayName(activeWorkspace).slice(0, 1).toUpperCase()}</div>
+	                        <h2>{activePendingProjectChat ? 'New chat' : `Chat with ${workspaceDisplayName(activeWorkspace)}`}</h2>
+	                        <p>{activePendingProjectChat
+	                          ? `${workspaceDisplayName(activeWorkspace)} · ${getAgentMeta(activePendingProjectChat.agent || defaultProjectAgent).label}`
+	                          : 'Project context and chat history stay attached here.'}</p>
+	                      </div>
+
+                      <div className="pk-project-chat-composer">
+                        <textarea
+                          value={projectChatDraft}
+                          onChange={event => setProjectChatDraft(event.target.value)}
+                          onKeyDown={handleProjectChatKeyDown}
+                          placeholder={`Ask ${workspaceDisplayName(activeWorkspace)} what to do next...`}
+                          rows={5}
+                        />
+                        <div className="pk-project-chat-composer-footer">
+                          <div className="pk-project-chat-tools">
+                            {activeContextItems.map(item => (
+                              <button
+                                key={item.key}
+                                type="button"
+                                data-ready={item.ready}
+                                onClick={() => openEdit(activeWorkspace, item.key as ProjectEditSection)}
+                              >
+                                <span />
+                                {item.label}
+                              </button>
+                            ))}
+                          </div>
+                          <button type="button" onClick={() => void launchActiveProjectChat()} className="pk-project-chat-send" aria-label={copy.newChat} disabled={projectChatSending || !projectChatDraft.trim()}>
+                            {projectChatSending ? <Spinner /> : <Icon name="arrow" />}
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+	                <div className="pk-project-chat-statusbar">
+	                  <span>{activeContextCount}/3 {copy.projectContext}</span>
+	                  <span>{activeProjectChatCount} {copy.chats}</span>
+	                  <span>{projectTasksLoading ? '...' : activeProjectWorkItems} {copy.workItems}</span>
+	                  <button type="button" onClick={() => setRemoving(activeWorkspace)}>{copy.removeProject}</button>
+                </div>
+              </section>
+
+              <aside className="pk-project-history-rail">
+                <div className="pk-project-history-header">
+                  <div>
+	                    <span>Chat History</span>
+	                    <strong>{workspaceDisplayName(activeWorkspace)}</strong>
+	                  </div>
+	                  <span>{activeProjectChatCount}</span>
+	                </div>
+	                <div className="pk-project-history-list" data-testid="project-chat-history-list">
+	                  {activePendingProjectChat && (
+	                    <button
+	                      key={activePendingProjectChat.id}
+	                      type="button"
+	                      data-active={!focusedProjectSession}
+	                      data-pending="true"
+	                      data-testid="project-history-pending-row"
+	                      onClick={() => setFocusedProjectSession(null)}
+	                      style={{ '--pk-row-index': 0 } as CSSProperties}
+	                      className="pk-project-history-row"
+	                    >
+	                      <span className="pk-project-history-dot" />
+	                      <span className="min-w-0 flex-1">
+	                        <span className="block truncate text-[13px] font-semibold text-fg">New chat</span>
+	                        <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
+	                          <span>{getAgentMeta(activePendingProjectChat.agent || defaultProjectAgent).label}</span>
+	                          <span>Draft</span>
+	                        </span>
+	                      </span>
+	                    </button>
+	                  )}
+	                  {activeProjectChats.map((item, index) => {
+                    const historyAgent = item.session.agent || defaultProjectAgent;
+                    const isFocused = !!focusedProjectSession
+                      && focusedProjectSession.workdir === item.workdir
+                      && focusedProjectSession.agent === historyAgent
+                      && focusedProjectSession.sessionId === item.session.sessionId;
+                    return (
+                    <button
+                      key={item.key}
+	                      type="button"
+	                      data-active={isFocused}
+	                      data-testid="project-chat-history-row"
+	                      onClick={() => focusProjectConversation(item)}
+                      onMouseEnter={() => {
+                        if (historyAgent && item.session.sessionId) {
+                          prefetchSessionMessages({
+                            workdir: item.workdir,
+                            agent: historyAgent,
+                            sessionId: item.session.sessionId,
+                            rich: true,
+                            turnOffset: 0,
+                            turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+                          });
+                        }
+                      }}
+	                      style={{ '--pk-row-index': index + (activePendingProjectChat ? 1 : 0) } as CSSProperties}
+	                      className="pk-project-history-row"
+                    >
+                      <span className="pk-project-history-dot" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] font-semibold text-fg">{sessionTitle(item.session)}</span>
+                        <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-fg-5">
+                          <span>{item.session.agent || 'agent'}</span>
+                          <span>{formatShortDate(item.session.runUpdatedAt || item.session.runStartedAt || item.session.createdAt)}</span>
+                        </span>
+                      </span>
+                    </button>
+                    );
+                  })}
+	                  {!activeProjectChatCount && (
+                    <div className="pk-project-history-empty">
+                      <Icon name="chat" />
+                      <span>No project chats yet.</span>
+                      <button type="button" onClick={startFreshProjectChat}>{copy.newChat}</button>
+                    </div>
+                  )}
+                </div>
+              </aside>
+            </>
+          ) : (
+            <div className="flex h-full min-h-[360px] items-center justify-center text-center text-[13px] text-fg-5">
+              {copy.noResults}
+            </div>
+          )}
+        </main>
+      </section>
       {renderProjectSettingsModal()}
       {renderProjectCreateModal()}
       {renderProjectRemoveModal()}
@@ -8836,6 +10810,16 @@ function ConversationsView({
   const visibleProjectCount = useMemo(() => new Set(searched.map(item => item.workdir)).size, [searched]);
   const runningCount = conversationFilters.find(item => item.key === 'running')?.count || 0;
   const incompleteCount = conversationFilters.find(item => item.key === 'incomplete')?.count || 0;
+  const attentionFeed = useMemo(() => {
+    const items = queryMatched
+      .map<ConversationAttentionItem | null>(item => {
+        const tone = conversationAttentionTone(item.session);
+        return tone ? { item, tone } : null;
+      })
+      .filter((item): item is ConversationAttentionItem => item !== null)
+      .sort((a, b) => conversationAttentionWeight(a.tone) - conversationAttentionWeight(b.tone) || sessionTime(b.item.session) - sessionTime(a.item.session));
+    return { items: items.slice(0, 7), total: items.length };
+  }, [queryMatched]);
 
   useEffect(() => {
     setSelectedKeys(prev => {
@@ -9035,6 +11019,19 @@ function ConversationsView({
     setSelectedKeys(new Set());
   }, []);
 
+  const warmConversationHistory = useCallback((item: RecentConversation) => {
+    const agent = item.session.agent || '';
+    if (!agent) return;
+    prefetchSessionMessages({
+      workdir: item.workdir,
+      agent,
+      sessionId: item.session.sessionId,
+      rich: true,
+      turnOffset: 0,
+      turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+    });
+  }, []);
+
   const exportSelectedChats = useCallback(async () => {
     if (actionBusy || !selectedItems.length) return;
     setActionBusy('batch-export');
@@ -9156,6 +11153,9 @@ function ConversationsView({
         <Link
           to={buildChatFocusUrl({ workdir: item.workdir, agent: item.session.agent || '', sessionId: item.session.sessionId })}
           state={chatFocusState({ workdir: item.workdir, agent: item.session.agent || '', sessionId: item.session.sessionId })}
+          onMouseEnter={() => warmConversationHistory(item)}
+          onFocus={() => warmConversationHistory(item)}
+          onMouseDown={() => warmConversationHistory(item)}
           className="min-w-0"
         >
           <div className="flex min-w-0 items-center gap-3">
@@ -9265,7 +11265,7 @@ function ConversationsView({
         </div>
     </article>
     );
-  }, [actionBusy, archiveChat, copy.archive, copy.conversationFilterCompleted, copy.delete, copy.exportChat, copy.moveToProject, copy.pin, copy.rename, copy.schedule, copy.select, copy.unpin, creatingSchedule, exportChat, openRename, openSchedule, selectedKeys, togglePinChat, toggleSelectedChat]);
+  }, [actionBusy, archiveChat, copy.archive, copy.conversationFilterCompleted, copy.delete, copy.exportChat, copy.moveToProject, copy.pin, copy.rename, copy.schedule, copy.select, copy.unpin, creatingSchedule, exportChat, openRename, openSchedule, selectedKeys, togglePinChat, toggleSelectedChat, warmConversationHistory]);
 
   return (
     <ProductPage
@@ -9358,37 +11358,44 @@ function ConversationsView({
       {loading ? (
         <div className="flex h-32 items-center justify-center gap-2 text-sm text-fg-4"><Spinner />{copy.loading}</div>
       ) : (
-        <div className="min-w-0 space-y-5">
-          {resume.length > 0 && (
-            <section className="pk-conversation-section min-w-0">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{copy.jumpBackIn}</div>
-                <div className="h-px flex-1 bg-edge/55" />
-              </div>
-              <div className="pk-conversation-directory-list min-w-0 overflow-hidden rounded-2xl border border-edge bg-panel/88">
-                {resume.map(renderConversation)}
-              </div>
-            </section>
-          )}
-          {pinned.length > 0 && (
-            <section className="pk-conversation-section min-w-0">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{copy.starred}</div>
-                <div className="h-px flex-1 bg-edge/55" />
-              </div>
-              <div className="pk-conversation-directory-list min-w-0 overflow-hidden rounded-2xl border border-edge bg-panel/88">{pinned.map(renderConversation)}</div>
-            </section>
-          )}
-          {dateSections.map(section => (
-            <section key={section.label} className="pk-conversation-section min-w-0">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{section.label}</div>
-                <div className="h-px flex-1 bg-edge/55" />
-              </div>
-              <div className="pk-conversation-directory-list min-w-0 overflow-hidden rounded-2xl border border-edge bg-panel/88">{section.items.map(renderConversation)}</div>
-            </section>
-          ))}
-          {!searched.length && <div className="rounded-xl border border-dashed border-edge bg-panel/60 p-8 text-center text-sm text-fg-5">{normalized ? copy.noResults : copy.noRecents}</div>}
+        <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1fr)_360px] 2xl:items-start">
+          <div className="order-2 min-w-0 space-y-5 2xl:order-1">
+            {resume.length > 0 && (
+              <section className="pk-conversation-section min-w-0">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{copy.jumpBackIn}</div>
+                  <div className="h-px flex-1 bg-edge/55" />
+                </div>
+                <div className="pk-conversation-directory-list min-w-0 overflow-hidden rounded-2xl border border-edge bg-panel/88">
+                  {resume.map(renderConversation)}
+                </div>
+              </section>
+            )}
+            {pinned.length > 0 && (
+              <section className="pk-conversation-section min-w-0">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{copy.starred}</div>
+                  <div className="h-px flex-1 bg-edge/55" />
+                </div>
+                <div className="pk-conversation-directory-list min-w-0 overflow-hidden rounded-2xl border border-edge bg-panel/88">{pinned.map(renderConversation)}</div>
+              </section>
+            )}
+            {dateSections.map(section => (
+              <section key={section.label} className="pk-conversation-section min-w-0">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">{section.label}</div>
+                  <div className="h-px flex-1 bg-edge/55" />
+                </div>
+                <div className="pk-conversation-directory-list min-w-0 overflow-hidden rounded-2xl border border-edge bg-panel/88">{section.items.map(renderConversation)}</div>
+              </section>
+            ))}
+            {!searched.length && <div className="rounded-xl border border-dashed border-edge bg-panel/60 p-8 text-center text-sm text-fg-5">{normalized ? copy.noResults : copy.noRecents}</div>}
+          </div>
+          <ConversationAttentionFeed
+            items={attentionFeed.items}
+            total={attentionFeed.total}
+            onWarmConversation={warmConversationHistory}
+          />
         </div>
       )}
 
@@ -9599,6 +11606,108 @@ function ConversationsView({
         </div>
       </Modal>
     </ProductPage>
+  );
+}
+
+function ConversationAttentionFeed({
+  items,
+  total,
+  onWarmConversation,
+}: {
+  items: ConversationAttentionItem[];
+  total: number;
+  onWarmConversation: (item: RecentConversation) => void;
+}) {
+  const hiddenCount = Math.max(0, total - items.length);
+
+  return (
+    <aside className="order-1 min-w-0 rounded-2xl border border-edge/75 bg-panel/82 p-2.5 shadow-sm 2xl:sticky 2xl:top-4 2xl:order-2" aria-label="Unread agent conversations">
+      <div className="mb-2 flex min-w-0 items-center justify-between gap-3 px-1">
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">Unread</div>
+          <h2 className="truncate text-[13px] font-semibold text-fg">Agent inbox</h2>
+        </div>
+        <span className={cn(
+          'inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-full border px-2 text-[11px] font-semibold',
+          total ? 'border-primary/25 bg-primary/[0.08] text-primary' : 'border-edge bg-inset text-fg-5',
+        )}>
+          {total}
+        </span>
+      </div>
+
+      {items.length ? (
+        <div className="space-y-1.5">
+          {items.map(({ item, tone }) => {
+            const agent = item.session.agent || '';
+            const meta = getAgentMeta(agent);
+            const title = sessionTitle(item.session);
+            const preview = conversationAttentionPreview(item.session) || item.workspaceName;
+            const updated = fmtRelative(item.session.runUpdatedAt || item.session.runStartedAt || item.session.createdAt);
+            return (
+              <Link
+                key={item.key}
+                to={buildChatFocusUrl({ workdir: item.workdir, agent, sessionId: item.session.sessionId })}
+                state={chatFocusState({ workdir: item.workdir, agent, sessionId: item.session.sessionId })}
+                onMouseEnter={() => onWarmConversation(item)}
+                onFocus={() => onWarmConversation(item)}
+                onMouseDown={() => onWarmConversation(item)}
+                className="group/attention grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-2.5 rounded-xl border border-edge/60 bg-inset/58 px-2.5 py-2.5 text-left transition-[border-color,background-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/25 hover:bg-panel-h hover:shadow-[0_10px_28px_rgba(15,23,42,0.08)]"
+              >
+                <span
+                  className={cn(
+                    'relative grid h-10 w-10 shrink-0 place-items-center rounded-xl border',
+                    tone === 'running' && 'border-warn/30 bg-warn/[0.08]',
+                    tone === 'review' && 'border-err/25 bg-err/[0.06]',
+                    tone === 'unread' && 'border-ok/25 bg-ok/[0.06]',
+                  )}
+                  title={meta.label}
+                >
+                  <BrandIcon brand={agent} size={18} className="rounded-[4px]" />
+                  <span
+                    className={cn(
+                      'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-panel',
+                      tone === 'running' && 'bg-warn shadow-[0_0_10px_var(--th-warn-glow)]',
+                      tone === 'review' && 'bg-err shadow-[0_0_10px_var(--th-err-glow)]',
+                      tone === 'unread' && 'bg-ok shadow-[0_0_10px_var(--th-ok-glow)]',
+                    )}
+                    aria-hidden="true"
+                  />
+                </span>
+                <span className="min-w-0">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-[12.5px] font-semibold text-fg">{title}</span>
+                    <span className={cn(
+                      'shrink-0 rounded-md border px-1.5 py-0.5 text-[9.5px] font-semibold',
+                      tone === 'running' && 'border-warn/25 bg-warn/[0.08] text-warn',
+                      tone === 'review' && 'border-err/25 bg-err/[0.07] text-err',
+                      tone === 'unread' && 'border-ok/25 bg-ok/[0.07] text-ok',
+                    )}>
+                      {conversationAttentionLabel(tone)}
+                    </span>
+                  </span>
+                  <span className="mt-1 line-clamp-2 text-[11px] leading-5 text-fg-4">{preview}</span>
+                  <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10.5px] text-fg-5">
+                    <span className="truncate">{item.workspaceName}</span>
+                    <span className="h-1 w-1 shrink-0 rounded-full bg-fg-6" />
+                    <span className="shrink-0">{meta.shortLabel}</span>
+                  </span>
+                </span>
+                <span className="shrink-0 self-start rounded-md border border-edge/65 bg-panel px-1.5 py-0.5 text-[10px] font-medium text-fg-5">{updated}</span>
+              </Link>
+            );
+          })}
+          {hiddenCount > 0 && (
+            <div className="rounded-lg border border-dashed border-edge/70 bg-inset/45 px-3 py-2 text-center text-[11px] font-medium text-fg-5">
+              +{hiddenCount} more
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-edge/70 bg-inset/45 px-3 py-5 text-center text-[12px] text-fg-5">
+          All caught up
+        </div>
+      )}
+    </aside>
   );
 }
 
@@ -9879,6 +11988,7 @@ function FocusedConversationView({
   reloadRecent: () => Promise<void>;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [dismissedSearchNonce, setDismissedSearchNonce] = useState<number | null>(null);
   const [fallbackSession, setFallbackSession] = useState<SessionInfo | null>(null);
   const targetKey = `${target.workdir}:${target.agent}:${target.sessionId}`;
@@ -9892,6 +12002,18 @@ function FocusedConversationView({
     setDismissedSearchNonce(null);
     setFallbackSession(null);
   }, [targetKey, target.nonce]);
+
+  useEffect(() => {
+    if (!target.agent || !target.sessionId || !target.workdir) return;
+    prefetchSessionMessages({
+      workdir: target.workdir,
+      agent: target.agent,
+      sessionId: target.sessionId,
+      rich: true,
+      turnOffset: 0,
+      turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+    });
+  }, [target.agent, target.sessionId, target.workdir]);
 
   useEffect(() => {
     if (recentMatch) return;
@@ -9923,29 +12045,37 @@ function FocusedConversationView({
     '--pk-session-agent-glow': agentMeta.glow,
   }) as CSSProperties, [agentMeta.bg, agentMeta.border, agentMeta.color, agentMeta.glow]);
   const searchContext = target.searchContext && dismissedSearchNonce !== target.nonce ? target.searchContext : null;
+  const inlineChatFocus = location.pathname === '/chat';
   const backTarget = target.searchContext ? '/search' : '/conversations';
-  const backLabel = target.searchContext ? 'Back to search' : 'Back to conversations';
+  const backLabel = inlineChatFocus ? 'Back to new chat' : target.searchContext ? 'Back to search' : 'Back to conversations';
+
+  const handleBack = useCallback(() => {
+    if (inlineChatFocus) {
+      navigate('/chat', { replace: true, state: null });
+      return;
+    }
+    navigate(backTarget);
+  }, [backTarget, inlineChatFocus, navigate]);
 
   const handleSessionChange = useCallback((next: SessionPanelChange) => {
     const nextWorkdir = next.workdir || target.workdir;
     const nextAgent = next.agent || target.agent;
     const nextSessionId = next.sessionId || target.sessionId;
-    const params = new URLSearchParams();
-    params.set('workdir', nextWorkdir);
-    params.set('agent', nextAgent);
-    params.set('session', nextSessionId);
-    params.set('nonce', String(Date.now()));
-    navigate(`/conversations/session?${params.toString()}`, { replace: true, state: chatFocusState({ workdir: nextWorkdir, agent: nextAgent, sessionId: nextSessionId }) });
+    const state = chatFocusState({ workdir: nextWorkdir, agent: nextAgent, sessionId: nextSessionId });
+    navigate(inlineChatFocus ? '/chat' : buildChatFocusUrl({ workdir: nextWorkdir, agent: nextAgent, sessionId: nextSessionId }), {
+      replace: true,
+      state,
+    });
     void reloadRecent();
-  }, [navigate, reloadRecent, target.agent, target.sessionId, target.workdir]);
+  }, [inlineChatFocus, navigate, reloadRecent, target.agent, target.sessionId, target.workdir]);
 
   return (
     <div className="pk-focused-conversation flex h-full min-h-0 flex-col bg-[var(--th-chat-window-bg)]" style={conversationTheme} data-state={displayState}>
-      <header className="pk-focused-conversation-header absolute inset-x-0 top-0 z-30 h-12 border-b border-edge/35 px-3 backdrop-blur-xl">
-        <div className="flex h-full min-w-0 items-center gap-2">
+      <header className="pk-focused-conversation-header pointer-events-none absolute inset-x-0 top-0 z-30 h-12 border-b border-edge/35 px-3">
+        <div className="pointer-events-auto flex h-full min-w-0 items-center gap-2">
           <button
             type="button"
-            onClick={() => navigate(backTarget)}
+            onClick={handleBack}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-edge/60 bg-control/82 text-fg-4 shadow-sm transition hover:-translate-x-0.5 hover:border-edge-h hover:bg-panel-h hover:text-fg"
             aria-label={backLabel}
             title={backLabel}
@@ -28721,6 +30851,52 @@ export function WaylandShell({
   const [recentLoading, setRecentLoading] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [chatLaunchTransition, setChatLaunchTransition] = useState<ChatLaunchTransition | null>(null);
+  const [assistantDockOpen, setAssistantDockOpen] = useState(false);
+  const [assistantDockAssistantId, setAssistantDockAssistantId] = useState('');
+  const chatLaunchClearTimerRef = useRef<number | null>(null);
+
+  const openAssistantDock = useCallback((assistantId?: string) => {
+    if (assistantId) setAssistantDockAssistantId(assistantId);
+    setAssistantDockOpen(true);
+  }, []);
+
+  const clearChatLaunchTransition = useCallback(() => {
+    if (chatLaunchClearTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchClearTimerRef.current);
+      chatLaunchClearTimerRef.current = null;
+    }
+    setChatLaunchTransition(null);
+  }, []);
+
+  const startChatLaunchTransition = useCallback((transition: ChatLaunchTransitionDraft) => {
+    if (chatLaunchClearTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchClearTimerRef.current);
+      chatLaunchClearTimerRef.current = null;
+    }
+    setChatLaunchTransition({
+      id: Date.now(),
+      phase: 'launching',
+      ...transition,
+    });
+  }, []);
+
+  const settleChatLaunchTransition = useCallback(() => {
+    setChatLaunchTransition(current => current ? { ...current, phase: 'settling' } : current);
+    if (chatLaunchClearTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchClearTimerRef.current);
+    }
+    chatLaunchClearTimerRef.current = window.setTimeout(() => {
+      chatLaunchClearTimerRef.current = null;
+      setChatLaunchTransition(null);
+    }, CHAT_LAUNCH_SETTLE_MS);
+  }, []);
+
+  useEffect(() => () => {
+    if (chatLaunchClearTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchClearTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -28742,7 +30918,7 @@ export function WaylandShell({
       }
       if (!editableTarget && (event.metaKey || event.ctrlKey) && key === 'n') {
         event.preventDefault();
-        navigate('/chat');
+        navigate('/chat', { state: null });
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -28945,16 +31121,59 @@ export function WaylandShell({
     [agentStatus?.defaultAgent, assistants, automations, launchpadWorkItems, workflowRecipes],
   );
 
-	  const content = (() => {
-	    if (chatFocusTarget) {
-	      return <FocusedConversationView target={chatFocusTarget} recent={recent} workspaces={workspaces} reloadRecent={loadRecent} />;
-	    }
-	    if (view === 'chat') {
-	      return <ChatHome workspaces={workspaces} assistants={assistants} automations={automations} workflowRecipes={workflowRecipes} workflowRuns={launchpadWorkflowRuns} workItems={launchpadWorkItems} todoItems={launchpadTodoItems} inboxItems={launchpadInboxItems} dailyItems={launchpadDailyItems} notePages={launchpadNotePages} jiraRemoteRuns={launchpadJiraRemoteRuns} recent={recent} agentStatus={agentStatus} reloadRecent={loadRecent} reloadAutomations={loadAutomations} reloadWorkItems={loadLaunchpadWorkItems} onOpenCommandPalette={() => setPaletteOpen(true)} />;
-	    }
+		  const content = (() => {
+		    if (chatFocusTarget) {
+		      return <FocusedConversationView target={chatFocusTarget} recent={recent} workspaces={workspaces} reloadRecent={loadRecent} />;
+		    }
+		    if (view === 'chat') {
+		      return (
+		        <ChatHome
+		          workspaces={workspaces}
+		          assistants={assistants}
+		          automations={automations}
+		          workflowRecipes={workflowRecipes}
+		          workflowRuns={launchpadWorkflowRuns}
+		          workItems={launchpadWorkItems}
+		          todoItems={launchpadTodoItems}
+		          inboxItems={launchpadInboxItems}
+		          dailyItems={launchpadDailyItems}
+		          notePages={launchpadNotePages}
+		          jiraRemoteRuns={launchpadJiraRemoteRuns}
+		          recent={recent}
+		          agentStatus={agentStatus}
+		          reloadRecent={loadRecent}
+		          reloadAutomations={loadAutomations}
+			          reloadWorkItems={loadLaunchpadWorkItems}
+			          onOpenCommandPalette={() => setPaletteOpen(true)}
+			          chatLaunchTransition={chatLaunchTransition}
+			          onChatLaunchTransitionStart={startChatLaunchTransition}
+			          onChatLaunchTransitionSettle={settleChatLaunchTransition}
+		          onChatLaunchTransitionClear={clearChatLaunchTransition}
+		        />
+		      );
+		    }
+    if (view === 'dashboard') {
+      return (
+        <PersonalDashboardView
+          assistants={assistants}
+          workflowRuns={launchpadWorkflowRuns}
+          workItems={launchpadWorkItems}
+          inboxItems={launchpadInboxItems}
+          dailyItems={launchpadDailyItems}
+          notePages={launchpadNotePages}
+          jiraRemoteRuns={launchpadJiraRemoteRuns}
+          recent={recent}
+          agentStatus={agentStatus}
+          reloadRecent={loadRecent}
+          reloadWorkItems={loadLaunchpadWorkItems}
+          onOpenCommandPalette={() => setPaletteOpen(true)}
+          onOpenAssistantDock={openAssistantDock}
+        />
+      );
+    }
     if (view === 'conversations') return <ConversationsView recent={recent} loading={recentLoading} workspaces={workspaces} reloadRecent={loadRecent} reloadAutomations={loadAutomations} />;
     if (view === 'search') return <SearchView workspaces={workspaces} assistants={assistants} automations={automations} workflowRecipes={workflowRecipes} recent={recent} />;
-    if (view === 'projects') return <ProjectLibrary workspaces={workspaces} recent={recent} jiraRemoteRuns={launchpadJiraRemoteRuns} reloadWorkspaces={loadWorkspaces} reloadRecent={loadRecent} />;
+    if (view === 'projects') return <ProjectLibrary workspaces={workspaces} recent={recent} jiraRemoteRuns={launchpadJiraRemoteRuns} agentStatus={agentStatus} reloadWorkspaces={loadWorkspaces} reloadRecent={loadRecent} />;
     if (view === 'work-items') return <WorkItemsView workspaces={workspaces} launchpadSeedKeys={launchpadSeedKeys} />;
     if (view === 'assistants') return <AssistantLibraryView assistants={assistants} automations={automations} agentStatus={agentStatus} reloadAssistants={loadAssistants} launchpadSeedKeys={launchpadSeedKeys} />;
     if (view === 'workflows') {
@@ -29032,9 +31251,28 @@ export function WaylandShell({
         version={version}
         restartPhase={restartPhase}
         onRestartClick={onRestartClick}
+        assistantDockOpen={assistantDockOpen}
+        onOpenAssistantDock={() => openAssistantDock()}
       />
-      <main className="pk-wayland-main min-w-0 flex-1 overflow-hidden">
-        {content}
+      <main className="pk-wayland-main relative min-w-0 flex-1 overflow-hidden">
+        <div className="flex h-full min-h-0 min-w-0">
+          {assistantDockOpen && (
+            <AssistantSideDock
+              assistants={assistants}
+              workspaces={workspaces}
+              agentStatus={agentStatus}
+              recent={recent}
+              selectedAssistantId={assistantDockAssistantId}
+              onSelectedAssistantChange={setAssistantDockAssistantId}
+              onClose={() => setAssistantDockOpen(false)}
+              reloadRecent={loadRecent}
+            />
+          )}
+          <div className="min-w-0 flex-1 overflow-hidden">
+            {content}
+          </div>
+        </div>
+        {chatLaunchTransition && <ChatLaunchTransitionOverlay transition={chatLaunchTransition} />}
       </main>
       <CommandPalette
         open={paletteOpen}

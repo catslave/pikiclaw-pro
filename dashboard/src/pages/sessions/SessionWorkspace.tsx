@@ -68,6 +68,7 @@ const PAGE_SIZE = 15;
 const AUTO_PREFETCH_DELAY_MS = 240;
 const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
+const CHAT_WORKSPACE_HANDOFF_MS = 680;
 const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 const SESSION_COMPLETION_CELEBRATION_MS = 1800;
 const STATUS_SUMMARY_RECENT_MS = 24 * 60 * 60 * 1000;
@@ -487,6 +488,16 @@ type ChatWorkspaceBetaItem = {
   workdir: string;
   workspaceName: string;
 };
+type ChatWorkspaceProjectItem = {
+  workspace: WorkspaceEntry;
+  workspaceName: string;
+  sessionCount: number;
+  runningCount: number;
+  attentionCount: number;
+  openCount: number;
+  latestAt?: string;
+  hasProjectContext: boolean;
+};
 type RecentConversationGroupKey = 'today' | 'yesterday' | 'thisWeek' | 'older';
 type RecentConversationGroup = {
   key: RecentConversationGroupKey;
@@ -861,6 +872,334 @@ function ChatWorkspaceWorkingItemCard({
         </button>
       )}
     </div>
+  );
+}
+
+function ChatWorkspaceProjectCard({
+  item,
+  active,
+  onSelect,
+  onNewChat,
+  onProjectContext,
+  onKnowledge,
+  t,
+}: {
+  item: ChatWorkspaceProjectItem;
+  active?: boolean;
+  onSelect: () => void;
+  onNewChat: () => void;
+  onProjectContext: () => void;
+  onKnowledge: () => void;
+  t: (key: string) => string;
+}) {
+  const workspace = item.workspace;
+  const originalName = workspaceBaseName(workspace.path);
+  const hasAlias = item.workspaceName !== originalName;
+  const latestLabel = item.latestAt ? fmtRelative(item.latestAt) : t('chatWorkspace.emptyItems');
+
+  return (
+    <div
+      className={cn(
+        'group/project relative mx-2 rounded-xl border bg-panel/66 shadow-sm transition-[border-color,background,box-shadow,transform] duration-150 hover:-translate-y-0.5 hover:border-edge-h hover:bg-panel-h/78',
+        active
+          ? 'border-primary/45 bg-primary/[0.075] shadow-[0_14px_34px_rgba(59,130,246,0.12)] ring-1 ring-primary/18'
+          : 'border-edge/55',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        className="block w-full rounded-xl p-3 pr-11 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+        title={workspace.path}
+      >
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span
+            className={cn(
+              'grid h-9 w-9 shrink-0 place-items-center rounded-xl border text-[13px] font-black uppercase shadow-sm',
+              active ? 'border-primary/35 bg-primary/[0.12] text-primary' : 'border-edge/60 bg-inset text-fg-4',
+            )}
+          >
+            {(item.workspaceName || originalName || 'P').slice(0, 1)}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-fg">{item.workspaceName}</span>
+              {item.hasProjectContext && (
+                <span className="shrink-0 rounded border border-primary/25 bg-primary/[0.09] px-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-primary">
+                  ctx
+                </span>
+              )}
+            </span>
+            {hasAlias && (
+              <span className="mt-0.5 block truncate text-[10px] text-fg-5/70">{originalName}</span>
+            )}
+            <span className="mt-2 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
+              <span className="shrink-0 font-mono tabular-nums">{item.sessionCount}</span>
+              <span className="min-w-0 truncate">{t('chatWorkspace.recentConversations')}</span>
+              <span className="shrink-0">·</span>
+              <span className="shrink-0 tabular-nums">{latestLabel}</span>
+            </span>
+          </span>
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-1.5">
+          <span className="rounded-lg border border-edge/45 bg-inset/55 px-2 py-1.5">
+            <span className="block font-mono text-[11px] font-semibold text-fg-2 tabular-nums">{item.runningCount}</span>
+            <span className="block truncate text-[9px] font-medium text-fg-5">{t('chat.columnLabel.running')}</span>
+          </span>
+          <span className="rounded-lg border border-edge/45 bg-inset/55 px-2 py-1.5">
+            <span className="block font-mono text-[11px] font-semibold text-fg-2 tabular-nums">{item.attentionCount}</span>
+            <span className="block truncate text-[9px] font-medium text-fg-5">{t('chatWorkspace.attention')}</span>
+          </span>
+          <span className="rounded-lg border border-edge/45 bg-inset/55 px-2 py-1.5">
+            <span className="block font-mono text-[11px] font-semibold text-fg-2 tabular-nums">{item.openCount}</span>
+            <span className="block truncate text-[9px] font-medium text-fg-5">{t('chatWorkspace.openWindows')}</span>
+          </span>
+        </div>
+      </button>
+      <div className="absolute right-2 top-2 flex flex-col gap-1 opacity-0 transition-opacity group-hover/project:opacity-100 group-focus-within/project:opacity-100">
+        <button
+          type="button"
+          onClick={event => {
+            event.stopPropagation();
+            onNewChat();
+          }}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-edge/55 bg-panel/88 text-primary shadow-sm transition hover:border-primary/35 hover:bg-primary/[0.10]"
+          title={t('chatWorkspace.newChat')}
+          aria-label={t('chatWorkspace.newChat')}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+            <path d="M12 5v14" />
+            <path d="M5 12h14" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          onClick={event => {
+            event.stopPropagation();
+            onProjectContext();
+          }}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-edge/55 bg-panel/88 text-fg-5 shadow-sm transition hover:border-edge-h hover:bg-panel-h hover:text-fg-2"
+          title={t('chatWorkspace.editProjectContext')}
+          aria-label={t('chatWorkspace.editProjectContext')}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          onClick={event => {
+            event.stopPropagation();
+            onKnowledge();
+          }}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-edge/55 bg-panel/88 text-fg-5 shadow-sm transition hover:border-edge-h hover:bg-panel-h hover:text-fg-2"
+          title={t('chatWorkspace.openProjectMemory')}
+          aria-label={t('chatWorkspace.openProjectMemory')}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ChatWorkspaceProjectRail({
+  items,
+  loading,
+  query,
+  activeWorkdir,
+  onSelectProject,
+  onNewChat,
+  onProjectContext,
+  onKnowledge,
+  t,
+}: {
+  items: ChatWorkspaceProjectItem[];
+  loading: boolean;
+  query: string;
+  activeWorkdir: string;
+  onSelectProject: (workdir: string) => void;
+  onNewChat: (workdir: string) => void;
+  onProjectContext: (workspace: WorkspaceEntry) => void;
+  onKnowledge: (workdir: string) => void;
+  t: (key: string) => string;
+}) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = normalizedQuery
+    ? items.filter(item => (
+      item.workspaceName.toLowerCase().includes(normalizedQuery)
+      || item.workspace.path.toLowerCase().includes(normalizedQuery)
+    ))
+    : items;
+
+  if (loading && items.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center py-12">
+        <Spinner className="h-4 w-4 text-fg-5" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-edge/25 px-4 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-[12px] font-semibold text-fg">{t('hub.allWorkspaces')}</div>
+            <div className="mt-0.5 truncate text-[10px] text-fg-5">{t('chatWorkspace.launcherTitle')} · {t('chatWorkspace.recentConversations')}</div>
+          </div>
+          <span className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 font-mono text-[9px] font-semibold text-fg-5">
+            {filtered.length}
+          </span>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto py-2">
+        {filtered.length ? filtered.map(item => (
+          <ChatWorkspaceProjectCard
+            key={item.workspace.path}
+            item={item}
+            active={normalizeLocalPathForCompare(item.workspace.path) === normalizeLocalPathForCompare(activeWorkdir)}
+            onSelect={() => onSelectProject(item.workspace.path)}
+            onNewChat={() => onNewChat(item.workspace.path)}
+            onProjectContext={() => onProjectContext(item.workspace)}
+            onKnowledge={() => onKnowledge(item.workspace.path)}
+            t={t}
+          />
+        )) : (
+          <div className="mx-2 rounded-xl border border-dashed border-edge/55 bg-inset/45 px-3 py-8 text-center text-[12px] text-fg-5">
+            {items.length ? t('chatWorkspace.noWorkspaceMatch') : t('hub.noWorkspaces')}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ChatWorkspaceHistoryRail({
+  activeWorkspace,
+  historyItems,
+  openItems,
+  selectedKey,
+  selectedWorkdir,
+  openSessionKeys,
+  onSelectSession,
+  onSelectOpenSlot,
+  onWarmSession,
+  onCancelWarmSession,
+  onSessionMenuOpen,
+  onCreateSchedule,
+  onNewChat,
+  t,
+}: {
+  activeWorkspace: WorkspaceEntry | null;
+  historyItems: ChatWorkspaceBetaItem[];
+  openItems: Array<{ slot: SessionSlot; slotIdx: number; item: ChatWorkspaceBetaItem; live: LiveSessionState | null }>;
+  selectedKey: string | null;
+  selectedWorkdir: string | null;
+  openSessionKeys: Set<string>;
+  onSelectSession: (session: SessionInfo, workdir: string) => void;
+  onSelectOpenSlot: (slotIdx: number, item: ChatWorkspaceBetaItem) => void;
+  onWarmSession: (session: SessionInfo, workdir: string) => void;
+  onCancelWarmSession: (session: SessionInfo, workdir: string) => void;
+  onSessionMenuOpen: (anchor: DOMRect, session: SessionInfo, workdir: string) => void;
+  onCreateSchedule: (session: SessionInfo, workdir: string) => void;
+  onNewChat: (workdir: string) => void;
+  t: (key: string) => string;
+}) {
+  const workspaceName = activeWorkspace?.name || (activeWorkspace?.path ? workspaceBaseName(activeWorkspace.path) : t('hub.workspace'));
+  const activePath = activeWorkspace?.path || '';
+
+  return (
+    <aside className="flex max-h-[320px] min-h-0 shrink-0 flex-col overflow-hidden rounded-[18px] border border-edge/65 bg-panel/72 shadow-sm backdrop-blur-md xl:max-h-none xl:w-[336px]">
+      <div className="border-b border-edge/30 px-3 py-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-[12px] font-semibold text-fg">{workspaceName}</span>
+              <span className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 font-mono text-[9px] font-semibold text-fg-5">
+                {historyItems.length}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[10px] text-fg-5" title={activePath}>
+              {t('chatWorkspace.recentConversations')}
+            </div>
+          </div>
+          <Button
+            variant="primary"
+            size="icon"
+            onClick={() => activePath && onNewChat(activePath)}
+            disabled={!activePath}
+            title={t('chatWorkspace.newChat')}
+            aria-label={t('chatWorkspace.newChat')}
+            className="h-8 w-8 shrink-0"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </Button>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
+        {openItems.length > 0 && (
+          <section className="mb-4">
+            <div className="mb-2 flex items-center justify-between px-1">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{t('chatWorkspace.openWindows')}</div>
+              <span className="font-mono text-[10px] text-fg-5">{openItems.length}</span>
+            </div>
+            <div className="space-y-2">
+              {openItems.map(entry => (
+                <ChatWorkspaceWorkingItemCard
+                  key={`${entry.item.key}:project-open`}
+                  item={entry.item}
+                  live={entry.live}
+                  active={selectedWorkdir === entry.item.workdir && selectedKey === sKey(entry.slot.agent, entry.slot.sessionId)}
+                  onSelect={() => onSelectOpenSlot(entry.slotIdx, entry.item)}
+                  onCreateSchedule={() => onCreateSchedule(entry.item.session, entry.item.workdir)}
+                  t={t}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section>
+          <div className="mb-2 flex items-center justify-between px-1">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{t('chatWorkspace.recentConversations')}</div>
+            <span className="font-mono text-[10px] text-fg-5">{historyItems.length}</span>
+          </div>
+          {historyItems.length ? (
+            <div className="space-y-1">
+              {historyItems.map(item => {
+                const itemKey = sKey(item.session.agent || '', item.session.sessionId);
+                return (
+                  <RecentConversationCard
+                    key={`${item.key}:project-history`}
+                    item={item}
+                    selected={selectedWorkdir === item.workdir && selectedKey === itemKey}
+                    open={openSessionKeys.has(itemKey)}
+                    onSelect={() => onSelectSession(item.session, item.workdir)}
+                    onWarm={() => onWarmSession(item.session, item.workdir)}
+                    onCancelWarm={() => onCancelWarmSession(item.session, item.workdir)}
+                    onShowMenu={anchor => onSessionMenuOpen(anchor, item.session, item.workdir)}
+                    onCreateSchedule={() => onCreateSchedule(item.session, item.workdir)}
+                    t={t}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-edge/55 bg-inset/45 px-3 py-8 text-center text-[12px] text-fg-5">
+              {t('chatWorkspace.emptyItems')}
+            </div>
+          )}
+        </section>
+      </div>
+    </aside>
   );
 }
 
@@ -1276,6 +1615,44 @@ function ChatWorkspaceLauncher({
   );
 }
 
+function ChatWorkspaceLaunchHandoffView({
+  handoff,
+  t,
+}: {
+  handoff: ChatWorkspaceLaunchHandoff;
+  t: (key: string) => string;
+}) {
+  return (
+    <section className="pk-chat-handoff flex min-h-0 flex-1 flex-col overflow-hidden rounded-[18px] border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]">
+      <div className="pk-chat-handoff-stream min-h-0 flex-1 overflow-hidden px-4 py-4">
+        <div className="mx-auto flex h-full max-w-[920px] flex-col justify-end gap-3 pb-2">
+          <div className="pk-chat-handoff-message">
+            <UserBubble text={handoff.prompt} blocks={[]} createdAt={handoff.createdAt} t={t} />
+          </div>
+          <div className="pk-chat-handoff-thinking">
+            <ThinkingDots className="text-fg-5" />
+          </div>
+        </div>
+      </div>
+      <div className="pk-chat-handoff-dock px-4 pb-4">
+        <div className="mx-auto max-w-[920px] rounded-xl border border-control-border bg-control shadow-[var(--th-composer-shadow-focus)]">
+          <div className="flex min-w-0 items-center gap-1.5 border-b border-edge/35 px-2 py-1.5">
+            <span className="max-w-[42%] truncate rounded-md border border-edge/55 bg-panel-alt px-2 py-1 text-[10px] font-semibold text-fg-4" title={handoff.workdir}>
+              {handoff.workspaceName}
+            </span>
+            <span className="min-w-0 truncate rounded-md border border-primary/20 bg-primary/[0.07] px-2 py-1 text-[10px] font-semibold text-primary">
+              {handoff.targetLabel}
+            </span>
+          </div>
+          <div className="flex min-h-[52px] items-center px-3 py-2 text-[13px] text-fg-5">
+            <span className="min-w-0 truncate">{handoff.prompt}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function chatWorkspaceAutomationTitle(rule: AutomationRule, fallback: string) {
   const name = rule.name.trim();
   if (name) return name;
@@ -1394,6 +1771,13 @@ type WorkspaceProjectContextDraft = {
   memory: string;
 };
 type FilePanelRequest = { workdir: string; path: string; line?: number; nonce: number };
+type ChatWorkspaceLaunchHandoff = {
+  prompt: string;
+  workdir: string;
+  workspaceName: string;
+  targetLabel: string;
+  createdAt: string;
+};
 
 /**
  * Reorder a flat session list so fork descendants render right after their
@@ -3142,6 +3526,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatWorkspaceAutomations, setChatWorkspaceAutomations] = useState<AutomationRule[]>([]);
   const [chatWorkspaceAutomationsLoading, setChatWorkspaceAutomationsLoading] = useState(false);
   const [chatWorkspaceAutomationRunningId, setChatWorkspaceAutomationRunningId] = useState<string | null>(null);
+  const [chatWorkspaceLaunchHandoff, setChatWorkspaceLaunchHandoff] = useState<ChatWorkspaceLaunchHandoff | null>(null);
   const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
   const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
   const [memoryLibraryOpen, setMemoryLibraryOpen] = useState(false);
@@ -3149,6 +3534,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatProjectPickerNonce, setChatProjectPickerNonce] = useState(0);
   const [chatTargetAssistantRequest, setChatTargetAssistantRequest] = useState<ChatTargetAssistantRequest | null>(null);
   const [chatLauncherWorkdir, setChatLauncherWorkdir] = useState<string | null>(null);
+  const [chatWorkspaceFocusedSessionKey, setChatWorkspaceFocusedSessionKey] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openAssistantLibrary = useCallback((assistantId?: string) => {
@@ -4599,6 +4985,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     // atomically with the slot/active changes. If set outside, the "pending" render still
     // shows the OLD active panel which would consume the prompt before the new panel mounts.
     startTransition(() => {
+      setChatWorkspaceLaunchHandoff(null);
+      if (mode === 'chat-workspace') {
+        setChatLauncherWorkdir(next.workdir);
+        setChatWorkspaceFocusedSessionKey(sessionSlotStorageKey(slot));
+      }
       setNewSessionPendingPrompt(pendingPrompt || null);
       setNewSessionPendingImageUrls(pendingImageUrls && pendingImageUrls.length ? pendingImageUrls : []);
       setNewSessionPendingCreatedAt(createdAt);
@@ -4618,7 +5009,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       });
     });
     void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
-  }, [loadSessionsForWorkspace, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
+  }, [loadSessionsForWorkspace, mode, setActiveSlotIndex, setOpenSessions, setShowNewSession, warmSession]);
 
   const openStageRunSession = useCallback((run: StageRun) => {
     const slot: SessionSlot = {
@@ -4975,6 +5366,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setNewSessionInitialAutoSend(false);
       setShowNewSession(null);
       setChatLauncherWorkdir(wsPath);
+      setChatWorkspaceFocusedSessionKey(null);
+      setChatWorkspaceLaunchHandoff(null);
       setChatProjectPickerNonce(Date.now());
       return;
     }
@@ -7079,44 +7472,65 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const handleChatWorkspaceLaunch = useCallback(async (workdir: string, prompt: string, target: ChatWorkspaceLaunchTarget) => {
     const createdAt = new Date().toISOString();
     const workspace = workspaces.find(ws => ws.path === workdir) || null;
+    const workspaceName = workspace?.name || workspaceBaseName(workdir);
+    const targetLabel = target.kind === 'assistant'
+      ? (chatAssistants.find(item => item.id === target.assistantId)?.name || t('chatWorkspace.targetAssistant'))
+      : target.kind === 'model'
+        ? `${shortenModel(target.model)} · ${getAgentMeta(target.agent).shortLabel}`
+        : getAgentMeta(target.agent || chatWorkspaceDefaultAgent || '').shortLabel;
+    const handoffStartedAt = Date.now();
+    setChatLauncherWorkdir(workdir);
+    setChatWorkspaceFocusedSessionKey(null);
+    setChatWorkspaceLaunchHandoff({ prompt, workdir, workspaceName, targetLabel, createdAt });
+    const finishHandoff = async () => {
+      const remaining = CHAT_WORKSPACE_HANDOFF_MS - (Date.now() - handoffStartedAt);
+      if (remaining > 0) await new Promise(resolve => window.setTimeout(resolve, remaining));
+    };
     const projectContext = buildWorkspaceProjectContext(workspace, locale);
     const projectContextRef = projectContext?.projectContext || null;
     const referenceContext = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
     const promptWithContext = [referenceContext, prompt].filter(Boolean).join('\n\n');
-    if (target.kind === 'assistant') {
-      const assistant = chatAssistants.find(item => item.id === target.assistantId);
-      if (!assistant) throw new Error(t('chatWorkspace.launchFailed'));
-      const assistantAgent = assistant.preferredAgents?.find(item => String(item || '').trim()) || chatWorkspaceDefaultAgent || null;
-      const res = await api.runProAssistant(assistant.id, {
-        prompt: promptWithContext,
+    try {
+      if (target.kind === 'assistant') {
+        const assistant = chatAssistants.find(item => item.id === target.assistantId);
+        if (!assistant) throw new Error(t('chatWorkspace.launchFailed'));
+        const assistantAgent = assistant.preferredAgents?.find(item => String(item || '').trim()) || chatWorkspaceDefaultAgent || null;
+        const res = await api.runProAssistant(assistant.id, {
+          prompt: promptWithContext,
+          displayPrompt: promptWithContext !== prompt ? prompt : undefined,
+          workdir,
+          agent: assistantAgent,
+          projectContext: projectContextRef,
+        });
+        if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
+        const parsed = res.session || (res.queued?.sessionKey ? parseSessionKeyValue(res.queued.sessionKey) : null);
+        if (!parsed) throw new Error(t('chatWorkspace.launchFailed'));
+        await finishHandoff();
+        handleNewSessionCreated({
+          agent: parsed.agent,
+          sessionId: parsed.sessionId,
+          workdir: 'workdir' in parsed && parsed.workdir ? parsed.workdir : workdir,
+          assistantId: assistant.id,
+          assistantName: assistant.name,
+        }, prompt, undefined, createdAt);
+        return;
+      }
+      const agent = target.agent || chatWorkspaceDefaultAgent;
+      if (!agent) throw new Error(t('chatWorkspace.noAgent'));
+      const res = await api.sendSessionMessage(workdir, agent, '', promptWithContext, {
+        model: target.kind === 'model' ? target.model : undefined,
         displayPrompt: promptWithContext !== prompt ? prompt : undefined,
-        workdir,
-        agent: assistantAgent,
         projectContext: projectContextRef,
       });
       if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
-      const parsed = res.session || (res.queued?.sessionKey ? parseSessionKeyValue(res.queued.sessionKey) : null);
-      if (!parsed) throw new Error(t('chatWorkspace.launchFailed'));
-      handleNewSessionCreated({
-        agent: parsed.agent,
-        sessionId: parsed.sessionId,
-        workdir: 'workdir' in parsed && parsed.workdir ? parsed.workdir : workdir,
-        assistantId: assistant.id,
-        assistantName: assistant.name,
-      }, prompt, undefined, createdAt);
-      return;
+      const nextSession = parseSessionKeyValue(res.sessionKey);
+      if (!nextSession) throw new Error(t('chatWorkspace.launchFailed'));
+      await finishHandoff();
+      handleNewSessionCreated({ ...nextSession, workdir }, prompt, undefined, createdAt);
+    } catch (err) {
+      setChatWorkspaceLaunchHandoff(null);
+      throw err;
     }
-    const agent = target.agent || chatWorkspaceDefaultAgent;
-    if (!agent) throw new Error(t('chatWorkspace.noAgent'));
-    const res = await api.sendSessionMessage(workdir, agent, '', promptWithContext, {
-      model: target.kind === 'model' ? target.model : undefined,
-      displayPrompt: promptWithContext !== prompt ? prompt : undefined,
-      projectContext: projectContextRef,
-    });
-    if (!res.ok) throw new Error(res.error || t('chatWorkspace.launchFailed'));
-    const nextSession = parseSessionKeyValue(res.sessionKey);
-    if (!nextSession) throw new Error(t('chatWorkspace.launchFailed'));
-    handleNewSessionCreated({ ...nextSession, workdir }, prompt, undefined, createdAt);
   }, [chatAssistants, chatWorkspaceDefaultAgent, handleNewSessionCreated, locale, t, workspaces]);
 
   const handleChatWorkspaceRunAutomation = useCallback(async (automation: AutomationRule) => {
@@ -7139,7 +7553,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, [chatWorkspaceAutomationRunningId, handleNewSessionCreated, runtimeWorkdir, t, toastSession, workspaces]);
 
-  const chatWorkspaceFocusSlot = selectedSession;
+  const chatWorkspaceActiveWorkdir = chatLauncherWorkdir
+    || showNewSession
+    || (chatWorkspaceFocusedSessionKey && selectedSession ? selectedSession.workdir : '')
+    || runtimeWorkdir
+    || workspaces[0]?.path
+    || '';
+  const chatWorkspaceActiveWorkspace = workspaces.find(ws => ws.path === chatWorkspaceActiveWorkdir)
+    || (chatWorkspaceActiveWorkdir ? { path: chatWorkspaceActiveWorkdir, name: workspaceBaseName(chatWorkspaceActiveWorkdir) } : null);
+  const chatWorkspaceFocusSlot = selectedSession && chatWorkspaceFocusedSessionKey === sessionSlotStorageKey(selectedSession)
+    ? selectedSession
+    : null;
   const chatWorkspaceFocusInfo = chatWorkspaceFocusSlot ? resolveSlotInfo(chatWorkspaceFocusSlot) : null;
   const chatWorkspaceFocusWorkspaceName = chatWorkspaceFocusSlot
     ? workspaces.find(ws => ws.path === chatWorkspaceFocusSlot.workdir)?.name || workspaceBaseName(chatWorkspaceFocusSlot.workdir)
@@ -7152,9 +7576,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     : null;
   const chatWorkspaceOpenWindowItems = openSessions.map((slot, slotIdx) => {
     const session = resolveSlotInfo(slot);
+    const key = sKey(slot.agent, slot.sessionId);
+    const live = liveSessionStates[key]
+      || Object.values(liveSessionStates).find(state => state.resolvedKey === key)
+      || null;
     return {
       slot,
       slotIdx,
+      live,
       item: {
         key: `${slot.workdir}:${sKey(slot.agent, slot.sessionId)}`,
         session,
@@ -7163,7 +7592,85 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       },
     };
   });
-  const chatWorkspaceNewSessionWorkdir = chatLauncherWorkdir || showNewSession || runtimeWorkdir || workspaces[0]?.path || '';
+  const chatWorkspaceProjectItems = useMemo<ChatWorkspaceProjectItem[]>(() => {
+    const openCounts = new Map<string, number>();
+    for (const entry of chatWorkspaceOpenWindowItems) {
+      openCounts.set(entry.slot.workdir, (openCounts.get(entry.slot.workdir) || 0) + 1);
+    }
+    return workspaces.map(workspace => {
+      const sessions = filteredByWs[workspace.path] || [];
+      let latest = 0;
+      let runningCount = 0;
+      let attentionCount = 0;
+      for (const session of sessions) {
+        const key = sKey(session.agent || '', session.sessionId);
+        const live = liveSessionStates[key]
+          || Object.values(liveSessionStates).find(state => state.resolvedKey === key)
+          || null;
+        const displayState = sessionDisplayState(session);
+        const running = live?.phase === 'queued' || live?.phase === 'streaming' || displayState === 'running';
+        if (running) runningCount += 1;
+        if (
+          running
+          || displayState === 'incomplete'
+          || shouldMarkSessionReadOnOpen(session)
+          || session.userStatus === 'inbox'
+          || session.userStatus === 'review'
+        ) {
+          attentionCount += 1;
+        }
+        latest = Math.max(latest, statusTimestampMs(session) || 0);
+      }
+      return {
+        workspace,
+        workspaceName: workspace.name || workspaceBaseName(workspace.path),
+        sessionCount: sessions.length,
+        runningCount,
+        attentionCount,
+        openCount: openCounts.get(workspace.path) || 0,
+        latestAt: latest ? new Date(latest).toISOString() : undefined,
+        hasProjectContext: workspaceHasProjectContext(workspace),
+      };
+    });
+  }, [chatWorkspaceOpenWindowItems, filteredByWs, liveSessionStates, workspaces]);
+  const chatWorkspaceHistoryItems = useMemo<ChatWorkspaceBetaItem[]>(() => {
+    if (!chatWorkspaceActiveWorkdir) return [];
+    const workspaceName = chatWorkspaceActiveWorkspace?.name || workspaceBaseName(chatWorkspaceActiveWorkdir);
+    return (filteredByWs[chatWorkspaceActiveWorkdir] || [])
+      .filter(session => !!session.agent && !!session.sessionId)
+      .map(session => ({
+        key: `${chatWorkspaceActiveWorkdir}:${sKey(session.agent || '', session.sessionId)}`,
+        session,
+        workdir: chatWorkspaceActiveWorkdir,
+        workspaceName,
+      }));
+  }, [chatWorkspaceActiveWorkdir, chatWorkspaceActiveWorkspace?.name, filteredByWs]);
+  const chatWorkspaceProjectOpenWindowItems = chatWorkspaceOpenWindowItems.filter(entry => entry.item.workdir === chatWorkspaceActiveWorkdir);
+  const chatWorkspaceSelectedKey = chatWorkspaceFocusSlot ? sKey(chatWorkspaceFocusSlot.agent, chatWorkspaceFocusSlot.sessionId) : null;
+  const chatWorkspaceSelectedWorkdir = chatWorkspaceFocusSlot?.workdir || null;
+  const chatWorkspaceNewSessionWorkdir = chatWorkspaceActiveWorkdir;
+  const handleChatWorkspaceProjectSelect = useCallback((workdir: string) => {
+    setChatLauncherWorkdir(workdir);
+    setChatWorkspaceFocusedSessionKey(null);
+    setChatWorkspaceLaunchHandoff(null);
+  }, []);
+  const handleChatWorkspaceHistorySelect = useCallback((session: SessionInfo, workdir: string) => {
+    const agent = session.agent || '';
+    if (!agent || !session.sessionId) return;
+    setChatLauncherWorkdir(workdir);
+    setChatWorkspaceFocusedSessionKey(sessionSlotStorageKey({ workdir, agent, sessionId: session.sessionId }));
+    handleSelectSession(session, workdir);
+  }, [handleSelectSession]);
+  const handleChatWorkspaceOpenSlotSelect = useCallback((slotIdx: number, item: ChatWorkspaceBetaItem) => {
+    const slot = openSessionsRef.current[slotIdx];
+    if (!slot) return;
+    setChatLauncherWorkdir(slot.workdir);
+    setChatWorkspaceFocusedSessionKey(sessionSlotStorageKey(slot));
+    warmSession(item.session, slot.workdir);
+    markSessionReadOnOpen(item.session, slot.workdir);
+    setShowNewSession(null);
+    setActiveSlotIndex(slotIdx);
+  }, [markSessionReadOnOpen, setActiveSlotIndex, setShowNewSession, warmSession]);
 
   if (false && mode === 'chat-workspace') {
     const betaItems: ChatWorkspaceBetaItem[] = [];
@@ -7543,7 +8050,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             </Button>
-            {!taskFocusId && (
+            {mode !== 'chat-workspace' && !taskFocusId && (
               <Button
                 variant={isMultiChatLayout(chatLayout) ? 'secondary' : 'ghost'}
                 size="icon"
@@ -7565,7 +8072,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
         {/* Workspace list */}
         <div className="flex-1 overflow-y-auto">
-          {sidebarLoading ? (
+          {mode === 'chat-workspace' ? (
+            <ChatWorkspaceProjectRail
+              items={chatWorkspaceProjectItems}
+              loading={sidebarLoading}
+              query={search}
+              activeWorkdir={chatWorkspaceActiveWorkdir}
+              onSelectProject={handleChatWorkspaceProjectSelect}
+              onNewChat={handleNewSessionRequest}
+              onProjectContext={openProjectContextModal}
+              onKnowledge={openWorkspaceKnowledgeModal}
+              t={t}
+            />
+          ) : sidebarLoading ? (
             <div className="flex items-center justify-center py-12">
               <Spinner className="h-4 w-4 text-fg-5" />
             </div>
@@ -7647,141 +8166,111 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         )}
       >
         {mode === 'chat-workspace' ? (
-          <div className={cn('flex min-h-0 flex-1 flex-col', chatWorkspaceSearchFocus ? 'gap-0' : 'gap-3')}>
-            {!chatWorkspaceSearchFocus && (
-              <ChatWorkspaceLauncher
-                workspaces={workspaces}
-                defaultWorkdir={chatWorkspaceNewSessionWorkdir}
-                agent={chatWorkspaceDefaultAgent}
-                agentOptions={chatWorkspaceAgentOptions}
-                modelOptions={chatWorkspaceModelOptions}
-                assistants={chatAssistants}
-                onSubmit={handleChatWorkspaceLaunch}
-                onError={(message) => toastSession(message, false)}
-                onProjectContext={openProjectContextModal}
-                onKnowledge={openWorkspaceKnowledgeModal}
-                onOpenAssistants={openAssistantLibrary}
-                onOpenMemory={() => openMemoryLibrary()}
-                onOpenTeam={() => setTeamLibraryOpen(true)}
-                onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
-                targetAssistantRequest={chatTargetAssistantRequest}
-                projectPickerNonce={chatProjectPickerNonce}
-                t={t}
-              />
-            )}
-            {!chatWorkspaceSearchFocus && <section className="shrink-0 rounded-xl border border-edge/65 bg-panel/64 p-3 shadow-sm backdrop-blur-md">
-              <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-[12px] font-semibold text-fg">{t('chatWorkspace.workingItems')}</div>
-                  <div className="mt-0.5 text-[10px] text-fg-5">{t('chatWorkspace.openWindows')} · {chatWorkspaceOpenWindowItems.length}</div>
-                </div>
-                {chatWorkspaceFocusWorkspaceName && (
-                  <span className="hidden max-w-[220px] truncate rounded-md border border-edge/50 bg-inset px-2 py-1 text-[10px] font-semibold text-fg-5 md:inline">
-                    {chatWorkspaceFocusWorkspaceName}
-                  </span>
-                )}
-              </div>
-              {chatWorkspaceOpenWindowItems.length > 0 ? (
-                <div className="grid max-h-[236px] grid-cols-1 gap-2 overflow-y-auto pr-1 md:grid-cols-2 2xl:grid-cols-3">
-                  {chatWorkspaceOpenWindowItems.map(entry => {
-                    const key = sKey(entry.slot.agent, entry.slot.sessionId);
-                    const live = liveSessionStates[key]
-                      || Object.values(liveSessionStates).find(state => state.resolvedKey === key)
-                      || null;
-                    return (
-                      <ChatWorkspaceWorkingItemCard
-                        key={`${entry.item.key}:working`}
-                        item={entry.item}
-                        live={live}
-                        active={entry.slotIdx === activeSlotIndex}
-                        onSelect={() => {
-                          warmSession(entry.item.session, entry.slot.workdir);
-                          markSessionReadOnOpen(entry.item.session, entry.slot.workdir);
-                          setShowNewSession(null);
-                          setActiveSlotIndex(entry.slotIdx);
-                        }}
-                        onCreateSchedule={() => openCreateScheduleModal({
-                          workdir: entry.slot.workdir,
-                          agent: entry.slot.agent,
-                          sessionId: entry.slot.sessionId,
-                          title: sessionListDisplayText(entry.item.session).slice(0, 120) || entry.slot.sessionId.slice(0, 16),
-                          prompt: entry.item.session.lastQuestion
-                            || sessionListContextText(entry.item.session, sessionListDisplayText(entry.item.session))
-                            || sessionListDisplayText(entry.item.session),
-                          assistantId: entry.slot.assistantId,
-                          assistantName: entry.slot.assistantName,
-                          pinned: entry.item.session.pinned === true,
-                          archived: entry.item.session.archived === true,
-                          unread: shouldMarkSessionReadOnOpen(entry.item.session),
-                        })}
-                        t={t}
-                      />
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="rounded-lg border border-dashed border-edge/55 bg-inset/45 px-3 py-4 text-center text-[12px] text-fg-5">
-                  {t('chatWorkspace.emptyItems')}
-                </div>
-              )}
-            </section>}
-            <section className={cn(
-              'min-h-0 flex-1 overflow-hidden border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]',
-              chatWorkspaceSearchFocus ? 'rounded-none md:rounded-[18px]' : 'rounded-[18px]',
-            )}>
-              {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (() => {
-                const projectReference = resolveProjectReferenceForSession(chatWorkspaceFocusSlot, chatWorkspaceFocusInfo);
-                return (
-                  <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
-                    <SessionPanel
-                      key={chatWorkspaceFocusSlot.mountKey}
-                      session={chatWorkspaceFocusInfo}
-                      workdir={chatWorkspaceFocusSlot.workdir}
-                      active={active && !inboxOpen}
-                      readOnly={chatWorkspaceFocusSlot.archiveOnly === true}
-                      searchContext={searchContextForSlot(chatWorkspaceFocusSlot)}
-                      onSearchContextClear={() => clearSearchContextForSlot(chatWorkspaceFocusSlot)}
-                      referenceContextPrompt={projectReference?.prompt || null}
-                      referenceContextLabel={projectReference?.label || null}
-                      referenceContextProject={projectReference?.project || null}
-                      onReferenceContextClear={projectReference ? () => {
-                        markProjectContextAppliedLocal(
-                          chatWorkspaceFocusSlot.workdir,
-                          chatWorkspaceFocusSlot.agent,
-                          chatWorkspaceFocusSlot.sessionId,
-                          projectReference.project,
-                        );
-                      } : undefined}
-                      onSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
-                      onMultiSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
-                      onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, chatWorkspaceFocusSlot.workdir, target)}
-                      onCreateSideChatFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(activeSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, request)}
-                      onCreateTodoFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(chatWorkspaceFocusSlot, request)}
-                      onCreateReviewCommentFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(chatWorkspaceFocusSlot, request)}
-                      scrollToTurnRequest={chatWorkspaceFocusScrollRequest}
-                      initialPendingPrompt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingPrompt : null}
-                      initialPendingImageUrls={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingImageUrls : undefined}
-                      initialPendingCreatedAt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingCreatedAt : null}
-                      onPendingPromptConsumed={!chatWorkspaceFocusSlot.archiveOnly ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
+          <div className={cn('flex min-h-0 flex-1 gap-3', chatWorkspaceSearchFocus ? 'flex-col' : 'flex-col xl:flex-row')}>
+            {chatWorkspaceLaunchHandoff ? (
+              <ChatWorkspaceLaunchHandoffView handoff={chatWorkspaceLaunchHandoff} t={t} />
+            ) : (
+              <>
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+                  {!chatWorkspaceSearchFocus && (
+                    <ChatWorkspaceLauncher
+                      workspaces={workspaces}
+                      defaultWorkdir={chatWorkspaceNewSessionWorkdir}
+                      agent={chatWorkspaceDefaultAgent}
+                      agentOptions={chatWorkspaceAgentOptions}
+                      modelOptions={chatWorkspaceModelOptions}
+                      assistants={chatAssistants}
+                      onSubmit={handleChatWorkspaceLaunch}
+                      onError={(message) => toastSession(message, false)}
+                      onProjectContext={openProjectContextModal}
+                      onKnowledge={openWorkspaceKnowledgeModal}
+                      onOpenAssistants={openAssistantLibrary}
+                      onOpenMemory={() => openMemoryLibrary()}
+                      onOpenTeam={() => setTeamLibraryOpen(true)}
+                      onOpenWorkflows={() => setWorkflowLibraryOpen(true)}
+                      targetAssistantRequest={chatTargetAssistantRequest}
+                      projectPickerNonce={chatProjectPickerNonce}
+                      t={t}
                     />
-                  </Suspense>
-                );
-              })() : (
-                  <div className="flex h-full items-center justify-center px-8 text-center">
-                    <div className="max-w-[360px]">
-                      <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl border border-edge/65 bg-panel/70 text-fg-4">
-                        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                          <rect x="3" y="4" width="18" height="14" rx="2" />
-                          <path d="M8 21h8" />
-                          <path d="M12 18v3" />
-                        </svg>
+                  )}
+                  <section className={cn(
+                    'min-h-0 flex-1 overflow-hidden border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]',
+                    chatWorkspaceSearchFocus ? 'rounded-none md:rounded-[18px]' : 'rounded-[18px]',
+                  )}>
+                    {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (() => {
+                      const projectReference = resolveProjectReferenceForSession(chatWorkspaceFocusSlot, chatWorkspaceFocusInfo);
+                      return (
+                        <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
+                          <SessionPanel
+                            key={chatWorkspaceFocusSlot.mountKey}
+                            session={chatWorkspaceFocusInfo}
+                            workdir={chatWorkspaceFocusSlot.workdir}
+                            active={active && !inboxOpen}
+                            readOnly={chatWorkspaceFocusSlot.archiveOnly === true}
+                            searchContext={searchContextForSlot(chatWorkspaceFocusSlot)}
+                            onSearchContextClear={() => clearSearchContextForSlot(chatWorkspaceFocusSlot)}
+                            referenceContextPrompt={projectReference?.prompt || null}
+                            referenceContextLabel={projectReference?.label || null}
+                            referenceContextProject={projectReference?.project || null}
+                            onReferenceContextClear={projectReference ? () => {
+                              markProjectContextAppliedLocal(
+                                chatWorkspaceFocusSlot.workdir,
+                                chatWorkspaceFocusSlot.agent,
+                                chatWorkspaceFocusSlot.sessionId,
+                                projectReference.project,
+                              );
+                            } : undefined}
+                            onSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
+                            onMultiSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
+                            onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, chatWorkspaceFocusSlot.workdir, target)}
+                            onCreateSideChatFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(activeSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, request)}
+                            onCreateTodoFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(chatWorkspaceFocusSlot, request)}
+                            onCreateReviewCommentFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(chatWorkspaceFocusSlot, request)}
+                            scrollToTurnRequest={chatWorkspaceFocusScrollRequest}
+                            initialPendingPrompt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingPrompt : null}
+                            initialPendingImageUrls={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingImageUrls : undefined}
+                            initialPendingCreatedAt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingCreatedAt : null}
+                            onPendingPromptConsumed={!chatWorkspaceFocusSlot.archiveOnly ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
+                          />
+                        </Suspense>
+                      );
+                    })() : (
+                      <div className="flex h-full items-center justify-center px-8 text-center">
+                        <div className="max-w-[380px]">
+                          <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl border border-edge/65 bg-panel/70 text-fg-4">
+                            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <rect x="3" y="4" width="18" height="14" rx="2" />
+                              <path d="M8 21h8" />
+                              <path d="M12 18v3" />
+                            </svg>
+                          </div>
+                          <div className="text-[14px] font-semibold text-fg">{chatWorkspaceActiveWorkspace?.name || t('chatWorkspace.emptyTitle')}</div>
+                          <div className="mt-1 text-[12px] leading-relaxed text-fg-5">{t('chatWorkspace.emptyHint')}</div>
+                        </div>
                       </div>
-                      <div className="text-[14px] font-semibold text-fg">{t('chatWorkspace.emptyTitle')}</div>
-                      <div className="mt-1 text-[12px] leading-relaxed text-fg-5">{t('chatWorkspace.emptyHint')}</div>
-                    </div>
-                  </div>
+                    )}
+                  </section>
+                </div>
+                {!chatWorkspaceSearchFocus && (
+                  <ChatWorkspaceHistoryRail
+                    activeWorkspace={chatWorkspaceActiveWorkspace}
+                    historyItems={chatWorkspaceHistoryItems}
+                    openItems={chatWorkspaceProjectOpenWindowItems}
+                    selectedKey={chatWorkspaceSelectedKey}
+                    selectedWorkdir={chatWorkspaceSelectedWorkdir}
+                    openSessionKeys={openSessionKeys}
+                    onSelectSession={handleChatWorkspaceHistorySelect}
+                    onSelectOpenSlot={handleChatWorkspaceOpenSlotSelect}
+                    onWarmSession={scheduleSessionWarmup}
+                    onCancelWarmSession={cancelScheduledWarmup}
+                    onSessionMenuOpen={handleSessionMenuOpen}
+                    onCreateSchedule={openCreateScheduleForSession}
+                    onNewChat={handleNewSessionRequest}
+                    t={t}
+                  />
                 )}
-            </section>
+              </>
+            )}
           </div>
         ) : mode === 'dashboard' ? (
           <div className="min-h-0 flex-1 overflow-hidden">

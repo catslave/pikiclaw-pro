@@ -8,7 +8,7 @@ import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils
 import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { AgentCapabilityDescriptor, AutomationRule, InteractionSnapshot, MessageBlock, SessionGoalView, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent, WorkflowRunRecord } from '../../types';
+import type { AgentCapabilityDescriptor, AutomationRule, InteractionSnapshot, MessageBlock, RichMessage, SessionGoalView, SessionInfo, StreamActivityEvents, StreamActivitySummary, StreamPlan, StreamPreviewMeta, StreamSubAgent, WorkflowRunRecord } from '../../types';
 import { TurnView, UserBubble, TurnDivider, type SelectionActionRequest, type SelectionSideChatRequest, type SessionMessageAnchorRole } from './TurnView';
 import { LivePreview, ThinkingDots, liveStreamShouldRender } from './LivePreview';
 import { hasRenderableAssistant, insertComposerCommand, messageHasProposedPlan, textHasProposedPlan, type ScheduleProposalActionHandler, type WorkflowAskAnswerHandler } from './AssistantContent';
@@ -129,6 +129,47 @@ function saveHistorySnapshot(key: string, h: TurnHistoryWindow) {
   while (historySnapshots.size > MAX_HISTORY_SNAPSHOTS) {
     historySnapshots.delete(historySnapshots.keys().next().value!);
   }
+}
+
+function previewRichMessage(role: RichMessage['role'], text: string, createdAt?: string | null): RichMessage {
+  const content = text.trim();
+  return {
+    role,
+    text: content,
+    blocks: [{ type: 'text', content }],
+    createdAt: createdAt || null,
+    usage: null,
+  };
+}
+
+function firstSessionPreviewText(...values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    const text = value?.trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function buildSessionPreviewHistory(session: SessionInfo): TurnHistoryWindow | null {
+  const userText = firstSessionPreviewText(session.lastQuestion, session.title);
+  const summaryText = firstSessionPreviewText(session.lastAnswer, session.classification?.summary);
+  const fallbackText = firstSessionPreviewText(session.lastMessageText);
+  const assistantText = summaryText || (fallbackText && fallbackText !== userText ? fallbackText : '');
+  if (!userText && !assistantText) return null;
+
+  const totalTurns = Math.max(1, session.numTurns || 1);
+  const createdAt = session.createdAt || null;
+  const updatedAt = session.runUpdatedAt || createdAt;
+  return {
+    turns: [{
+      user: userText ? previewRichMessage('user', userText, createdAt) : null,
+      assistant: assistantText ? previewRichMessage('assistant', assistantText, updatedAt) : null,
+    }],
+    startTurn: Math.max(0, totalTurns - 1),
+    endTurn: totalTurns,
+    totalTurns,
+    hasOlder: totalTurns > 1,
+  };
 }
 
 type EditReplacement = { fromTurn: number; prompt: string };
@@ -1547,10 +1588,11 @@ export const SessionPanel = memo(function SessionPanel({
       turnLimit: SESSION_PAGE_TURNS,
     }, { allowStale: true });
     const isNewSession = hasInitialPending;
-    // Stale-while-revalidate: API cache → history snapshot → loading spinner
+    // Stale-while-revalidate: API cache → history snapshot → session preview → loading spinner
+    const previewHistory = buildSessionPreviewHistory(session);
     const initialHistory = cachedLatest?.ok
       ? normalizeTurnHistory(cachedLatest)
-      : historySnapshots.get(sk) || null;
+      : historySnapshots.get(sk) || previewHistory;
     setLoading(isNewSession ? false : !initialHistory);
     setHistory(initialHistory);
     setLiveStream(null);
@@ -1581,7 +1623,23 @@ export const SessionPanel = memo(function SessionPanel({
       loadLatestTurns({ keepOlder: false, force: true }).finally(() => { if (!c) setLoading(false); });
     }
     return () => { c = true; };
-  }, [loadLatestTurns, session.agent, session.sessionId, workdir, sk, clearPending, clearPendingQueuedSends]);
+  }, [
+    loadLatestTurns,
+    session.agent,
+    session.sessionId,
+    session.title,
+    session.lastQuestion,
+    session.lastAnswer,
+    session.lastMessageText,
+    session.classification?.summary,
+    session.createdAt,
+    session.runUpdatedAt,
+    session.numTurns,
+    workdir,
+    sk,
+    clearPending,
+    clearPendingQueuedSends,
+  ]);
 
   // Persist history snapshot for stale-while-revalidate on re-mount
   useEffect(() => {
@@ -2241,7 +2299,7 @@ export const SessionPanel = memo(function SessionPanel({
     }
   }, [session.agent, session.sessionId, workdir]);
   const composerContextMeta = latestContextMeta ?? lastContextMeta;
-  const hasImmediateMessageContent = !!(pendingPrompt || pendingImageUrls.length || effectiveLiveStream);
+  const hasImmediateMessageContent = !!(turns.length || pendingPrompt || pendingImageUrls.length || effectiveLiveStream);
   const uniqueQueuedCommandCount = useMemo(() => {
     const ids = new Set<string>();
     for (const id of queuedTaskIds) if (id) ids.add(id);
@@ -2459,26 +2517,8 @@ export const SessionPanel = memo(function SessionPanel({
         className="pk-conversation-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain [overflow-anchor:none]"
       >
         {loading && !hasImmediateMessageContent ? (
-          <div className={cn(transcriptClass, 'flex min-h-full items-center justify-center')}>
-            <div className="pk-conversation-state-card w-full max-w-[520px] rounded-2xl border border-edge/70 bg-panel/78 px-5 py-5 shadow-[var(--th-card-shadow)] backdrop-blur-md">
-              <div className="flex items-start gap-4">
-                <span className="pk-conversation-state-orb grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-[color:var(--pk-session-agent-border)] bg-[var(--pk-session-agent-bg)] text-[var(--pk-session-agent-color)]">
-                  <Spinner className="h-4 w-4" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <BrandIcon brand={session.agent || ''} size={14} />
-                    <span className="truncate text-[13px] font-semibold text-fg">{t('modal.loadingConv')}</span>
-                  </div>
-                  <p className="mt-1 text-[12px] leading-5 text-fg-5">{sessionLoadingHint}</p>
-                  <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5 text-[10.5px] font-semibold text-fg-5">
-                    <span className="rounded-md border border-edge/55 bg-inset px-2 py-1">{workspaceLabel}</span>
-                    <span className="rounded-md border border-edge/55 bg-inset px-2 py-1">{meta.shortLabel}</span>
-                    <span className="rounded-md border border-edge/55 bg-inset px-2 py-1 font-mono">{session.sessionId.slice(0, 8)}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+          <div className={cn(transcriptClass, 'min-h-full')}>
+            <span className="sr-only" aria-live="polite">{t('modal.loadingConv')} {sessionLoadingHint}</span>
           </div>
         ) : turns.length === 0 && !pendingPrompt && !pendingImageUrls.length && !effectiveLiveStream ? (
           <div className={cn(transcriptClass, 'flex min-h-full flex-col justify-center')}>

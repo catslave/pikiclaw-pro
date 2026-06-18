@@ -104,6 +104,7 @@ function locationToTab(pathname: string): DashboardTab {
     '/workspace': 'sessions',
     '/focus': 'sessions',
     '/chat-workspace': 'sessions',
+    '/workbench': 'dashboard',
     '/dashboard': 'dashboard',
     '/tasks': 'dashboard',
     '/work-items': 'dashboard',
@@ -148,6 +149,8 @@ function isWaylandShellPath(pathname: string): boolean {
     '/team',
     '/memory',
     '/knowledge',
+    '/workbench',
+    '/dashboard',
     '/mission-control',
     '/channels',
     '/im',
@@ -178,13 +181,14 @@ function normalizeDashboardPath(pathname: string): string | null {
   if (pathname === '/chat-workspace') return '/chat-workspace';
   if (pathname === '/permissions') return '/system';
   if (pathname === '/archive') return '/system';
-  if (pathname === '/dashboard') return '/task-diagnostics';
+  if (pathname === '/workbench') return '/workbench';
+  if (pathname === '/dashboard') return '/workbench';
   if (pathname === '/jira') return '/task-diagnostics';
   if (pathname === '/tasks') return '/work-items';
   if (pathname === '/skills') return '/extensions';
   if (pathname === '/project' || pathname.startsWith('/project/')) return pathname;
   if (pathname === '/daily') return '/work-items';
-  if (['/chat', '/conversations', '/search', '/projects', '/task-diagnostics', '/notes', '/knowledge', '/memory', '/mission-control', '/work-items', '/workflows', '/scheduled-tasks', '/usage', '/im', '/channels', '/agents', '/assistants', '/team', '/extensions', '/settings', '/system'].includes(pathname)) return pathname;
+  if (['/chat', '/conversations', '/search', '/projects', '/workbench', '/dashboard', '/task-diagnostics', '/notes', '/knowledge', '/memory', '/mission-control', '/work-items', '/workflows', '/scheduled-tasks', '/usage', '/im', '/channels', '/agents', '/assistants', '/team', '/extensions', '/settings', '/system'].includes(pathname)) return pathname;
   return null;
 }
 
@@ -441,6 +445,8 @@ export function App() {
   const sessionShellActive = !waylandShellActive && normalizedDashboardPath !== null;
   const sessionWorkspaceMode = tab === 'dashboard'
     ? 'dashboard'
+    : location.pathname === '/chat-workspace'
+      ? 'chat-workspace'
     : tab === 'sessions'
       ? 'workspace'
       : 'settings';
@@ -623,7 +629,11 @@ export function App() {
       navigate(dailyWorkItemsRedirect(location.search), { replace: true, state: location.state });
       return;
     }
-    if (location.pathname === '/jira' || location.pathname === '/dashboard') {
+    if (location.pathname === '/dashboard') {
+      navigate('/workbench', { replace: true, state: location.state });
+      return;
+    }
+    if (location.pathname === '/jira') {
       navigate('/task-diagnostics', { replace: true });
       return;
     }
