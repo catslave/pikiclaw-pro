@@ -7,20 +7,24 @@ final class VoiceCaptureController: ObservableObject {
     @Published var isRecording = false
     @Published var statusLine = "Ready"
 
-    private let audioEngine = AVAudioEngine()
+    private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+    private var speechRecognizer: SFSpeechRecognizer?
 
     var isSpeechAvailable: Bool {
-        speechRecognizer?.isAvailable == true
+        guard hasRequiredUsageDescriptions else { return false }
+        return (speechRecognizer ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")))?.isAvailable == true
     }
 
     var nativeSpeechReadinessMessage: String? {
-        guard Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil else {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            return "Native listening needs the bundled Pikiclaw.app. You can type the brief here for now."
+        }
+        guard hasUsageDescription("NSSpeechRecognitionUsageDescription") else {
             return "Native listening needs the bundled Pikiclaw.app so macOS can show speech permission."
         }
-        guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil else {
+        guard hasUsageDescription("NSMicrophoneUsageDescription") else {
             return "Native listening needs the bundled Pikiclaw.app so macOS can show microphone permission."
         }
         guard isSpeechAvailable else {
@@ -56,6 +60,11 @@ final class VoiceCaptureController: ObservableObject {
             return
         }
 
+        let recognizer = speechRecognizer ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        speechRecognizer = recognizer
+        let engine = AVAudioEngine()
+        audioEngine = engine
+
         guard let speechRecognizer, speechRecognizer.isAvailable else {
             statusLine = "Speech recognizer is unavailable."
             return
@@ -69,22 +78,23 @@ final class VoiceCaptureController: ObservableObject {
         request.shouldReportPartialResults = true
         recognitionRequest = request
 
-        let inputNode = audioEngine.inputNode
+        let inputNode = engine.inputNode
         inputNode.removeTap(onBus: 0)
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak request] buffer, _ in
             request?.append(buffer)
         }
 
-        audioEngine.prepare()
+        engine.prepare()
         do {
-            try audioEngine.start()
+            try engine.start()
             isRecording = true
             statusLine = "Listening"
         } catch {
             statusLine = "Microphone start failed: \(error.localizedDescription)"
             inputNode.removeTap(onBus: 0)
             recognitionRequest = nil
+            audioEngine = nil
             return
         }
 
@@ -107,13 +117,14 @@ final class VoiceCaptureController: ObservableObject {
     }
 
     func stopRecording() {
-        guard isRecording || audioEngine.isRunning else { return }
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        guard isRecording || audioEngine?.isRunning == true else { return }
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
+        audioEngine = nil
         isRecording = false
         if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             statusLine = "Ready"
@@ -122,7 +133,7 @@ final class VoiceCaptureController: ObservableObject {
         }
     }
 
-    private func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
+    nonisolated private func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
@@ -130,7 +141,7 @@ final class VoiceCaptureController: ObservableObject {
         }
     }
 
-    private func requestMicrophoneAccess() async -> Bool {
+    nonisolated private func requestMicrophoneAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             return true
@@ -145,6 +156,16 @@ final class VoiceCaptureController: ObservableObject {
         @unknown default:
             return false
         }
+    }
+
+    private var hasRequiredUsageDescriptions: Bool {
+        hasUsageDescription("NSSpeechRecognitionUsageDescription")
+            && hasUsageDescription("NSMicrophoneUsageDescription")
+    }
+
+    private func hasUsageDescription(_ key: String) -> Bool {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

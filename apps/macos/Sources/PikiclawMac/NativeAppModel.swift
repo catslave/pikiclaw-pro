@@ -12,6 +12,8 @@ final class NativeAppModel: ObservableObject {
     @Published var statusLine = "Ready"
     @Published var isRunning = false
     @Published var activeRunId: EntityID?
+    @Published var branchOptionsByWorkspace: [EntityID: [String]] = [:]
+    @Published var branchStatusByWorkspace: [EntityID: String] = [:]
 
     private let store: JSONNativeStore
     @MainActor private static var restartInFlight = false
@@ -60,8 +62,70 @@ final class NativeAppModel: ObservableObject {
                 workspaceId: workspace.id
             ))
             await reload()
+            await refreshBranches(for: workspace)
         } catch {
             statusLine = "Add workspace failed: \(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    func refreshBranches(for workspace: Workspace?) async -> Workspace? {
+        guard let workspace else { return nil }
+
+        do {
+            let showCurrent = try Self.gitOutput(["branch", "--show-current"], in: workspace.pathDisplay).gitTrimmed
+            let fallbackCurrent = showCurrent.isEmpty
+                ? try Self.gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], in: workspace.pathDisplay).gitTrimmed
+                : showCurrent
+            let currentBranch = fallbackCurrent == "HEAD" ? "Detached HEAD" : fallbackCurrent
+            let branchList = try Self.gitOutput(["branch", "--format=%(refname:short)"], in: workspace.pathDisplay)
+            let branches = Self.orderedBranches(currentBranch: currentBranch, branchList: branchList)
+
+            branchOptionsByWorkspace[workspace.id] = branches
+            branchStatusByWorkspace[workspace.id] = branches.isEmpty ? "No local branches found" : nil
+
+            let storedBranch = currentBranch.isEmpty ? nil : currentBranch
+            if workspace.currentBranch != storedBranch {
+                var updated = workspace
+                updated.currentBranch = storedBranch
+                try await store.saveWorkspace(updated)
+                await reload()
+                return updated
+            }
+            return workspace
+        } catch {
+            branchStatusByWorkspace[workspace.id] = "Branch lookup failed: \(error.localizedDescription)"
+            return workspace
+        }
+    }
+
+    func switchBranch(_ branch: String, workspace: Workspace?) async {
+        guard let workspace else { return }
+        let target = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+
+        do {
+            branchStatusByWorkspace[workspace.id] = "Switching to \(target)"
+            _ = try Self.gitOutput(["switch", target], in: workspace.pathDisplay)
+
+            var updated = workspace
+            updated.currentBranch = target
+            updated.lastOpenedAt = Date()
+            try await store.saveWorkspace(updated)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .workspaceAccess,
+                actor: "user",
+                summary: "Switched branch to \(target)",
+                workspaceId: workspace.id
+            ))
+
+            statusLine = "Branch switched to \(target)"
+            branchStatusByWorkspace[workspace.id] = nil
+            await reload()
+            await refreshBranches(for: updated)
+        } catch {
+            branchStatusByWorkspace[workspace.id] = "Switch failed: \(error.localizedDescription)"
+            statusLine = "Branch switch failed: \(error.localizedDescription)"
         }
     }
 
@@ -148,6 +212,11 @@ final class NativeAppModel: ObservableObject {
             return nil
         }
 
+        let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first
+        if let workspace {
+            await refreshBranches(for: workspace)
+        }
+
         let target = snapshot.workItems.first(where: { $0.id == targetWorkItemId })
         let shouldReuseTarget = target.map { item in
             prompt == item.title || prompt == item.description
@@ -222,6 +291,7 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Workspace missing"
             return nil
         }
+        let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
         guard let profile = agentProfile(for: selectedAgentKind) else {
             statusLine = "Agent profile missing"
             return nil
@@ -236,7 +306,7 @@ final class NativeAppModel: ObservableObject {
 
         var run = AgentRun(
             workItemId: item.id,
-            workspaceId: workspace.id,
+            workspaceId: launchWorkspace.id,
             agentProfileId: profile.id,
             permissionMode: selectedPermissionMode,
             state: .queued,
@@ -252,7 +322,7 @@ final class NativeAppModel: ObservableObject {
                 summary: "Queued \(profile.displayName) run",
                 runId: run.id,
                 workItemId: item.id,
-                workspaceId: workspace.id
+                workspaceId: launchWorkspace.id
             ))
             await reload()
 
@@ -264,7 +334,7 @@ final class NativeAppModel: ObservableObject {
             )
             let adapter = ProcessAgentAdapter(descriptor: descriptor)
             var request = AgentLaunchRequest(
-                workspacePath: workspace.pathDisplay,
+                workspacePath: launchWorkspace.pathDisplay,
                 prompt: run.promptSnapshot,
                 run: run
             )
@@ -350,6 +420,44 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    private static func orderedBranches(currentBranch: String, branchList: String) -> [String] {
+        let localBranches = branchList
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).gitTrimmed }
+            .filter { !$0.isEmpty }
+
+        var ordered: [String] = []
+        if !currentBranch.isEmpty && currentBranch != "Detached HEAD" {
+            ordered.append(currentBranch)
+        }
+        for branch in localBranches where !ordered.contains(branch) {
+            ordered.append(branch)
+        }
+        return ordered
+    }
+
+    private static func gitOutput(_ arguments: [String], in path: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", path] + arguments
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            throw NativeGitError(command: arguments.joined(separator: " "), message: errorOutput.gitTrimmed)
+        }
+        return output
+    }
+
     private static func launchReplacementApplication() throws {
         let bundleURL = Bundle.main.bundleURL
         if bundleURL.pathExtension == "app" {
@@ -379,6 +487,15 @@ private enum NativeRestartError: LocalizedError {
         case .missingExecutable:
             return "Current executable could not be found."
         }
+    }
+}
+
+private struct NativeGitError: LocalizedError {
+    let command: String
+    let message: String
+
+    var errorDescription: String? {
+        message.isEmpty ? "git \(command) failed" : message
     }
 }
 
@@ -421,6 +538,10 @@ private extension NativeAgentKind {
 }
 
 private extension String {
+    var gitTrimmed: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func firstLineFallback(_ fallback: String) -> String {
         let first = split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)

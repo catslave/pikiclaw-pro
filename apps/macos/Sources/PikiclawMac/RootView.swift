@@ -1,9 +1,11 @@
 import AppKit
 import PikiclawCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum NativeRoute: String, CaseIterable, Identifiable {
     case chat
+    case voice
     case projects
     case workItems
     case workPlan
@@ -31,6 +33,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .chat: "Conversations"
+        case .voice: "Voice Assistant"
         case .projects: "Projects"
         case .workItems: "Work Items"
         case .workPlan: "Work Plan"
@@ -50,6 +53,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
     var sidebarTitle: String {
         switch self {
         case .chat: "Conversations"
+        case .voice: "Voice"
         case .projects: "Projects"
         case .workItems: "Work Items"
         case .workPlan: "Work Plan"
@@ -69,6 +73,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .chat: "Start from a project, target, model, and permission mode."
+        case .voice: "Speak a task, let Pikiclaw route it to an agent, and hear the report."
         case .projects: "Workspace-backed project library. Rules and memory feed new chats."
         case .workItems: "Inbox, queue, and workbench for durable engineering tasks."
         case .workPlan: "Daily planning and lightweight intake before promotion to Work Items."
@@ -88,6 +93,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .chat: "text.bubble"
+        case .voice: "waveform.circle"
         case .projects: "folder"
         case .workItems: "square.grid.2x2"
         case .workPlan: "calendar"
@@ -136,6 +142,10 @@ struct RootView: View {
         PKThemePreference(rawValue: themePreferenceRaw) ?? .dark
     }
 
+    private var selectedWorkspace: Workspace? {
+        model.snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? model.snapshot.workspaces.first
+    }
+
     var body: some View {
         ZStack {
             PKTheme.surface.ignoresSafeArea()
@@ -148,12 +158,14 @@ struct RootView: View {
                     selectedAgentKind: $model.selectedAgentKind,
                     statusLine: model.statusLine,
                     isRunning: model.isRunning,
+                    isVoiceSelected: route == .voice,
                     openProjects: { route = .projects },
                     addProject: chooseWorkspace,
                     selectAgent: { kind in
                         model.selectedAgentKind = kind
                         route = .chat
                         model.prepareNewChat()
+                        Task { await model.refreshBranches(for: selectedWorkspace) }
                         commandFocused = true
                     },
                     newChat: openNewChat,
@@ -218,6 +230,14 @@ struct RootView: View {
                 model: model,
                 navigate: navigate
             )
+        case .voice:
+            VoiceAssistantPage(
+                snapshot: model.snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                selectedWorkItemId: $selectedWorkItemId,
+                model: model,
+                navigate: navigate
+            )
         case .projects:
             ProjectsPage(
                 snapshot: model.snapshot,
@@ -273,12 +293,13 @@ struct RootView: View {
     private func openNewChat() {
         route = .chat
         model.prepareNewChat()
+        Task { await model.refreshBranches(for: selectedWorkspace) }
         commandFocused = true
     }
 
     private func openVoiceAssistant() {
-        route = .chat
-        assistantDockOpen = true
+        route = .voice
+        assistantDockOpen = false
         commandFocused = false
     }
 
@@ -336,6 +357,7 @@ private struct AgentDock: View {
     @Binding var selectedAgentKind: NativeAgentKind
     let statusLine: String
     let isRunning: Bool
+    let isVoiceSelected: Bool
     let openProjects: () -> Void
     let addProject: () -> Void
     let selectAgent: (NativeAgentKind) -> Void
@@ -361,7 +383,7 @@ private struct AgentDock: View {
             .help("New Chat")
 
             Button(action: openVoice) {
-                VoiceDockRobotButton(isLive: isRunning)
+                VoiceDockRobotButton(isLive: isRunning, isSelected: isVoiceSelected)
             }
             .buttonStyle(.plain)
             .help("Voice Assistant")
@@ -702,6 +724,7 @@ private struct ChatHomeView: View {
                 },
                 newChat: {
                     model.prepareNewChat()
+                    Task { await model.refreshBranches(for: selectedWorkspace) }
                     commandFocused.wrappedValue = true
                 },
                 openRunInNewWindow: { run in
@@ -726,6 +749,7 @@ private struct ChatHomeView: View {
                         model: model,
                         newChat: {
                             model.prepareNewChat()
+                            Task { await model.refreshBranches(for: selectedWorkspace) }
                             commandFocused.wrappedValue = true
                         },
                         openWorkItem: {
@@ -982,6 +1006,10 @@ private struct DetachedChatWindowView: View {
         snapshot.agentProfiles.first(where: { $0.id == run.agentProfileId })?.displayName ?? "Pikiclaw"
     }
 
+    private var accent: Color {
+        agentTint(agentKind(for: run, snapshot: snapshot))
+    }
+
     var body: some View {
         ZStack {
             PKTheme.surface.ignoresSafeArea()
@@ -1014,7 +1042,7 @@ private struct DetachedChatWindowView: View {
                             subtitle: workspace?.name ?? "Project",
                             text: run.promptSnapshot,
                             symbol: "person.crop.circle",
-                            accent: PKTheme.primary,
+                            accent: accent,
                             trailing: true
                         )
 
@@ -1022,7 +1050,8 @@ private struct DetachedChatWindowView: View {
                             title: agentName,
                             text: run.transcript.isEmpty ? "No assistant output yet." : run.transcript,
                             state: run.state,
-                            isRunning: run.state == .running
+                            isRunning: run.state == .running,
+                            accent: accent
                         )
                     }
                     .padding(20)
@@ -1044,6 +1073,10 @@ private struct NewChatLauncher: View {
     @ObservedObject var model: NativeAppModel
     let send: () -> Void
     @State private var selectedMode: NewChatMode = .engineering
+
+    private var selectedWorkspace: Workspace? {
+        snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
+    }
 
     var body: some View {
         ScrollView {
@@ -1089,6 +1122,9 @@ private struct NewChatLauncher: View {
             .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: selectedWorkspace?.id) {
+            await model.refreshBranches(for: selectedWorkspace)
+        }
     }
 
     private func applyPrompt(_ prompt: String) {
@@ -1125,9 +1161,9 @@ private struct NewChatHero: View {
                 Spacer(minLength: 0)
 
                 NewChatFocusPill(
-                    title: focusTitle,
-                    subtitle: focusSubtitle,
-                    tint: isRunning ? PKTheme.ok : PKTheme.primary
+                    title: branchTitle(for: selectedWorkspaceId, snapshot: snapshot),
+                    subtitle: "Current branch",
+                    tint: PKTheme.primary
                 )
             }
 
@@ -1593,9 +1629,15 @@ private struct MinimalChatComposer: View {
     let captureWorkItem: () -> Void
     let send: () -> Void
     @State private var isHovering = false
+    @State private var imageAttachments: [ComposerImageAttachment] = []
+    @State private var attachmentError: String?
 
     private var canSend: Bool {
-        !isRunning && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isRunning && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imageAttachments.isEmpty)
+    }
+
+    private var accent: Color {
+        agentTint(selectedAgentKind)
     }
 
     var body: some View {
@@ -1627,6 +1669,19 @@ private struct MinimalChatComposer: View {
                     .padding(.bottom, 2)
             }
 
+            if !imageAttachments.isEmpty || attachmentError != nil {
+                ComposerImageAttachmentStrip(
+                    attachments: imageAttachments,
+                    error: attachmentError,
+                    remove: { attachment in
+                        imageAttachments.removeAll { $0.id == attachment.id }
+                    },
+                    clearError: { attachmentError = nil }
+                )
+                .padding(.horizontal, 12)
+                .padding(.bottom, 9)
+            }
+
             Rectangle()
                 .fill(PKTheme.edge.opacity(0.62))
                 .frame(height: 1)
@@ -1635,9 +1690,16 @@ private struct MinimalChatComposer: View {
                 ComposerToolbarLabel(
                     symbol: "folder",
                     title: projectTitle(for: selectedWorkspaceId, snapshot: snapshot),
-                    tint: PKTheme.primary
+                    tint: accent
                 )
                 .help("Project is selected from the Project tree")
+
+                ComposerToolbarLabel(
+                    symbol: "arrow.triangle.branch",
+                    title: branchTitle(for: selectedWorkspaceId, snapshot: snapshot),
+                    tint: PKTheme.text3
+                )
+                .help("Current git branch")
 
                 Menu {
                     Button("Read only") { selectedPermissionMode = .readOnly }
@@ -1656,12 +1718,17 @@ private struct MinimalChatComposer: View {
 
                 StatusPill(
                     text: isRunning ? "RUNNING" : "READY",
-                    color: isRunning ? PKTheme.warn : PKTheme.text3
+                    color: isRunning ? PKTheme.warn : accent
                 )
 
                 Spacer(minLength: 0)
 
-                ComposerIconButton(symbol: "paperclip", title: "Attach") {}
+                ComposerIconButton(symbol: "paperclip", title: "Attach Images") {
+                    addAttachments(ComposerImageAttachmentStore.pickImageFiles())
+                }
+                ComposerIconButton(symbol: "doc.on.clipboard", title: "Paste Image") {
+                    addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+                }
                 ComposerIconButton(symbol: "tray.and.arrow.down", title: "Capture") {
                     captureWorkItem()
                 }
@@ -1672,12 +1739,12 @@ private struct MinimalChatComposer: View {
 
                 Spacer()
 
-                Button(action: send) {
+                Button(action: sendWithAttachments) {
                     Image(systemName: isRunning ? "hourglass" : "arrow.up")
                         .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
                     .frame(width: 38, height: 34)
-                    .background(canSend ? PKTheme.primary : PKTheme.control.opacity(0.86))
+                    .background(canSend ? accent : PKTheme.control.opacity(0.86))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
@@ -1689,20 +1756,53 @@ private struct MinimalChatComposer: View {
             .padding(.bottom, 12)
             .padding(.top, 10)
         }
-        .background(PKTheme.surfaceRaised.opacity(0.95))
+        .background(
+            LinearGradient(
+                colors: [
+                    accent.opacity(0.07),
+                    PKTheme.surfaceRaised.opacity(0.95)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(focused.wrappedValue ? PKTheme.primary.opacity(0.72) : PKTheme.edgeStrong.opacity(isHovering ? 0.78 : 0.52), lineWidth: 1)
+                .stroke(focused.wrappedValue ? accent.opacity(0.72) : PKTheme.edgeStrong.opacity(isHovering ? 0.78 : 0.52), lineWidth: 1)
         )
         .overlay(alignment: .leading) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(PKTheme.primary.opacity(focused.wrappedValue ? 0.92 : 0.40))
+                .fill(accent.opacity(focused.wrappedValue ? 0.92 : 0.40))
                 .frame(width: 2)
                 .padding(.vertical, 10)
         }
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.20 : 0.11), radius: focused.wrappedValue ? 18 : 12, x: 0, y: 10)
         .onHover { isHovering = $0 }
+        .onPasteCommand(of: [.image, .fileURL]) { _ in
+            addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+        }
+    }
+
+    private func addAttachments(_ result: ComposerImageAttachmentImportResult) {
+        if !result.attachments.isEmpty {
+            imageAttachments.append(contentsOf: result.attachments)
+            attachmentError = nil
+        }
+        if let message = result.message {
+            attachmentError = message
+        }
+    }
+
+    private func sendWithAttachments() {
+        guard canSend else { return }
+        text = ComposerAttachmentPrompt.appendImageRefs(
+            to: text,
+            images: imageAttachments.map { ComposerImageAttachmentRef(name: $0.name, path: $0.url.path) }
+        )
+        imageAttachments = []
+        attachmentError = nil
+        send()
     }
 }
 
@@ -1767,6 +1867,15 @@ private struct ConversationWorkspace: View {
     let openWorkItem: () -> Void
     @State private var replyDraft = ""
 
+    private var conversationAgentKind: NativeAgentKind {
+        guard let run else { return model.selectedAgentKind }
+        return agentKind(for: run, snapshot: snapshot)
+    }
+
+    private var accent: Color {
+        agentTint(conversationAgentKind)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -1799,7 +1908,7 @@ private struct ConversationWorkspace: View {
                             subtitle: selectedWorkspace?.name ?? "Project",
                             text: run?.promptSnapshot ?? model.draftPrompt,
                             symbol: "person.crop.circle",
-                            accent: PKTheme.primary,
+                            accent: accent,
                             trailing: true
                         )
 
@@ -1807,7 +1916,8 @@ private struct ConversationWorkspace: View {
                             title: agentLabel,
                             text: assistantText,
                             state: run?.state,
-                            isRunning: model.isRunning
+                            isRunning: model.isRunning,
+                            accent: accent
                         )
                         .id("assistant-output")
                     }
@@ -1824,7 +1934,8 @@ private struct ConversationWorkspace: View {
             ConversationReplyComposer(
                 text: $replyDraft,
                 statusLine: model.statusLine,
-                isRunning: model.isRunning
+                isRunning: model.isRunning,
+                accent: accent
             ) {
                 let next = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !next.isEmpty else { return }
@@ -1843,7 +1954,7 @@ private struct ConversationWorkspace: View {
             .padding(16)
         }
         .background(PKTheme.panel.opacity(0.46))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.22), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -1899,8 +2010,8 @@ private struct ConversationMessageBubble: View {
                     .textSelection(.enabled)
                     .multilineTextAlignment(trailing ? .trailing : .leading)
                     .padding(13)
-                    .background(trailing ? PKTheme.primary.opacity(0.14) : PKTheme.panelAlt.opacity(0.52))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(trailing ? PKTheme.primary.opacity(0.28) : PKTheme.edge, lineWidth: 1))
+                    .background(trailing ? accent.opacity(0.14) : PKTheme.panelAlt.opacity(0.52))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(trailing ? accent.opacity(0.28) : PKTheme.edge, lineWidth: 1))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             .frame(maxWidth: 680, alignment: trailing ? .trailing : .leading)
@@ -1923,6 +2034,7 @@ private struct AssistantResponseCard: View {
     let text: String
     let state: RunState?
     let isRunning: Bool
+    let accent: Color
 
     private var cleanedText: String {
         friendlyAgentOutput(text)
@@ -1936,7 +2048,7 @@ private struct AssistantResponseCard: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(PKTheme.primaryText)
                         .frame(width: 30, height: 30)
-                        .background(PKTheme.primary)
+                        .background(accent)
                         .clipShape(RoundedRectangle(cornerRadius: 7))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title)
@@ -1951,7 +2063,7 @@ private struct AssistantResponseCard: View {
                 }
 
                 if cleanedText.isEmpty {
-                    AgentThinkingState(isRunning: isRunning, state: state)
+                    AgentThinkingState(isRunning: isRunning, state: state, accent: accent)
                 } else {
                     Text(cleanedText)
                         .font(.system(size: 13))
@@ -1968,7 +2080,7 @@ private struct AssistantResponseCard: View {
             .frame(maxWidth: 760, alignment: .leading)
             .padding(14)
             .background(PKTheme.panelAlt.opacity(0.42))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
             Spacer(minLength: 72)
@@ -1979,11 +2091,13 @@ private struct AssistantResponseCard: View {
 private struct AgentThinkingState: View {
     let isRunning: Bool
     let state: RunState?
+    let accent: Color
 
     var body: some View {
         HStack(spacing: 11) {
             ProgressView()
                 .controlSize(.small)
+                .tint(accent)
                 .opacity(isRunning ? 1 : 0.4)
             VStack(alignment: .leading, spacing: 3) {
                 Text(isRunning ? "Starting agent runtime" : emptyOutputTitle)
@@ -1997,7 +2111,7 @@ private struct AgentThinkingState: View {
         }
         .padding(14)
         .background(PKTheme.inset.opacity(0.78))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.20), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -2014,11 +2128,14 @@ private struct ConversationReplyComposer: View {
     @Binding var text: String
     let statusLine: String
     let isRunning: Bool
+    let accent: Color
     let send: () -> Void
     @FocusState private var focused: Bool
+    @State private var imageAttachments: [ComposerImageAttachment] = []
+    @State private var attachmentError: String?
 
     private var canSend: Bool {
-        !isRunning && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isRunning && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imageAttachments.isEmpty)
     }
 
     var body: some View {
@@ -2044,18 +2161,38 @@ private struct ConversationReplyComposer: View {
                     .padding(.bottom, 2)
             }
 
+            if !imageAttachments.isEmpty || attachmentError != nil {
+                ComposerImageAttachmentStrip(
+                    attachments: imageAttachments,
+                    error: attachmentError,
+                    remove: { attachment in
+                        imageAttachments.removeAll { $0.id == attachment.id }
+                    },
+                    clearError: { attachmentError = nil },
+                    compact: true
+                )
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+            }
+
             HStack(spacing: 9) {
                 Text(statusLine)
                     .font(.caption)
                     .foregroundStyle(PKTheme.text3)
                     .lineLimit(1)
                 Spacer()
-                Button(action: send) {
+                ComposerIconButton(symbol: "paperclip", title: "Attach Images") {
+                    addAttachments(ComposerImageAttachmentStore.pickImageFiles())
+                }
+                ComposerIconButton(symbol: "doc.on.clipboard", title: "Paste Image") {
+                    addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+                }
+                Button(action: sendWithAttachments) {
                     Image(systemName: isRunning ? "hourglass" : "arrow.up")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
                         .frame(width: 32, height: 32)
-                        .background(canSend ? PKTheme.primary : PKTheme.control.opacity(0.86))
+                        .background(canSend ? accent : PKTheme.control.opacity(0.86))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
@@ -2066,8 +2203,258 @@ private struct ConversationReplyComposer: View {
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
         }
-        .background(PKTheme.surfaceRaised.opacity(0.92))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused ? PKTheme.primary.opacity(0.62) : PKTheme.edgeStrong.opacity(0.48), lineWidth: 1))
+        .background(
+            LinearGradient(
+                colors: [
+                    accent.opacity(0.06),
+                    PKTheme.surfaceRaised.opacity(0.92)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused ? accent.opacity(0.62) : PKTheme.edgeStrong.opacity(0.48), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onPasteCommand(of: [.image, .fileURL]) { _ in
+            addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+        }
+    }
+
+    private func addAttachments(_ result: ComposerImageAttachmentImportResult) {
+        if !result.attachments.isEmpty {
+            imageAttachments.append(contentsOf: result.attachments)
+            attachmentError = nil
+        }
+        if let message = result.message {
+            attachmentError = message
+        }
+    }
+
+    private func sendWithAttachments() {
+        guard canSend else { return }
+        text = ComposerAttachmentPrompt.appendImageRefs(
+            to: text,
+            images: imageAttachments.map { ComposerImageAttachmentRef(name: $0.name, path: $0.url.path) }
+        )
+        imageAttachments = []
+        attachmentError = nil
+        send()
+    }
+}
+
+private struct ComposerImageAttachment: Identifiable, Hashable {
+    let id: UUID
+    let name: String
+    let url: URL
+
+    init(id: UUID = UUID(), name: String, url: URL) {
+        self.id = id
+        self.name = name
+        self.url = url
+    }
+}
+
+private struct ComposerImageAttachmentImportResult {
+    var attachments: [ComposerImageAttachment]
+    var message: String?
+
+    static let empty = ComposerImageAttachmentImportResult(attachments: [], message: nil)
+}
+
+@MainActor
+private enum ComposerImageAttachmentStore {
+    static func pickImageFiles() -> ComposerImageAttachmentImportResult {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Attach"
+
+        guard panel.runModal() == .OK else {
+            return .empty
+        }
+
+        let attachments = panel.urls.compactMap(makeAttachment)
+        if attachments.isEmpty {
+            return ComposerImageAttachmentImportResult(attachments: [], message: "No supported image files were selected.")
+        }
+        return ComposerImageAttachmentImportResult(attachments: attachments, message: nil)
+    }
+
+    static func importImagesFromPasteboard(_ pasteboard: NSPasteboard = .general) -> ComposerImageAttachmentImportResult {
+        var attachments: [ComposerImageAttachment] = []
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingContentsConformToTypes: [UTType.image.identifier]
+        ]
+
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [NSURL] {
+            attachments.append(contentsOf: urls.map { $0 as URL }.compactMap(makeAttachment))
+        }
+
+        if attachments.isEmpty, let image = NSImage(pasteboard: pasteboard) {
+            do {
+                let url = try writePastedImage(image)
+                attachments.append(ComposerImageAttachment(name: url.lastPathComponent, url: url))
+            } catch {
+                return ComposerImageAttachmentImportResult(attachments: [], message: "Could not save pasted image: \(error.localizedDescription)")
+            }
+        }
+
+        if attachments.isEmpty {
+            return ComposerImageAttachmentImportResult(attachments: [], message: "No image found on the clipboard.")
+        }
+        return ComposerImageAttachmentImportResult(attachments: attachments, message: nil)
+    }
+
+    private static func makeAttachment(url: URL) -> ComposerImageAttachment? {
+        guard isSupportedImageURL(url) else { return nil }
+        return ComposerImageAttachment(name: url.lastPathComponent, url: url)
+    }
+
+    private static func isSupportedImageURL(_ url: URL) -> Bool {
+        if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
+            return true
+        }
+        return NSImage(contentsOf: url) != nil
+    }
+
+    private static func writePastedImage(_ image: NSImage) throws -> URL {
+        let directory = try attachmentDirectory()
+        let filename = "pasted-image-\(Int(Date().timeIntervalSince1970 * 1000)).png"
+        let url = directory.appendingPathComponent(filename)
+
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw ComposerImageAttachmentError.unwritableImage
+        }
+
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+
+    private static func attachmentDirectory() throws -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        let directory = appSupport
+            .appendingPathComponent("PikiclawMacNative", isDirectory: true)
+            .appendingPathComponent("ComposerAttachments", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+        return directory
+    }
+}
+
+private enum ComposerImageAttachmentError: LocalizedError {
+    case unwritableImage
+
+    var errorDescription: String? {
+        switch self {
+        case .unwritableImage:
+            return "The pasted image could not be converted to PNG."
+        }
+    }
+}
+
+private struct ComposerImageAttachmentStrip: View {
+    let attachments: [ComposerImageAttachment]
+    let error: String?
+    let remove: (ComposerImageAttachment) -> Void
+    let clearError: () -> Void
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachments) { attachment in
+                            ComposerImageAttachmentChip(
+                                attachment: attachment,
+                                compact: compact,
+                                remove: { remove(attachment) }
+                            )
+                        }
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
+
+            if let error {
+                HStack(spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PKTheme.warn)
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    Button(action: clearError) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(PKTheme.text3)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(8)
+                .background(PKTheme.warn.opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.warn.opacity(0.22), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+        }
+    }
+}
+
+private struct ComposerImageAttachmentChip: View {
+    let attachment: ComposerImageAttachment
+    let compact: Bool
+    let remove: () -> Void
+
+    private var thumbnail: NSImage? {
+        NSImage(contentsOf: attachment.url)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(PKTheme.inset.opacity(0.88))
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PKTheme.primary)
+                }
+            }
+            .frame(width: compact ? 34 : 42, height: compact ? 30 : 36)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.name)
+                    .font(.system(size: compact ? 10 : 11, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                Text("Image")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(PKTheme.text4)
+            }
+            .frame(maxWidth: compact ? 100 : 140, alignment: .leading)
+
+            Button(action: remove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text3)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: compact ? 42 : 48)
+        .background(PKTheme.panelAlt.opacity(0.52))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -2989,15 +3376,17 @@ private struct VoiceAssistantHero: View {
 
 private struct VoiceDockRobotButton: View {
     let isLive: Bool
+    var isSelected: Bool = false
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(PKTheme.panel.opacity(0.62))
+                .fill(isSelected ? PKTheme.primary.opacity(0.18) : PKTheme.panel.opacity(0.62))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke((isLive ? PKTheme.ok : PKTheme.primary).opacity(0.42), lineWidth: 1)
+                        .stroke((isSelected ? PKTheme.primary : (isLive ? PKTheme.ok : PKTheme.primary)).opacity(isSelected ? 0.82 : 0.42), lineWidth: 1)
                 )
+                .shadow(color: PKTheme.primary.opacity(isSelected ? 0.18 : 0.0), radius: 12, y: 6)
             VoiceRippleHalo(isLive: isLive, color: isLive ? PKTheme.ok : PKTheme.primary, compact: true)
             VoiceRobotAvatar(size: 38, isLive: isLive, stage: isLive ? .running : .idle)
         }
@@ -3236,6 +3625,425 @@ private struct VoiceStepRow: View {
     }
 }
 
+private struct VoiceAssistantPage: View {
+    let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkspaceId: EntityID?
+    @Binding var selectedWorkItemId: EntityID?
+    @ObservedObject var model: NativeAppModel
+    let navigate: (NativeRoute) -> Void
+    @StateObject private var voice = VoiceCaptureController()
+    @StateObject private var speaker = VoiceReportSpeaker()
+    @State private var delegatedUtterance = ""
+    @State private var lastSpokenRunId: EntityID?
+
+    private var selectedWorkspace: Workspace? {
+        if let selectedWorkspaceId,
+           let workspace = snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) {
+            return workspace
+        }
+        return snapshot.workspaces.first
+    }
+
+    private var selectedWorkItem: WorkItem? {
+        snapshot.workItems.first(where: { $0.id == selectedWorkItemId })
+    }
+
+    private var activeRun: AgentRun? {
+        guard let activeRunId = model.activeRunId else { return nil }
+        return snapshot.runs.first(where: { $0.id == activeRunId })
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    voiceHeader
+
+                    VStack(spacing: 16) {
+                        VoiceAssistantHero(
+                            stage: stage,
+                            transcript: delegatedUtterance,
+                            report: report.spokenText,
+                            isLive: voice.isRecording || model.isRunning,
+                            canListen: !model.isRunning,
+                            isRecording: voice.isRecording,
+                            toggleListen: { voice.toggleRecording() }
+                        )
+                        .frame(maxWidth: 760)
+
+                        VoiceProgressStrip(stage: stage)
+                            .frame(maxWidth: 760)
+
+                        voiceActions
+                            .frame(maxWidth: 760)
+
+                        if let readiness = voice.nativeSpeechReadinessMessage, !voice.isRecording {
+                            VoiceHintBanner(text: readiness)
+                                .frame(maxWidth: 760)
+                        }
+
+                        capturedBriefPanel
+                            .frame(maxWidth: 760)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
+                }
+                .padding(28)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+
+            Divider().overlay(PKTheme.edge)
+
+            voiceSidebar
+                .frame(width: 344)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(PKTheme.surface.opacity(0.2))
+        .onChange(of: voice.transcript) { _, next in
+            let trimmed = next.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                delegatedUtterance = trimmed
+            }
+        }
+        .onChange(of: activeRun?.state) { _, state in
+            guard let activeRun, let state, state == .completed || state == .failed || state == .waitingForUser else { return }
+            guard lastSpokenRunId != activeRun.id else { return }
+            lastSpokenRunId = activeRun.id
+            speaker.speak(report.spokenText)
+        }
+    }
+
+    private var voiceHeader: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                VoiceRippleHalo(isLive: voice.isRecording || model.isRunning, color: stageColor, compact: true)
+                VoiceRobotAvatar(size: 50, isLive: voice.isRecording || model.isRunning, stage: stage)
+            }
+            .frame(width: 58, height: 52)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Voice Assistant")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                Text("Speak the outcome. I will open the right agent chat, supervise it, and report back.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            StatusPill(text: stageLabel, color: stageColor)
+            StatusPill(text: selectedWorkspace?.name ?? "No Project", color: selectedWorkspace == nil ? PKTheme.warn : PKTheme.primary)
+        }
+    }
+
+    private var voiceActions: some View {
+        HStack(spacing: 10) {
+            Button {
+                voice.toggleRecording()
+            } label: {
+                Label(voice.isRecording ? "Stop" : "Listen", systemImage: voice.isRecording ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(voice.isRecording ? PKTheme.primaryText : PKTheme.text)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 42)
+                    .background(voice.isRecording ? PKTheme.err : PKTheme.primary.opacity(0.92))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke((voice.isRecording ? PKTheme.err : PKTheme.primary).opacity(0.72), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isRunning)
+            .help(voice.isRecording ? "Stop listening" : "Start listening")
+
+            Button {
+                launchDelegation()
+            } label: {
+                Label(model.isRunning ? "Supervising" : "Delegate", systemImage: model.isRunning ? "eye.fill" : "arrow.up.forward.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(canDelegate ? PKTheme.primaryText : PKTheme.text4)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 42)
+                    .background(canDelegate ? PKTheme.ok.opacity(0.92) : PKTheme.control.opacity(0.72))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(canDelegate ? PKTheme.ok.opacity(0.72) : PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canDelegate)
+            .help(canDelegate ? "Create an agent chat from this voice task" : "Capture a voice task first")
+
+            Button {
+                if speaker.isSpeaking {
+                    speaker.stop()
+                } else {
+                    speaker.speak(report.spokenText)
+                }
+            } label: {
+                Image(systemName: speaker.isSpeaking ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(speaker.isSpeaking ? PKTheme.warn : PKTheme.text2)
+                    .frame(width: 44, height: 42)
+                    .background(PKTheme.control.opacity(0.78))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .help("Speak current report")
+
+            Button {
+                delegatedUtterance = ""
+                voice.transcript = ""
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .frame(width: 44, height: 42)
+                    .background(PKTheme.control.opacity(0.78))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .disabled(delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isRunning)
+            .help("Clear captured brief")
+        }
+    }
+
+    private var capturedBriefPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Captured Request", systemImage: "quote.bubble")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                Spacer()
+                Text(voice.statusLine)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(stageColor)
+            }
+
+            Text(capturedBriefText)
+                .font(.system(size: 14, weight: delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .medium : .regular))
+                .foregroundStyle(delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? PKTheme.text3 : PKTheme.text)
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, minHeight: 68, alignment: .topLeading)
+                .padding(14)
+            .background(PKTheme.inset.opacity(0.82))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .padding(16)
+        .background(PKTheme.panel.opacity(0.68))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(PKTheme.edgeStrong.opacity(0.42), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 11))
+    }
+
+    private var capturedBriefText: String {
+        let trimmed = delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return "The robot will show what it hears here. Try: Help me add image paste support to the input composer and verify it."
+    }
+
+    private var voiceSidebar: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VoiceStatusCard(
+                title: statusTitle,
+                subtitle: statusSubtitle,
+                symbol: statusSymbol,
+                color: stageColor
+            )
+
+            if voice.nativeSpeechReadinessMessage != nil || !delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                fallbackBriefEditor
+            }
+
+            InspectorSection(title: "Delegation Plan") {
+                VoiceStepRow(symbol: "folder", title: "Project", value: selectedWorkspace?.name ?? "No project", color: selectedWorkspace == nil ? PKTheme.warn : PKTheme.primary)
+                VoiceStepRow(symbol: agentSymbol(plan.suggestedAgentKind), title: "Agent", value: agentShortLabel(plan.suggestedAgentKind), color: agentTint(plan.suggestedAgentKind))
+                VoiceStepRow(symbol: "checkmark.shield", title: "Permission", value: permissionLabel(plan.permissionMode), color: PKTheme.warn)
+                VoiceStepRow(symbol: "list.bullet.clipboard", title: "Criteria", value: "\(plan.acceptanceCriteria.count) checks", color: PKTheme.text3)
+                if let selectedWorkItem {
+                    VoiceStepRow(symbol: "checklist", title: "Context", value: selectedWorkItem.title, color: PKTheme.text3)
+                }
+            }
+
+            InspectorSection(title: "Report") {
+                Text(report.spokenText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let activeRun {
+                    Divider().overlay(PKTheme.edge)
+                    VoiceStepRow(symbol: "waveform.path.ecg", title: "Run", value: activeRun.state.rawValue, color: runStateColor(activeRun.state))
+                }
+            }
+
+            HStack(spacing: 8) {
+                SecondaryButton(title: "Chat", systemImage: "text.bubble") {
+                    navigate(.chat)
+                }
+                SecondaryButton(title: "Mission", systemImage: "gauge.with.dots.needle.67percent") {
+                    navigate(.missionControl)
+                }
+            }
+
+            if activeRun != nil {
+                SecondaryButton(title: "Open Work Item", systemImage: "checklist") {
+                    if let itemId = activeRun?.workItemId {
+                        selectedWorkItemId = itemId
+                    }
+                    navigate(.workItems)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(18)
+        .background(PKTheme.panel.opacity(0.52))
+    }
+
+    private var fallbackBriefEditor: some View {
+        InspectorSection(title: "Manual Fallback") {
+            TextEditor(text: $delegatedUtterance)
+                .font(.system(size: 12))
+                .foregroundStyle(PKTheme.text)
+                .lineSpacing(2)
+                .scrollContentBackground(.hidden)
+                .frame(height: 66)
+                .padding(6)
+                .background(PKTheme.inset.opacity(0.78))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private var plan: VoiceDelegationPlan {
+        VoiceAssistantPlanner.makePlan(
+            utterance: planningInput,
+            workspace: selectedWorkspace,
+            preferredAgent: model.selectedAgentKind,
+            recentWorkItem: selectedWorkItem
+        )
+    }
+
+    private var planningInput: String {
+        let trimmed = delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return activeRun?.promptSnapshot ?? ""
+    }
+
+    private var report: VoiceDelegationReport {
+        VoiceAssistantPlanner.report(for: plan, run: activeRun)
+    }
+
+    private var canDelegate: Bool {
+        !model.isRunning
+            && selectedWorkspace != nil
+            && !delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var statusTitle: String {
+        switch stage {
+        case .listening: return "Listening to your request"
+        case .understanding: return "Turning speech into an agent brief"
+        case .planning: return "Ready to delegate"
+        case .running: return "\(agentShortLabel(plan.suggestedAgentKind)) is working"
+        case .needsUser: return "Decision needed"
+        case .reporting: return report.headline
+        case .idle: return "Ready for a voice task"
+        }
+    }
+
+    private var statusSubtitle: String {
+        switch stage {
+        case .listening:
+            return "Speak naturally. The robot will keep the task brief here."
+        case .understanding:
+            return "I am shaping the request into an agent-ready brief."
+        case .planning:
+            return "Review the target and hand it to the selected agent."
+        case .running:
+            return "The chat window is active. I will keep watching state changes."
+        case .needsUser:
+            return "Open the chat or Work Item to answer the agent's question."
+        case .reporting:
+            return report.spokenText
+        case .idle:
+            return "Tap the robot or Listen to start a voice delegation."
+        }
+    }
+
+    private var statusSymbol: String {
+        switch stage {
+        case .listening, .understanding: return "mic.fill"
+        case .planning: return "list.bullet.clipboard"
+        case .running: return "eye.fill"
+        case .needsUser: return "person.crop.circle.badge.exclamationmark"
+        case .reporting: return "speaker.wave.2.fill"
+        case .idle: return "waveform.circle"
+        }
+    }
+
+    private var stageLabel: String {
+        switch stage {
+        case .listening: return "LISTENING"
+        case .understanding: return "UNDERSTANDING"
+        case .planning: return "READY"
+        case .running: return "SUPERVISING"
+        case .needsUser: return "NEEDS YOU"
+        case .reporting: return "REPORT"
+        case .idle: return "VOICE"
+        }
+    }
+
+    private var stage: VoiceDelegationStage {
+        if voice.isRecording { return .listening }
+        if activeRun?.state == .waitingForUser { return .needsUser }
+        if model.isRunning { return .running }
+        if activeRun?.state == .completed || activeRun?.state == .failed { return .reporting }
+        if !delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .planning }
+        return .idle
+    }
+
+    private var stageColor: Color {
+        switch stage {
+        case .listening, .understanding: return PKTheme.primary
+        case .planning: return PKTheme.warn
+        case .running: return PKTheme.ok
+        case .needsUser: return PKTheme.warn
+        case .reporting: return reportColor
+        case .idle: return PKTheme.primary
+        }
+    }
+
+    private var reportColor: Color {
+        switch report.tone {
+        case "active": return PKTheme.ok
+        case "attention": return PKTheme.warn
+        case "done": return PKTheme.ok
+        case "failed": return PKTheme.err
+        default: return PKTheme.text3
+        }
+    }
+
+    private func launchDelegation() {
+        let preparedPlan = plan
+        Task {
+            if let runId = await model.startVoiceDelegation(
+                preparedPlan,
+                workspaceId: selectedWorkspaceId,
+                targetWorkItemId: selectedWorkItemId
+            ),
+               let run = model.snapshot.runs.first(where: { $0.id == runId }) {
+                selectedWorkItemId = run.workItemId
+            }
+        }
+    }
+}
+
 private struct ProjectsPage: View {
     let snapshot: NativeStoreSnapshot
     @Binding var selectedWorkspaceId: EntityID?
@@ -3299,8 +4107,11 @@ private struct ProjectsPage: View {
                     selectedWorkspace: selectedWorkspace,
                     selectedProject: selectedProject,
                     selectedAgentKind: model.selectedAgentKind,
+                    branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
+                    branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
                     hideContext: { withAnimation(.easeInOut(duration: 0.16)) { contextVisible = false } },
-                    openWorkItems: { navigate(.workItems) }
+                    refreshBranches: { Task { await model.refreshBranches(for: selectedWorkspace) } },
+                    switchBranch: { branch in Task { await model.switchBranch(branch, workspace: selectedWorkspace) } }
                 )
                 .frame(width: 300)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -3316,6 +4127,9 @@ private struct ProjectsPage: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(PKTheme.panel.opacity(0.24))
+        .task(id: selectedWorkspace?.id) {
+            await model.refreshBranches(for: selectedWorkspace)
+        }
     }
 
     private func selectWorkspace(_ workspaceId: EntityID) {
@@ -3671,8 +4485,11 @@ private struct ProjectContextSidebar: View {
     let selectedWorkspace: Workspace?
     let selectedProject: Project?
     let selectedAgentKind: NativeAgentKind
+    let branchOptions: [String]
+    let branchStatus: String?
     let hideContext: () -> Void
-    let openWorkItems: () -> Void
+    let refreshBranches: () -> Void
+    let switchBranch: (String) -> Void
 
     private var workspaceIds: [EntityID] {
         if let selectedProject, !selectedProject.workspaceIds.isEmpty {
@@ -3684,16 +4501,16 @@ private struct ProjectContextSidebar: View {
         return []
     }
 
-    private var workItems: [WorkItem] {
-        snapshot.workItems.filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
-    }
-
     private var runs: [AgentRun] {
         snapshot.runs.filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
     }
 
     private var artifacts: [Artifact] {
         snapshot.artifacts.filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
+    }
+
+    private var currentBranch: String {
+        selectedWorkspace?.currentBranch ?? branchOptions.first ?? "Unknown"
     }
 
     var body: some View {
@@ -3726,7 +4543,13 @@ private struct ProjectContextSidebar: View {
 
                 InspectorSection(title: "Project") {
                     InspectorMetric(label: "Workspace", value: selectedWorkspace?.name ?? "None")
-                    InspectorMetric(label: "Branch", value: selectedWorkspace?.currentBranch ?? "Unknown")
+                    ProjectBranchPicker(
+                        currentBranch: currentBranch,
+                        branches: branchOptions,
+                        status: branchStatus,
+                        refresh: refreshBranches,
+                        switchBranch: switchBranch
+                    )
                     InspectorMetric(label: "Trust", value: selectedWorkspace?.trustState.rawValue ?? "unknown")
                     if let path = selectedWorkspace?.pathDisplay {
                         Text(path)
@@ -3735,18 +4558,6 @@ private struct ProjectContextSidebar: View {
                             .lineLimit(2)
                             .textSelection(.enabled)
                     }
-                }
-
-                InspectorSection(title: "Work Items") {
-                    InspectorMetric(label: "Active", value: "\(workItems.filter { $0.state == .active || $0.state == .review || $0.state == .blocked }.count)")
-                    InspectorMetric(label: "Total", value: "\(workItems.count)")
-                    ForEach(workItems.prefix(3)) { item in
-                        InspectorRow(symbol: "checklist", title: item.title, subtitle: item.state.rawValue)
-                    }
-                    if workItems.isEmpty {
-                        EmptyMiniState(title: "No items", subtitle: "Project chat can create the first durable work item.")
-                    }
-                    SecondaryButton(title: "Open Work Items", systemImage: "square.grid.2x2", action: openWorkItems)
                 }
 
                 InspectorSection(title: "Recent Chats") {
@@ -3770,6 +4581,69 @@ private struct ProjectContextSidebar: View {
             .padding(16)
         }
         .background(PKTheme.panel.opacity(0.42))
+    }
+}
+
+private struct ProjectBranchPicker: View {
+    let currentBranch: String
+    let branches: [String]
+    let status: String?
+    let refresh: () -> Void
+    let switchBranch: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Menu {
+                if branches.isEmpty {
+                    Button("Refresh Branches", systemImage: "arrow.clockwise", action: refresh)
+                    Divider()
+                    Button("No local branches") {}
+                        .disabled(true)
+                } else {
+                    ForEach(branches, id: \.self) { branch in
+                        Button {
+                            if branch != currentBranch {
+                                switchBranch(branch)
+                            }
+                        } label: {
+                            Label(branch, systemImage: branch == currentBranch ? "checkmark" : "arrow.triangle.branch")
+                        }
+                    }
+                    Divider()
+                    Button("Refresh Branches", systemImage: "arrow.clockwise", action: refresh)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text("Branch")
+                        .font(.caption)
+                        .foregroundStyle(PKTheme.text3)
+                    Spacer(minLength: 8)
+                    Text(currentBranch)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(PKTheme.text2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(PKTheme.text3)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .frame(maxWidth: .infinity)
+                .background(PKTheme.control.opacity(0.52))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+            .menuStyle(.borderlessButton)
+            .help("Switch Branch")
+
+            if let status {
+                Text(status)
+                    .font(.caption2)
+                    .foregroundStyle(status.hasPrefix("Switching") ? PKTheme.primary : PKTheme.warn)
+                    .lineLimit(2)
+            }
+        }
     }
 }
 
@@ -5478,6 +6352,17 @@ private func projectTitle(for workspaceId: EntityID?, snapshot: NativeStoreSnaps
         return project.name
     }
     return snapshot.workspaces.first(where: { $0.id == workspaceId })?.name ?? "Project"
+}
+
+private func branchTitle(for workspaceId: EntityID?, snapshot: NativeStoreSnapshot) -> String {
+    let workspace = workspaceId.flatMap { id in
+        snapshot.workspaces.first(where: { $0.id == id })
+    } ?? snapshot.workspaces.first
+    guard let branch = workspace?.currentBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !branch.isEmpty else {
+        return "No branch"
+    }
+    return branch
 }
 
 private func permissionTitle(_ mode: PermissionMode) -> String {
