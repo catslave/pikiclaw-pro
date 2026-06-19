@@ -174,4 +174,41 @@ describe('Wayland workbench artifact recovery', () => {
       sessionId: 'side-clarify-scope',
     });
   });
+
+  it('does not duplicate a final deliverable as a stage output for the same run', () => {
+    const items = buildWorkbenchArtifactRecoveryItems({
+      tasks: [task({
+        stageRuns: [
+          stageRun({
+            id: 'run-final',
+            stage: 'coding',
+            status: 'completed',
+            completedAt: '2026-06-16T10:00:00.000Z',
+            output: {
+              summary: 'Implemented the final workbench recovery lane.',
+            },
+          }),
+        ],
+        outputs: [
+          output({
+            id: 'out-final',
+            kind: 'final',
+            stageRunId: 'run-final',
+            summary: 'Ready for review.',
+            createdAt: '2026-06-16T10:05:00.000Z',
+          }),
+        ],
+      })],
+      limit: 10,
+    });
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'output-ready',
+      label: 'Final output',
+      target: 'deliverables',
+      outputId: 'out-final',
+      stageRunId: 'run-final',
+    });
+  });
 });

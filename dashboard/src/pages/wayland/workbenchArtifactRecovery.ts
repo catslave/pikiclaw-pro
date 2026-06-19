@@ -59,6 +59,21 @@ function artifactRank(tone: WorkbenchArtifactRecoveryTone): number {
   return 3;
 }
 
+function dedupeKey(item: WorkbenchArtifactRecoveryItem): string {
+  if ((item.kind === 'stage-output' || item.kind === 'output-ready') && item.stageRunId) {
+    return `stage-artifact:${item.taskId}:${item.stageRunId}`;
+  }
+  return `${item.kind}:${item.taskId}:${item.stageRunId || item.outputId || ''}`;
+}
+
+function shouldReplaceRecoveryItem(existing: WorkbenchArtifactRecoveryItem, candidate: WorkbenchArtifactRecoveryItem): boolean {
+  if (candidate.kind === 'output-ready' && existing.kind === 'stage-output') return true;
+  if (candidate.kind === 'stage-output' && existing.kind === 'output-ready') return false;
+  const rankDelta = artifactRank(candidate.tone) - artifactRank(existing.tone);
+  if (rankDelta !== 0) return rankDelta < 0;
+  return time(candidate.updatedAt) > time(existing.updatedAt);
+}
+
 function activeSessionTone(status: ProStageRunStatus): WorkbenchArtifactRecoveryTone {
   if (status === 'waiting-user' || status === 'failed') return 'warn';
   if (status === 'running' || status === 'queued') return 'running';
@@ -187,14 +202,16 @@ export function buildWorkbenchArtifactRecoveryItems(input: BuildWorkbenchArtifac
     }
   }
 
-  const seen = new Set<string>();
-  return items
+  const deduped = new Map<string, WorkbenchArtifactRecoveryItem>();
+  for (const item of items) {
+    const key = dedupeKey(item);
+    const existing = deduped.get(key);
+    if (!existing || shouldReplaceRecoveryItem(existing, item)) {
+      deduped.set(key, item);
+    }
+  }
+
+  return [...deduped.values()]
     .sort((a, b) => artifactRank(a.tone) - artifactRank(b.tone) || time(b.updatedAt) - time(a.updatedAt))
-    .filter(item => {
-      const key = `${item.kind}:${item.taskId}:${item.stageRunId || item.outputId || ''}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
     .slice(0, limit);
 }

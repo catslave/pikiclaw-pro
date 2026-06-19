@@ -778,7 +778,7 @@ private struct ChatHomeView: View {
                     close: { assistantDockOpen = false },
                     navigate: navigate
                 )
-                .frame(width: 340)
+                .frame(width: 388)
                 .padding(18)
             }
         }
@@ -966,6 +966,7 @@ private final class DetachedChatWindowRegistry {
             defer: false
         )
         window.title = run.promptSnapshot.firstLineFallback("Chat")
+        window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 760, height: 520)
         window.contentView = NSHostingView(rootView: rootView)
         window.center()
@@ -1609,31 +1610,31 @@ private struct MinimalChatComposer: View {
                 if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(placeholder)
-                            .font(.system(size: 17, weight: .medium))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(PKTheme.text2)
                         Text(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(PKTheme.text4)
                     }
-                    .padding(.top, 15)
-                    .padding(.leading, 16)
+                    .padding(.top, 16)
+                    .padding(.leading, 18)
                     .allowsHitTesting(false)
                 }
 
                 TextEditor(text: $text)
                     .focused(focused)
-                    .font(.system(size: 17))
+                    .font(.system(size: 16))
                     .foregroundStyle(PKTheme.text)
                     .scrollContentBackground(.hidden)
                     .lineSpacing(3)
-                    .frame(minHeight: 132, maxHeight: 172)
-                    .padding(.top, 15)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 4)
+                    .frame(minHeight: 104, maxHeight: 136)
+                    .padding(.top, 11)
+                    .padding(.horizontal, 15)
+                    .padding(.bottom, 2)
             }
 
             Rectangle()
-                .fill(PKTheme.edge.opacity(0.72))
+                .fill(PKTheme.edge.opacity(0.62))
                 .frame(height: 1)
 
             HStack(spacing: 9) {
@@ -1652,7 +1653,8 @@ private struct MinimalChatComposer: View {
                     ComposerToolbarLabel(
                         symbol: "shield.checkered",
                         title: permissionTitle(selectedPermissionMode),
-                        tint: PKTheme.text3
+                        tint: PKTheme.text3,
+                        showsChevron: true
                     )
                 }
                 .menuStyle(.borderlessButton)
@@ -1671,23 +1673,16 @@ private struct MinimalChatComposer: View {
                 }
                 ComposerIconButton(symbol: "mic", title: "Voice") {}
                     .disabled(true)
-
-                Text("# Commands")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(PKTheme.text4)
+                ComposerIconButton(symbol: "number", title: "Commands") {}
+                    .disabled(true)
 
                 Spacer()
 
                 Button(action: send) {
-                    HStack(spacing: 7) {
-                        Image(systemName: isRunning ? "hourglass" : "arrow.up")
-                            .font(.system(size: 13, weight: .bold))
-                        Text(isRunning ? "Running" : "Send")
-                            .font(.system(size: 13, weight: .semibold))
-                    }
+                    Image(systemName: isRunning ? "hourglass" : "arrow.up")
+                        .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
-                    .padding(.horizontal, 12)
-                    .frame(height: 34)
+                    .frame(width: 38, height: 34)
                     .background(canSend ? PKTheme.primary : PKTheme.control.opacity(0.86))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
@@ -1700,22 +1695,19 @@ private struct MinimalChatComposer: View {
             .padding(.bottom, 12)
             .padding(.top, 10)
         }
-        .background(
-            LinearGradient(
-                colors: [
-                    PKTheme.surfaceRaised.opacity(0.96),
-                    PKTheme.panel.opacity(0.92)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
+        .background(PKTheme.surfaceRaised.opacity(0.95))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(focused.wrappedValue ? PKTheme.primary.opacity(0.72) : PKTheme.edgeStrong.opacity(isHovering ? 0.78 : 0.54), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(focused.wrappedValue ? PKTheme.primary.opacity(0.72) : PKTheme.edgeStrong.opacity(isHovering ? 0.78 : 0.52), lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.26 : 0.16), radius: focused.wrappedValue ? 24 : 16, x: 0, y: 12)
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(PKTheme.primary.opacity(focused.wrappedValue ? 0.92 : 0.40))
+                .frame(width: 2)
+                .padding(.vertical, 10)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.20 : 0.11), radius: focused.wrappedValue ? 18 : 12, x: 0, y: 10)
         .onHover { isHovering = $0 }
     }
 }
@@ -1724,6 +1716,7 @@ private struct ComposerToolbarLabel: View {
     let symbol: String
     let title: String
     let tint: Color
+    var showsChevron = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -1733,12 +1726,15 @@ private struct ComposerToolbarLabel: View {
                 .font(.system(size: 12, weight: .semibold))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(tint.opacity(0.72))
+            if showsChevron {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(tint.opacity(0.72))
+            }
         }
         .foregroundStyle(tint)
         .padding(.horizontal, 10)
+        .frame(maxWidth: 188)
         .frame(height: 30)
         .background(tint.opacity(0.10))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.22), lineWidth: 1))
@@ -2482,7 +2478,15 @@ private struct AssistantInspector: View {
                 .foregroundStyle(PKTheme.text3)
             }
 
+            VoiceProgressStrip(stage: stage)
             VoiceWaveform(isLive: voice.isRecording || model.isRunning, color: stageColor)
+
+            VoiceStatusCard(
+                title: statusTitle,
+                subtitle: statusSubtitle,
+                symbol: statusSymbol,
+                color: stageColor
+            )
 
             HStack(spacing: 8) {
                 Button {
@@ -2502,6 +2506,22 @@ private struct AssistantInspector: View {
                 .help(voice.isRecording ? "Stop listening" : "Start listening")
 
                 Button {
+                    delegatedUtterance = ""
+                    voice.transcript = ""
+                } label: {
+                    Image(systemName: "xmark.circle")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 38, height: 34)
+                        .foregroundStyle(PKTheme.text2)
+                        .background(PKTheme.control.opacity(0.78))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isRunning)
+                .help("Clear brief")
+
+                Button {
                     speaker.speak(report.spokenText)
                 } label: {
                     Image(systemName: speaker.isSpeaking ? "speaker.slash.fill" : "speaker.wave.2.fill")
@@ -2514,6 +2534,10 @@ private struct AssistantInspector: View {
                 }
                 .buttonStyle(.plain)
                 .help("Speak current report")
+            }
+
+            if let readiness = voice.nativeSpeechReadinessMessage, !voice.isRecording {
+                VoiceHintBanner(text: readiness)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -2534,6 +2558,7 @@ private struct AssistantInspector: View {
                             .foregroundStyle(PKTheme.text3)
                             .padding(.top, 9)
                             .padding(.leading, 8)
+                            .allowsHitTesting(false)
                     }
                     TextEditor(text: $delegatedUtterance)
                         .font(.system(size: 12))
@@ -2551,6 +2576,7 @@ private struct AssistantInspector: View {
                 VoiceStepRow(symbol: "folder", title: "Project", value: selectedWorkspace?.name ?? "No project", color: selectedWorkspace == nil ? PKTheme.warn : PKTheme.primary)
                 VoiceStepRow(symbol: agentSymbol(plan.suggestedAgentKind), title: "Agent", value: agentShortLabel(plan.suggestedAgentKind), color: agentTint(plan.suggestedAgentKind))
                 VoiceStepRow(symbol: "checkmark.shield", title: "Permission", value: permissionLabel(plan.permissionMode), color: PKTheme.warn)
+                VoiceStepRow(symbol: "list.bullet.clipboard", title: "Criteria", value: "\(plan.acceptanceCriteria.count) checks", color: PKTheme.text3)
                 if let selectedWorkItem {
                     VoiceStepRow(symbol: "checklist", title: "Context", value: selectedWorkItem.title, color: PKTheme.text3)
                 }
@@ -2565,6 +2591,20 @@ private struct AssistantInspector: View {
                 if let activeRun {
                     Divider().overlay(PKTheme.edge)
                     VoiceStepRow(symbol: "waveform.path.ecg", title: "Run", value: activeRun.state.rawValue, color: runStateColor(activeRun.state))
+                }
+            }
+
+            if activeRun != nil {
+                HStack(spacing: 8) {
+                    SecondaryButton(title: "Open Chat", systemImage: "text.bubble") {
+                        navigate(.chat)
+                    }
+                    SecondaryButton(title: "Work Item", systemImage: "checklist") {
+                        if let itemId = activeRun?.workItemId {
+                            selectedWorkItemId = itemId
+                        }
+                        navigate(.workItems)
+                    }
                 }
             }
 
@@ -2752,6 +2792,7 @@ private struct ProjectsPage: View {
     @ObservedObject var model: NativeAppModel
     let newProject: () -> Void
     let navigate: (NativeRoute) -> Void
+    @State private var contextVisible = true
 
     private var selectedWorkspace: Workspace? {
         if let selectedWorkspaceId,
@@ -2801,14 +2842,26 @@ private struct ProjectsPage: View {
 
             Divider().overlay(PKTheme.edge)
 
-            ProjectContextSidebar(
-                snapshot: snapshot,
-                selectedWorkspace: selectedWorkspace,
-                selectedProject: selectedProject,
-                selectedAgentKind: model.selectedAgentKind,
-                openWorkItems: { navigate(.workItems) }
-            )
-            .frame(width: 300)
+            if contextVisible {
+                ProjectContextSidebar(
+                    snapshot: snapshot,
+                    selectedWorkspace: selectedWorkspace,
+                    selectedProject: selectedProject,
+                    selectedAgentKind: model.selectedAgentKind,
+                    hideContext: { withAnimation(.easeInOut(duration: 0.16)) { contextVisible = false } },
+                    openWorkItems: { navigate(.workItems) }
+                )
+                .frame(width: 300)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            } else {
+                ContextRevealRail {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        contextVisible = true
+                    }
+                }
+                .frame(width: 42)
+                .transition(.opacity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(PKTheme.panel.opacity(0.24))
@@ -3167,6 +3220,7 @@ private struct ProjectContextSidebar: View {
     let selectedWorkspace: Workspace?
     let selectedProject: Project?
     let selectedAgentKind: NativeAgentKind
+    let hideContext: () -> Void
     let openWorkItems: () -> Void
 
     private var workspaceIds: [EntityID] {
@@ -3206,6 +3260,17 @@ private struct ProjectContextSidebar: View {
                     }
                     Spacer()
                     StatusPill(text: agentShortLabel(selectedAgentKind), color: agentTint(selectedAgentKind))
+                    Button(action: hideContext) {
+                        Image(systemName: "sidebar.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text3)
+                            .frame(width: 30, height: 30)
+                            .background(PKTheme.control.opacity(0.72))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide Context")
                 }
 
                 InspectorSection(title: "Project") {
@@ -3254,6 +3319,31 @@ private struct ProjectContextSidebar: View {
             .padding(16)
         }
         .background(PKTheme.panel.opacity(0.42))
+    }
+}
+
+private struct ContextRevealRail: View {
+    let showContext: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Button(action: showContext) {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 30, height: 30)
+                    .background(PKTheme.primary.opacity(0.10))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.primary.opacity(0.24), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+            .help("Show Context")
+            .padding(.top, 14)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(PKTheme.panel.opacity(0.34))
     }
 }
 

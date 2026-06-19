@@ -1,9 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type Dispatch, type DragEvent, type KeyboardEvent, type ReactNode, type Ref, type SetStateAction } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type ClipboardEvent, type Dispatch, type DragEvent, type KeyboardEvent, type ReactNode, type Ref, type SetStateAction } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { resolveAppStatusBadge } from '../../app-status';
 import { api } from '../../api';
 import { getBrowserNotificationPermission, requestBrowserNotificationPermission, showBrowserNotification, type BrowserNotificationPermission } from '../../browser-notifications';
-import { prefetchSessionMessages } from '../../session-preload';
+import { loadSessionMessages, prefetchSessionMessages } from '../../session-preload';
 import { BrandIcon } from '../../components/BrandIcon';
 import { Button, Dot, Input, Modal, ModalHeader, Spinner } from '../../components/ui';
 import { createT, type Locale } from '../../i18n';
@@ -109,6 +109,7 @@ import {
   chatHomeNextActionTodayPrompt,
   chatHomeNextActionTaskId,
 } from './chatHomeNextActions';
+import { canSubmitChatHomeMessage } from './chatHomeComposer';
 import { buildJiraQueueCockpitItems, type JiraQueueCockpitTone } from './jiraQueueCockpit';
 import { buildLocalWorkRecoveryItems, type LocalWorkRecoveryTone } from './localWorkRecovery';
 import { buildTodoIntakeCockpit, type TodoIntakeTone } from './todoIntakeCockpit';
@@ -142,6 +143,7 @@ import {
   projectReferenceContextSources,
   projectReferenceLaunchKey,
 } from './projectReferenceLaunch';
+import { buildProjectConversationModel } from './projectConversationModel';
 import {
   buildTeamLaunchPlan,
   buildTeamProfiles,
@@ -293,7 +295,11 @@ import {
 } from './scheduledTaskTiming';
 import { scheduledTaskNotificationRequest } from './scheduledTaskNotification';
 
-const FocusSessionPanel = lazy(async () => ({ default: (await import('../sessions/SessionPanel')).SessionPanel }));
+function loadFocusSessionPanel() {
+  return import('../sessions/SessionPanel');
+}
+
+const FocusSessionPanel = lazy(async () => ({ default: (await loadFocusSessionPanel()).SessionPanel }));
 const CONVERSATION_PANEL_PREFETCH_TURNS = 12;
 
 type WaylandView =
@@ -363,11 +369,63 @@ type RecentConversation = {
 };
 
 type AssistantDockSessionRef = {
+  panelKey: string;
   workdir: string;
   agent: string;
   sessionId: string;
   assistantId?: string;
 };
+
+type WorkbenchPendingChat = {
+  key: string;
+  prompt: string;
+  createdAt: string;
+};
+
+const WORKBENCH_CHAT_HANDOFF_ATTEMPTS = 36;
+const WORKBENCH_CHAT_HANDOFF_DELAY_MS = 500;
+
+function workbenchSessionMessagesReady(result: SessionMessagesResult | null | undefined): boolean {
+  if (!result?.ok) return false;
+  if ((result.window?.totalTurns ?? result.totalTurns ?? 0) > 0) return true;
+  return !!(result.richMessages?.length || result.messages?.length);
+}
+
+function workbenchStreamStateReady(state: { phase?: string | null; text?: string | null; activity?: string | null; prompt?: string | null } | null | undefined): boolean {
+  if (!state) return false;
+  if (state.phase === 'done') return true;
+  if (state.phase !== 'streaming') return false;
+  return !!(state.text?.trim() || state.activity?.trim() || state.prompt?.trim());
+}
+
+async function waitForWorkbenchSessionHandoffReady({
+  workdir,
+  agent,
+  sessionId,
+}: {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+}): Promise<boolean> {
+  for (let attempt = 0; attempt < WORKBENCH_CHAT_HANDOFF_ATTEMPTS; attempt += 1) {
+    const [messages, stream] = await Promise.all([
+      loadSessionMessages({
+        workdir,
+        agent,
+        sessionId,
+        rich: true,
+        turnOffset: 0,
+        turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
+      }, { force: true, request: { timeoutMs: 6_000 } }).catch(() => null),
+      api.getSessionStreamState(agent, sessionId, { timeoutMs: 6_000 }).catch(() => null),
+    ]);
+    if (workbenchSessionMessagesReady(messages) || workbenchStreamStateReady(stream?.state)) {
+      return true;
+    }
+    await waitForChatLaunchMotion(WORKBENCH_CHAT_HANDOFF_DELAY_MS);
+  }
+  return false;
+}
 
 type ConversationFilter = 'all' | 'running' | 'pinned' | 'incomplete' | 'completed';
 type ConversationAttentionTone = 'running' | 'review' | 'unread';
@@ -1409,6 +1467,7 @@ function copyFor(locale: Locale) {
   };
 }
 
+
 function viewFromPath(pathname: string): WaylandView {
   if (pathname === '/workbench') return 'dashboard';
   if (pathname === '/dashboard') return 'dashboard';
@@ -1645,6 +1704,8 @@ type ChatFocusTarget = {
   agent: string;
   sessionId: string;
   nonce: number;
+  launchPrompt: string | null;
+  launchCreatedAt: string | null;
   searchContext: SessionPanelSearchContext | null;
   scrollRequest: SessionPanelScrollRequest | null;
 };
@@ -1672,12 +1733,16 @@ function chatFocusState(args: {
   role?: 'user' | 'assistant' | null;
   turnIndex?: number;
   totalTurns?: number;
+  launchPrompt?: string | null;
+  launchCreatedAt?: string | null;
 }): Record<string, unknown> {
   return {
     openSessionWorkdir: args.workdir,
     openSessionAgent: args.agent,
     openSessionId: args.sessionId,
     openSessionNonce: Date.now(),
+    ...(args.launchPrompt ? { openSessionLaunchPrompt: args.launchPrompt } : {}),
+    ...(args.launchCreatedAt ? { openSessionLaunchCreatedAt: args.launchCreatedAt } : {}),
     ...(args.query ? { openSessionSearchQuery: args.query } : {}),
     ...(args.snippet ? { openSessionSearchSnippet: args.snippet } : {}),
     ...(args.role ? { openSessionSearchRole: args.role } : {}),
@@ -1754,6 +1819,12 @@ function readChatFocusTarget(pathname: string, search: string, state: unknown): 
   const turnIndex = parseNavNumber(navState.openSessionSearchTurnIndex ?? params.get('turn'));
   const totalTurns = parseNavNumber(navState.openSessionSearchTotalTurns ?? params.get('total'));
   const nonce = parseNavNumber(navState.openSessionNonce ?? params.get('nonce')) ?? Date.now();
+  const launchPrompt = typeof navState.openSessionLaunchPrompt === 'string' && navState.openSessionLaunchPrompt.trim()
+    ? navState.openSessionLaunchPrompt.trim()
+    : null;
+  const launchCreatedAt = typeof navState.openSessionLaunchCreatedAt === 'string' && navState.openSessionLaunchCreatedAt.trim()
+    ? navState.openSessionLaunchCreatedAt.trim()
+    : null;
   const searchContext: SessionPanelSearchContext | null = searchQuery
     ? {
       query: searchQuery,
@@ -1769,6 +1840,8 @@ function readChatFocusTarget(pathname: string, search: string, state: unknown): 
     agent,
     sessionId,
     nonce,
+    launchPrompt,
+    launchCreatedAt,
     searchContext,
     scrollRequest: turnIndex !== null
       ? {
@@ -3378,6 +3451,7 @@ function AssistantSideDock({
       if (!parsed?.agent || !parsed.sessionId) throw new Error(copy.launchFailed);
       const runWorkdir = 'workdir' in parsed && parsed.workdir ? parsed.workdir : dockWorkdir;
       setSessionRef({
+        panelKey: `${runWorkdir}:${parsed.agent}:${parsed.sessionId}`,
         workdir: runWorkdir,
         agent: parsed.agent,
         sessionId: parsed.sessionId,
@@ -3394,6 +3468,7 @@ function AssistantSideDock({
 
   const openHistoryItem = useCallback((item: AssistantHistoryItem) => {
     setSessionRef({
+      panelKey: `${item.workdir}:${item.agent}:${item.sessionId}`,
       workdir: item.workdir,
       agent: item.agent,
       sessionId: item.sessionId,
@@ -3404,6 +3479,7 @@ function AssistantSideDock({
   const openRecentConversation = useCallback((item: RecentConversation) => {
     if (!item.session.agent) return;
     setSessionRef({
+      panelKey: `${item.workdir}:${item.session.agent}:${item.session.sessionId}`,
       workdir: item.workdir,
       agent: item.session.agent,
       sessionId: item.session.sessionId,
@@ -3413,13 +3489,14 @@ function AssistantSideDock({
 
   const handleSessionChange = useCallback((next: SessionPanelChange) => {
     setSessionRef({
+      panelKey: sessionRef?.panelKey || `${next.workdir || dockWorkdir}:${next.agent || preferredAssistantAgent || ''}:${next.sessionId || sessionRef?.sessionId || ''}`,
       workdir: next.workdir || sessionRef?.workdir || dockWorkdir,
       agent: next.agent || sessionRef?.agent || preferredAssistantAgent || '',
       sessionId: next.sessionId || sessionRef?.sessionId || '',
       assistantId: selectedAssistant?.id,
     });
     void Promise.allSettled([reloadRecent(), loadHistory()]);
-  }, [dockWorkdir, loadHistory, preferredAssistantAgent, reloadRecent, selectedAssistant?.id, sessionRef?.agent, sessionRef?.sessionId, sessionRef?.workdir]);
+  }, [dockWorkdir, loadHistory, preferredAssistantAgent, reloadRecent, selectedAssistant?.id, sessionRef?.agent, sessionRef?.panelKey, sessionRef?.sessionId, sessionRef?.workdir]);
 
   return (
     <aside
@@ -3518,7 +3595,7 @@ function AssistantSideDock({
           <div className="mt-3 h-[520px] min-h-[420px] overflow-hidden rounded-[18px] border border-edge bg-[var(--th-chat-window-bg)]" data-testid="assistant-side-dock-session">
             <Suspense fallback={<div className="flex h-full items-center justify-center gap-2 text-[12px] text-fg-5"><Spinner />Loading assistant...</div>}>
               <FocusSessionPanel
-                key={`${sessionRef.workdir}:${sessionRef.agent}:${sessionRef.sessionId}`}
+                key={sessionRef.panelKey}
                 session={activeSession}
                 workdir={sessionRef.workdir}
                 active
@@ -4824,7 +4901,7 @@ function ChatHome({
   const showComposerContextControls = false;
   const showComposerReferenceControls = false;
   const showComposerAuxiliaryWork = false;
-	  const canSend = !!prompt.trim() && !!selectedWorkspace && !!selectedTarget && !sending;
+	  const canSend = canSubmitChatHomeMessage(prompt, attachments.length) && !!selectedWorkspace && !!selectedTarget && !sending;
 	  const scheduleCount = automations.length;
 	  const effortLabel = effort === 'low' ? copy.quick : effort === 'high' ? copy.deep : copy.medium;
 	  const permissionLabel = permissionMode === 'autopilot'
@@ -5218,9 +5295,15 @@ function ChatHome({
     setProjectMentionActiveIndex(0);
   }, [projectMentionQuery, filteredProjectMentionWorkspaces.length]);
 
-  const openCreatedSession = useCallback((workdir: string, agent: string, sessionId: string) => {
+  const openCreatedSession = useCallback((workdir: string, agent: string, sessionId: string, launchPrompt?: string | null) => {
     navigate('/chat', {
-      state: chatFocusState({ workdir, agent, sessionId }),
+      state: chatFocusState({
+        workdir,
+        agent,
+        sessionId,
+        launchPrompt,
+        launchCreatedAt: launchPrompt ? new Date().toISOString() : null,
+      }),
     });
   }, [navigate]);
 
@@ -5375,6 +5458,16 @@ function ChatHome({
     });
   }, [projectReferenceFiles]);
 
+  const handleComposerPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedImages = Array.from(event.clipboardData?.items || [])
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .map(item => item.getAsFile())
+      .filter((file): file is File => !!file);
+    if (!pastedImages.length) return;
+    event.preventDefault();
+    setAttachments(current => [...current, ...pastedImages]);
+  }, []);
+
   const submit = useCallback(async (overridePrompt?: string) => {
     const hasOverridePrompt = typeof overridePrompt === 'string';
     const cleanPrompt = (hasOverridePrompt ? overridePrompt : prompt).trim();
@@ -5389,17 +5482,12 @@ function ChatHome({
       : cleanPrompt;
     const target = parseTarget(targetValue);
     const workspace = selectedWorkspace;
-    if (!cleanPrompt || !target || !workspace || sending) return false;
+    if (!canSubmitChatHomeMessage(cleanPrompt, attachments.length) || !target || !workspace || sending) return false;
     if (target.kind === 'assistant' && attachments.length) {
       toast(copy.attachmentsWithAssistant, false);
       return false;
     }
-    beginLaunchTransition({
-      prompt: cleanPrompt,
-      workspaceLabel: workspaceDisplayName(workspace),
-      targetLabel: selectedTargetLabel,
-      theme: chatHomeActiveAgentTheme,
-    });
+    onChatLaunchTransitionClear();
     setSending(true);
     try {
       const contextEnvelope = projectContext ? buildReferenceContextEnvelope(projectContext.prompt) : '';
@@ -5431,9 +5519,7 @@ function ChatHome({
             assistantName: assistant.name,
           }, workflowNote);
         }
-        await waitForLaunchTransition();
-        openCreatedSession(runWorkdir, parsed.agent, parsed.sessionId);
-        onChatLaunchTransitionSettle();
+        openCreatedSession(runWorkdir, parsed.agent, parsed.sessionId, cleanPrompt);
       } else {
         const agent = target.agent || defaultAgent;
         if (!agent) throw new Error(copy.launchFailed);
@@ -5457,9 +5543,7 @@ function ChatHome({
             model: target.kind === 'model' ? target.model : undefined,
           }, workflowNote);
         }
-        await waitForLaunchTransition();
-        openCreatedSession(workspace.path, parsed.agent, parsed.sessionId);
-        onChatLaunchTransitionSettle();
+        openCreatedSession(workspace.path, parsed.agent, parsed.sessionId, cleanPrompt);
       }
       setPrompt('');
       setAttachments([]);
@@ -5475,7 +5559,7 @@ function ChatHome({
     } finally {
       setSending(false);
     }
-  }, [assistantOptions, attachments, beginLaunchTransition, chatHomeActiveAgentTheme, copy, defaultAgent, effort, launchWorkflowContext, launchWorkItemContext, onChatLaunchTransitionClear, onChatLaunchTransitionSettle, openCreatedSession, permissionMode, projectContext, prompt, reloadRecent, rememberChatWorkflowRun, selectedProjectReferences, selectedTargetLabel, selectedWorkspace, sending, targetValue, toast, waitForLaunchTransition]);
+  }, [assistantOptions, attachments, copy, defaultAgent, effort, launchWorkflowContext, launchWorkItemContext, onChatLaunchTransitionClear, openCreatedSession, permissionMode, projectContext, prompt, reloadRecent, rememberChatWorkflowRun, selectedProjectReferences, selectedWorkspace, sending, targetValue, toast]);
 
   const closeSpeechDialog = useCallback(() => {
     speechRecognitionRef.current?.abort();
@@ -6449,6 +6533,7 @@ function ChatHome({
             ref={composerInputRef}
             value={prompt}
             onChange={event => setPrompt(event.target.value)}
+            onPaste={handleComposerPaste}
             onKeyDown={event => {
               const isComposing = isImeCompositionKeyEvent(
                 event,
@@ -6863,7 +6948,11 @@ function ChatHome({
                   type="file"
                   multiple
                   className="hidden"
-                  onChange={event => setAttachments(Array.from(event.target.files || []))}
+                  onChange={event => {
+                    const files = Array.from(event.target.files || []);
+                    if (files.length) setAttachments(current => [...current, ...files]);
+                    event.target.value = '';
+                  }}
                 />
               </div>
               <span className="hidden shrink-0 text-[11px] text-fg-5 xl:inline-flex">
@@ -7431,6 +7520,11 @@ function ProjectWorkspaceView({
     [referenceFiles],
   );
   const projectContextReady = readyParts > 0 || referenceFiles.length > 0 || allMemoryEntries.length > 0;
+  const projectConversationModel = useMemo(() => buildProjectConversationModel({
+    workspace,
+    conversations: projectChats,
+    tasks: projectWorkItems,
+  }), [projectChats, projectWorkItems, workspace]);
   const referenceLaunchLabel = referenceFiles.length === 1
     ? copy.referenceAutoAttached
     : copy.referencesAutoAttached.replace('{{count}}', String(referenceFiles.length));
@@ -8094,11 +8188,57 @@ function ProjectWorkspaceView({
         ))}
       </div>
 
-      {activeTab === 'overview' && (
-        <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.18fr)_minmax(320px,0.82fr)]">
-          <section className="min-w-0 rounded-xl border border-edge bg-panel/82 p-4">
-            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
+	      {activeTab === 'overview' && (
+	        <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.18fr)_minmax(320px,0.82fr)]">
+	          <section
+	            className="pk-project-runtime-strip min-w-0 rounded-xl border border-edge bg-panel/82 p-4 xl:col-span-2"
+	            data-testid="project-conversation-runtime-strip"
+	          >
+	            <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+	              <div className="min-w-0">
+	                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">Project operating model</div>
+	                <h2 className="mt-1 text-[15px] font-semibold text-fg">Context feeds the chat; Work Items keep the durable result.</h2>
+	              </div>
+	              <div className="flex shrink-0 flex-wrap gap-1.5 text-[11px] font-semibold text-fg-5">
+	                <span className="rounded-md border border-edge bg-inset px-2 py-1">{projectConversationModel.contextAppliedCount} context-applied chats</span>
+	                <span className="rounded-md border border-edge bg-inset px-2 py-1">{projectConversationModel.sideChatCount} side chats</span>
+	                <span className="rounded-md border border-edge bg-inset px-2 py-1">{projectConversationModel.deliverableCount} deliverables</span>
+	              </div>
+	            </div>
+	            <div className="mt-3 grid min-w-0 gap-2 lg:grid-cols-3">
+	              {projectConversationModel.steps.map((step, index) => (
+	                <button
+	                  key={step.key}
+	                  type="button"
+	                  data-tone={step.tone}
+	                  onClick={() => setActiveTab(step.key === 'project' ? 'reference' : step.key === 'conversation' ? 'chats' : 'work-items')}
+	                  className="pk-project-runtime-step group min-w-0 rounded-lg border border-edge bg-inset p-3 text-left transition-[border-color,background-color,transform,box-shadow] hover:border-edge-h hover:bg-panel-h"
+	                  data-testid={`project-runtime-step-${step.key}`}
+	                >
+	                  <div className="flex min-w-0 items-start gap-3">
+	                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-edge bg-panel text-fg-4 transition-colors group-hover:text-primary">
+	                      <Icon name={step.key === 'project' ? 'folder' : step.key === 'conversation' ? 'chat' : 'workitem'} />
+	                    </span>
+	                    <span className="min-w-0 flex-1">
+	                      <span className="flex min-w-0 items-center justify-between gap-2">
+	                        <span className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-5">{step.label}</span>
+	                        <Dot variant={step.tone === 'ready' ? 'ok' : step.tone === 'warn' ? 'warn' : step.tone === 'active' ? 'running' : 'idle'} pulse={step.tone === 'active'} />
+	                      </span>
+	                      <span className="mt-1 block text-[22px] font-semibold tracking-tight text-fg">{step.value}</span>
+	                      <span className="mt-1 block truncate text-[11px] text-fg-5">{step.detail}</span>
+	                    </span>
+	                    {index < projectConversationModel.steps.length - 1 && (
+	                      <span className="hidden self-center text-fg-6 xl:block"><Icon name="arrow" /></span>
+	                    )}
+	                  </div>
+	                </button>
+	              ))}
+	            </div>
+	          </section>
+
+	          <section className="min-w-0 rounded-xl border border-edge bg-panel/82 p-4">
+	            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+	              <div className="min-w-0">
                 <h2 className="text-[14px] font-semibold text-fg">{copy.setupReadiness}</h2>
                 <p className="mt-1 text-[12px] leading-relaxed text-fg-5">
                   {workspaceHasProjectContext(workspace) ? copy.contextInjected : copy.contextMissing}
@@ -8867,6 +9007,39 @@ function dashboardTicketRank(task: ProTask, runs: JiraRemoteUpdateRun[]): number
   return rank;
 }
 
+function WorkbenchPendingChatShell({
+  prompt,
+  agentLabel,
+}: {
+  prompt: string;
+  agentLabel: string;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[var(--th-chat-window-bg)] px-5 py-4 text-fg">
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <div className="ml-auto max-w-[72%] rounded-2xl border border-edge/55 bg-panel px-4 py-3 text-[13px] leading-relaxed text-fg shadow-sm">
+          {prompt}
+        </div>
+        <div className="mt-5 flex min-w-0 items-center gap-3 text-[12px] text-fg-4">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-primary/20 bg-primary/[0.08] text-primary">
+            <Icon name="assistant" />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate font-semibold text-fg">{agentLabel}</span>
+            <span className="mt-0.5 flex items-center gap-2 text-fg-5">
+              <Spinner className="h-3.5 w-3.5" />
+              Starting this chat...
+            </span>
+          </span>
+        </div>
+      </div>
+      <div className="mt-4 rounded-2xl border border-edge/70 bg-panel/80 px-4 py-3 text-[13px] text-fg-5 shadow-sm">
+        Connecting to the chat session...
+      </div>
+    </div>
+  );
+}
+
 function PersonalDashboardView({
   assistants,
   workflowRuns,
@@ -8901,12 +9074,16 @@ function PersonalDashboardView({
   const [activeWorkbenchTickets, setActiveWorkbenchTickets] = useState<ProTask[]>([]);
   const [activeWorkbenchTicket, setActiveWorkbenchTicket] = useState<ProTask | null>(null);
   const [activeWorkbenchTodo, setActiveWorkbenchTodo] = useState<DashboardTodoCard | null>(null);
+  const [activeWorkbenchPending, setActiveWorkbenchPending] = useState<WorkbenchPendingChat | null>(null);
   const [attachedTickets, setAttachedTickets] = useState<ProTask[]>([]);
   const [localWorkbenchChats, setLocalWorkbenchChats] = useState<RecentConversation[]>([]);
   const [ticketDropActive, setTicketDropActive] = useState(false);
   const [workbenchChatDraft, setWorkbenchChatDraft] = useState('');
   const [workbenchChatSending, setWorkbenchChatSending] = useState(false);
   const workbenchComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    void loadFocusSessionPanel();
+  }, []);
   const jiraRunsByTask = useMemo(() => jiraRemoteRuns.reduce<Record<string, JiraRemoteUpdateRun[]>>((acc, run) => {
     if (!acc[run.taskId]) acc[run.taskId] = [];
     acc[run.taskId].push(run);
@@ -9068,6 +9245,34 @@ function PersonalDashboardView({
         `User message:\n${cleanDraft || '请基于这些 ticket 梳理下一步，并开始推进。'}`,
       ].join('\n')
       : cleanDraft;
+    const now = new Date().toISOString();
+    const pendingKey = `workbench-pending:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+    const pendingConversation: RecentConversation = {
+      key: pendingKey,
+      workdir,
+      workspaceName: workspaceBaseName(workdir) || 'Workspace',
+      session: {
+        sessionId: pendingKey,
+        agent,
+        workdir,
+        title: visiblePrompt,
+        titleSource: 'prompt',
+        createdAt: now,
+        runStartedAt: now,
+        runUpdatedAt: now,
+        runState: 'running',
+        running: true,
+      },
+    };
+    setActiveWorkbenchTickets(selectedTickets);
+    setActiveWorkbenchPending({
+      key: pendingConversation.key,
+      prompt: visiblePrompt,
+      createdAt: now,
+    });
+    setActiveWorkbenchChat(pendingConversation);
+    setAttachedTickets([]);
+    setWorkbenchChatDraft('');
     setWorkbenchChatSending(true);
     try {
       const result = await api.sendSessionMessage(workdir, agent, '', prompt, {
@@ -9077,16 +9282,6 @@ function PersonalDashboardView({
       const parsed = parseSessionKeyValue(result.sessionKey);
       if (!parsed) throw new Error('Failed to open the new chat.');
       const linkedChatUrl = buildWorkbenchLinkedChatUrl({ workdir, agent: parsed.agent, sessionId: parsed.sessionId });
-      if (selectedTickets.length) {
-        await Promise.allSettled(selectedTickets.map(task => api.appendProTaskSourceEvidence(task.id, {
-          kind: 'linked-chat',
-          value: linkedChatUrl,
-        })));
-        await Promise.allSettled(selectedTickets
-          .filter(task => task.status !== 'coding' && task.status !== 'done' && task.status !== 'resolved')
-          .map(task => api.updateProTaskStatus(task.id, 'coding')));
-      }
-      const now = new Date().toISOString();
       const nextConversation: RecentConversation = {
         key: `${workdir}:${parsed.agent}:${parsed.sessionId}`,
         workdir,
@@ -9104,21 +9299,27 @@ function PersonalDashboardView({
           running: true,
         },
       };
-      setActiveWorkbenchTickets(selectedTickets);
+      setActiveWorkbenchPending(current => current?.key === pendingConversation.key
+        ? { key: nextConversation.key, prompt: current.prompt, createdAt: current.createdAt }
+        : current);
       setLocalWorkbenchChats(prev => [nextConversation, ...prev.filter(item => item.key !== nextConversation.key)].slice(0, 8));
       setActiveWorkbenchChat(nextConversation);
-      setAttachedTickets([]);
-      setWorkbenchChatDraft('');
-      prefetchSessionMessages({
-        workdir,
-        agent: parsed.agent,
-        sessionId: parsed.sessionId,
-        rich: true,
-        turnOffset: 0,
-        turnLimit: CONVERSATION_PANEL_PREFETCH_TURNS,
-      });
+      if (selectedTickets.length) {
+        await Promise.allSettled(selectedTickets.map(task => api.appendProTaskSourceEvidence(task.id, {
+          kind: 'linked-chat',
+          value: linkedChatUrl,
+        })));
+        await Promise.allSettled(selectedTickets
+          .filter(task => task.status !== 'coding' && task.status !== 'done' && task.status !== 'resolved')
+          .map(task => api.updateProTaskStatus(task.id, 'coding')));
+      }
       await Promise.allSettled([reloadRecent(), reloadWorkItems()]);
     } catch (err) {
+      setActiveWorkbenchChat(null);
+      setActiveWorkbenchPending(null);
+      setActiveWorkbenchTickets([]);
+      setAttachedTickets(selectedTickets);
+      setWorkbenchChatDraft(cleanDraft);
       toast(err instanceof Error ? err.message : 'Failed to start chat.', false);
     } finally {
       setWorkbenchChatSending(false);
@@ -9153,6 +9354,7 @@ function PersonalDashboardView({
       },
     };
     setActiveWorkbenchTickets([]);
+    setActiveWorkbenchPending(null);
     setActiveWorkbenchChat(normalized);
     prefetchSessionMessages({
       workdir: item.workdir,
@@ -9168,7 +9370,6 @@ function PersonalDashboardView({
       if (!current) return current;
       return {
         ...current,
-        key: `${next.workdir}:${next.agent}:${next.sessionId}`,
         workdir: next.workdir || current.workdir,
         session: {
           ...current.session,
@@ -9185,8 +9386,18 @@ function PersonalDashboardView({
     workdir: activeWorkbenchChat.session.workdir || activeWorkbenchChat.workdir,
   } : null;
   const activeWorkbenchChatKey = activeWorkbenchChat && activeWorkbenchSession
-    ? `${activeWorkbenchChat.workdir}:${activeWorkbenchSession.agent}:${activeWorkbenchSession.sessionId}`
+    ? activeWorkbenchChat.key
     : '';
+  const activeWorkbenchPendingChat = activeWorkbenchPending?.key === activeWorkbenchChatKey
+    ? activeWorkbenchPending
+    : null;
+  const activeWorkbenchChatBooting = !!activeWorkbenchPending
+    && activeWorkbenchPending.key === activeWorkbenchChatKey
+    && !!activeWorkbenchSession;
+  const activeWorkbenchAgentLabel = getAgentMeta(activeWorkbenchSession?.agent || primaryAgent).label;
+  const activeWorkbenchSessionId = activeWorkbenchSession?.sessionId || '';
+  const activeWorkbenchSessionAgent = activeWorkbenchSession?.agent || primaryAgent;
+  const activeWorkbenchSessionWorkdir = activeWorkbenchSession?.workdir || activeWorkbenchChat?.workdir || '';
   const activeWorkbenchChatStyle = useMemo(() => {
     const meta = getAgentMeta(activeWorkbenchSession?.agent || primaryAgent);
     return {
@@ -9196,6 +9407,28 @@ function PersonalDashboardView({
       '--pk-session-agent-glow': meta.glow,
     } as CSSProperties;
   }, [activeWorkbenchSession?.agent, primaryAgent]);
+
+  useEffect(() => {
+    if (!activeWorkbenchPendingChat || !activeWorkbenchSessionId || !activeWorkbenchSessionWorkdir) return;
+    if (activeWorkbenchSessionId.startsWith('workbench-pending:')) return;
+    let cancelled = false;
+    void waitForWorkbenchSessionHandoffReady({
+      workdir: activeWorkbenchSessionWorkdir,
+      agent: activeWorkbenchSessionAgent,
+      sessionId: activeWorkbenchSessionId,
+    }).then(ready => {
+      if (!ready || cancelled) return;
+      setActiveWorkbenchPending(current => current?.key === activeWorkbenchPendingChat.key ? null : current);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeWorkbenchPendingChat?.key,
+    activeWorkbenchSessionAgent,
+    activeWorkbenchSessionId,
+    activeWorkbenchSessionWorkdir,
+  ]);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#eef1f4] px-4 py-4 text-slate-950 sm:px-6" data-testid="personal-dashboard">
@@ -9665,6 +9898,7 @@ function PersonalDashboardView({
         onClose={() => {
           setActiveWorkbenchChat(null);
           setActiveWorkbenchTickets([]);
+          setActiveWorkbenchPending(null);
         }}
         wide
         panelClassName="max-w-[min(1120px,calc(100vw-28px))]"
@@ -9675,6 +9909,7 @@ function PersonalDashboardView({
           onClose={() => {
             setActiveWorkbenchChat(null);
             setActiveWorkbenchTickets([]);
+            setActiveWorkbenchPending(null);
           }}
         />
         {activeWorkbenchTickets.length > 0 && (
@@ -9689,14 +9924,25 @@ function PersonalDashboardView({
         )}
         <div className="h-[min(76vh,760px)] min-h-[520px] overflow-hidden rounded-[18px] border border-edge bg-[var(--th-chat-window-bg)]" style={activeWorkbenchChatStyle} data-testid="personal-dashboard-chat-window">
           {activeWorkbenchChat && activeWorkbenchSession ? (
-            <Suspense fallback={<div className="flex h-full items-center justify-center gap-2 text-sm text-fg-5"><Spinner /> Loading conversation...</div>}>
-              <FocusSessionPanel
-                key={activeWorkbenchChatKey}
-                session={activeWorkbenchSession}
-                workdir={activeWorkbenchChat.workdir}
-                active
-                onSessionChange={handleWorkbenchSessionChange}
-              />
+            <Suspense fallback={activeWorkbenchPendingChat ? (
+              <WorkbenchPendingChatShell prompt={activeWorkbenchPendingChat.prompt} agentLabel={activeWorkbenchAgentLabel} />
+            ) : (
+              <div className="flex h-full items-center justify-center gap-2 text-sm text-fg-5"><Spinner /> Loading conversation...</div>
+            )}>
+              {activeWorkbenchChatBooting ? (
+                <WorkbenchPendingChatShell
+                  prompt={activeWorkbenchPendingChat?.prompt || ''}
+                  agentLabel={activeWorkbenchAgentLabel}
+                />
+              ) : (
+                <FocusSessionPanel
+                  key={activeWorkbenchChatKey}
+                  session={activeWorkbenchSession}
+                  workdir={activeWorkbenchChat.workdir}
+                  active
+                  onSessionChange={handleWorkbenchSessionChange}
+                />
+              )}
             </Suspense>
           ) : (
             <div className="flex h-full items-center justify-center text-[12px] text-fg-5">No chat selected.</div>
@@ -9868,14 +10114,19 @@ function ProjectLibrary({
     projectWorkbenchTargetPath,
     workspaces,
   ]);
-  const activePendingProjectChat = useMemo(() => {
-    if (!activeWorkspace || pendingProjectChat?.workdir !== activeWorkspace.path) return null;
-    return pendingProjectChat;
-  }, [activeWorkspace, pendingProjectChat]);
-  const activeProjectChatCount = activeProjectChats.length + (activePendingProjectChat ? 1 : 0);
-  const focusProjectConversation = useCallback((item: RecentConversation) => {
-    const agent = item.session.agent || defaultProjectAgent;
-    const sessionId = item.session.sessionId;
+	  const activePendingProjectChat = useMemo(() => {
+	    if (!activeWorkspace || pendingProjectChat?.workdir !== activeWorkspace.path) return null;
+	    return pendingProjectChat;
+	  }, [activeWorkspace, pendingProjectChat]);
+	  const activeProjectChatCount = activeProjectChats.length + (activePendingProjectChat ? 1 : 0);
+	  const activeProjectConversationModel = useMemo(() => activeWorkspace ? buildProjectConversationModel({
+	    workspace: activeWorkspace,
+	    conversations: recent,
+	    tasks: projectTasks,
+	  }) : null, [activeWorkspace, projectTasks, recent]);
+	  const focusProjectConversation = useCallback((item: RecentConversation) => {
+	    const agent = item.session.agent || defaultProjectAgent;
+	    const sessionId = item.session.sessionId;
     if (!agent || !sessionId) return;
     setPendingProjectChat(null);
     setFocusedProjectSession({
@@ -10562,12 +10813,64 @@ function ProjectLibrary({
                     <button type="button" onClick={startFreshProjectChat} data-primary="true" data-testid="project-new-chat-button">
                       {copy.newChat}
                     </button>
-                    <Link to={projectDetailUrl(activeWorkspace.path)}>Project console</Link>
-                  </div>
-                </div>
+	                    <Link to={projectDetailUrl(activeWorkspace.path)}>Project console</Link>
+	                  </div>
+	                </div>
 
-                <div className="pk-project-chat-window">
-                  {focusedProjectSession && focusedProjectSessionInfo ? (
+	                {activeProjectConversationModel && (
+	                  <div className="pk-project-room-runtime-strip" data-testid="project-room-runtime-strip">
+	                    {activeProjectConversationModel.steps.map(step => {
+	                      const content = (
+	                        <>
+	                          <span className="pk-project-room-runtime-icon">
+	                            <Icon name={step.key === 'project' ? 'folder' : step.key === 'conversation' ? 'chat' : 'workitem'} />
+	                          </span>
+	                          <span className="min-w-0 flex-1">
+	                            <span className="block truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{step.label}</span>
+	                            <span className="mt-0.5 flex min-w-0 items-baseline gap-2">
+	                              <strong className="text-[15px] font-semibold text-fg">{step.value}</strong>
+	                            </span>
+	                            <span className="mt-0.5 block min-w-0 truncate text-[11px] text-fg-5">{step.detail}</span>
+	                          </span>
+	                          <Dot variant={step.tone === 'ready' ? 'ok' : step.tone === 'warn' ? 'warn' : step.tone === 'active' ? 'running' : 'idle'} pulse={step.tone === 'active'} />
+	                        </>
+	                      );
+	                      if (step.key === 'work-item') {
+	                        return (
+	                          <Link
+	                            key={step.key}
+	                            to={`/work-items?${new URLSearchParams({ project: activeWorkspace.path }).toString()}`}
+	                            data-tone={step.tone}
+	                            className="pk-project-room-runtime-step"
+	                          >
+	                            {content}
+	                          </Link>
+	                        );
+	                      }
+	                      return (
+	                        <button
+	                          key={step.key}
+	                          type="button"
+	                          data-tone={step.tone}
+	                          className="pk-project-room-runtime-step"
+	                          onClick={() => {
+	                            if (step.key === 'project') {
+	                              openEdit(activeWorkspace, (activeContextItems.find(item => !item.ready)?.key || 'rules') as ProjectEditSection);
+	                              return;
+	                            }
+	                            if (activeProjectLatestChat) focusProjectConversation(activeProjectLatestChat);
+	                            else startFreshProjectChat();
+	                          }}
+	                        >
+	                          {content}
+	                        </button>
+	                      );
+	                    })}
+	                  </div>
+	                )}
+	
+	                <div className="pk-project-chat-window">
+	                  {focusedProjectSession && focusedProjectSessionInfo ? (
                     <div className="pk-project-session-frame" style={focusedProjectTheme}>
                       <Suspense fallback={<div className="flex h-full items-center justify-center gap-2 text-sm text-fg-5"><Spinner /> Loading conversation...</div>}>
                         <FocusSessionPanel
@@ -11991,6 +12294,11 @@ function FocusedConversationView({
   const location = useLocation();
   const [dismissedSearchNonce, setDismissedSearchNonce] = useState<number | null>(null);
   const [fallbackSession, setFallbackSession] = useState<SessionInfo | null>(null);
+  const [launchPending, setLaunchPending] = useState<WorkbenchPendingChat | null>(() => target.launchPrompt ? {
+    key: `${target.workdir}:${target.agent}:${target.sessionId}`,
+    prompt: target.launchPrompt,
+    createdAt: target.launchCreatedAt || new Date().toISOString(),
+  } : null);
   const targetKey = `${target.workdir}:${target.agent}:${target.sessionId}`;
   const projectWorkspace = workspaces.find(workspace => workspace.path === target.workdir) || null;
   const workspaceName = projectWorkspace?.name || workspaceBaseName(target.workdir);
@@ -12001,7 +12309,12 @@ function FocusedConversationView({
   useEffect(() => {
     setDismissedSearchNonce(null);
     setFallbackSession(null);
-  }, [targetKey, target.nonce]);
+    setLaunchPending(target.launchPrompt ? {
+      key: targetKey,
+      prompt: target.launchPrompt,
+      createdAt: target.launchCreatedAt || new Date().toISOString(),
+    } : null);
+  }, [target.launchCreatedAt, target.launchPrompt, targetKey, target.nonce]);
 
   useEffect(() => {
     if (!target.agent || !target.sessionId || !target.workdir) return;
@@ -12029,6 +12342,22 @@ function FocusedConversationView({
       cancelled = true;
     };
   }, [recentMatch, target.agent, target.sessionId, target.workdir]);
+
+  useEffect(() => {
+    if (!launchPending || launchPending.key !== targetKey) return;
+    let cancelled = false;
+    void waitForWorkbenchSessionHandoffReady({
+      workdir: target.workdir,
+      agent: target.agent,
+      sessionId: target.sessionId,
+    }).then(ready => {
+      if (!ready || cancelled) return;
+      setLaunchPending(current => current?.key === targetKey ? null : current);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [launchPending?.key, target.agent, target.sessionId, target.workdir, targetKey]);
 
   const session = recentMatch || fallbackSession || {
     sessionId: target.sessionId,
@@ -12108,17 +12437,25 @@ function FocusedConversationView({
       </header>
       <section className="pk-focused-conversation-body min-h-0 flex-1 overflow-hidden p-0">
         <div className="pk-focused-conversation-frame h-full w-full overflow-hidden border-0 bg-[var(--th-chat-window-bg)]">
-          <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-fg-5"><Spinner /> Loading conversation...</div>}>
-            <FocusSessionPanel
-              key={targetKey}
-              session={session}
-              workdir={target.workdir}
-              active
-              searchContext={searchContext}
-              onSearchContextClear={() => setDismissedSearchNonce(target.nonce)}
-              scrollToTurnRequest={target.scrollRequest}
-              onSessionChange={handleSessionChange}
-            />
+          <Suspense fallback={launchPending?.key === targetKey ? (
+            <WorkbenchPendingChatShell prompt={launchPending.prompt} agentLabel={agentMeta.label} />
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-fg-5"><Spinner /> Loading conversation...</div>
+          )}>
+            {launchPending?.key === targetKey ? (
+              <WorkbenchPendingChatShell prompt={launchPending.prompt} agentLabel={agentMeta.label} />
+            ) : (
+              <FocusSessionPanel
+                key={targetKey}
+                session={session}
+                workdir={target.workdir}
+                active
+                searchContext={searchContext}
+                onSearchContextClear={() => setDismissedSearchNonce(target.nonce)}
+                scrollToTurnRequest={target.scrollRequest}
+                onSessionChange={handleSessionChange}
+              />
+            )}
           </Suspense>
         </div>
       </section>

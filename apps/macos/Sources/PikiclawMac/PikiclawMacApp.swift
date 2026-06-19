@@ -6,6 +6,7 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         showMainWindow()
     }
@@ -33,6 +34,7 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "Pikiclaw"
+        window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 1120, height: 700)
         window.contentView = NSHostingView(rootView: rootView)
         window.center()

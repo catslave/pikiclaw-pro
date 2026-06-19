@@ -1,4 +1,3 @@
-import AppKit
 import AVFoundation
 import Speech
 
@@ -17,6 +16,19 @@ final class VoiceCaptureController: ObservableObject {
         speechRecognizer?.isAvailable == true
     }
 
+    var nativeSpeechReadinessMessage: String? {
+        guard Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil else {
+            return "Native listening needs the bundled Pikiclaw.app so macOS can show speech permission."
+        }
+        guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil else {
+            return "Native listening needs the bundled Pikiclaw.app so macOS can show microphone permission."
+        }
+        guard isSpeechAvailable else {
+            return "Speech recognition is unavailable right now. You can still type the brief."
+        }
+        return nil
+    }
+
     func toggleRecording() {
         if isRecording {
             stopRecording()
@@ -27,6 +39,10 @@ final class VoiceCaptureController: ObservableObject {
 
     func startRecording() async {
         guard !isRecording else { return }
+        if let readiness = nativeSpeechReadinessMessage {
+            statusLine = readiness
+            return
+        }
 
         let speechStatus = await requestSpeechAuthorization()
         guard speechStatus == .authorized else {
@@ -133,33 +149,42 @@ final class VoiceCaptureController: ObservableObject {
 }
 
 @MainActor
-final class VoiceReportSpeaker: NSObject, ObservableObject, NSSpeechSynthesizerDelegate {
+final class VoiceReportSpeaker: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var isSpeaking = false
 
-    private let synthesizer = NSSpeechSynthesizer()
+    private let synthesizer = AVSpeechSynthesizer()
 
     override init() {
         super.init()
         synthesizer.delegate = self
-        synthesizer.rate = 185
     }
 
     func speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking()
+            synthesizer.stopSpeaking(at: .immediate)
         }
+        let utterance = AVSpeechUtterance(string: trimmed)
+        utterance.rate = 0.48
+        utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+            ?? AVSpeechSynthesisVoice(language: "en-US")
         isSpeaking = true
-        synthesizer.startSpeaking(trimmed)
+        synthesizer.speak(utterance)
     }
 
     func stop() {
-        synthesizer.stopSpeaking()
+        synthesizer.stopSpeaking(at: .immediate)
         isSpeaking = false
     }
 
-    nonisolated func speechSynthesizer(_ sender: NSSpeechSynthesizer, didFinishSpeaking finishedSpeaking: Bool) {
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor in
+            self.isSpeaking = false
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         Task { @MainActor in
             self.isSpeaking = false
         }

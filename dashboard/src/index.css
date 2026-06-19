@@ -2026,7 +2026,7 @@ button:disabled { cursor: not-allowed; }
   min-height: 0;
   height: 100%;
   max-height: 100%;
-  grid-template-rows: 60px minmax(0, 1fr) 44px;
+  grid-template-rows: 60px auto minmax(0, 1fr) 44px;
   overflow: hidden;
   border-right: 1px solid color-mix(in oklab, var(--th-edge) 72%, transparent);
   background:
@@ -2133,6 +2133,56 @@ button:disabled { cursor: not-allowed; }
 .pk-project-room-actions button[data-primary="true"]:hover {
   background: color-mix(in oklab, var(--th-primary) 88%, #111827);
   color: #ffffff;
+}
+
+.pk-project-room-runtime-strip {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--th-edge) 58%, transparent);
+  padding: 10px 18px;
+}
+
+.pk-project-room-runtime-step {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid color-mix(in oklab, var(--th-edge) 74%, transparent);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--th-panel) 70%, transparent);
+  padding: 8px 9px;
+  text-align: left;
+  transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.pk-project-room-runtime-step:hover,
+.pk-project-room-runtime-step:focus-visible {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--th-primary) 26%, var(--th-edge));
+  background: color-mix(in oklab, var(--th-primary) 5%, var(--th-panel));
+  outline: none;
+}
+
+.pk-project-room-runtime-step[data-tone="warn"] {
+  border-color: color-mix(in oklab, var(--th-warn) 24%, var(--th-edge));
+}
+
+.pk-project-room-runtime-step[data-tone="active"] {
+  border-color: color-mix(in oklab, #16a34a 22%, var(--th-edge));
+}
+
+.pk-project-room-runtime-icon {
+  display: grid;
+  height: 30px;
+  width: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border: 1px solid color-mix(in oklab, var(--th-edge) 76%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--th-inset) 74%, transparent);
+  color: var(--th-fg-4);
 }
 
 .pk-project-chat-window {
@@ -2343,6 +2393,10 @@ button:disabled { cursor: not-allowed; }
 
   .pk-project-room .pk-project-history-rail {
     display: none;
+  }
+
+  .pk-project-room-runtime-strip {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3012,6 +3066,44 @@ button:disabled { cursor: not-allowed; }
 
 .pk-project-signal-card[data-tone="warn"] {
   border-color: color-mix(in oklab, var(--th-warn) 26%, var(--th-edge));
+}
+
+.pk-project-runtime-strip {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+}
+
+.pk-project-runtime-step {
+  position: relative;
+  overflow: hidden;
+}
+
+.pk-project-runtime-step::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: color-mix(in oklab, var(--th-edge) 72%, transparent);
+  opacity: 0.8;
+}
+
+.pk-project-runtime-step[data-tone="ready"]::before {
+  background: color-mix(in oklab, var(--th-primary) 74%, var(--th-edge));
+}
+
+.pk-project-runtime-step[data-tone="active"]::before {
+  background: color-mix(in oklab, #16a34a 78%, var(--th-primary));
+}
+
+.pk-project-runtime-step[data-tone="warn"]::before {
+  background: color-mix(in oklab, var(--th-warn) 84%, var(--th-edge));
+}
+
+.pk-project-runtime-step:hover,
+.pk-project-runtime-step:focus-visible {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--th-primary) 26%, var(--th-edge));
+  box-shadow: 0 12px 26px color-mix(in oklab, var(--th-surface) 42%, transparent);
+  outline: none;
 }
 
 .pk-project-tab-bar {
