@@ -1617,6 +1617,7 @@ private struct MinimalChatComposer: View {
                     }
                     .padding(.top, 15)
                     .padding(.leading, 16)
+                    .allowsHitTesting(false)
                 }
 
                 TextEditor(text: $text)
@@ -1626,8 +1627,8 @@ private struct MinimalChatComposer: View {
                     .scrollContentBackground(.hidden)
                     .lineSpacing(3)
                     .frame(minHeight: 132, maxHeight: 172)
-                    .padding(.top, 5)
-                    .padding(.horizontal, 10)
+                    .padding(.top, 15)
+                    .padding(.horizontal, 16)
                     .padding(.bottom, 4)
             }
 
