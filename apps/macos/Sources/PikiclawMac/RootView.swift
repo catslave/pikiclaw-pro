@@ -361,13 +361,7 @@ private struct AgentDock: View {
             .help("New Chat")
 
             Button(action: openVoice) {
-                Image(systemName: "waveform.circle")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 42, height: 42)
-                    .background(PKTheme.panel.opacity(0.62))
-                    .foregroundStyle(PKTheme.primary)
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(PKTheme.primary.opacity(0.42), lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                VoiceDockRobotButton(isLive: isRunning)
             }
             .buttonStyle(.plain)
             .help("Voice Assistant")
@@ -2479,7 +2473,15 @@ private struct AssistantInspector: View {
             }
 
             VoiceProgressStrip(stage: stage)
-            VoiceWaveform(isLive: voice.isRecording || model.isRunning, color: stageColor)
+            VoiceAssistantHero(
+                stage: stage,
+                transcript: delegatedUtterance,
+                report: report.spokenText,
+                isLive: voice.isRecording || model.isRunning,
+                canListen: !model.isRunning,
+                isRecording: voice.isRecording,
+                toggleListen: { voice.toggleRecording() }
+            )
 
             VoiceStatusCard(
                 title: statusTitle,
@@ -2882,6 +2884,301 @@ private struct VoiceHintBanner: View {
         .background(PKTheme.warn.opacity(0.08))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.warn.opacity(0.20), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct VoiceAssistantHero: View {
+    let stage: VoiceDelegationStage
+    let transcript: String
+    let report: String
+    let isLive: Bool
+    let canListen: Bool
+    let isRecording: Bool
+    let toggleListen: () -> Void
+
+    private var heroText: String {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return report
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            PKTheme.panelAlt.opacity(0.78),
+                            PKTheme.inset.opacity(0.88)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(PKTheme.edgeStrong.opacity(0.48), lineWidth: 1)
+                )
+                .frame(height: 164)
+                .padding(.top, 54)
+
+            VStack(spacing: 8) {
+                Button(action: toggleListen) {
+                    ZStack {
+                        VoiceRippleHalo(isLive: isLive, color: stageColor)
+                        VoiceRobotAvatar(size: 124, isLive: isLive, stage: stage)
+                    }
+                    .frame(width: 150, height: 118)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canListen)
+                .help(isRecording ? "Stop listening" : "Start listening")
+
+                VStack(spacing: 7) {
+                    HStack(spacing: 7) {
+                        Image(systemName: isRecording ? "mic.fill" : "sparkle.magnifyingglass")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(stageColor)
+                        Text(isRecording ? "Listening..." : heroTitle)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PKTheme.text)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+
+                    Text(heroText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineSpacing(2)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VoiceWaveform(isLive: isLive, color: stageColor)
+                        .frame(height: 30)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+            }
+        }
+        .frame(height: 218)
+    }
+
+    private var heroTitle: String {
+        switch stage {
+        case .listening, .understanding: return "I am catching the request"
+        case .planning: return "Ready to hand this to an agent"
+        case .running: return "Watching the agent work"
+        case .needsUser: return "I need you for a decision"
+        case .reporting: return "Here is the report"
+        case .idle: return "Tap the robot or Listen"
+        }
+    }
+
+    private var stageColor: Color {
+        switch stage {
+        case .listening, .understanding, .planning: return PKTheme.primary
+        case .running: return PKTheme.ok
+        case .needsUser: return PKTheme.warn
+        case .reporting: return PKTheme.ok
+        case .idle: return PKTheme.text3
+        }
+    }
+}
+
+private struct VoiceDockRobotButton: View {
+    let isLive: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(PKTheme.panel.opacity(0.62))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke((isLive ? PKTheme.ok : PKTheme.primary).opacity(0.42), lineWidth: 1)
+                )
+            VoiceRippleHalo(isLive: isLive, color: isLive ? PKTheme.ok : PKTheme.primary, compact: true)
+            VoiceRobotAvatar(size: 38, isLive: isLive, stage: isLive ? .running : .idle)
+        }
+        .frame(width: 42, height: 42)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+private struct VoiceRippleHalo: View {
+    let isLive: Bool
+    let color: Color
+    var compact: Bool = false
+    @State private var pulse = false
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .stroke(color.opacity(isLive ? 0.24 : 0.09), lineWidth: compact ? 1 : 1.4)
+                    .scaleEffect(pulse && isLive ? 1.0 + CGFloat(index) * 0.20 : 0.62 + CGFloat(index) * 0.08)
+                    .opacity(isLive ? (pulse ? 0.12 : 0.36) : 0.12)
+                    .animation(
+                        .easeOut(duration: compact ? 1.0 : 1.35)
+                            .repeatForever(autoreverses: false)
+                            .delay(Double(index) * 0.18),
+                        value: pulse
+                    )
+            }
+            Circle()
+                .fill(color.opacity(isLive ? 0.12 : 0.05))
+                .scaleEffect(isLive ? 0.72 : 0.56)
+        }
+        .frame(width: compact ? 46 : 150, height: compact ? 46 : 150)
+        .onAppear { pulse = true }
+    }
+}
+
+private struct VoiceRobotAvatar: View {
+    let size: CGFloat
+    let isLive: Bool
+    let stage: VoiceDelegationStage
+    @State private var bob = false
+
+    private var accent: Color {
+        switch stage {
+        case .running, .reporting: return PKTheme.ok
+        case .needsUser: return PKTheme.warn
+        case .idle: return PKTheme.primary
+        default: return PKTheme.primary
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            ears
+                .offset(y: -size * 0.22)
+
+            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.96),
+                            PKTheme.surfaceRaised.opacity(0.88),
+                            PKTheme.panelAlt.opacity(0.76)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                        .stroke(PKTheme.edgeStrong.opacity(0.54), lineWidth: max(1, size * 0.018))
+                )
+                .frame(width: size * 0.78, height: size * 0.52)
+                .shadow(color: Color.black.opacity(0.18), radius: size * 0.11, y: size * 0.05)
+                .offset(y: size * 0.03)
+
+            RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.88),
+                            Color(red: 0.11, green: 0.16, blue: 0.17).opacity(0.94)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: size * 0.62, height: size * 0.32)
+                .overlay(face)
+                .offset(y: size * 0.06)
+
+            headphones
+                .offset(y: size * 0.06)
+
+            RoundedRectangle(cornerRadius: size * 0.08, style: .continuous)
+                .fill(PKTheme.surfaceRaised.opacity(0.92))
+                .frame(width: size * 0.82, height: size * 0.11)
+                .offset(y: size * 0.34)
+                .overlay(
+                    RoundedRectangle(cornerRadius: size * 0.08, style: .continuous)
+                        .stroke(PKTheme.edge.opacity(0.8), lineWidth: 1)
+                        .offset(y: size * 0.34)
+                )
+        }
+        .frame(width: size, height: size * 0.86)
+        .offset(y: bob && isLive ? -size * 0.025 : size * 0.01)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: bob)
+        .onAppear { bob = true }
+    }
+
+    private var ears: some View {
+        HStack(spacing: size * 0.36) {
+            robotEar(rotation: -20)
+            robotEar(rotation: 20)
+        }
+    }
+
+    private func robotEar(rotation: Double) -> some View {
+        RoundedRectangle(cornerRadius: size * 0.06, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        PKTheme.surfaceRaised.opacity(0.95),
+                        PKTheme.text3.opacity(0.45)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: size * 0.05, style: .continuous)
+                    .fill(Color.black.opacity(0.64))
+                    .padding(size * 0.04)
+            )
+            .frame(width: size * 0.20, height: size * 0.30)
+            .rotationEffect(.degrees(rotation))
+    }
+
+    private var face: some View {
+        HStack(spacing: size * 0.13) {
+            Capsule(style: .continuous)
+                .fill(accent)
+                .frame(width: size * 0.035, height: isLive ? size * 0.15 : size * 0.11)
+                .shadow(color: accent.opacity(0.72), radius: size * 0.025)
+            Image(systemName: stage == .needsUser ? "exclamationmark" : "sparkle")
+                .font(.system(size: size * 0.14, weight: .bold))
+                .foregroundStyle(accent)
+                .shadow(color: accent.opacity(0.6), radius: size * 0.025)
+            Capsule(style: .continuous)
+                .fill(accent)
+                .frame(width: size * 0.035, height: isLive ? size * 0.15 : size * 0.11)
+                .shadow(color: accent.opacity(0.72), radius: size * 0.025)
+        }
+    }
+
+    private var headphones: some View {
+        HStack(spacing: size * 0.62) {
+            headphoneCup
+            headphoneCup
+        }
+    }
+
+    private var headphoneCup: some View {
+        RoundedRectangle(cornerRadius: size * 0.08, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.72),
+                        PKTheme.text3.opacity(0.56),
+                        Color.white.opacity(0.36)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: size * 0.06, style: .continuous)
+                    .stroke(PKTheme.edgeStrong.opacity(0.55), lineWidth: 1)
+            )
+            .frame(width: size * 0.14, height: size * 0.30)
     }
 }
 
