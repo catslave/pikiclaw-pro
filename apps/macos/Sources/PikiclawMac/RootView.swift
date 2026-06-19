@@ -2674,6 +2674,48 @@ private struct AssistantInspector: View {
             && !delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var statusTitle: String {
+        switch stage {
+        case .listening: return "Listening to your request"
+        case .understanding: return "Turning speech into a brief"
+        case .planning: return "Review and delegate"
+        case .running: return "\(agentShortLabel(plan.suggestedAgentKind)) is working"
+        case .needsUser: return "Decision needed"
+        case .reporting: return report.headline
+        case .idle: return "Ready for a voice task"
+        }
+    }
+
+    private var statusSubtitle: String {
+        switch stage {
+        case .listening:
+            return "Speak naturally. Stop when the request is complete."
+        case .understanding:
+            return "I am capturing the intent and preparing the agent brief."
+        case .planning:
+            return "Check the project, agent, and permission mode, then delegate."
+        case .running:
+            return "The chat window is active. I will keep watching state changes."
+        case .needsUser:
+            return "Open the chat or Work Item to answer the agent's question."
+        case .reporting:
+            return report.spokenText
+        case .idle:
+            return "Use Listen, or type a brief directly if microphone access is not ready."
+        }
+    }
+
+    private var statusSymbol: String {
+        switch stage {
+        case .listening, .understanding: return "mic.fill"
+        case .planning: return "list.bullet.clipboard"
+        case .running: return "eye.fill"
+        case .needsUser: return "person.crop.circle.badge.exclamationmark"
+        case .reporting: return "speaker.wave.2.fill"
+        case .idle: return "waveform.circle"
+        }
+    }
+
     private var stageLabel: String {
         switch stage {
         case .listening: return "Listening"
@@ -2728,6 +2770,118 @@ private struct AssistantInspector: View {
                 selectedWorkItemId = run.workItemId
             }
         }
+    }
+}
+
+private struct VoiceProgressStrip: View {
+    let stage: VoiceDelegationStage
+
+    private let steps: [(VoiceDelegationStage, String, String)] = [
+        (.listening, "Listen", "mic.fill"),
+        (.planning, "Plan", "list.bullet.clipboard"),
+        (.running, "Run", "play.fill"),
+        (.reporting, "Report", "speaker.wave.2.fill")
+    ]
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ForEach(steps, id: \.0.rawValue) { item in
+                let active = isActive(item.0)
+                HStack(spacing: 5) {
+                    Image(systemName: item.2)
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(item.1)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(active ? PKTheme.primaryText : PKTheme.text3)
+                .frame(maxWidth: .infinity)
+                .frame(height: 28)
+                .background(active ? progressColor.opacity(0.92) : PKTheme.control.opacity(0.58))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? progressColor.opacity(0.95) : PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+        }
+    }
+
+    private var progressColor: Color {
+        switch stage {
+        case .listening, .understanding, .planning: return PKTheme.primary
+        case .running: return PKTheme.ok
+        case .needsUser: return PKTheme.warn
+        case .reporting: return PKTheme.ok
+        case .idle: return PKTheme.text3
+        }
+    }
+
+    private func isActive(_ item: VoiceDelegationStage) -> Bool {
+        switch (stage, item) {
+        case (.listening, .listening), (.understanding, .listening):
+            return true
+        case (.planning, .planning):
+            return true
+        case (.running, .running), (.needsUser, .running):
+            return true
+        case (.reporting, .reporting):
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+private struct VoiceStatusCard: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 34, height: 34)
+                .background(color.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(3)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(PKTheme.panelAlt.opacity(0.48))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct VoiceHintBanner: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(PKTheme.warn)
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(3)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(PKTheme.warn.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.warn.opacity(0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
