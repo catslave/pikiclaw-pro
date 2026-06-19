@@ -1605,13 +1605,13 @@ private struct MinimalChatComposer: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(placeholder)
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(PKTheme.text2)
+                            .foregroundStyle(PKTheme.text3)
                         Text(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(PKTheme.text4)
                     }
-                    .padding(.top, 16)
-                    .padding(.leading, 18)
+                    .padding(.top, 11)
+                    .padding(.leading, 15)
                     .allowsHitTesting(false)
                 }
 
