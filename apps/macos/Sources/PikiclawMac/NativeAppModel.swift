@@ -625,6 +625,38 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
+    func appendVoiceConversationTurn(
+        runId: EntityID?,
+        role: String,
+        text: String,
+        caption: String? = nil
+    ) async -> Bool {
+        guard let runId else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }) else {
+                statusLine = "Voice conversation not found"
+                return false
+            }
+
+            let entry = Self.voiceConversationTranscriptEntry(role: role, text: trimmed, caption: caption)
+            let nextTranscript = Self.appendingVoiceTranscriptEntry(entry, to: run.transcript)
+            guard nextTranscript != run.transcript else { return true }
+
+            run.transcript = nextTranscript
+            try await store.saveRun(run)
+            await reload()
+            return true
+        } catch {
+            statusLine = "Voice transcript failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
     func submitVoiceTurn(
         _ plan: VoiceDelegationPlan,
         conversationRunId: EntityID?,
@@ -921,10 +953,28 @@ final class NativeAppModel: ObservableObject {
 
     nonisolated private static func appendingVoiceTurn(_ utterance: String, to transcript: String) -> String {
         let trimmed = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        let turn = voiceConversationTranscriptEntry(role: "user voice", text: trimmed)
+        return appendingVoiceTranscriptEntry(turn, to: transcript)
+    }
+
+    nonisolated private static func voiceConversationTranscriptEntry(
+        role: String,
+        text: String,
+        caption: String? = nil
+    ) -> String {
+        let normalizedRole = role.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "voice"
+        let normalizedCaption = caption?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let header = normalizedCaption.map { "[\(normalizedRole) · \($0)]" } ?? "[\(normalizedRole)]"
+        return "\(header)\n\(text.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    nonisolated private static func appendingVoiceTranscriptEntry(_ entry: String, to transcript: String) -> String {
+        let trimmedEntry = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedEntry.isEmpty else { return transcript }
         let prefix = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        let turn = "[user voice]\n\(trimmed)\n"
-        guard !prefix.isEmpty else { return "\(turn)\n" }
-        return "\(prefix)\n\n\(turn)\n"
+        guard !prefix.isEmpty else { return "\(trimmedEntry)\n" }
+        guard !prefix.hasSuffix(trimmedEntry) else { return "\(prefix)\n" }
+        return "\(prefix)\n\n\(trimmedEntry)\n"
     }
 
     nonisolated private static func voiceContextRefs(_ refs: [ContextRef], workspace: Workspace) -> [ContextRef] {
@@ -1384,6 +1434,10 @@ private extension NativeAgentKind {
 }
 
 private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+
     var gitTrimmed: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
     }

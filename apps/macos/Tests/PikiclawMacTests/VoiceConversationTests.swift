@@ -68,6 +68,66 @@ import Testing
 }
 
 @MainActor
+@Test func voiceConversationRecordsGreetingAndLocalTurns() async throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-voice-transcript-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let workspace = Workspace(
+        id: "workspace-voice-transcript",
+        name: "Voice Transcript",
+        pathDisplay: dir.path,
+        trustState: .trusted
+    )
+    let codex = AgentProfile(
+        id: "agent-codex-transcript",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [codex],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: dir.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    let runId = try #require(await model.ensureVoiceConversation(workspaceId: workspace.id, focus: false))
+    await model.appendVoiceConversationTurn(
+        runId: runId,
+        role: "assistant voice",
+        text: "你好，我在。你可以直接说要做什么。",
+        caption: "Voice Greeting"
+    )
+    await model.appendVoiceConversationTurn(
+        runId: runId,
+        role: "user voice",
+        text: "你可以做什么",
+        caption: "You · Live"
+    )
+
+    let snapshot = try await store.loadSnapshot()
+    let run = try #require(snapshot.runs.first(where: { $0.id == runId }))
+
+    #expect(run.state == .draft)
+    #expect(run.transcript.contains("[assistant voice · Voice Greeting]"))
+    #expect(run.transcript.contains("你好，我在。你可以直接说要做什么。"))
+    #expect(run.transcript.contains("[user voice · You · Live]"))
+    #expect(run.transcript.contains("你可以做什么"))
+}
+
+@MainActor
 @Test func voiceConversationCompletesTenRealProductUseCases() async throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-voice-scenarios-\(UUID().uuidString)", isDirectory: true)

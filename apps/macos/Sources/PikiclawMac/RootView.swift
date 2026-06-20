@@ -7406,16 +7406,23 @@ private struct VoiceAssistantOverlay: View {
         didGreet = true
         isOpeningGreeting = true
         let greeting = openingGreetingText
+        let greetingCaption = voiceboxEnabled ? "Voicebox Greeting" : "Voice Greeting"
         openingGreetingTask?.cancel()
         openingGreetingTask = Task {
-            _ = await ensureVoiceConversationOpened()
+            let runId = await ensureVoiceConversationOpened()
+            _ = await model.appendVoiceConversationTurn(
+                runId: runId,
+                role: "assistant voice",
+                text: greeting,
+                caption: greetingCaption
+            )
             guard !Task.isCancelled else { return }
             if autoListen {
                 await voice.startConversation(configuration: voiceboxConfiguration)
                 guard !Task.isCancelled else { return }
             }
             await MainActor.run {
-                appendAssistantTurn(greeting, caption: voiceboxEnabled ? "Voicebox Greeting" : "Voice Greeting")
+                appendAssistantTurn(greeting, caption: greetingCaption)
                 speakWithAppleVoice(greeting, allowBargeIn: false)
             }
         }
@@ -7562,6 +7569,7 @@ private struct VoiceAssistantOverlay: View {
         delegatedUtterance = ""
         voice.transcript = ""
         if reply {
+            persistVoiceConversationTurn(role: "user voice", text: utterance, caption: caption)
             startAssistantReply(to: utterance)
         }
     }
@@ -7573,7 +7581,9 @@ private struct VoiceAssistantOverlay: View {
             try? await Task.sleep(nanoseconds: 620_000_000)
             await MainActor.run {
                 assistantThinking = false
-                appendAssistantTurn(reply, caption: voiceboxEnabled ? "Voicebox Lens" : "Voice Lens")
+                let replyCaption = voiceboxEnabled ? "Voicebox Lens" : "Voice Lens"
+                appendAssistantTurn(reply, caption: replyCaption)
+                persistVoiceConversationTurn(role: "assistant voice", text: reply, caption: replyCaption)
                 speakAssistantText(reply)
             }
         }
@@ -7653,6 +7663,18 @@ private struct VoiceAssistantOverlay: View {
             return "好的，我先不交给智能体。我们可以继续聊，把需求说清楚之后再行动。"
         }
         return "我听到了：\(shortUtterance(utterance))。我会先把它当成对话上下文记住；你可以继续说更多背景，或者让我把最新这件事整理成智能体任务。"
+    }
+
+    private func persistVoiceConversationTurn(role: String, text: String, caption: String) {
+        Task {
+            let runId = await ensureVoiceConversationOpened()
+            _ = await model.appendVoiceConversationTurn(
+                runId: runId,
+                role: role,
+                text: text,
+                caption: caption
+            )
+        }
     }
 
     private func isCapabilityQuestion(_ lower: String) -> Bool {
