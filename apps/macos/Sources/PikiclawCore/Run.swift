@@ -46,9 +46,31 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var endedAt: Date?
     public var nativeSessionRef: String?
     public var handoverFromRunId: EntityID?
+    public var sideChatOfRunId: EntityID?
+    public var sideChatRunIds: [EntityID]
     public var promptSnapshot: String
     public var contextRefs: [ContextRef]
     public var transcript: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case workItemId
+        case workspaceId
+        case agentProfileId
+        case teamProfileId
+        case permissionMode
+        case modelProfileId
+        case state
+        case startedAt
+        case endedAt
+        case nativeSessionRef
+        case handoverFromRunId
+        case sideChatOfRunId
+        case sideChatRunIds
+        case promptSnapshot
+        case contextRefs
+        case transcript
+    }
 
     public init(
         id: EntityID = EntityID(),
@@ -63,6 +85,8 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         endedAt: Date? = nil,
         nativeSessionRef: String? = nil,
         handoverFromRunId: EntityID? = nil,
+        sideChatOfRunId: EntityID? = nil,
+        sideChatRunIds: [EntityID] = [],
         promptSnapshot: String,
         contextRefs: [ContextRef] = [],
         transcript: String = ""
@@ -79,9 +103,32 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.endedAt = endedAt
         self.nativeSessionRef = nativeSessionRef
         self.handoverFromRunId = handoverFromRunId
+        self.sideChatOfRunId = sideChatOfRunId
+        self.sideChatRunIds = sideChatRunIds
         self.promptSnapshot = promptSnapshot
         self.contextRefs = contextRefs
         self.transcript = transcript
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(EntityID.self, forKey: .id)
+        self.workItemId = try container.decodeIfPresent(EntityID.self, forKey: .workItemId)
+        self.workspaceId = try container.decode(EntityID.self, forKey: .workspaceId)
+        self.agentProfileId = try container.decode(EntityID.self, forKey: .agentProfileId)
+        self.teamProfileId = try container.decodeIfPresent(EntityID.self, forKey: .teamProfileId)
+        self.permissionMode = try container.decode(PermissionMode.self, forKey: .permissionMode)
+        self.modelProfileId = try container.decodeIfPresent(EntityID.self, forKey: .modelProfileId)
+        self.state = try container.decode(RunState.self, forKey: .state)
+        self.startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        self.endedAt = try container.decodeIfPresent(Date.self, forKey: .endedAt)
+        self.nativeSessionRef = try container.decodeIfPresent(String.self, forKey: .nativeSessionRef)
+        self.handoverFromRunId = try container.decodeIfPresent(EntityID.self, forKey: .handoverFromRunId)
+        self.sideChatOfRunId = try container.decodeIfPresent(EntityID.self, forKey: .sideChatOfRunId)
+        self.sideChatRunIds = try container.decodeIfPresent([EntityID].self, forKey: .sideChatRunIds) ?? []
+        self.promptSnapshot = try container.decode(String.self, forKey: .promptSnapshot)
+        self.contextRefs = try container.decodeIfPresent([ContextRef].self, forKey: .contextRefs) ?? []
+        self.transcript = try container.decodeIfPresent(String.self, forKey: .transcript) ?? ""
     }
 }
 

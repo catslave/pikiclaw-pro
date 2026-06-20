@@ -8,5 +8,6 @@ extension Notification.Name {
     static let pikiclawRestartApplication = Notification.Name("PikiclawRestartApplication")
     static let pikiclawFocusCommandCenter = Notification.Name("PikiclawFocusCommandCenter")
     static let pikiclawToggleVoiceAssistant = Notification.Name("PikiclawToggleVoiceAssistant")
+    static let pikiclawOpenContextTerminal = Notification.Name("PikiclawOpenContextTerminal")
     static let pikiclawNavigate = Notification.Name("PikiclawNavigate")
 }

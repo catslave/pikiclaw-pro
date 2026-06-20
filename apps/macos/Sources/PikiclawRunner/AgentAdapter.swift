@@ -83,10 +83,10 @@ public protocol AgentAdapter: Sendable {
 public enum NativeAgentCommandBuilder {
     public static func codexArguments(for request: AgentLaunchRequest) -> [String] {
         [
+            "--ask-for-approval", "never",
             "exec",
             "--color", "never",
             "--sandbox", codexSandbox(for: request.run.permissionMode),
-            "--ask-for-approval", "never",
             "-C", request.workspacePath,
             request.prompt
         ]

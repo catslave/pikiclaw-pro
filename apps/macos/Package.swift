@@ -20,7 +20,7 @@ let package = Package(
             dependencies: ["PikiclawCore", "PikiclawRunner"]
         ),
         .testTarget(name: "PikiclawCoreTests", dependencies: ["PikiclawCore"]),
+        .testTarget(name: "PikiclawMacTests", dependencies: ["PikiclawMac"]),
         .testTarget(name: "PikiclawRunnerTests", dependencies: ["PikiclawRunner"])
     ]
 )
-

@@ -14,6 +14,10 @@ final class NativeAppModel: ObservableObject {
     @Published var activeRunId: EntityID?
     @Published var branchOptionsByWorkspace: [EntityID: [String]] = [:]
     @Published var branchStatusByWorkspace: [EntityID: String] = [:]
+    @Published var terminalCommand = ""
+    @Published var terminalTranscript = ""
+    @Published var terminalIsRunning = false
+    @Published var terminalWorkingDirectories: [EntityID: String] = [:]
 
     private let store: JSONNativeStore
     @MainActor private static var restartInFlight = false
@@ -36,7 +40,11 @@ final class NativeAppModel: ObservableObject {
 
     func reload() async {
         do {
-            snapshot = try await store.loadSnapshot()
+            var next = try await store.loadSnapshot()
+            if Self.syncProjectSkillCapabilities(into: &next) {
+                try await store.replaceSnapshot(next)
+            }
+            snapshot = next
             ensureSelectedAgentIsEnabled()
             statusLine = "Loaded \(snapshot.workItems.count) work item(s)"
         } catch {
@@ -73,6 +81,11 @@ final class NativeAppModel: ObservableObject {
         guard let workspace else { return nil }
 
         do {
+            let insideWorkTree = try Self.gitOutput(["rev-parse", "--is-inside-work-tree"], in: workspace.pathDisplay).gitTrimmed
+            guard insideWorkTree == "true" else {
+                return await clearBranchState(for: workspace)
+            }
+
             let showCurrent = try Self.gitOutput(["branch", "--show-current"], in: workspace.pathDisplay).gitTrimmed
             let fallbackCurrent = showCurrent.isEmpty
                 ? try Self.gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], in: workspace.pathDisplay).gitTrimmed
@@ -93,8 +106,30 @@ final class NativeAppModel: ObservableObject {
                 return updated
             }
             return workspace
+        } catch let error as NativeGitError where error.isNotGitRepository {
+            return await clearBranchState(for: workspace)
         } catch {
             branchStatusByWorkspace[workspace.id] = "Branch lookup failed: \(error.localizedDescription)"
+            return workspace
+        }
+    }
+
+    private func clearBranchState(for workspace: Workspace) async -> Workspace {
+        branchOptionsByWorkspace[workspace.id] = []
+        branchStatusByWorkspace[workspace.id] = nil
+
+        guard workspace.currentBranch != nil else {
+            return workspace
+        }
+
+        var updated = workspace
+        updated.currentBranch = nil
+        do {
+            try await store.saveWorkspace(updated)
+            await reload()
+            return updated
+        } catch {
+            statusLine = "Branch state cleanup failed: \(error.localizedDescription)"
             return workspace
         }
     }
@@ -146,6 +181,214 @@ final class NativeAppModel: ObservableObject {
         } catch {
             statusLine = "Delete chat failed: \(error.localizedDescription)"
         }
+    }
+
+    func attachSideChat(parentRunId: EntityID, childRunId: EntityID) async {
+        guard parentRunId != childRunId else {
+            statusLine = "A chat cannot be nested into itself"
+            return
+        }
+
+        do {
+            var next = try await store.loadSnapshot()
+            guard
+                let parentIndex = next.runs.firstIndex(where: { $0.id == parentRunId }),
+                let childIndex = next.runs.firstIndex(where: { $0.id == childRunId })
+            else {
+                statusLine = "Chat not found"
+                return
+            }
+            guard !Self.wouldCreateSideChatCycle(parentRunId: parentRunId, childRunId: childRunId, runs: next.runs) else {
+                statusLine = "Cannot nest a parent chat into its child"
+                return
+            }
+
+            let previousParentId = next.runs[childIndex].sideChatOfRunId
+            if let previousParentId,
+               let previousParentIndex = next.runs.firstIndex(where: { $0.id == previousParentId }) {
+                next.runs[previousParentIndex].sideChatRunIds.removeAll { $0 == childRunId }
+            }
+
+            next.runs[childIndex].sideChatOfRunId = parentRunId
+            if !next.runs[parentIndex].sideChatRunIds.contains(childRunId) {
+                next.runs[parentIndex].sideChatRunIds.append(childRunId)
+            }
+
+            try await store.replaceSnapshot(next)
+            activeRunId = parentRunId
+            statusLine = "Chat nested into workspace"
+            await reload()
+        } catch {
+            statusLine = "Nest chat failed: \(error.localizedDescription)"
+        }
+    }
+
+    func detachSideChat(runId: EntityID, focus: Bool = true) async {
+        do {
+            var next = try await store.loadSnapshot()
+            guard let childIndex = next.runs.firstIndex(where: { $0.id == runId }) else {
+                statusLine = "Chat not found"
+                return
+            }
+            let parentId = next.runs[childIndex].sideChatOfRunId
+            if let parentId,
+               let parentIndex = next.runs.firstIndex(where: { $0.id == parentId }) {
+                next.runs[parentIndex].sideChatRunIds.removeAll { $0 == runId }
+            }
+            next.runs[childIndex].sideChatOfRunId = nil
+
+            try await store.replaceSnapshot(next)
+            if focus {
+                activeRunId = runId
+            }
+            statusLine = "Chat detached"
+            await reload()
+        } catch {
+            statusLine = "Detach chat failed: \(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    func createInlineSideChat(parentRunId: EntityID) async -> EntityID? {
+        do {
+            var next = try await store.loadSnapshot()
+            guard let parentIndex = next.runs.firstIndex(where: { $0.id == parentRunId }) else {
+                statusLine = "Parent chat not found"
+                return nil
+            }
+            let parent = next.runs[parentIndex]
+            var child = AgentRun(
+                workItemId: parent.workItemId,
+                workspaceId: parent.workspaceId,
+                agentProfileId: parent.agentProfileId,
+                teamProfileId: parent.teamProfileId,
+                permissionMode: parent.permissionMode,
+                modelProfileId: parent.modelProfileId,
+                state: .queued,
+                startedAt: Date(),
+                sideChatOfRunId: parent.id,
+                promptSnapshot: "Side chat"
+            )
+            child.transcript = "Ready for a focused side chat."
+
+            next.runs.append(child)
+            next.runs[parentIndex].sideChatRunIds.append(child.id)
+            next.runs[parentIndex].sideChatRunIds = Self.dedupedRunIds(next.runs[parentIndex].sideChatRunIds)
+
+            try await store.replaceSnapshot(next)
+            activeRunId = parent.id
+            statusLine = "Inline chat added"
+            await reload()
+            return child.id
+        } catch {
+            statusLine = "Add inline chat failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func clearTerminal() {
+        terminalTranscript = ""
+        terminalCommand = ""
+        statusLine = "Context terminal cleared"
+    }
+
+    func terminalCurrentDirectory(for workspace: Workspace?) -> String? {
+        guard let workspace else { return nil }
+        if let stored = terminalWorkingDirectories[workspace.id],
+           Self.directoryExists(stored) {
+            return stored
+        }
+        return workspace.pathDisplay
+    }
+
+    func terminalDisplayDirectory(for workspace: Workspace?) -> String {
+        guard let directory = terminalCurrentDirectory(for: workspace) else {
+            return "No workspace"
+        }
+        return Self.shortTerminalPath(directory)
+    }
+
+    func openNativeTerminal(workspace: Workspace?) {
+        guard let directory = terminalCurrentDirectory(for: workspace) else {
+            statusLine = "Add a workspace first"
+            return
+        }
+        guard Self.directoryExists(directory) else {
+            statusLine = "Terminal directory is missing"
+            return
+        }
+        guard let terminalURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else {
+            statusLine = "Terminal.app was not found"
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        let directoryURL = URL(fileURLWithPath: directory, isDirectory: true)
+        NSWorkspace.shared.open([directoryURL], withApplicationAt: terminalURL, configuration: configuration) { _, error in
+            Task { @MainActor in
+                if let error {
+                    self.statusLine = "Native shell failed: \(error.localizedDescription)"
+                } else {
+                    self.statusLine = "Opened Terminal at \(Self.shortTerminalPath(directory))"
+                }
+            }
+        }
+    }
+
+    func runTerminalCommand(_ command: String, workspace: Workspace?) async {
+        let cleanCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanCommand.isEmpty else {
+            statusLine = "Type a terminal command first"
+            return
+        }
+        guard !terminalIsRunning else {
+            statusLine = "Terminal command already running"
+            return
+        }
+        guard let workspace else {
+            statusLine = "Add a workspace first"
+            return
+        }
+        if cleanCommand == "clear" || cleanCommand == "cls" {
+            clearTerminal()
+            return
+        }
+
+        terminalIsRunning = true
+        statusLine = "Running terminal command"
+        let workingDirectory = terminalCurrentDirectory(for: workspace) ?? workspace.pathDisplay
+        terminalWorkingDirectories[workspace.id] = workingDirectory
+        let promptLine = "\(Self.shortTerminalPath(workingDirectory)) $ \(cleanCommand)"
+        terminalTranscript = [terminalTranscript.gitTrimmed, promptLine]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try Self.shellCommandOutput(cleanCommand, in: workingDirectory)
+            }.value
+            if let resultDirectory = result.workingDirectory,
+               Self.directoryExists(resultDirectory) {
+                terminalWorkingDirectories[workspace.id] = resultDirectory
+            }
+            let output = result.output.gitTrimmed
+            if !output.isEmpty {
+                terminalTranscript += "\n\(output)"
+            }
+            if let resultDirectory = result.workingDirectory,
+               resultDirectory != workingDirectory {
+                terminalTranscript += "\n[cwd \(Self.shortTerminalPath(resultDirectory))]"
+            }
+            terminalTranscript += "\n[exit \(result.exitCode)]"
+            terminalCommand = ""
+            statusLine = result.exitCode == 0 ? "Terminal command completed" : "Terminal command exited \(result.exitCode)"
+        } catch {
+            terminalTranscript += "\n[terminal failed] \(error.localizedDescription)"
+            statusLine = "Terminal failed: \(error.localizedDescription)"
+        }
+
+        terminalIsRunning = false
     }
 
     func restartApplication() {
@@ -398,6 +641,33 @@ final class NativeAppModel: ObservableObject {
             ?? AgentProfile(kind: kind, displayName: kind.displayName, executableName: kind.defaultExecutableName, isEnabled: false)
     }
 
+    nonisolated private static func wouldCreateSideChatCycle(
+        parentRunId: EntityID,
+        childRunId: EntityID,
+        runs: [AgentRun]
+    ) -> Bool {
+        var cursor = runs.first(where: { $0.id == parentRunId })
+        var seen = Set<EntityID>()
+        while let current = cursor {
+            if current.id == childRunId { return true }
+            guard let nextParentId = current.sideChatOfRunId else { return false }
+            if seen.contains(nextParentId) { return true }
+            seen.insert(nextParentId)
+            cursor = runs.first(where: { $0.id == nextParentId })
+        }
+        return false
+    }
+
+    nonisolated private static func dedupedRunIds(_ ids: [EntityID]) -> [EntityID] {
+        var seen = Set<EntityID>()
+        var out: [EntityID] = []
+        for id in ids where !seen.contains(id) {
+            seen.insert(id)
+            out.append(id)
+        }
+        return out
+    }
+
     private func ensureSelectedAgentIsEnabled() {
         if snapshot.agentProfiles.first(where: { $0.kind == selectedAgentKind })?.isEnabled == true {
             return
@@ -420,7 +690,7 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
-    private static func orderedBranches(currentBranch: String, branchList: String) -> [String] {
+    nonisolated private static func orderedBranches(currentBranch: String, branchList: String) -> [String] {
         let localBranches = branchList
             .split(whereSeparator: \.isNewline)
             .map { String($0).gitTrimmed }
@@ -436,7 +706,7 @@ final class NativeAppModel: ObservableObject {
         return ordered
     }
 
-    private static func gitOutput(_ arguments: [String], in path: String) throws -> String {
+    nonisolated private static func gitOutput(_ arguments: [String], in path: String) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git", "-C", path] + arguments
@@ -456,6 +726,245 @@ final class NativeAppModel: ObservableObject {
             throw NativeGitError(command: arguments.joined(separator: " "), message: errorOutput.gitTrimmed)
         }
         return output
+    }
+
+    nonisolated private static func shellCommandOutput(_ command: String, in path: String) throws -> NativeTerminalCommandResult {
+        let workingDirectoryMarker = "__PIKICLAW_TERMINAL_CWD__"
+        let wrappedCommand = """
+        \(command)
+        __pikiclaw_exit_code=$?
+        printf '\\n\(workingDirectoryMarker)%s\\n' "$PWD"
+        exit $__pikiclaw_exit_code
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", wrappedCommand]
+        process.currentDirectoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        process.environment = terminalExecutionEnvironment()
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        try process.run()
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        let parsed = splitTerminalOutput(output, marker: workingDirectoryMarker)
+        return NativeTerminalCommandResult(
+            exitCode: Int(process.terminationStatus),
+            output: parsed.output.truncatedTerminalOutput,
+            workingDirectory: parsed.workingDirectory
+        )
+    }
+
+    nonisolated private static func splitTerminalOutput(_ output: String, marker: String) -> (output: String, workingDirectory: String?) {
+        guard let markerRange = output.range(of: marker, options: .backwards) else {
+            return (output, nil)
+        }
+        let visibleOutput = String(output[..<markerRange.lowerBound]).trimmingCharacters(in: .newlines)
+        let markerSuffix = output[markerRange.upperBound...]
+        let workingDirectory = markerSuffix
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map { String($0).gitTrimmed }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return (visibleOutput, workingDirectory)
+    }
+
+    nonisolated private static func terminalExecutionEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let homeDirectory = environment["HOME"] ?? NSHomeDirectory()
+        environment["PATH"] = expandedTerminalPath(from: environment["PATH"], homeDirectory: homeDirectory)
+        return environment
+    }
+
+    nonisolated private static func expandedTerminalPath(from currentPath: String?, homeDirectory: String) -> String {
+        var directories = currentPath?
+            .split(separator: ":")
+            .map(String.init)
+            .filter { !$0.isEmpty } ?? []
+        directories.append(contentsOf: [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            homePath(".local/bin", homeDirectory: homeDirectory),
+            homePath(".cargo/bin", homeDirectory: homeDirectory),
+            homePath(".asdf/shims", homeDirectory: homeDirectory),
+            homePath(".nodenv/shims", homeDirectory: homeDirectory),
+            homePath(".volta/bin", homeDirectory: homeDirectory),
+            homePath(".bun/bin", homeDirectory: homeDirectory),
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ])
+        directories.append(contentsOf: nodeVersionBins(homeDirectory: homeDirectory))
+
+        var seen = Set<String>()
+        return directories.filter { seen.insert($0).inserted }.joined(separator: ":")
+    }
+
+    nonisolated private static func homePath(_ suffix: String, homeDirectory: String) -> String {
+        URL(fileURLWithPath: homeDirectory).appendingPathComponent(suffix).path
+    }
+
+    nonisolated private static func nodeVersionBins(homeDirectory: String) -> [String] {
+        let root = URL(fileURLWithPath: homeDirectory)
+            .appendingPathComponent(".nvm")
+            .appendingPathComponent("versions")
+            .appendingPathComponent("node")
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        return entries
+            .filter { url in
+                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
+            .map { $0.appendingPathComponent("bin").path }
+    }
+
+    nonisolated private static func directoryExists(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    nonisolated private static func shortTerminalPath(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path == home {
+            return "~"
+        }
+        if path.hasPrefix(home + "/") {
+            return "~/" + String(path.dropFirst(home.count + 1))
+        }
+        return path
+    }
+
+    nonisolated private static func syncProjectSkillCapabilities(into snapshot: inout NativeStoreSnapshot) -> Bool {
+        var changed = false
+        for workspace in snapshot.workspaces {
+            let skillsRoot = URL(fileURLWithPath: workspace.pathDisplay, isDirectory: true)
+                .appendingPathComponent(".pikiclaw", isDirectory: true)
+                .appendingPathComponent("skills", isDirectory: true)
+            let skillDirectories = (try? FileManager.default.contentsOfDirectory(
+                at: skillsRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+
+            for skillDirectory in skillDirectories {
+                let values = try? skillDirectory.resourceValues(forKeys: [.isDirectoryKey])
+                guard values?.isDirectory == true else { continue }
+                let skillName = skillDirectory.lastPathComponent
+                let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
+                guard FileManager.default.fileExists(atPath: skillFile.path) else { continue }
+
+                let metadata = readSkillMetadata(at: skillFile)
+                let label = metadata.label?.gitTrimmed
+                let requires = metadata.mcpRequires
+                let capability = Capability(
+                    id: EntityID("capability-skill-\(workspace.id.rawValue.skillSlug)-\(skillName.skillSlug)"),
+                    kind: .skill,
+                    name: label?.isEmpty == false ? label! : skillName,
+                    scope: .workspace,
+                    installState: "installed",
+                    configState: requires.isEmpty ? "ready" : "requires \(requires.joined(separator: ", ")) MCP",
+                    trustLevel: .trusted,
+                    healthState: requires.isEmpty ? .healthy : .needsConfiguration
+                )
+                changed = upsertCapability(capability, into: &snapshot.capabilities) || changed
+            }
+        }
+        return changed
+    }
+
+    nonisolated private static func upsertCapability(_ capability: Capability, into capabilities: inout [Capability]) -> Bool {
+        if let index = capabilities.firstIndex(where: { $0.id == capability.id }) {
+            var updated = capability
+            updated.lastUsedAt = capabilities[index].lastUsedAt
+            guard capabilities[index] != updated else { return false }
+            capabilities[index] = updated
+            return true
+        }
+        capabilities.append(capability)
+        return true
+    }
+
+    nonisolated private static func readSkillMetadata(at url: URL) -> NativeSkillMetadata {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+            return NativeSkillMetadata()
+        }
+        let label = frontmatterValue("label", in: content)
+            ?? frontmatterValue("name", in: content)
+            ?? markdownHeading(in: content)
+        return NativeSkillMetadata(
+            label: label,
+            mcpRequires: frontmatterList("mcp_requires", in: content)
+        )
+    }
+
+    nonisolated private static func frontmatter(in content: String) -> String? {
+        guard content.hasPrefix("---") else { return nil }
+        let marker = "\n---"
+        guard let end = content.dropFirst(3).range(of: marker) else { return nil }
+        return String(content[content.index(content.startIndex, offsetBy: 3)..<end.lowerBound])
+    }
+
+    nonisolated private static func frontmatterValue(_ key: String, in content: String) -> String? {
+        guard let fm = frontmatter(in: content) else { return nil }
+        let prefix = "\(key):"
+        for line in fm.split(whereSeparator: \.isNewline) {
+            let text = String(line).gitTrimmed
+            guard text.localizedCaseInsensitiveHasPrefix(prefix) else { continue }
+            let value = String(text.dropFirst(prefix.count)).gitTrimmed
+            return value.trimmedQuotes
+        }
+        return nil
+    }
+
+    nonisolated private static func frontmatterList(_ key: String, in content: String) -> [String] {
+        guard let fm = frontmatter(in: content) else { return [] }
+        let lines = fm.split(whereSeparator: \.isNewline).map(String.init)
+        let prefix = "\(key):"
+        for (index, rawLine) in lines.enumerated() {
+            let text = rawLine.gitTrimmed
+            guard text.localizedCaseInsensitiveHasPrefix(prefix) else { continue }
+            let rest = String(text.dropFirst(prefix.count)).gitTrimmed
+            if rest.hasPrefix("[") && rest.hasSuffix("]") {
+                return rest.dropFirst().dropLast()
+                    .split(separator: ",")
+                    .map { String($0).gitTrimmed.trimmedQuotes }
+                    .filter { !$0.isEmpty }
+            }
+
+            var values: [String] = []
+            for nextLine in lines.dropFirst(index + 1) {
+                let trimmed = nextLine.gitTrimmed
+                if trimmed.hasPrefix("-") {
+                    values.append(String(trimmed.dropFirst()).gitTrimmed.trimmedQuotes)
+                    continue
+                }
+                if !trimmed.isEmpty { break }
+            }
+            return values.filter { !$0.isEmpty }
+        }
+        return []
+    }
+
+    nonisolated private static func markdownHeading(in content: String) -> String? {
+        for line in content.split(whereSeparator: \.isNewline) {
+            let text = String(line).gitTrimmed
+            guard text.hasPrefix("# ") else { continue }
+            return String(text.dropFirst(2)).gitTrimmed
+        }
+        return nil
     }
 
     private static func launchReplacementApplication() throws {
@@ -490,12 +999,27 @@ private enum NativeRestartError: LocalizedError {
     }
 }
 
+private struct NativeTerminalCommandResult: Sendable {
+    let exitCode: Int
+    let output: String
+    let workingDirectory: String?
+}
+
+private struct NativeSkillMetadata: Sendable {
+    var label: String?
+    var mcpRequires: [String] = []
+}
+
 private struct NativeGitError: LocalizedError {
     let command: String
     let message: String
 
     var errorDescription: String? {
         message.isEmpty ? "git \(command) failed" : message
+    }
+
+    var isNotGitRepository: Bool {
+        message.localizedCaseInsensitiveContains("not a git repository")
     }
 }
 
@@ -542,9 +1066,40 @@ private extension String {
         trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    var trimmedQuotes: String {
+        let trimmed = gitTrimmed
+        guard trimmed.count >= 2 else { return trimmed }
+        let first = trimmed.first
+        let last = trimmed.last
+        if (first == "\"" && last == "\"") || (first == "'" && last == "'") {
+            return String(trimmed.dropFirst().dropLast()).gitTrimmed
+        }
+        return trimmed
+    }
+
+    var skillSlug: String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        let mapped = map { allowed.contains($0) ? Character(String($0).lowercased()) : "-" }
+        let collapsed = String(mapped)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        return collapsed.isEmpty ? "skill" : collapsed
+    }
+
+    func localizedCaseInsensitiveHasPrefix(_ prefix: String) -> Bool {
+        range(of: prefix, options: [.anchored, .caseInsensitive], locale: .current) != nil
+    }
+
     func firstLineFallback(_ fallback: String) -> String {
         let first = split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? fallback : String(trimmed.prefix(80))
+    }
+
+    var truncatedTerminalOutput: String {
+        let limit = 24_000
+        guard count > limit else { return self }
+        let prefixText = prefix(limit)
+        return "\(prefixText)\n[output truncated]"
     }
 }

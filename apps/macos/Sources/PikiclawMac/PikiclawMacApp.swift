@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class PikiclawAppDelegate: NSObject, NSApplicationDelegate {
+final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
+    private let mainWindowIdentifier = NSUserInterfaceItemIdentifier("PikiclawMainWindow")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -13,12 +14,26 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showMainWindow()
-        return true
+        return false
     }
 
     private func showMainWindow() {
         if let window {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
             window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        if let existing = NSApp.windows.first(where: { $0.identifier == mainWindowIdentifier }) {
+            existing.delegate = self
+            if existing.isMiniaturized {
+                existing.deminiaturize(nil)
+            }
+            existing.makeKeyAndOrderFront(nil)
+            window = existing
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -34,13 +49,21 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "Pikiclaw"
+        window.identifier = mainWindowIdentifier
         window.tabbingMode = .disallowed
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.minSize = NSSize(width: 1120, height: 700)
         window.contentView = NSHostingView(rootView: rootView)
         window.center()
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closedWindow = notification.object as? NSWindow, closedWindow === window else { return }
+        window = nil
     }
 }
 
@@ -49,10 +72,8 @@ struct PikiclawMacApp: App {
     @NSApplicationDelegateAdaptor(PikiclawAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            RootView()
-                .frame(minWidth: 1120, minHeight: 700)
-                .tint(PKTheme.primary)
+        Settings {
+            EmptyView()
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -108,17 +129,22 @@ struct PikiclawMacApp: App {
                 }
                 .keyboardShortcut("7", modifiers: [.command])
 
+                Button("Context Terminal") {
+                    NotificationCenter.default.post(name: .pikiclawOpenContextTerminal, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+
+                Button("Voice Lens") {
+                    NotificationCenter.default.post(name: .pikiclawToggleVoiceAssistant, object: nil)
+                }
+                .keyboardShortcut(" ", modifiers: [.command, .shift])
+
                 Divider()
 
                 Button("Focus Command Center") {
                     NotificationCenter.default.post(name: .pikiclawFocusCommandCenter, object: nil)
                 }
                 .keyboardShortcut("k", modifiers: [.command])
-
-                Button("Voice Assistant") {
-                    NotificationCenter.default.post(name: .pikiclawToggleVoiceAssistant, object: nil)
-                }
-                .keyboardShortcut("v", modifiers: [.command, .shift])
             }
 
             CommandMenu("Appearance") {

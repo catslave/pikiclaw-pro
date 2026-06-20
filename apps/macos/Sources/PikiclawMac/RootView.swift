@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 private enum NativeRoute: String, CaseIterable, Identifiable {
     case chat
     case voice
+    case terminal
     case projects
     case workItems
     case workPlan
@@ -23,7 +24,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static let primary: [NativeRoute] = [
-        .chat, .projects, .workItems, .workPlan, .notes, .memory, .workflows,
+        .chat, .terminal, .projects, .workItems, .workPlan, .notes, .memory, .workflows,
     ]
 
     static let system: [NativeRoute] = [
@@ -33,7 +34,8 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .chat: "Conversations"
-        case .voice: "Voice Assistant"
+        case .voice: "Voice Lens"
+        case .terminal: "Context Terminal"
         case .projects: "Projects"
         case .workItems: "Work Items"
         case .workPlan: "Work Plan"
@@ -54,6 +56,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
         switch self {
         case .chat: "Conversations"
         case .voice: "Voice"
+        case .terminal: "Terminal"
         case .projects: "Projects"
         case .workItems: "Work Items"
         case .workPlan: "Work Plan"
@@ -74,6 +77,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
         switch self {
         case .chat: "Start from a project, target, model, and permission mode."
         case .voice: "Speak a task, let Pikiclaw route it to an agent, and hear the report."
+        case .terminal: "Open a shell in the current project, chat, or work item context."
         case .projects: "Workspace-backed project library. Rules and memory feed new chats."
         case .workItems: "Inbox, queue, and workbench for durable engineering tasks."
         case .workPlan: "Daily planning and lightweight intake before promotion to Work Items."
@@ -94,6 +98,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
         switch self {
         case .chat: "text.bubble"
         case .voice: "waveform.circle"
+        case .terminal: "terminal"
         case .projects: "folder"
         case .workItems: "square.grid.2x2"
         case .workPlan: "calendar"
@@ -102,7 +107,7 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
         case .workflows: "point.3.connected.trianglepath.dotted"
         case .missionControl: "gauge.with.dots.needle.67percent"
         case .channels: "bubble.left.and.bubble.right"
-        case .agents: "terminal"
+        case .agents: "cpu"
         case .assistants: "person.crop.circle.badge.plus"
         case .team: "person.2"
         case .extensions: "puzzlepiece.extension"
@@ -136,6 +141,8 @@ struct RootView: View {
     @State private var detailTab: DetailTab = .activity
     @State private var commandQuery = ""
     @State private var assistantDockOpen = false
+    @State private var voiceOverlayOpen = false
+    @State private var voiceOverlayAutoStart = false
     @FocusState private var commandFocused: Bool
 
     private var themePreference: PKThemePreference {
@@ -144,6 +151,15 @@ struct RootView: View {
 
     private var selectedWorkspace: Workspace? {
         model.snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? model.snapshot.workspaces.first
+    }
+
+    private var selectedWorkItem: WorkItem? {
+        model.snapshot.workItems.first(where: { $0.id == selectedWorkItemId }) ?? model.snapshot.workItems.first
+    }
+
+    private var activeRun: AgentRun? {
+        guard let activeRunId = model.activeRunId else { return nil }
+        return model.snapshot.runs.first(where: { $0.id == activeRunId })
     }
 
     var body: some View {
@@ -158,10 +174,11 @@ struct RootView: View {
                     selectedAgentKind: $model.selectedAgentKind,
                     statusLine: model.statusLine,
                     isRunning: model.isRunning,
-                    isVoiceSelected: route == .voice,
-                    openProjects: { route = .projects },
+                    isVoiceSelected: voiceOverlayOpen || route == .voice,
+                    openProjects: { navigate(.projects) },
                     addProject: chooseWorkspace,
                     selectAgent: { kind in
+                        closeVoiceOverlay()
                         model.selectedAgentKind = kind
                         route = .chat
                         model.prepareNewChat()
@@ -169,9 +186,10 @@ struct RootView: View {
                         commandFocused = true
                     },
                     newChat: openNewChat,
-                    openVoice: openVoiceAssistant,
-                    openAgentStudio: { route = .agents },
-                    openMissionControl: { route = .missionControl }
+                    openVoice: { openVoiceAssistant(autoStart: true) },
+                    openTerminal: openContextTerminal,
+                    openAgentStudio: { navigate(.agents) },
+                    openMissionControl: { navigate(.missionControl) }
                 )
 
                 Divider().overlay(PKTheme.edge)
@@ -180,6 +198,39 @@ struct RootView: View {
                     pageContent
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !voiceOverlayOpen {
+                    VoiceLensLauncher(
+                        runState: activeRun?.state,
+                        isRunning: model.isRunning,
+                        open: { openVoiceAssistant(autoStart: true) }
+                    )
+                    .padding(.trailing, 22)
+                    .padding(.bottom, 22)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
+                }
+            }
+            .blur(radius: voiceOverlayOpen ? 7 : 0)
+            .allowsHitTesting(!voiceOverlayOpen)
+
+            if voiceOverlayOpen {
+                VoiceAssistantOverlay(
+                    snapshot: model.snapshot,
+                    selectedWorkspaceId: $selectedWorkspaceId,
+                    selectedWorkItemId: $selectedWorkItemId,
+                    model: model,
+                    autoStart: voiceOverlayAutoStart,
+                    close: {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            voiceOverlayOpen = false
+                        }
+                        voiceOverlayAutoStart = false
+                    },
+                    navigate: navigate
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                .zIndex(5)
             }
         }
         .preferredColorScheme(themePreference.colorScheme)
@@ -209,9 +260,12 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pikiclawToggleVoiceAssistant)) { _ in
             openVoiceAssistant()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pikiclawOpenContextTerminal)) { _ in
+            openContextTerminal()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pikiclawNavigate)) { note in
             if let raw = note.object as? String, let destination = NativeRoute(rawValue: raw) {
-                route = destination
+                navigate(destination)
             }
         }
     }
@@ -237,6 +291,26 @@ struct RootView: View {
                 selectedWorkItemId: $selectedWorkItemId,
                 model: model,
                 navigate: navigate
+            )
+        case .terminal:
+            ContextTerminalPage(
+                snapshot: model.snapshot,
+                selectedWorkspace: selectedWorkspace,
+                selectedWorkItem: selectedWorkItem,
+                selectedAgentKind: model.selectedAgentKind,
+                selectedPermissionMode: model.selectedPermissionMode,
+                activeRun: activeRun,
+                model: model,
+                openChat: {
+                    route = .chat
+                    commandFocused = true
+                },
+                openWorkItem: {
+                    route = .workItems
+                },
+                refreshBranches: {
+                    Task { await model.refreshBranches(for: selectedWorkspace) }
+                }
             )
         case .projects:
             ProjectsPage(
@@ -287,23 +361,45 @@ struct RootView: View {
     }
 
     private func navigate(_ next: NativeRoute) {
+        if next == .voice {
+            openVoiceAssistant(autoStart: true)
+            return
+        }
+        closeVoiceOverlay()
         route = next
     }
 
     private func openNewChat() {
+        closeVoiceOverlay()
         route = .chat
         model.prepareNewChat()
         Task { await model.refreshBranches(for: selectedWorkspace) }
         commandFocused = true
     }
 
-    private func openVoiceAssistant() {
-        route = .voice
+    private func openVoiceAssistant(autoStart: Bool = true) {
+        if voiceOverlayOpen {
+            closeVoiceOverlay()
+            return
+        }
+        voiceOverlayAutoStart = autoStart
+        withAnimation(.easeInOut(duration: 0.18)) {
+            voiceOverlayOpen = true
+        }
         assistantDockOpen = false
         commandFocused = false
     }
 
+    private func openContextTerminal() {
+        closeVoiceOverlay()
+        route = .terminal
+        assistantDockOpen = false
+        commandFocused = false
+        Task { await model.refreshBranches(for: selectedWorkspace) }
+    }
+
     private func chooseWorkspace() {
+        closeVoiceOverlay()
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -316,6 +412,37 @@ struct RootView: View {
                 route = .projects
             }
         }
+    }
+
+    private func closeVoiceOverlay() {
+        if voiceOverlayOpen {
+            withAnimation(.easeInOut(duration: 0.12)) {
+                voiceOverlayOpen = false
+            }
+        }
+        voiceOverlayAutoStart = false
+    }
+}
+
+private struct ProjectChatCanvasBackground: View {
+    let accent: Color
+    var cornerRadius: CGFloat = 18
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(PKTheme.panel.opacity(0.56))
+            .overlay(
+                LinearGradient(
+                    colors: [
+                        accent.opacity(0.13),
+                        PKTheme.surfaceRaised.opacity(0.18),
+                        PKTheme.surface.opacity(0.10)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            )
     }
 }
 
@@ -363,12 +490,13 @@ private struct AgentDock: View {
     let selectAgent: (NativeAgentKind) -> Void
     let newChat: () -> Void
     let openVoice: () -> Void
+    let openTerminal: () -> Void
     let openAgentStudio: () -> Void
     let openMissionControl: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
-            BrandMark()
+            BrandMark(size: 46)
                 .padding(.top, 12)
 
             Button(action: newChat) {
@@ -383,10 +511,10 @@ private struct AgentDock: View {
             .help("New Chat")
 
             Button(action: openVoice) {
-                VoiceDockRobotButton(isLive: isRunning, isSelected: isVoiceSelected)
+                VoiceDockButton(isLive: isRunning, isSelected: isVoiceSelected)
             }
             .buttonStyle(.plain)
-            .help("Voice Assistant")
+            .help("Voice Lens")
 
             ProjectDockTile(
                 snapshot: snapshot,
@@ -429,8 +557,20 @@ private struct AgentDock: View {
 
             Spacer()
 
-            Button(action: openAgentStudio) {
+            Button(action: openTerminal) {
                 Image(systemName: "terminal")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 42, height: 42)
+                    .background(PKTheme.panel.opacity(0.62))
+                    .foregroundStyle(PKTheme.primary)
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(PKTheme.primary.opacity(0.34), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .help("Context Terminal")
+
+            Button(action: openAgentStudio) {
+                Image(systemName: "cpu")
                     .font(.system(size: 15, weight: .semibold))
                     .frame(width: 42, height: 42)
                     .background(PKTheme.panel.opacity(0.62))
@@ -506,6 +646,168 @@ private struct ProjectDockTile: View {
             Button("Add Project...", systemImage: "plus", action: addProject)
         }
         .help("Project: \(selectedTitle)")
+    }
+}
+
+private struct VoiceLensLauncher: View {
+    let runState: RunState?
+    let isRunning: Bool
+    let open: () -> Void
+    @State private var isHovering = false
+
+    private var tint: Color {
+        if isRunning { return PKTheme.ok }
+        if runState == .waitingForUser { return PKTheme.warn }
+        if runState == .failed { return PKTheme.err }
+        return PKTheme.primary
+    }
+
+    private var isAttending: Bool {
+        isHovering || isRunning || runState == .waitingForUser
+    }
+
+    var body: some View {
+        Button(action: open) {
+            ZStack {
+                VoiceLauncherBloom(color: tint, isLive: isAttending, isHovering: isHovering)
+                    .frame(width: 74, height: 74)
+
+                Circle()
+                    .stroke(Color.white.opacity(isHovering ? 0.30 : 0.18), lineWidth: 1)
+                    .frame(width: 58, height: 58)
+
+                Image(systemName: isRunning ? "waveform.path.ecg" : "waveform")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.94))
+                    .shadow(color: tint.opacity(0.60), radius: 9, y: 3)
+            }
+            .frame(width: 78, height: 78)
+            .contentShape(Circle())
+            .scaleEffect(isHovering ? 1.06 : 1)
+            .shadow(color: tint.opacity(isAttending ? 0.42 : 0.24), radius: isAttending ? 26 : 18, y: 12)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
+                isHovering = hovering
+            }
+        }
+        .help("Open Voice Chat")
+        .accessibilityLabel("Open Voice Chat")
+    }
+}
+
+private struct VoiceLauncherBloom: View {
+    let color: Color
+    let isLive: Bool
+    let isHovering: Bool
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let seconds = timeline.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(0..<4, id: \.self) { index in
+                    Circle()
+                        .fill(blobColor(index: index).opacity(isLive ? 0.32 : 0.18))
+                        .frame(width: blobSize(index: index), height: blobSize(index: index))
+                        .offset(blobOffset(index: index, seconds: seconds))
+                        .blur(radius: 9)
+                }
+
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 64, height: 64)
+
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(0.50),
+                                color.opacity(isLive ? 0.46 : 0.28),
+                                PKTheme.panelAlt.opacity(0.74)
+                            ],
+                            center: .topLeading,
+                            startRadius: 2,
+                            endRadius: 68
+                        )
+                    )
+                    .frame(width: 62, height: 62)
+
+                Circle()
+                    .stroke(color.opacity(isLive ? 0.42 : 0.24), lineWidth: 1)
+                    .frame(width: isHovering ? 72 : 66, height: isHovering ? 72 : 66)
+            }
+        }
+    }
+
+    private func blobColor(index: Int) -> Color {
+        switch index {
+        case 0: return color
+        case 1: return PKTheme.ok
+        case 2: return PKTheme.primary
+        default: return Color.white
+        }
+    }
+
+    private func blobSize(index: Int) -> CGFloat {
+        [44, 36, 30, 24][index]
+    }
+
+    private func blobOffset(index: Int, seconds: TimeInterval) -> CGSize {
+        let speed = isLive ? 1.24 : 0.54
+        let phase = seconds * speed + Double(index) * 1.74
+        let radius = CGFloat(isHovering ? 13 : (isLive ? 10 : 7))
+        return CGSize(
+            width: CGFloat(cos(phase)) * radius,
+            height: CGFloat(sin(phase * 0.82)) * radius
+        )
+    }
+}
+
+private struct VoiceOverlayAtmosphere: View {
+    let color: Color
+    let isLive: Bool
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let seconds = timeline.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(0..<4, id: \.self) { index in
+                    Circle()
+                        .stroke(color.opacity(isLive ? 0.14 : 0.07), lineWidth: index == 0 ? 1.2 : 0.8)
+                        .frame(width: ringSize(index: index, seconds: seconds), height: ringSize(index: index, seconds: seconds))
+                        .offset(ringOffset(index: index, seconds: seconds))
+                        .blur(radius: CGFloat(index) * 1.5)
+                }
+
+                RadialGradient(
+                    colors: [
+                        color.opacity(isLive ? 0.18 : 0.10),
+                        PKTheme.ok.opacity(isLive ? 0.08 : 0.03),
+                        Color.clear
+                    ],
+                    center: .center,
+                    startRadius: 60,
+                    endRadius: 540
+                )
+                .opacity(0.72)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func ringSize(index: Int, seconds: TimeInterval) -> CGFloat {
+        let base = CGFloat(380 + index * 120)
+        let pulse = CGFloat(sin(seconds * (isLive ? 0.90 : 0.38) + Double(index))) * CGFloat(isLive ? 24 : 10)
+        return base + pulse
+    }
+
+    private func ringOffset(index: Int, seconds: TimeInterval) -> CGSize {
+        let phase = seconds * (isLive ? 0.45 : 0.20) + Double(index) * 1.3
+        return CGSize(
+            width: CGFloat(cos(phase)) * CGFloat(38 + index * 9),
+            height: CGFloat(sin(phase * 0.76)) * CGFloat(28 + index * 6)
+        )
     }
 }
 
@@ -697,6 +999,9 @@ private struct ChatHomeView: View {
     @Binding var assistantDockOpen: Bool
     @ObservedObject var model: NativeAppModel
     let navigate: (NativeRoute) -> Void
+    @AppStorage("PikiclawMac.chatHistoryVisible") private var chatHistoryVisible = true
+    @State private var focusedSideRunId: EntityID?
+    @State private var hiddenSideRunIds: Set<EntityID> = []
 
     private var selectedWorkspace: Workspace? {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
@@ -713,44 +1018,100 @@ private struct ChatHomeView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ChatHistoryPane(
-                snapshot: snapshot,
-                selectedAgentKind: model.selectedAgentKind,
-                activeRunId: model.activeRunId,
-                selectRun: { run in
-                    model.activeRunId = run.id
-                    selectedWorkspaceId = run.workspaceId
-                    selectedWorkItemId = run.workItemId
-                },
-                newChat: {
-                    model.prepareNewChat()
-                    Task { await model.refreshBranches(for: selectedWorkspace) }
-                    commandFocused.wrappedValue = true
-                },
-                openRunInNewWindow: { run in
-                    DetachedChatWindowRegistry.shared.open(run: run, snapshot: snapshot)
-                },
-                deleteRun: { run in
-                    Task { await model.deleteChat(runId: run.id) }
-                }
-            )
-            .frame(width: 312)
+            if chatHistoryVisible {
+                ChatHistoryPane(
+                    snapshot: snapshot,
+                    selectedAgentKind: model.selectedAgentKind,
+                    activeRunId: model.activeRunId,
+                    focusedSideRunId: focusedSideRunId,
+                    selectRun: { run in
+                        model.activeRunId = run.id
+                        focusedSideRunId = nil
+                        selectedWorkspaceId = run.workspaceId
+                        selectedWorkItemId = run.workItemId
+                    },
+                    selectSideRun: { parent, child in
+                        model.activeRunId = parent.id
+                        focusedSideRunId = child.id
+                        hiddenSideRunIds.remove(child.id)
+                        selectedWorkspaceId = parent.workspaceId
+                        selectedWorkItemId = parent.workItemId
+                    },
+                    newChat: {
+                        model.prepareNewChat()
+                        focusedSideRunId = nil
+                        Task { await model.refreshBranches(for: selectedWorkspace) }
+                        commandFocused.wrappedValue = true
+                    },
+                    hideHistory: {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            chatHistoryVisible = false
+                        }
+                    },
+                    openRunInNewWindow: { run in
+                        DetachedChatWindowRegistry.shared.open(run: run, snapshot: snapshot)
+                    },
+                    attachSideChat: { parent, child in
+                        Task {
+                            await model.attachSideChat(parentRunId: parent.id, childRunId: child.id)
+                            focusedSideRunId = child.id
+                            hiddenSideRunIds.remove(child.id)
+                        }
+                    },
+                    detachSideChat: { run, focus in
+                        Task {
+                            await model.detachSideChat(runId: run.id, focus: focus)
+                            hiddenSideRunIds.remove(run.id)
+                            if focus {
+                                focusedSideRunId = nil
+                                selectedWorkspaceId = run.workspaceId
+                                selectedWorkItemId = run.workItemId
+                            }
+                        }
+                    },
+                    deleteRun: { run in
+                        hiddenSideRunIds.remove(run.id)
+                        Task { await model.deleteChat(runId: run.id) }
+                    }
+                )
+                .frame(width: 312)
 
-            Divider().overlay(PKTheme.edge)
+                Divider().overlay(PKTheme.edge)
+            }
 
             ZStack {
                 if model.activeRunId != nil {
-                    ConversationWorkspace(
-                        run: activeRun,
+                    NativeMultiChatWorkspace(
+                        activeRun: activeRun,
                         snapshot: snapshot,
                         selectedWorkspace: selectedWorkspace,
                         selectedWorkspaceId: $selectedWorkspaceId,
                         selectedWorkItemId: $selectedWorkItemId,
                         model: model,
+                        focusedSideRunId: $focusedSideRunId,
+                        hiddenSideRunIds: $hiddenSideRunIds,
                         newChat: {
                             model.prepareNewChat()
+                            focusedSideRunId = nil
                             Task { await model.refreshBranches(for: selectedWorkspace) }
                             commandFocused.wrappedValue = true
+                        },
+                        addInlineSideChat: { parent in
+                            Task {
+                                if let childId = await model.createInlineSideChat(parentRunId: parent.id) {
+                                    focusedSideRunId = childId
+                                    hiddenSideRunIds.remove(childId)
+                                }
+                            }
+                        },
+                        detachSideChat: { run in
+                            Task {
+                                await model.detachSideChat(runId: run.id, focus: true)
+                                hiddenSideRunIds.remove(run.id)
+                                focusedSideRunId = nil
+                                selectedWorkspaceId = run.workspaceId
+                                selectedWorkItemId = run.workItemId
+                            }
                         },
                         openWorkItem: {
                             if let itemId = activeRun?.workItemId {
@@ -766,6 +1127,9 @@ private struct ChatHomeView: View {
                         selectedWorkspaceId: $selectedWorkspaceId,
                         commandFocused: commandFocused,
                         model: model,
+                        openTerminal: {
+                            navigate(.terminal)
+                        },
                         send: {
                             Task {
                                 if let runId = await model.startChat(
@@ -782,6 +1146,17 @@ private struct ChatHomeView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topLeading) {
+                if !chatHistoryVisible {
+                    ChatHistoryRevealButton {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            chatHistoryVisible = true
+                        }
+                    }
+                    .padding(.leading, 10)
+                    .padding(.top, 10)
+                }
+            }
 
             if assistantDockOpen {
                 Divider().overlay(PKTheme.edge)
@@ -821,20 +1196,142 @@ private struct ChatHomeView: View {
     }
 }
 
+private struct NativeMultiChatWorkspace: View {
+    let activeRun: AgentRun?
+    let snapshot: NativeStoreSnapshot
+    let selectedWorkspace: Workspace?
+    @Binding var selectedWorkspaceId: EntityID?
+    @Binding var selectedWorkItemId: EntityID?
+    @ObservedObject var model: NativeAppModel
+    @Binding var focusedSideRunId: EntityID?
+    @Binding var hiddenSideRunIds: Set<EntityID>
+    let newChat: () -> Void
+    let addInlineSideChat: (AgentRun) -> Void
+    let detachSideChat: (AgentRun) -> Void
+    let openWorkItem: () -> Void
+
+    private var parentRun: AgentRun? {
+        guard let activeRun else { return nil }
+        if let parentId = activeRun.sideChatOfRunId,
+           let parent = snapshot.runs.first(where: { $0.id == parentId }) {
+            return parent
+        }
+        return activeRun
+    }
+
+    private var sideRuns: [AgentRun] {
+        guard let parentRun else { return [] }
+        return nativeChatRunGroups(from: snapshot.runs).first(where: { $0.parent.id == parentRun.id })?.children ?? []
+    }
+
+    private var paneRuns: [AgentRun] {
+        guard let parentRun else { return [] }
+        return [parentRun] + sideRuns.filter { !hiddenSideRunIds.contains($0.id) }
+    }
+
+    private var workspace: Workspace? {
+        guard let parentRun else { return selectedWorkspace }
+        return snapshot.workspaces.first(where: { $0.id == parentRun.workspaceId }) ?? selectedWorkspace
+    }
+
+    private var columns: [GridItem] {
+        let columnCount = paneRuns.count <= 1 ? 1 : 2
+        return Array(repeating: GridItem(.flexible(minimum: 320), spacing: 12), count: columnCount)
+    }
+
+    var body: some View {
+        if paneRuns.count <= 1 {
+            singlePaneWorkspace
+        } else {
+            multiPaneWorkspace
+        }
+    }
+
+    private var singlePaneWorkspace: some View {
+        ConversationWorkspace(
+            run: parentRun,
+            snapshot: snapshot,
+            selectedWorkspace: workspace,
+            selectedWorkspaceId: $selectedWorkspaceId,
+            selectedWorkItemId: $selectedWorkItemId,
+            model: model,
+            immersive: true,
+            newChat: newChat,
+            newSideChat: parentRun.map { parent in { addInlineSideChat(parent) } },
+            openWorkItem: openWorkItem
+        )
+    }
+
+    private var multiPaneWorkspace: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
+                ForEach(Array(paneRuns.enumerated()), id: \.element.id) { index, run in
+                    paneWorkspace(run: run, isParent: index == 0)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private func paneWorkspace(run: AgentRun, isParent: Bool) -> some View {
+        let isFocused = (isParent && focusedSideRunId == nil) || focusedSideRunId == run.id
+        return ConversationWorkspace(
+            run: run,
+            snapshot: snapshot,
+            selectedWorkspace: snapshot.workspaces.first(where: { $0.id == run.workspaceId }) ?? workspace,
+            selectedWorkspaceId: $selectedWorkspaceId,
+            selectedWorkItemId: $selectedWorkItemId,
+            model: model,
+            immersive: true,
+            paneLabel: isParent ? "Parent" : "Side",
+            newChat: newChat,
+            newSideChat: isParent ? parentRun.map { parent in { addInlineSideChat(parent) } } : nil,
+            closeChat: isParent ? nil : { closeSideRun(run) },
+            detachChat: isParent ? nil : { detachSideChat(run) },
+            openWorkItem: openWorkItem
+        )
+        .frame(minHeight: 520)
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(isFocused ? PKTheme.primary.opacity(0.55) : Color.clear, lineWidth: 1.5)
+        )
+        .simultaneousGesture(TapGesture().onEnded {
+            focusedSideRunId = isParent ? nil : run.id
+        })
+    }
+
+    private func closeSideRun(_ run: AgentRun) {
+        hiddenSideRunIds.insert(run.id)
+        if focusedSideRunId == run.id {
+            focusedSideRunId = nil
+        }
+    }
+}
+
 private struct ChatHistoryPane: View {
     let snapshot: NativeStoreSnapshot
     let selectedAgentKind: NativeAgentKind
     let activeRunId: EntityID?
+    let focusedSideRunId: EntityID?
     let selectRun: (AgentRun) -> Void
+    let selectSideRun: (AgentRun, AgentRun) -> Void
     let newChat: () -> Void
+    let hideHistory: () -> Void
     let openRunInNewWindow: (AgentRun) -> Void
+    let attachSideChat: (AgentRun, AgentRun) -> Void
+    let detachSideChat: (AgentRun, Bool) -> Void
     let deleteRun: (AgentRun) -> Void
+    @State private var rootDetachTargeted = false
 
     private var runs: [AgentRun] {
         let matching = snapshot.runs.filter { run in
             agentKind(for: run, snapshot: snapshot) == selectedAgentKind
         }
         return matching.sorted { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+    }
+
+    private var groups: [NativeChatRunGroup] {
+        nativeChatRunGroups(from: runs)
     }
 
     var body: some View {
@@ -849,6 +1346,7 @@ private struct ChatHistoryPane: View {
                         .foregroundStyle(PKTheme.text3)
                 }
                 Spacer()
+                ChatHistoryToggleButton(mode: .hide, action: hideHistory)
                 Button(action: newChat) {
                     Image(systemName: "plus")
                         .font(.system(size: 13, weight: .semibold))
@@ -865,19 +1363,35 @@ private struct ChatHistoryPane: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(runs) { run in
-                        ChatHistoryRow(
-                            run: run,
-                            selected: activeRunId == run.id,
-                            workspaceName: workspaceName(for: run.workspaceId, snapshot: snapshot)
-                            ,
-                            openInNewWindow: { openRunInNewWindow(run) },
-                            delete: { deleteRun(run) },
-                            action: { selectRun(run) }
+                    if focusedSideRunId != nil {
+                        NativeRootDetachDropZone(isTargeted: rootDetachTargeted)
+                            .onDrop(of: [UTType.plainText], isTargeted: $rootDetachTargeted) { providers in
+                                loadNativeRunId(from: providers) { runId in
+                                    guard let run = runs.first(where: { $0.id == runId }),
+                                          run.sideChatOfRunId != nil else { return }
+                                    detachSideChat(run, true)
+                                }
+                                return true
+                            }
+                    }
+
+                    ForEach(groups) { group in
+                        ChatHistoryGroupRow(
+                            group: group,
+                            allRuns: runs,
+                            selected: activeRunId == group.parent.id,
+                            selectedChildId: focusedSideRunId,
+                            workspaceName: workspaceName(for: group.parent.workspaceId, snapshot: snapshot),
+                            openInNewWindow: { openRunInNewWindow($0) },
+                            attachSideChat: attachSideChat,
+                            detachSideChat: detachSideChat,
+                            delete: deleteRun,
+                            selectParent: { selectRun(group.parent) },
+                            selectChild: { child in selectSideRun(group.parent, child) }
                         )
                     }
 
-                    if runs.isEmpty {
+                    if groups.isEmpty {
                         EmptyMiniState(
                             title: "No \(agentShortLabel(selectedAgentKind)) chats",
                             subtitle: "Start a chat on the right; it will stay in this window."
@@ -888,6 +1402,261 @@ private struct ChatHistoryPane: View {
             }
         }
         .background(PKTheme.panel.opacity(0.48))
+    }
+}
+
+private struct ChatHistoryRevealButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        ChatHistoryToggleButton(mode: .show, action: action)
+    }
+}
+
+private struct ChatHistoryToggleButton: View {
+    enum Mode {
+        case hide
+        case show
+
+        var help: String {
+            switch self {
+            case .hide: "Hide Chat History"
+            case .show: "Show Chat History"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .hide: "sidebar.left"
+            case .show: "sidebar.left"
+            }
+        }
+    }
+
+    let mode: Mode
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: mode.symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(hovering ? PKTheme.text2 : PKTheme.text4)
+                .frame(width: 30, height: 30)
+                .background(hovering ? PKTheme.control.opacity(0.72) : Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(hovering ? PKTheme.edgeStrong.opacity(0.62) : Color.clear, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help(mode.help)
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct NativeChatRunGroup: Identifiable {
+    let parent: AgentRun
+    let children: [AgentRun]
+
+    var id: EntityID { parent.id }
+}
+
+private func nativeChatRunGroups(from runs: [AgentRun]) -> [NativeChatRunGroup] {
+    let runById = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, $0) })
+    return runs
+        .filter { $0.sideChatOfRunId == nil }
+        .map { parent in
+            var seen = Set<EntityID>()
+            var children: [AgentRun] = []
+            for childId in parent.sideChatRunIds {
+                guard let child = runById[childId], !seen.contains(child.id) else { continue }
+                seen.insert(child.id)
+                children.append(child)
+            }
+            for child in runs where child.sideChatOfRunId == parent.id && !seen.contains(child.id) {
+                seen.insert(child.id)
+                children.append(child)
+            }
+            return NativeChatRunGroup(parent: parent, children: children)
+        }
+}
+
+private func nativeRunDragProvider(_ runId: EntityID) -> NSItemProvider {
+    NSItemProvider(object: runId.rawValue as NSString)
+}
+
+private func loadNativeRunId(from providers: [NSItemProvider], onLoad: @escaping @MainActor @Sendable (EntityID) -> Void) {
+    guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }) else { return }
+    provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
+        let raw: String?
+        if let data = item as? Data {
+            raw = String(data: data, encoding: .utf8)
+        } else if let text = item as? String {
+            raw = text
+        } else if let text = item as? NSString {
+            raw = text as String
+        } else {
+            raw = nil
+        }
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
+        Task { @MainActor in
+            onLoad(EntityID(raw))
+        }
+    }
+}
+
+private struct NativeRootDetachDropZone: View {
+    let isTargeted: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 11, weight: .semibold))
+            Text("Drop here to detach chat")
+                .font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(isTargeted ? PKTheme.primary : PKTheme.text3)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 9)
+        .background(isTargeted ? PKTheme.primary.opacity(0.12) : PKTheme.panelAlt.opacity(0.35))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(isTargeted ? PKTheme.primary.opacity(0.45) : PKTheme.edge, style: StrokeStyle(lineWidth: 1, dash: [4, 4])))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+}
+
+private struct ChatHistoryGroupRow: View {
+    let group: NativeChatRunGroup
+    let allRuns: [AgentRun]
+    let selected: Bool
+    let selectedChildId: EntityID?
+    let workspaceName: String
+    let openInNewWindow: (AgentRun) -> Void
+    let attachSideChat: (AgentRun, AgentRun) -> Void
+    let detachSideChat: (AgentRun, Bool) -> Void
+    let delete: (AgentRun) -> Void
+    let selectParent: () -> Void
+    let selectChild: (AgentRun) -> Void
+    @State private var isHovering = false
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            parentBody
+            if !group.children.isEmpty {
+                VStack(spacing: 5) {
+                    ForEach(group.children) { child in
+                        childRow(child)
+                    }
+                }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(PKTheme.primary.opacity(0.22))
+                        .frame(width: 1)
+                }
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? PKTheme.selected : PKTheme.panelAlt.opacity(isHovering || isDropTargeted ? 0.50 : 0.38))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isDropTargeted ? PKTheme.primary.opacity(0.55) : selected ? PKTheme.edgeStrong : PKTheme.edge, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture(perform: selectParent)
+        .onHover { isHovering = $0 }
+        .onDrag { nativeRunDragProvider(group.parent.id) }
+        .onDrop(of: [UTType.plainText], isTargeted: $isDropTargeted) { providers in
+            loadNativeRunId(from: providers) { runId in
+                guard runId != group.parent.id,
+                      let child = groupSourceRun(runId) else { return }
+                attachSideChat(group.parent, child)
+            }
+            return true
+        }
+        .contextMenu {
+            Button("Open in New Window", systemImage: "rectangle.on.rectangle") { openInNewWindow(group.parent) }
+            Button("Delete Chat", systemImage: "trash", role: .destructive) { delete(group.parent) }
+        }
+    }
+
+    private var parentBody: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(group.parent.promptSnapshot.firstLineFallback("Conversation"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+                if !group.children.isEmpty {
+                    Text("\(group.children.count + 1)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(PKTheme.primary)
+                        .padding(.horizontal, 6)
+                        .frame(height: 20)
+                        .background(PKTheme.primary.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                StatusPill(text: group.parent.state.rawValue, color: runStateColor(group.parent.state))
+            }
+
+            Text(workspaceName)
+                .font(.caption)
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(1)
+
+            HStack(spacing: 7) {
+                if let startedAt = group.parent.startedAt {
+                    Text(startedAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                }
+                Spacer()
+                if isHovering || selected {
+                    RowIconButton(symbol: "rectangle.on.rectangle", help: "Open in New Window") { openInNewWindow(group.parent) }
+                    RowIconButton(symbol: "trash", help: "Delete Chat", tint: PKTheme.err) { delete(group.parent) }
+                }
+            }
+        }
+    }
+
+    private func childRow(_ child: AgentRun) -> some View {
+        let childSelected = selectedChildId == child.id
+        return HStack(spacing: 7) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(PKTheme.primary)
+            Button {
+                selectChild(child)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(child.promptSnapshot.firstLineFallback("Side chat"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(childSelected ? PKTheme.text : PKTheme.text2)
+                        .lineLimit(1)
+                    Text(child.state.rawValue)
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            RowIconButton(symbol: "arrow.up.right.square", help: "Detach Chat") {
+                detachSideChat(child, true)
+            }
+        }
+        .padding(7)
+        .background(childSelected ? PKTheme.primary.opacity(0.12) : PKTheme.panel.opacity(0.35))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(childSelected ? PKTheme.primary.opacity(0.35) : PKTheme.edge.opacity(0.65), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .onDrag { nativeRunDragProvider(child.id) }
+    }
+
+    private func groupSourceRun(_ runId: EntityID) -> AgentRun? {
+        allRuns.first(where: { $0.id == runId })
     }
 }
 
@@ -1071,6 +1840,7 @@ private struct NewChatLauncher: View {
     @Binding var selectedWorkspaceId: EntityID?
     var commandFocused: FocusState<Bool>.Binding
     @ObservedObject var model: NativeAppModel
+    let openTerminal: () -> Void
     let send: () -> Void
     @State private var selectedMode: NewChatMode = .engineering
 
@@ -1107,6 +1877,7 @@ private struct NewChatLauncher: View {
                     focused: commandFocused,
                     selectedAgentKind: model.selectedAgentKind,
                     isRunning: model.isRunning,
+                    openTerminal: openTerminal,
                     captureWorkItem: {
                         Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
                     },
@@ -1160,11 +1931,13 @@ private struct NewChatHero: View {
 
                 Spacer(minLength: 0)
 
-                NewChatFocusPill(
-                    title: branchTitle(for: selectedWorkspaceId, snapshot: snapshot),
-                    subtitle: "Current branch",
-                    tint: PKTheme.primary
-                )
+                if let branch = branchTitle(for: selectedWorkspaceId, snapshot: snapshot) {
+                    NewChatFocusPill(
+                        title: branch,
+                        subtitle: "Current branch",
+                        tint: PKTheme.primary
+                    )
+                }
             }
 
             NewChatModePicker(selectedMode: $selectedMode)
@@ -1626,6 +2399,7 @@ private struct MinimalChatComposer: View {
     var focused: FocusState<Bool>.Binding
     let selectedAgentKind: NativeAgentKind
     let isRunning: Bool
+    var openTerminal: () -> Void = {}
     let captureWorkItem: () -> Void
     let send: () -> Void
     @State private var isHovering = false
@@ -1643,7 +2417,7 @@ private struct MinimalChatComposer: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
-                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !focused.wrappedValue {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(placeholder)
                             .font(.system(size: 16, weight: .semibold))
@@ -1657,12 +2431,13 @@ private struct MinimalChatComposer: View {
                     .allowsHitTesting(false)
                 }
 
-                TextEditor(text: $text)
-                    .focused(focused)
-                    .font(.system(size: 16))
-                    .foregroundStyle(PKTheme.text)
-                    .scrollContentBackground(.hidden)
-                    .lineSpacing(3)
+                NativeSendingTextEditor(
+                    text: $text,
+                    focused: focused,
+                    fontSize: 16,
+                    lineSpacing: 3,
+                    onSend: sendWithAttachments
+                )
                     .frame(minHeight: 104, maxHeight: 136)
                     .padding(.top, 11)
                     .padding(.horizontal, 15)
@@ -1694,12 +2469,14 @@ private struct MinimalChatComposer: View {
                 )
                 .help("Project is selected from the Project tree")
 
-                ComposerToolbarLabel(
-                    symbol: "arrow.triangle.branch",
-                    title: branchTitle(for: selectedWorkspaceId, snapshot: snapshot),
-                    tint: PKTheme.text3
-                )
-                .help("Current git branch")
+                if let branch = branchTitle(for: selectedWorkspaceId, snapshot: snapshot) {
+                    ComposerToolbarLabel(
+                        symbol: "arrow.triangle.branch",
+                        title: branch,
+                        tint: PKTheme.text3
+                    )
+                    .help("Current git branch")
+                }
 
                 Menu {
                     Button("Read only") { selectedPermissionMode = .readOnly }
@@ -1732,11 +2509,13 @@ private struct MinimalChatComposer: View {
                 ComposerIconButton(symbol: "tray.and.arrow.down", title: "Capture") {
                     captureWorkItem()
                 }
-                ComposerIconButton(symbol: "mic", title: "Voice") {}
-                    .disabled(true)
-                ComposerIconButton(symbol: "number", title: "Commands") {}
-                    .disabled(true)
-
+                ComposerIconButton(symbol: "waveform.path.ecg", title: "Log Trace") {
+                    insertSkillCommand("/logtrace conversationId= last=24h ")
+                }
+                ComposerIconButton(symbol: "tablecells", title: "ClickHouse") {
+                    insertSkillCommand("/clickhouse ")
+                }
+                ComposerIconButton(symbol: "terminal", title: "Terminal", action: openTerminal)
                 Spacer()
 
                 Button(action: sendWithAttachments) {
@@ -1781,6 +2560,12 @@ private struct MinimalChatComposer: View {
         .onHover { isHovering = $0 }
         .onPasteCommand(of: [.image, .fileURL]) { _ in
             addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+            refocusComposer()
+        }
+        .onChange(of: isRunning) { _, running in
+            if !running {
+                refocusComposer()
+            }
         }
     }
 
@@ -1794,6 +2579,11 @@ private struct MinimalChatComposer: View {
         }
     }
 
+    private func insertSkillCommand(_ command: String) {
+        text = command
+        focused.wrappedValue = true
+    }
+
     private func sendWithAttachments() {
         guard canSend else { return }
         text = ComposerAttachmentPrompt.appendImageRefs(
@@ -1803,6 +2593,13 @@ private struct MinimalChatComposer: View {
         imageAttachments = []
         attachmentError = nil
         send()
+        refocusComposer()
+    }
+
+    private func refocusComposer() {
+        DispatchQueue.main.async {
+            focused.wrappedValue = true
+        }
     }
 }
 
@@ -1856,6 +2653,134 @@ private struct ComposerIconButton: View {
     }
 }
 
+private struct NativeSendingTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    var focused: FocusState<Bool>.Binding?
+    let fontSize: CGFloat
+    let lineSpacing: CGFloat
+    let onSend: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .noBorder
+        scrollView.autohidesScrollers = true
+
+        let textView = SendingNSTextView()
+        textView.delegate = context.coordinator
+        textView.onSend = onSend
+        textView.string = text
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .controlAccentColor
+        textView.textContainerInset = NSSize(width: 0, height: 0)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: max(scrollView.contentSize.width, 1), height: CGFloat.greatestFiniteMagnitude)
+        textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        scrollView.documentView = textView
+        applyStyle(to: textView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? SendingNSTextView else { return }
+        context.coordinator.parent = self
+        textView.onSend = onSend
+        if textView.string != text {
+            textView.string = text
+        }
+        let editorWidth = max(scrollView.contentSize.width, 1)
+        textView.textContainer?.containerSize = NSSize(width: editorWidth, height: .greatestFiniteMagnitude)
+        if abs(textView.frame.width - editorWidth) > 0.5 {
+            var frame = textView.frame
+            frame.size.width = editorWidth
+            textView.frame = frame
+        }
+        applyStyle(to: textView)
+        if focused?.wrappedValue == true,
+           textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    private func applyStyle(to textView: NSTextView) {
+        textView.font = .systemFont(ofSize: fontSize)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = lineSpacing
+        textView.defaultParagraphStyle = paragraph
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: fontSize),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ]
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: NativeSendingTextEditor
+
+        init(_ parent: NativeSendingTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.focused?.wrappedValue = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.focused?.wrappedValue = false
+        }
+    }
+
+    final class SendingNSTextView: NSTextView {
+        var onSend: (() -> Void)?
+
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            super.mouseDown(with: event)
+        }
+
+        override func keyDown(with event: NSEvent) {
+            let isReturn = event.keyCode == 36 || event.keyCode == 76
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if isReturn,
+               !modifiers.contains(.shift),
+               !modifiers.contains(.option),
+               !modifiers.contains(.control) {
+                onSend?()
+                return
+            }
+            super.keyDown(with: event)
+        }
+    }
+}
+
 private struct ConversationWorkspace: View {
     let run: AgentRun?
     let snapshot: NativeStoreSnapshot
@@ -1863,9 +2788,15 @@ private struct ConversationWorkspace: View {
     @Binding var selectedWorkspaceId: EntityID?
     @Binding var selectedWorkItemId: EntityID?
     @ObservedObject var model: NativeAppModel
+    var immersive = false
+    var paneLabel: String?
     let newChat: () -> Void
+    var newSideChat: (() -> Void)?
+    var closeChat: (() -> Void)?
+    var detachChat: (() -> Void)?
     let openWorkItem: () -> Void
     @State private var replyDraft = ""
+    @State private var terminalOpen = false
 
     private var conversationAgentKind: NativeAgentKind {
         guard let run else { return model.selectedAgentKind }
@@ -1876,29 +2807,90 @@ private struct ConversationWorkspace: View {
         agentTint(conversationAgentKind)
     }
 
+    private var cornerRadius: CGFloat {
+        immersive ? 18 : 8
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
+                if immersive {
+                    Image(systemName: agentSymbol(conversationAgentKind))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PKTheme.primaryText)
+                        .frame(width: 36, height: 36)
+                        .background(accent)
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(runTitle)
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: immersive ? 20 : 20, weight: .semibold))
                         .foregroundStyle(PKTheme.text)
                         .lineLimit(1)
-                    Text("\(selectedWorkspace?.name ?? "Project") · \(run?.state.rawValue ?? "starting")")
+                        .truncationMode(.tail)
+                    Text(immersive ? immersiveSubtitle : "\(selectedWorkspace?.name ?? "Project") · \(run?.state.rawValue ?? "starting")")
                         .font(.caption)
                         .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                Spacer()
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+                Spacer(minLength: 8)
+                if let paneLabel {
+                    StatusPill(text: paneLabel, color: accent)
+                }
                 StatusPill(text: run?.state.rawValue ?? "starting", color: runStateColor(run?.state))
-                SecondaryButton(title: "Work Item", systemImage: "checklist", action: openWorkItem)
-                PrimaryButton(title: "New Chat", systemImage: "plus", action: newChat)
+                if let newSideChat {
+                    ComposerIconButton(symbol: "rectangle.split.2x1", title: "Add Inline Chat", action: newSideChat)
+                }
+                if let closeChat {
+                    ComposerIconButton(symbol: "xmark", title: "Close Pane", action: closeChat)
+                }
+                if let detachChat {
+                    ComposerIconButton(symbol: "arrow.up.right.square", title: "Detach Chat", action: detachChat)
+                }
+                if immersive {
+                    ComposerIconButton(symbol: "terminal", title: "Terminal") {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            terminalOpen.toggle()
+                        }
+                    }
+                } else {
+                    SecondaryButton(title: "Terminal", systemImage: "terminal") {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            terminalOpen.toggle()
+                        }
+                    }
+                    SecondaryButton(title: "Work Item", systemImage: "checklist", action: openWorkItem)
+                    PrimaryButton(title: "New Chat", systemImage: "plus", action: newChat)
+                }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
+            .padding(.horizontal, immersive ? 22 : 18)
+            .padding(.vertical, immersive ? 18 : 14)
 
             Rectangle()
                 .fill(PKTheme.edge.opacity(0.72))
                 .frame(height: 1)
+
+            if terminalOpen {
+                ContextTerminalPane(
+                    selectedWorkspace: selectedWorkspace,
+                    selectedWorkItem: conversationWorkItem,
+                    selectedAgentKind: conversationAgentKind,
+                    selectedPermissionMode: run?.permissionMode ?? model.selectedPermissionMode,
+                    activeRun: run,
+                    model: model,
+                    compact: true
+                )
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .transition(.move(edge: .top).combined(with: .opacity))
+
+                Rectangle()
+                    .fill(PKTheme.edge.opacity(0.62))
+                    .frame(height: 1)
+            }
 
             ScrollViewReader { reader in
                 ScrollView {
@@ -1921,7 +2913,7 @@ private struct ConversationWorkspace: View {
                         )
                         .id("assistant-output")
                     }
-                    .padding(20)
+                    .padding(immersive ? 24 : 20)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: run?.transcript ?? "") { _, _ in
@@ -1951,15 +2943,31 @@ private struct ConversationWorkspace: View {
                     }
                 }
             }
-            .padding(16)
+            .padding(immersive ? 18 : 16)
         }
-        .background(PKTheme.panel.opacity(0.46))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.22), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background {
+            if immersive {
+                ProjectChatCanvasBackground(accent: accent, cornerRadius: cornerRadius)
+            } else {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(PKTheme.panel.opacity(0.46))
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(accent.opacity(immersive ? 0.32 : 0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .shadow(color: immersive ? accent.opacity(0.10) : .clear, radius: 22, y: 14)
     }
 
     private var runTitle: String {
         run?.promptSnapshot.firstLineFallback("Conversation") ?? "Starting conversation"
+    }
+
+    private var immersiveSubtitle: String {
+        let workspace = selectedWorkspace?.name ?? "Project"
+        if let branch = selectedWorkspace?.currentBranch, !branch.isEmpty {
+            return "\(workspace) · \(branch) · \(run?.state.rawValue ?? "starting")"
+        }
+        return "\(workspace) · \(run?.state.rawValue ?? "starting")"
     }
 
     private var agentLabel: String {
@@ -1975,6 +2983,13 @@ private struct ConversationWorkspace: View {
             return transcript
         }
         return model.isRunning ? "Starting the native runner..." : "No assistant output yet."
+    }
+
+    private var conversationWorkItem: WorkItem? {
+        if let itemId = run?.workItemId ?? selectedWorkItemId {
+            return snapshot.workItems.first(where: { $0.id == itemId })
+        }
+        return nil
     }
 }
 
@@ -2141,24 +3156,29 @@ private struct ConversationReplyComposer: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
-                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !focused {
                     Text("Continue the conversation")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(PKTheme.text3)
-                        .padding(.top, 6)
-                        .padding(.leading, 9)
+                        .padding(.top, 4)
+                        .padding(.leading, 8)
                         .allowsHitTesting(false)
                 }
-                TextEditor(text: $text)
-                    .focused($focused)
-                    .font(.system(size: 14))
-                    .foregroundStyle(PKTheme.text)
-                    .lineSpacing(2)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 58, maxHeight: 92)
-                    .padding(.horizontal, 9)
-                    .padding(.top, 6)
-                    .padding(.bottom, 2)
+                NativeSendingTextEditor(
+                    text: $text,
+                    focused: $focused,
+                    fontSize: 13,
+                    lineSpacing: 1,
+                    onSend: sendWithAttachments
+                )
+                    .frame(minHeight: 38, maxHeight: 56)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                    .padding(.bottom, 0)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                focused = true
             }
 
             if !imageAttachments.isEmpty || attachmentError != nil {
@@ -2175,7 +3195,7 @@ private struct ConversationReplyComposer: View {
                 .padding(.bottom, 8)
             }
 
-            HStack(spacing: 9) {
+            HStack(spacing: 7) {
                 Text(statusLine)
                     .font(.caption)
                     .foregroundStyle(PKTheme.text3)
@@ -2191,7 +3211,7 @@ private struct ConversationReplyComposer: View {
                     Image(systemName: isRunning ? "hourglass" : "arrow.up")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
-                        .frame(width: 32, height: 32)
+                        .frame(width: 30, height: 30)
                         .background(canSend ? accent : PKTheme.control.opacity(0.86))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
@@ -2200,8 +3220,8 @@ private struct ConversationReplyComposer: View {
                 .keyboardShortcut(.return, modifiers: .command)
                 .help(isRunning ? "Running" : "Send")
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 10)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
         }
         .background(
             LinearGradient(
@@ -2217,6 +3237,12 @@ private struct ConversationReplyComposer: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onPasteCommand(of: [.image, .fileURL]) { _ in
             addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+            refocusComposer()
+        }
+        .onChange(of: isRunning) { _, running in
+            if !running {
+                refocusComposer()
+            }
         }
     }
 
@@ -2239,6 +3265,303 @@ private struct ConversationReplyComposer: View {
         imageAttachments = []
         attachmentError = nil
         send()
+        refocusComposer()
+    }
+
+    private func refocusComposer() {
+        DispatchQueue.main.async {
+            focused = true
+        }
+    }
+}
+
+private struct ContextTerminalPage: View {
+    let snapshot: NativeStoreSnapshot
+    let selectedWorkspace: Workspace?
+    let selectedWorkItem: WorkItem?
+    let selectedAgentKind: NativeAgentKind
+    let selectedPermissionMode: PermissionMode
+    let activeRun: AgentRun?
+    @ObservedObject var model: NativeAppModel
+    let openChat: () -> Void
+    let openWorkItem: () -> Void
+    let refreshBranches: () -> Void
+
+    var body: some View {
+        PageFrame(route: .terminal) {
+            HStack(alignment: .top, spacing: 14) {
+                ContextTerminalPane(
+                    selectedWorkspace: selectedWorkspace,
+                    selectedWorkItem: selectedWorkItem,
+                    selectedAgentKind: selectedAgentKind,
+                    selectedPermissionMode: selectedPermissionMode,
+                    activeRun: activeRun,
+                    model: model
+                )
+                .frame(minWidth: 560)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    InspectorSection(title: "Context") {
+                        InspectorMetric(label: "Project", value: selectedWorkspace?.name ?? "No project")
+                        if let branch = selectedWorkspace?.currentBranch {
+                            InspectorMetric(label: "Branch", value: branch)
+                        }
+                        InspectorMetric(label: "Agent", value: agentShortLabel(selectedAgentKind))
+                        InspectorMetric(label: "Permission", value: permissionLabel(selectedPermissionMode))
+                    }
+
+                    InspectorSection(title: "Work Item") {
+                        if let selectedWorkItem {
+                            InspectorRow(symbol: "checklist", title: selectedWorkItem.title, subtitle: selectedWorkItem.state.rawValue)
+                        } else {
+                            EmptyMiniState(title: "No work item selected", subtitle: "Terminal will attach to the selected project.")
+                        }
+                    }
+
+                    InspectorSection(title: "Recent Runs") {
+                        ForEach(snapshot.runs.prefix(3)) { run in
+                            InspectorRow(
+                                symbol: agentSymbol(agentKind(for: run, snapshot: snapshot)),
+                                title: run.promptSnapshot.firstLineFallback("Conversation"),
+                                subtitle: run.state.rawValue
+                            )
+                        }
+                        if snapshot.runs.isEmpty {
+                            EmptyMiniState(title: "No runs yet", subtitle: "Agent output will appear after a chat starts.")
+                        }
+                    }
+                }
+                .frame(width: 320)
+            }
+        } actions: {
+            SecondaryButton(title: "Native Shell", systemImage: "terminal", action: {
+                model.openNativeTerminal(workspace: selectedWorkspace)
+            })
+            SecondaryButton(title: "Refresh", systemImage: "arrow.clockwise", action: refreshBranches)
+            SecondaryButton(title: "Work Item", systemImage: "checklist", action: openWorkItem)
+            PrimaryButton(title: "Back to Chat", systemImage: "text.bubble", action: openChat)
+        }
+    }
+}
+
+private struct ContextTerminalPane: View {
+    let selectedWorkspace: Workspace?
+    let selectedWorkItem: WorkItem?
+    let selectedAgentKind: NativeAgentKind
+    let selectedPermissionMode: PermissionMode
+    let activeRun: AgentRun?
+    @ObservedObject var model: NativeAppModel
+    var compact = false
+    @FocusState private var commandFocused: Bool
+
+    private var accent: Color {
+        agentTint(selectedAgentKind)
+    }
+
+    private var canRun: Bool {
+        selectedWorkspace != nil
+            && !model.terminalIsRunning
+            && !model.terminalCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 10 : 14) {
+            HStack(spacing: 11) {
+                Image(systemName: "terminal")
+                    .font(.system(size: compact ? 13 : 15, weight: .semibold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: compact ? 30 : 36, height: compact ? 30 : 36)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(selectedWorkspace?.name ?? "Context Terminal")
+                        .font(.system(size: compact ? 13 : 16, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    Text(contextSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                StatusPill(text: model.terminalIsRunning ? "RUNNING" : permissionLabel(selectedPermissionMode), color: model.terminalIsRunning ? PKTheme.warn : accent)
+                ComposerIconButton(symbol: "terminal", title: "Open Native Shell", action: openNativeShell)
+            }
+
+            ScrollViewReader { reader in
+                ScrollView {
+                    Text(terminalText)
+                        .font(.system(size: compact ? 11 : 12, design: .monospaced))
+                        .foregroundStyle(PKTheme.text2)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(compact ? 10 : 13)
+                        .id("terminal-output")
+                }
+                .frame(minHeight: compact ? 126 : 300, maxHeight: compact ? 180 : 420)
+                .background(PKTheme.inset.opacity(0.92))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onChange(of: model.terminalTranscript) { _, _ in
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        reader.scrollTo("terminal-output", anchor: .bottom)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("\(model.terminalDisplayDirectory(for: selectedWorkspace)) $")
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: compact ? 120 : 220, alignment: .leading)
+                TextField("git status --short", text: $model.terminalCommand)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(PKTheme.text)
+                    .focused($commandFocused)
+                    .onSubmit(runCommand)
+                    .disabled(model.terminalIsRunning || selectedWorkspace == nil)
+                Button(action: runCommand) {
+                    Image(systemName: model.terminalIsRunning ? "hourglass" : "arrow.up")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(canRun ? PKTheme.primaryText : PKTheme.text4)
+                        .frame(width: 30, height: 28)
+                        .background(canRun ? accent : PKTheme.control.opacity(0.86))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRun)
+                .help("Run Command")
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(PKTheme.control.opacity(0.72))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(commandFocused ? accent.opacity(0.52) : PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            HStack(spacing: 8) {
+                ForEach(terminalSuggestions, id: \.self) { command in
+                    TerminalSuggestionButton(command: command, tint: accent) {
+                        model.terminalCommand = command
+                        refocusCommand()
+                    }
+                }
+                Spacer(minLength: 0)
+                ComposerIconButton(symbol: "terminal", title: "Open Native Shell", action: openNativeShell)
+                ComposerIconButton(symbol: "doc.on.doc", title: "Copy Output") {
+                    copyTextToPasteboard(model.terminalTranscript)
+                }
+                ComposerIconButton(symbol: "trash", title: "Clear Terminal") {
+                    model.clearTerminal()
+                    refocusCommand()
+                }
+            }
+        }
+        .padding(compact ? 12 : 16)
+        .background(
+            LinearGradient(
+                colors: [
+                    accent.opacity(0.08),
+                    PKTheme.panel.opacity(0.84)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear {
+            refocusCommand()
+        }
+        .onChange(of: model.terminalIsRunning) { _, isRunning in
+            if !isRunning {
+                refocusCommand()
+            }
+        }
+        .onChange(of: selectedWorkspace?.id) { _, _ in
+            refocusCommand()
+        }
+    }
+
+    private var contextSubtitle: String {
+        let project = model.terminalDisplayDirectory(for: selectedWorkspace)
+        if let selectedWorkItem {
+            return "\(selectedWorkItem.title) · cwd \(project)"
+        }
+        if let activeRun {
+            return "\(activeRun.state.rawValue) run · cwd \(project)"
+        }
+        return selectedWorkspace == nil ? "No workspace selected" : "cwd \(project)"
+    }
+
+    private var terminalText: String {
+        let transcript = model.terminalTranscript.gitTrimmed
+        if !transcript.isEmpty {
+            return transcript
+        }
+        guard let selectedWorkspace else {
+            return "$ add a project first"
+        }
+        return [
+            "\(model.terminalDisplayDirectory(for: selectedWorkspace)) $ pwd",
+            selectedWorkspace.pathDisplay,
+            "\(model.terminalDisplayDirectory(for: selectedWorkspace)) $ # \(agentShortLabel(selectedAgentKind)) · \(permissionLabel(selectedPermissionMode))"
+        ].joined(separator: "\n")
+    }
+
+    private var terminalSuggestions: [String] {
+        if selectedWorkspace?.pathDisplay.contains("pikiclaw") == true {
+            return ["pwd", "git status --short", "npm test"]
+        }
+        return ["pwd", "ls", "git status --short"]
+    }
+
+    private func runCommand() {
+        guard canRun else { return }
+        let command = model.terminalCommand
+        Task { @MainActor in
+            await model.runTerminalCommand(command, workspace: selectedWorkspace)
+            refocusCommand()
+        }
+    }
+
+    private func openNativeShell() {
+        model.openNativeTerminal(workspace: selectedWorkspace)
+        refocusCommand()
+    }
+
+    private func refocusCommand() {
+        guard selectedWorkspace != nil else { return }
+        DispatchQueue.main.async {
+            commandFocused = true
+        }
+    }
+}
+
+private struct TerminalSuggestionButton: View {
+    let command: String
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(command)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(tint.opacity(0.10))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(tint.opacity(0.22), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help(command)
     }
 }
 
@@ -2894,6 +4217,12 @@ private struct AssistantInspector: View {
                 .disabled(model.isRunning)
                 .help(voice.isRecording ? "Stop listening" : "Start listening")
 
+                VoiceLanguagePicker(
+                    selection: $voice.recognitionLanguage,
+                    disabled: voice.isRecording || model.isRunning
+                )
+                .frame(width: 96)
+
                 Button {
                     delegatedUtterance = ""
                     voice.transcript = ""
@@ -3374,21 +4703,82 @@ private struct VoiceAssistantHero: View {
     }
 }
 
-private struct VoiceDockRobotButton: View {
+private struct VoiceListeningOrb: View {
+    let level: Double
+    let isListening: Bool
+    let isThinking: Bool
+    let isSpeaking: Bool
+    let color: Color
+    var compact: Bool = false
+
+    private var isActive: Bool {
+        isListening || isThinking || isSpeaking
+    }
+
+    private var displayLevel: Double {
+        if isListening { return level }
+        if isSpeaking { return 0.56 }
+        if isThinking { return 0.32 }
+        return 0.10
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(0.88),
+                            color.opacity(isActive ? 0.34 : 0.18),
+                            PKTheme.panelAlt.opacity(0.84)
+                        ],
+                        center: .topLeading,
+                        startRadius: compact ? 2 : 10,
+                        endRadius: compact ? 34 : 118
+                    )
+                )
+                .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                .shadow(color: color.opacity(isActive ? 0.28 : 0.12), radius: compact ? 10 : 24, y: compact ? 5 : 14)
+                .scaleEffect(1 + CGFloat(displayLevel) * (compact ? 0.035 : 0.055))
+
+            VoiceLevelWaveform(
+                level: displayLevel,
+                isLive: isActive,
+                color: compact ? PKTheme.primaryText.opacity(0.95) : Color.black.opacity(0.74),
+                barCount: compact ? 9 : 19,
+                maxHeight: compact ? 22 : 58,
+                barWidth: compact ? 3 : 4,
+                spacing: compact ? 2.5 : 4
+            )
+            .padding(.horizontal, compact ? 9 : 30)
+        }
+        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: displayLevel)
+        .accessibilityLabel(isListening ? "Voice is listening" : isSpeaking ? "Voice is speaking" : "Voice")
+    }
+}
+
+private struct VoiceDockButton: View {
     let isLive: Bool
     var isSelected: Bool = false
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isSelected ? PKTheme.primary.opacity(0.18) : PKTheme.panel.opacity(0.62))
+                .fill(isSelected ? PKTheme.primary.opacity(0.20) : PKTheme.panel.opacity(0.62))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke((isSelected ? PKTheme.primary : (isLive ? PKTheme.ok : PKTheme.primary)).opacity(isSelected ? 0.82 : 0.42), lineWidth: 1)
                 )
                 .shadow(color: PKTheme.primary.opacity(isSelected ? 0.18 : 0.0), radius: 12, y: 6)
-            VoiceRippleHalo(isLive: isLive, color: isLive ? PKTheme.ok : PKTheme.primary, compact: true)
-            VoiceRobotAvatar(size: 38, isLive: isLive, stage: isLive ? .running : .idle)
+            VoiceListeningOrb(
+                level: isLive ? 0.68 : (isSelected ? 0.24 : 0.10),
+                isListening: isLive || isSelected,
+                isThinking: false,
+                isSpeaking: false,
+                color: isLive ? PKTheme.ok : PKTheme.primary,
+                compact: true
+            )
+            .padding(4)
         }
         .frame(width: 42, height: 42)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -3574,26 +4964,57 @@ private struct VoiceRobotAvatar: View {
 private struct VoiceWaveform: View {
     let isLive: Bool
     let color: Color
+    var level: Double = 0
 
     var body: some View {
-        HStack(alignment: .center, spacing: 4) {
-            ForEach(0..<22, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(color.opacity(isLive ? 0.82 : 0.32))
-                    .frame(width: 4, height: barHeight(index))
-                    .animation(.easeInOut(duration: 0.28).repeatForever(autoreverses: true).delay(Double(index % 6) * 0.035), value: isLive)
-            }
-        }
+        VoiceLevelWaveform(
+            level: level,
+            isLive: isLive,
+            color: color,
+            barCount: 24,
+            maxHeight: 42
+        )
         .frame(maxWidth: .infinity)
         .frame(height: 44)
         .background(PKTheme.inset.opacity(0.62))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(isLive ? 0.40 : 0.18), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
+}
 
-    private func barHeight(_ index: Int) -> CGFloat {
-        let pattern: [CGFloat] = [10, 18, 26, 15, 34, 22, 12, 28, 38, 20, 16]
-        return isLive ? pattern[index % pattern.count] : max(8, pattern[index % pattern.count] * 0.42)
+private struct VoiceLevelWaveform: View {
+    let level: Double
+    let isLive: Bool
+    let color: Color
+    var barCount: Int = 20
+    var maxHeight: CGFloat = 44
+    var barWidth: CGFloat = 4
+    var spacing: CGFloat = 4
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: spacing) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: barWidth / 2)
+                        .fill(color.opacity(isLive ? 0.88 : 0.34))
+                        .frame(width: barWidth, height: barHeight(index, time: time))
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func barHeight(_ index: Int, time: TimeInterval) -> CGFloat {
+        let normalized = max(0, min(1, level))
+        let activity = isLive ? max(0.18, normalized) : 0.08
+        let center = Double(barCount - 1) / 2
+        let distance = abs(Double(index) - center) / max(center, 1)
+        let envelope = 1 - min(0.82, distance * 0.72)
+        let ripple = (sin(time * 7.6 + Double(index) * 0.74) + 1) / 2
+        let liveBoost = activity * (0.42 + ripple * 0.72) * envelope
+        let idle = 0.16 + envelope * 0.18
+        return max(6, maxHeight * CGFloat(isLive ? liveBoost : idle))
     }
 }
 
@@ -3622,6 +5043,24 @@ private struct VoiceStepRow: View {
             }
             Spacer(minLength: 0)
         }
+    }
+}
+
+private struct VoiceLanguagePicker: View {
+    @Binding var selection: VoiceRecognitionLanguage
+    let disabled: Bool
+
+    var body: some View {
+        Picker("Speech Language", selection: $selection) {
+            ForEach(VoiceRecognitionLanguage.allCases) { language in
+                Text(language.shortTitle).tag(language)
+            }
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .labelsHidden()
+        .disabled(disabled)
+        .help("Speech language")
     }
 }
 
@@ -3755,6 +5194,12 @@ private struct VoiceAssistantPage: View {
             .buttonStyle(.plain)
             .disabled(model.isRunning)
             .help(voice.isRecording ? "Stop listening" : "Start listening")
+
+            VoiceLanguagePicker(
+                selection: $voice.recognitionLanguage,
+                disabled: voice.isRecording || model.isRunning
+            )
+            .frame(width: 112)
 
             Button {
                 launchDelegation()
@@ -4044,6 +5489,1794 @@ private struct VoiceAssistantPage: View {
     }
 }
 
+private struct VoiceAssistantOverlay: View {
+    let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkspaceId: EntityID?
+    @Binding var selectedWorkItemId: EntityID?
+    @ObservedObject var model: NativeAppModel
+    let autoStart: Bool
+    let close: () -> Void
+    let navigate: (NativeRoute) -> Void
+
+    @StateObject private var voice = ContinuousVoiceSessionController()
+    @StateObject private var speaker = VoiceReportSpeaker()
+    @AppStorage("PikiclawMac.voiceboxEnabled") private var voiceboxEnabled = true
+    @AppStorage("PikiclawMac.voiceboxBaseURL") private var voiceboxBaseURL = "http://127.0.0.1:17493"
+    @AppStorage("PikiclawMac.voiceboxProfile") private var voiceboxProfile = ""
+    @AppStorage("PikiclawMac.voiceboxSTTModel") private var voiceboxSTTModel = "turbo"
+    @AppStorage("PikiclawMac.voiceboxTTSEngine") private var voiceboxTTSEngine = ""
+    @AppStorage("PikiclawMac.voiceboxPersonality") private var voiceboxPersonality = false
+    @AppStorage("PikiclawMac.systemSpeechVoiceIdentifier") private var systemSpeechVoiceIdentifier = ""
+    @AppStorage("PikiclawMac.voiceAutoDelegate") private var voiceAutoDelegate = true
+    @State private var delegatedUtterance = ""
+    @State private var conversationTurns: [VoiceConversationTurn] = []
+    @State private var assistantThinking = false
+    @State private var engineSettingsExpanded = false
+    @State private var lastCommittedUtterance = ""
+    @State private var lastSpokenRunId: EntityID?
+    @State private var didAutoStart = false
+    @State private var didGreet = false
+    @State private var isOpeningGreeting = false
+    @State private var openingGreetingTask: Task<Void, Never>?
+    @FocusState private var briefFocused: Bool
+
+    private var selectedWorkspace: Workspace? {
+        if let selectedWorkspaceId,
+           let workspace = snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) {
+            return workspace
+        }
+        return snapshot.workspaces.first
+    }
+
+    private var selectedWorkItem: WorkItem? {
+        snapshot.workItems.first(where: { $0.id == selectedWorkItemId })
+    }
+
+    private var activeRun: AgentRun? {
+        guard let activeRunId = model.activeRunId else { return nil }
+        return snapshot.runs.first(where: { $0.id == activeRunId })
+    }
+
+    private var voiceboxConfiguration: VoiceboxConfiguration {
+        VoiceboxConfiguration(
+            enabled: voiceboxEnabled,
+            baseURLString: voiceboxBaseURL,
+            profile: voiceboxProfile,
+            sttModel: voiceboxSTTModel,
+            ttsEngine: voiceboxTTSEngine,
+            personality: voiceboxPersonality
+        )
+    }
+
+    private var systemSpeechVoiceOptions: [SystemSpeechVoiceOption] {
+        SystemSpeechVoiceOption.options(for: voice.recognitionLanguage)
+    }
+
+    private var selectedSystemVoiceName: String {
+        SystemSpeechVoiceOption.displayName(
+            for: systemSpeechVoiceIdentifier,
+            language: voice.recognitionLanguage
+        )
+    }
+
+    private var selectedVoiceLabel: String {
+        if voiceboxEnabled {
+            let profile = voiceboxProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+            return profile.isEmpty ? "Voicebox Default" : profile
+        }
+        return selectedSystemVoiceName
+    }
+
+    private var voiceVisualColor: Color {
+        switch stage {
+        case .running:
+            return Color(red: 0.28, green: 0.96, blue: 0.72)
+        case .needsUser:
+            return Color(red: 1.0, green: 0.70, blue: 0.28)
+        case .reporting:
+            return Color(red: 0.42, green: 0.88, blue: 1.0)
+        default:
+            return Color(red: 0.94, green: 0.24, blue: 1.0)
+        }
+    }
+
+    private var isVoiceSurfaceLive: Bool {
+        voice.isConversationActive || assistantThinking || speaker.isSpeaking || voice.isVoiceboxSpeaking || model.isRunning
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Color.black.opacity(0.70)
+                    .ignoresSafeArea()
+
+                VoiceOverlayAtmosphere(
+                    color: stageColor,
+                    isLive: voice.isConversationActive || assistantThinking || speaker.isSpeaking || voice.isVoiceboxSpeaking || model.isRunning
+                )
+                .ignoresSafeArea()
+
+                voiceImmersivePanel
+                    .frame(
+                        width: min(540, max(390, proxy.size.width - 96)),
+                        height: min(820, max(620, proxy.size.height - 76))
+                    )
+                    .padding(.vertical, 28)
+            }
+        }
+        .onChange(of: voice.transcript) { _, next in
+            let trimmed = next.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                interruptAssistantSpeechIfNeeded()
+                delegatedUtterance = trimmed
+            }
+        }
+        .onChange(of: voice.finalizedTurn?.id) { _, _ in
+            guard let turn = voice.finalizedTurn else { return }
+            handleFinalizedTurn(turn)
+        }
+        .onChange(of: voice.isCapturingTurn) { _, isCapturing in
+            if isCapturing {
+                interruptAssistantSpeechIfNeeded()
+            }
+        }
+        .onChange(of: voice.interruptionCount) { _, _ in
+            interruptAssistantSpeechIfNeeded()
+        }
+        .onChange(of: speaker.isSpeaking) { _, isSpeaking in
+            if !isSpeaking {
+                isOpeningGreeting = false
+                if !voice.isCapturingTurn && !voice.isTranscribing {
+                    voice.resumeListening()
+                }
+            }
+        }
+        .onChange(of: activeRun?.state) { _, state in
+            guard let activeRun, let state, state == .completed || state == .failed || state == .waitingForUser else { return }
+            guard lastSpokenRunId != activeRun.id else { return }
+            lastSpokenRunId = activeRun.id
+            appendAssistantTurn(report.spokenText, caption: report.headline)
+            speakAssistantText(report.spokenText)
+        }
+        .onAppear {
+            voice.applyConfiguration(voiceboxConfiguration)
+            Task { await voice.refreshVoicebox(configuration: voiceboxConfiguration) }
+            if autoStart && !didAutoStart {
+                didAutoStart = true
+                startOpeningGreeting(autoListen: true)
+            } else {
+                startOpeningGreeting(autoListen: false)
+            }
+        }
+        .onChange(of: voiceboxConfiguration) { _, next in
+            voice.applyConfiguration(next)
+            Task { await voice.refreshVoicebox(configuration: next) }
+        }
+        .onDisappear {
+            openingGreetingTask?.cancel()
+            openingGreetingTask = nil
+            speaker.stop()
+            voice.stopConversation()
+        }
+    }
+
+    private var voiceImmersivePanel: some View {
+        ZStack {
+            VoiceImmersiveBackground(color: voiceVisualColor, isLive: isVoiceSurfaceLive)
+
+            VStack(spacing: 0) {
+                HStack(alignment: .center) {
+                    VoiceGlassIconButton(symbol: "chevron.left", help: "Close Voice Chat", action: close)
+
+                    Spacer()
+
+                    VoiceModePill(
+                        title: "Pikiclaw Voice",
+                        badge: voiceboxEnabled ? "Voicebox" : "Apple",
+                        color: voiceVisualColor
+                    )
+
+                    Spacer()
+
+                    VoiceGlassIconButton(symbol: "arrow.clockwise", help: "Refresh Voice Engine") {
+                        Task { await voice.refreshVoicebox(configuration: voiceboxConfiguration) }
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 28)
+
+                Spacer(minLength: 14)
+
+                VoiceFluidOrb(
+                    level: voice.audioLevel,
+                    isListening: voice.isListening || voice.isCapturingTurn,
+                    isThinking: assistantThinking || voice.isTranscribing,
+                    isSpeaking: speaker.isSpeaking || voice.isVoiceboxSpeaking,
+                    color: voiceVisualColor
+                )
+                .frame(width: 218, height: 218)
+                .padding(.bottom, 22)
+
+                VoicePromptStack(
+                    title: immersivePromptTitle,
+                    text: immersivePromptText,
+                    color: voiceVisualColor,
+                    isLive: voice.isListening || voice.isCapturingTurn || !currentTranscript.isEmpty
+                )
+                .frame(maxWidth: 390)
+                .padding(.horizontal, 36)
+
+                Spacer(minLength: 14)
+
+                if engineSettingsExpanded {
+                    voiceboxSettingsCard
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 22)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                Text(bottomVoiceStatus)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .padding(.bottom, 18)
+
+                HStack(alignment: .center) {
+                    VoiceFloatingControlButton(
+                        symbol: (speaker.isSpeaking || voice.isVoiceboxSpeaking) ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                        color: voiceVisualColor,
+                        isActive: speaker.isSpeaking || voice.isVoiceboxSpeaking,
+                        help: (speaker.isSpeaking || voice.isVoiceboxSpeaking) ? "Stop Speaking" : "Speak Last Reply",
+                        action: toggleAssistantSpeech
+                    )
+
+                    Spacer()
+
+                    VoiceMicControlButton(
+                        isActive: voice.isConversationActive,
+                        isCapturing: voice.isCapturingTurn,
+                        isThinking: assistantThinking || voice.isTranscribing,
+                        color: voiceVisualColor
+                    ) {
+                        voice.toggleConversation(configuration: voiceboxConfiguration)
+                    }
+                    .disabled(model.isRunning && !voice.isConversationActive)
+
+                    Spacer()
+
+                    VoiceFloatingControlButton(
+                        symbol: canUseCommandAction ? commandActionSymbol : "slider.horizontal.3",
+                        color: canUseCommandAction ? PKTheme.ok : voiceVisualColor,
+                        isActive: canUseCommandAction || engineSettingsExpanded,
+                        help: canUseCommandAction ? commandActionTitle : "Voice Settings"
+                    ) {
+                        if canUseCommandAction {
+                            performCommandAction()
+                        } else {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                engineSettingsExpanded.toggle()
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 54)
+                .padding(.bottom, 30)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 46, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 46, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 1.2)
+        )
+        .shadow(color: voiceVisualColor.opacity(0.28), radius: 54, y: 26)
+        .shadow(color: Color.black.opacity(0.45), radius: 44, y: 28)
+    }
+
+    private var immersivePromptTitle: String {
+        if !currentTranscript.isEmpty { return voice.isCapturingTurn ? "我在听" : "我听到了" }
+        if voice.isCapturingTurn { return "我在听" }
+        if voice.isTranscribing { return "正在识别" }
+        if assistantThinking { return "正在思考" }
+        if speaker.isSpeaking || voice.isVoiceboxSpeaking { return "正在回应" }
+        if isOpeningGreeting { return "你好，我在" }
+        return statusTitle
+    }
+
+    private var immersivePromptText: String {
+        if !currentTranscript.isEmpty {
+            return currentTranscript
+        }
+        if let voiceProblemText {
+            return voiceProblemText
+        }
+        if voice.isCapturingTurn {
+            return "你继续说，短暂停顿后我会整理成文字。"
+        }
+        if voice.isTranscribing {
+            return "我正在把刚才那一轮语音转成文字。"
+        }
+        if assistantThinking {
+            return "我正在根据你的上一句话决定继续对话，还是交给合适的 agent。"
+        }
+        if isOpeningGreeting {
+            return openingGreetingText
+        }
+        if stage == .reporting || stage == .needsUser {
+            return report.spokenText
+        }
+        return "直接说你想完成什么。我会先听完，再判断是继续对话、查看状态，还是交给合适的 agent。"
+    }
+
+    private var voiceProblemText: String? {
+        let status = voice.statusLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !status.isEmpty else { return nil }
+        let lower = status.lowercased()
+        let isProblem = lower.contains("failed")
+            || lower.contains("permission")
+            || lower.contains("unavailable")
+            || lower.contains("timed out")
+        return isProblem ? status : nil
+    }
+
+    private var bottomVoiceStatus: String {
+        if voice.isCapturingTurn { return "Capturing" }
+        if voice.isTranscribing { return "Transcribing" }
+        if assistantThinking { return "Thinking" }
+        if model.isRunning { return "\(agentShortLabel(plan.suggestedAgentKind)) Working" }
+        if speaker.isSpeaking || voice.isVoiceboxSpeaking { return "Speaking" }
+        if voice.isListening { return "I'm Listening · \(Int((voice.audioLevel * 100).rounded()))%" }
+        if voice.isConversationActive { return "Ready" }
+        return "Tap to Speak"
+    }
+
+    private var voiceWindowHeader: some View {
+        HStack(spacing: 13) {
+            VoiceListeningOrb(
+                level: voice.audioLevel,
+                isListening: voice.isListening || voice.isCapturingTurn,
+                isThinking: assistantThinking || voice.isTranscribing,
+                isSpeaking: speaker.isSpeaking || voice.isVoiceboxSpeaking,
+                color: stageColor,
+                compact: true
+            )
+            .frame(width: 48, height: 48)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Voice Chat")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                Text(statusSubtitle)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 12)
+
+            StatusPill(text: stageLabel.uppercased(), color: stageColor)
+            StatusPill(text: voiceboxEnabled ? "Voicebox" : "Apple", color: voice.voiceboxOnline ? PKTheme.ok : PKTheme.text3)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    engineSettingsExpanded.toggle()
+                }
+            } label: {
+                Image(systemName: engineSettingsExpanded ? "slider.horizontal.3" : "slider.horizontal.below.rectangle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .frame(width: 34, height: 34)
+                    .background(PKTheme.control.opacity(0.54))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+            .help("Voice settings")
+
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text3)
+                    .frame(width: 34, height: 34)
+                    .background(PKTheme.control.opacity(0.54))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .help("Close Voice Chat")
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+    }
+
+    private var overlayCommandBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                voice.toggleConversation(configuration: voiceboxConfiguration)
+            } label: {
+                VoiceListeningOrb(
+                    level: voice.audioLevel,
+                    isListening: voice.isListening || voice.isCapturingTurn,
+                    isThinking: assistantThinking || voice.isTranscribing,
+                    isSpeaking: speaker.isSpeaking || voice.isVoiceboxSpeaking,
+                    color: stageColor,
+                    compact: true
+                )
+                .frame(width: 50, height: 44)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isRunning && !voice.isConversationActive)
+            .help(voice.isConversationActive ? "Stop Voice Lens" : "Start Voice Lens")
+
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(PKTheme.text)
+
+            ZStack(alignment: .leading) {
+                if delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Tell Pikiclaw what to do...")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(PKTheme.text3)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: $delegatedUtterance)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(PKTheme.text)
+                    .focused($briefFocused)
+                    .onSubmit {
+                        if canDelegate && !plan.needsConfirmation {
+                            launchDelegation()
+                        } else {
+                            sendConversationTurn()
+                        }
+                    }
+            }
+            .frame(maxWidth: .infinity)
+
+            VoiceLanguagePicker(
+                selection: $voice.recognitionLanguage,
+                disabled: voice.isConversationActive || model.isRunning
+            )
+            .frame(width: 112)
+
+            Button {
+                voice.toggleConversation(configuration: voiceboxConfiguration)
+            } label: {
+                Label(voice.isConversationActive ? "Stop" : "Listen", systemImage: voice.isConversationActive ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(voice.isConversationActive ? PKTheme.primaryText : PKTheme.text2)
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .background(voice.isConversationActive ? PKTheme.err : PKTheme.control.opacity(0.78))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(voice.isConversationActive ? PKTheme.err.opacity(0.72) : PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isRunning && !voice.isConversationActive)
+
+            Button {
+                if canDelegate && !plan.needsConfirmation {
+                    launchDelegation()
+                } else {
+                    sendConversationTurn()
+                }
+            } label: {
+                Label(commandActionTitle, systemImage: commandActionSymbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(canUseCommandAction ? PKTheme.primaryText : PKTheme.text4)
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .background(canUseCommandAction ? PKTheme.primary : PKTheme.control.opacity(0.58))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(canUseCommandAction ? PKTheme.primary.opacity(0.78) : PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canUseCommandAction)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.regularMaterial)
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.16), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .shadow(color: Color.black.opacity(0.28), radius: 28, y: 16)
+    }
+
+    private var conversationCard: some View {
+        VoiceOverlayCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Label("Voice Conversation", systemImage: "bubble.left.and.bubble.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text2)
+                    Spacer()
+                    Text(voice.statusLine)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(stageColor)
+                }
+
+                if conversationTurns.isEmpty && currentTranscript.isEmpty && !assistantThinking {
+                    VoiceConversationBubble(
+                        role: .assistant,
+                        text: "我在。直接说你想完成的事，我会判断是继续聊、看状态，还是自动交给合适的 agent。",
+                        caption: voiceboxEnabled ? "Voicebox Lens" : "Voice Lens",
+                        color: PKTheme.primary,
+                        isLive: false
+                    )
+                }
+
+                ForEach(conversationTurns) { turn in
+                    VoiceConversationBubble(
+                        role: turn.role,
+                        text: turn.text,
+                        caption: turn.caption,
+                        color: turn.role == .assistant ? PKTheme.primary : PKTheme.ok,
+                        isLive: false
+                    )
+                }
+
+                if !currentTranscript.isEmpty {
+                        VoiceConversationBubble(
+                            role: .user,
+                            text: currentTranscript,
+                            caption: voice.isConversationActive ? "Current turn" : "Ready to send",
+                            color: PKTheme.ok,
+                            isLive: voice.isCapturingTurn || voice.isTranscribing
+                        )
+                    }
+
+                if assistantThinking {
+                    VoiceThinkingBubble()
+                }
+            }
+        }
+    }
+
+    private var assistantStatusCard: some View {
+        VoiceOverlayCard {
+            VStack(alignment: .center, spacing: 16) {
+                HStack {
+                    StatusPill(text: stageLabel.uppercased(), color: stageColor)
+                    StatusPill(text: voice.recognitionLanguage.displayName, color: PKTheme.text3)
+                    StatusPill(text: voiceboxEnabled ? "Voicebox" : "Apple", color: voice.voiceboxOnline ? PKTheme.ok : PKTheme.text3)
+                    Spacer()
+                    Text(voice.statusLine)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(stageColor)
+                }
+
+                VoiceListeningOrb(
+                    level: voice.audioLevel,
+                    isListening: voice.isListening || voice.isCapturingTurn,
+                    isThinking: assistantThinking || voice.isTranscribing,
+                    isSpeaking: speaker.isSpeaking || voice.isVoiceboxSpeaking,
+                    color: stageColor
+                )
+                .frame(width: 172, height: 172)
+
+                VStack(spacing: 7) {
+                    Text(statusTitle)
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(statusSubtitle)
+                        .font(.system(size: 13))
+                        .foregroundStyle(PKTheme.text3)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Live Transcript", systemImage: "quote.bubble")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text2)
+                        Spacer()
+                        Text(voice.activityLabel)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(stageColor)
+                    }
+                    Text(liveTranscriptText)
+                        .font(.system(size: 15, weight: currentTranscript.isEmpty ? .medium : .regular))
+                        .foregroundStyle(currentTranscript.isEmpty ? PKTheme.text3 : PKTheme.text)
+                        .lineSpacing(3)
+                        .frame(maxWidth: .infinity, minHeight: 46, alignment: .topLeading)
+                }
+                .padding(14)
+                .background(PKTheme.inset.opacity(0.70))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(stageColor.opacity((voice.isListening || voice.isCapturingTurn) ? 0.38 : 0.18), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+
+                VoiceWaveform(
+                    isLive: voice.isConversationActive || assistantThinking || speaker.isSpeaking || voice.isVoiceboxSpeaking || model.isRunning,
+                    color: stageColor,
+                    level: voice.audioLevel
+                )
+                .frame(height: 48)
+
+                VoiceProgressStrip(stage: stage)
+
+                if let readiness = voice.nativeSpeechReadinessMessage, !voice.isConversationActive {
+                    VoiceHintBanner(text: readiness)
+                }
+            }
+        }
+    }
+
+    private var voiceboxSettingsCard: some View {
+        VoiceOverlayCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Label("Engine", systemImage: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text2)
+                    Spacer()
+                    Toggle("Auto-route", isOn: $voiceAutoDelegate)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PKTheme.text3)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            engineSettingsExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: engineSettingsExpanded ? "chevron.up" : "slider.horizontal.3")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text3)
+                            .frame(width: 26, height: 24)
+                            .background(PKTheme.control.opacity(0.54))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    Toggle("", isOn: $voiceboxEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+
+                HStack(spacing: 10) {
+                    VoiceOverlayMetric(
+                        label: "Status",
+                        value: voiceboxEnabled ? voice.voiceboxStatus : "Apple Speech fallback",
+                        color: voiceboxEnabled ? (voice.voiceboxOnline ? PKTheme.ok : PKTheme.warn) : PKTheme.text3
+                    )
+                    VoiceOverlayMetric(
+                        label: "Voice",
+                        value: selectedVoiceLabel,
+                        color: PKTheme.primary
+                    )
+                    VoiceOverlayMetric(label: "STT", value: voiceboxSTTModel, color: PKTheme.text3)
+                }
+
+                if engineSettingsExpanded {
+                    VStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(voice.inputDeviceLine)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(PKTheme.primary)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(voice.diagnosticLine)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(PKTheme.text2)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(voice.lastTurnDebugLine)
+                                .font(.system(size: 11))
+                                .foregroundStyle(PKTheme.text3)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(PKTheme.inset.opacity(0.62))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                        TextField("http://127.0.0.1:17493", text: $voiceboxBaseURL)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(PKTheme.text)
+                            .padding(.horizontal, 10)
+                            .frame(height: 32)
+                            .background(PKTheme.inset.opacity(0.72))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                        HStack(spacing: 10) {
+                            Picker("Voicebox Voice", selection: $voiceboxProfile) {
+                                Text("Default").tag("")
+                                ForEach(voice.voiceboxProfiles) { profile in
+                                    Text(profile.name).tag(profile.name)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity)
+
+                            Picker("STT", selection: $voiceboxSTTModel) {
+                                Text("Turbo").tag("turbo")
+                                Text("Large").tag("large")
+                                Text("Medium").tag("medium")
+                                Text("Small").tag("small")
+                                Text("Base").tag("base")
+                            }
+                            .labelsHidden()
+                            .frame(width: 108)
+                        }
+
+                        Picker("Apple Voice", selection: $systemSpeechVoiceIdentifier) {
+                            Text("Apple Auto").tag("")
+                            if !systemSpeechVoiceIdentifier.isEmpty,
+                               !systemSpeechVoiceOptions.contains(where: { $0.id == systemSpeechVoiceIdentifier }) {
+                                Text(selectedSystemVoiceName).tag(systemSpeechVoiceIdentifier)
+                            }
+                            ForEach(systemSpeechVoiceOptions) { option in
+                                Text(option.displayName).tag(option.id)
+                            }
+                        }
+                        .labelsHidden()
+
+                        HStack(spacing: 10) {
+                            TextField("TTS engine auto", text: $voiceboxTTSEngine)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12))
+                                .foregroundStyle(PKTheme.text)
+                                .padding(.horizontal, 10)
+                                .frame(height: 30)
+                                .background(PKTheme.inset.opacity(0.72))
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                            Toggle("Personality", isOn: $voiceboxPersonality)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(PKTheme.text2)
+                        }
+
+                        SecondaryButton(title: "Refresh Engine", systemImage: "arrow.clockwise") {
+                            Task { await voice.refreshVoicebox(configuration: voiceboxConfiguration) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var delegationPlanCard: some View {
+        VoiceOverlayCard {
+            HStack(alignment: .top, spacing: 14) {
+                VoiceOverlayAvatar(symbol: "wand.and.stars", color: PKTheme.text, isAssistant: true)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(plan.routeSummary)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(PKTheme.text)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 10) {
+                        VoiceOverlayMetric(label: "Intent", value: plan.intent.rawValue.capitalized, color: intentColor)
+                        VoiceOverlayMetric(label: "Agent", value: agentShortLabel(plan.suggestedAgentKind), color: agentTint(plan.suggestedAgentKind))
+                        VoiceOverlayMetric(label: "Project", value: selectedWorkspace?.name ?? "No project", color: selectedWorkspace == nil ? PKTheme.warn : PKTheme.primary)
+                        VoiceOverlayMetric(label: "Confidence", value: confidenceLabel, color: plan.needsConfirmation ? PKTheme.warn : PKTheme.ok)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(plan.acceptanceCriteria.prefix(3)), id: \.self) { item in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(PKTheme.ok)
+                                    .padding(.top, 2)
+                                Text(item)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(PKTheme.text3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    Button {
+                        launchDelegation()
+                    } label: {
+                        Label(delegationButtonTitle, systemImage: model.isRunning ? "eye.fill" : "arrow.up.forward.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(canDelegate ? PKTheme.primaryText : PKTheme.text4)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                            .background(canDelegate ? PKTheme.primary : PKTheme.control.opacity(0.58))
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(canDelegate ? PKTheme.primary.opacity(0.78) : PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canDelegate)
+                }
+
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var reportCard: some View {
+        VoiceOverlayCard {
+            HStack(alignment: .top, spacing: 14) {
+                VoiceOverlayAvatar(symbol: reportSymbol, color: reportColor, isAssistant: true)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(report.headline)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(report.spokenText)
+                        .font(.system(size: 14))
+                        .foregroundStyle(PKTheme.text2)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let activeRun {
+                        HStack(spacing: 10) {
+                            VoiceOverlayMetric(label: "Run", value: activeRun.state.rawValue, color: runStateColor(activeRun.state))
+                            if let selectedWorkItem {
+                                VoiceOverlayMetric(label: "Work Item", value: selectedWorkItem.title, color: PKTheme.text3)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        SecondaryButton(title: (speaker.isSpeaking || voice.isVoiceboxSpeaking) ? "Stop" : "Speak", systemImage: (speaker.isSpeaking || voice.isVoiceboxSpeaking) ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+                            if speaker.isSpeaking || voice.isVoiceboxSpeaking {
+                                speaker.stop()
+                                voice.isVoiceboxSpeaking = false
+                                voice.resumeListening()
+                            } else {
+                                speakAssistantText(report.spokenText)
+                            }
+                        }
+
+                        if activeRun != nil {
+                            SecondaryButton(title: "Open Chat", systemImage: "text.bubble") {
+                                navigate(.chat)
+                            }
+                            SecondaryButton(title: "Work Item", systemImage: "checklist") {
+                                if let itemId = activeRun?.workItemId {
+                                    selectedWorkItemId = itemId
+                                }
+                                navigate(.workItems)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var capturedBriefText: String {
+        let trimmed = delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return "Speak naturally. For example: help me add image paste support to the input composer, verify it, then report back."
+    }
+
+    private var openingGreetingText: String {
+        "你好，我在。你可以直接跟我说要做什么；我会先听完，再判断是继续对话、查看状态，还是交给合适的 agent。"
+    }
+
+    private var liveTranscriptText: String {
+        if !currentTranscript.isEmpty {
+            return currentTranscript
+        }
+        if voice.isCapturingTurn {
+            return "我听到声音了，正在捕捉这一轮；你可以继续说，短暂停顿后我会整理成文字。"
+        }
+        if assistantThinking {
+            return "I am thinking about what you just said..."
+        }
+        if voice.isTranscribing {
+            return "I am turning the last voice turn into text..."
+        }
+        if speaker.isSpeaking || voice.isVoiceboxSpeaking {
+            return conversationTurns.last(where: { $0.role == .assistant })?.text ?? "Speaking..."
+        }
+        return voiceboxEnabled
+            ? "我正在等你说话。停顿后会用 Voicebox 本地转写，并在可执行任务上自动路由。"
+            : "我正在等你说话。停顿后会用 Apple Speech 转写，并在可执行任务上自动路由。"
+    }
+
+    private var plan: VoiceDelegationPlan {
+        VoiceAssistantPlanner.makePlan(
+            utterance: planningInput,
+            workspace: selectedWorkspace,
+            preferredAgent: model.selectedAgentKind,
+            recentWorkItem: selectedWorkItem
+        )
+    }
+
+    private var planningInput: String {
+        let latest = latestUserUtterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !latest.isEmpty { return latest }
+        return activeRun?.promptSnapshot ?? ""
+    }
+
+    private var report: VoiceDelegationReport {
+        VoiceAssistantPlanner.report(for: plan, run: activeRun)
+    }
+
+    private var canDelegate: Bool {
+        !model.isRunning
+            && selectedWorkspace != nil
+            && plan.intent == .delegate
+            && !latestUserUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canSendConversation: Bool {
+        !assistantThinking
+            && !voice.isTranscribing
+            && !speaker.isSpeaking
+            && !voice.isVoiceboxSpeaking
+            && !currentTranscript.isEmpty
+            && currentTranscript != lastCommittedUtterance
+    }
+
+    private var canUseCommandAction: Bool {
+        if canDelegate {
+            return true
+        }
+        return canSendConversation
+    }
+
+    private var commandActionTitle: String {
+        if canDelegate {
+            return voiceAutoDelegate ? "Auto Route" : "Route"
+        }
+        return assistantThinking ? "Thinking" : "Send"
+    }
+
+    private var commandActionSymbol: String {
+        if canDelegate {
+            return "arrow.up.forward.circle.fill"
+        }
+        return assistantThinking ? "ellipsis" : "return"
+    }
+
+    private var shouldAutoDelegateCurrentTurn: Bool {
+        voiceAutoDelegate
+            && canDelegate
+            && !assistantThinking
+            && !speaker.isSpeaking
+            && !voice.isVoiceboxSpeaking
+    }
+
+    private var confidenceLabel: String {
+        "\(Int((plan.routeConfidence * 100).rounded()))%"
+    }
+
+    private var delegationButtonTitle: String {
+        if model.isRunning { return "Supervising Agent" }
+        if canDelegate && voiceAutoDelegate { return "Auto Route Ready" }
+        if canDelegate { return "Delegate Agent" }
+        switch plan.intent {
+        case .status: return "Status Intent"
+        case .cancel: return "No Run"
+        case .converse: return "Keep Talking"
+        case .delegate: return "Need Task"
+        }
+    }
+
+    private var statusTitle: String {
+        if isOpeningGreeting {
+            return "你好，我在"
+        }
+        switch stage {
+        case .listening: return "I am listening"
+        case .understanding: return "Thinking about what you said"
+        case .planning: return "Ready for the next turn"
+        case .running: return "\(agentShortLabel(plan.suggestedAgentKind)) is working"
+        case .needsUser: return "The agent needs you"
+        case .reporting: return report.headline
+        case .idle: return "Voice Lens is ready"
+        }
+    }
+
+    private var statusSubtitle: String {
+        if isOpeningGreeting {
+            return "我会先问候你，然后开始听你说话。"
+        }
+        switch stage {
+        case .listening:
+            return voice.isCapturingTurn ? "Keep talking. I will close this turn after a short pause." : "Hands-free mode is open. Start speaking when you are ready."
+        case .understanding:
+            return "I am preparing a reply and keeping the conversation context."
+        case .planning:
+            return "Say the next thing, or delegate the latest request to an agent."
+        case .running:
+            return "I am keeping this overlay open while the agent works, then I will summarize the final state."
+        case .needsUser:
+            return "A human decision is needed. Open the chat or Work Item when you are ready."
+        case .reporting:
+            return report.spokenText
+        case .idle:
+            return "Start speaking and I will show the transcript, choose a route, and answer out loud."
+        }
+    }
+
+    private var statusSymbol: String {
+        switch stage {
+        case .listening, .understanding: return "mic.fill"
+        case .planning: return "paperplane.fill"
+        case .running: return "eye.fill"
+        case .needsUser: return "person.crop.circle.badge.exclamationmark"
+        case .reporting: return "speaker.wave.2.fill"
+        case .idle: return "waveform.circle"
+        }
+    }
+
+    private var reportSymbol: String {
+        switch stage {
+        case .needsUser: return "person.crop.circle.badge.exclamationmark"
+        case .reporting: return "checkmark.seal.fill"
+        case .running: return "eye.fill"
+        default: return "sparkle"
+        }
+    }
+
+    private var stageLabel: String {
+        if isOpeningGreeting {
+            return "Greeting"
+        }
+        switch stage {
+        case .listening: return "Listening"
+        case .understanding: return "Understanding"
+        case .planning: return "Ready"
+        case .running: return "Supervising"
+        case .needsUser: return "Needs You"
+        case .reporting: return "Report"
+        case .idle: return "Voice"
+        }
+    }
+
+    private var stage: VoiceDelegationStage {
+        if voice.isTranscribing { return .understanding }
+        if voice.isListening || voice.isCapturingTurn { return .listening }
+        if activeRun?.state == .waitingForUser { return .needsUser }
+        if model.isRunning { return .running }
+        if speaker.isSpeaking || voice.isVoiceboxSpeaking || activeRun?.state == .completed || activeRun?.state == .failed { return .reporting }
+        if assistantThinking { return .understanding }
+        if !currentTranscript.isEmpty || !latestUserUtterance.isEmpty { return .planning }
+        return .idle
+    }
+
+    private var stageColor: Color {
+        if isOpeningGreeting {
+            return PKTheme.primary
+        }
+        switch stage {
+        case .listening, .understanding: return PKTheme.primary
+        case .planning: return PKTheme.warn
+        case .running: return PKTheme.ok
+        case .needsUser: return PKTheme.warn
+        case .reporting: return reportColor
+        case .idle: return PKTheme.primary
+        }
+    }
+
+    private var reportColor: Color {
+        switch report.tone {
+        case "active": return PKTheme.ok
+        case "attention": return PKTheme.warn
+        case "done": return PKTheme.ok
+        case "failed": return PKTheme.err
+        default: return PKTheme.text3
+        }
+    }
+
+    private var intentColor: Color {
+        switch plan.intent {
+        case .delegate: return plan.needsConfirmation ? PKTheme.warn : PKTheme.ok
+        case .status: return PKTheme.primary
+        case .cancel: return PKTheme.err
+        case .converse: return PKTheme.text3
+        }
+    }
+
+    private func startOpeningGreeting(autoListen: Bool) {
+        guard !didGreet else { return }
+        didGreet = true
+        isOpeningGreeting = true
+        let greeting = openingGreetingText
+        appendAssistantTurn(greeting, caption: voiceboxEnabled ? "Voicebox Greeting" : "Voice Greeting")
+        if autoListen {
+            openingGreetingTask?.cancel()
+            openingGreetingTask = Task {
+                await voice.startConversation(configuration: voiceboxConfiguration)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    speakWithAppleVoice(greeting, allowBargeIn: voice.isConversationActive)
+                }
+            }
+        } else {
+            speakWithAppleVoice(greeting, allowBargeIn: false)
+        }
+    }
+
+    private func handleFinalizedTurn(_ turn: ContinuousVoiceSessionController.FinalizedTurn) {
+        delegatedUtterance = turn.text
+        let caption = "You · \(turn.backend.rawValue)"
+        if shouldAutoDelegateCurrentTurn {
+            launchDelegation(autoTriggered: true, userCaption: caption, speakStart: false)
+        } else {
+            commitCurrentTranscript(caption: caption)
+        }
+    }
+
+    private func performCommandAction() {
+        if canDelegate {
+            launchDelegation()
+        } else {
+            sendConversationTurn()
+        }
+    }
+
+    private func toggleAssistantSpeech() {
+        if speaker.isSpeaking || voice.isVoiceboxSpeaking {
+            speaker.stop()
+            voice.cancelVoiceboxSpeechForInterruption()
+            voice.resumeListening()
+            return
+        }
+        let text = conversationTurns.last(where: { $0.role == .assistant })?.text
+            ?? (activeRun == nil ? openingGreetingText : report.spokenText)
+        speakAssistantText(text)
+    }
+
+    private func launchDelegation(autoTriggered: Bool = false, userCaption: String = "You", speakStart: Bool = true) {
+        commitCurrentTranscript(reply: false, caption: userCaption)
+        voice.pauseForAgentRun()
+        briefFocused = false
+        let preparedPlan = plan
+        let message = autoTriggered
+            ? "我会把这件事自动交给 \(agentShortLabel(preparedPlan.suggestedAgentKind))，并在这里继续观察进度。"
+            : "好的，我会把这件事交给 \(agentShortLabel(preparedPlan.suggestedAgentKind))，并继续在这里观察进度。"
+        appendAssistantTurn(message, caption: autoTriggered ? "Auto Route" : "Delegating")
+        if speakStart {
+            speakAssistantText(message)
+        }
+        assistantThinking = true
+        Task {
+            if let runId = await model.startVoiceDelegation(
+                preparedPlan,
+                workspaceId: selectedWorkspaceId,
+                targetWorkItemId: selectedWorkItemId
+            ),
+               let run = model.snapshot.runs.first(where: { $0.id == runId }) {
+                selectedWorkItemId = run.workItemId
+                assistantThinking = false
+            } else {
+                let message = model.statusLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "我没能启动 agent。请检查当前项目和 agent 配置。"
+                    : model.statusLine
+                assistantThinking = false
+                appendAssistantTurn(message, caption: "Voice")
+                speakAssistantText(message)
+            }
+        }
+    }
+
+    private var currentTranscript: String {
+        delegatedUtterance.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var latestUserUtterance: String {
+        if !currentTranscript.isEmpty { return currentTranscript }
+        return conversationTurns.last(where: { $0.role == .user })?.text ?? ""
+    }
+
+    private func sendConversationTurn() {
+        commitCurrentTranscript()
+    }
+
+    private func commitCurrentTranscript(reply: Bool = true, caption: String = "You") {
+        let utterance = currentTranscript
+        guard !utterance.isEmpty, utterance != lastCommittedUtterance else { return }
+        conversationTurns.append(
+            VoiceConversationTurn(role: .user, text: utterance, caption: caption)
+        )
+        lastCommittedUtterance = utterance
+        delegatedUtterance = ""
+        voice.transcript = ""
+        if reply {
+            startAssistantReply(to: utterance)
+        }
+    }
+
+    private func startAssistantReply(to utterance: String) {
+        assistantThinking = true
+        let reply = assistantReply(for: utterance)
+        Task {
+            try? await Task.sleep(nanoseconds: 620_000_000)
+            await MainActor.run {
+                assistantThinking = false
+                appendAssistantTurn(reply, caption: voiceboxEnabled ? "Voicebox Lens" : "Voice Lens")
+                speakAssistantText(reply)
+            }
+        }
+    }
+
+    private func speakAssistantText(_ text: String) {
+        voice.pauseForOutput(allowBargeIn: true)
+        Task {
+            let spokeWithVoicebox = voice.voiceboxOnline
+                ? await voice.speakWithVoiceboxIfAvailable(text, configuration: voiceboxConfiguration, allowBargeIn: true)
+                : false
+            guard !spokeWithVoicebox else { return }
+            await MainActor.run {
+                speakWithAppleVoice(text, allowBargeIn: true)
+            }
+        }
+    }
+
+    private func speakWithAppleVoice(_ text: String, allowBargeIn: Bool) {
+        if allowBargeIn {
+            voice.pauseForOutput(allowBargeIn: true)
+        }
+        speaker.speak(
+            text,
+            voiceIdentifier: systemSpeechVoiceIdentifier,
+            language: voice.recognitionLanguage
+        )
+    }
+
+    private func interruptAssistantSpeechIfNeeded() {
+        guard speaker.isSpeaking || voice.isVoiceboxSpeaking else { return }
+        speaker.stop()
+        voice.cancelVoiceboxSpeechForInterruption()
+        isOpeningGreeting = false
+    }
+
+    private func appendAssistantTurn(_ text: String, caption: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if conversationTurns.last?.role == .assistant && conversationTurns.last?.text == trimmed {
+            return
+        }
+        conversationTurns.append(VoiceConversationTurn(role: .assistant, text: trimmed, caption: caption))
+    }
+
+    private func assistantReply(for utterance: String) -> String {
+        let lower = utterance.lowercased()
+        let agent = agentShortLabel(plan.suggestedAgentKind)
+        if lower.contains("开始") || lower.contains("执行") || lower.contains("帮我做") || lower.contains("实现") || lower.contains("fix") || lower.contains("build") {
+            return "我听到了。这个更像一个可以交给 \(agent) 的任务：\(shortUtterance(utterance))。我已经整理好项目、权限和验收点；你可以继续补充细节，也可以点 Delegate Agent 让我开始监督执行。"
+        }
+        if lower.contains("进度") || lower.contains("状态") || lower.contains("status") {
+            if let activeRun {
+                return "当前运行状态是 \(activeRun.state.rawValue)。我会继续盯着它；如果它需要你决策，我会在这里提醒你。"
+            }
+            return "现在没有正在监督的 agent run。你可以告诉我要做什么，我会先和你确认，再决定是否交给 agent。"
+        }
+        if lower.contains("不用") || lower.contains("取消") || lower.contains("stop") || lower.contains("cancel") {
+            return "好的，我先不交给 agent。我们可以继续聊，把需求说清楚之后再行动。"
+        }
+        return "我听到了：\(shortUtterance(utterance))。我会先把它当成对话上下文记住；你可以继续说更多背景，或者让我把最新这件事整理成 agent 任务。"
+    }
+
+    private func shortUtterance(_ utterance: String) -> String {
+        let trimmed = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count <= 48 { return trimmed }
+        return "\(trimmed.prefix(48))..."
+    }
+}
+
+private enum VoiceConversationRole {
+    case user
+    case assistant
+}
+
+private struct VoiceConversationTurn: Identifiable {
+    let id = UUID()
+    var role: VoiceConversationRole
+    var text: String
+    var caption: String
+}
+
+private struct VoiceConversationBubble: View {
+    let role: VoiceConversationRole
+    let text: String
+    let caption: String
+    let color: Color
+    let isLive: Bool
+
+    private var alignment: HorizontalAlignment {
+        role == .user ? .trailing : .leading
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if role == .assistant {
+                VoiceOverlayAvatar(symbol: "sparkle", color: color, isAssistant: true)
+            } else {
+                Spacer(minLength: 64)
+            }
+
+            VStack(alignment: alignment, spacing: 6) {
+                HStack(spacing: 6) {
+                    if isLive {
+                        Circle()
+                            .fill(color)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text(caption)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isLive ? color : PKTheme.text3)
+                }
+                Text(text)
+                    .font(.system(size: 15))
+                    .foregroundStyle(PKTheme.text)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .background(role == .user ? color.opacity(0.14) : PKTheme.control.opacity(0.48))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(isLive ? 0.46 : 0.20), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .frame(maxWidth: 650, alignment: role == .user ? .trailing : .leading)
+
+            if role == .user {
+                VoiceOverlayAvatar(symbol: "person.fill", color: color, isAssistant: false)
+            } else {
+                Spacer(minLength: 64)
+            }
+        }
+    }
+}
+
+private struct VoiceThinkingBubble: View {
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VoiceOverlayAvatar(symbol: "sparkle", color: PKTheme.primary, isAssistant: true)
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(PKTheme.primary.opacity(0.75))
+                        .frame(width: 6, height: 6)
+                        .scaleEffect(pulse ? 1.0 : 0.62)
+                        .animation(
+                            .easeInOut(duration: 0.62)
+                                .repeatForever(autoreverses: true)
+                                .delay(Double(index) * 0.12),
+                            value: pulse
+                        )
+                }
+                Text("Thinking")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text3)
+                    .padding(.leading, 4)
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 10)
+            .background(PKTheme.control.opacity(0.48))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(PKTheme.primary.opacity(0.20), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            Spacer(minLength: 0)
+        }
+        .onAppear { pulse = true }
+    }
+}
+
+private struct VoiceImmersiveBackground: View {
+    let color: Color
+    let isLive: Bool
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.06, green: 0.04, blue: 0.08),
+                    Color.black,
+                    Color(red: 0.02, green: 0.02, blue: 0.03)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            RadialGradient(
+                colors: [
+                    color.opacity(isLive ? 0.82 : 0.58),
+                    Color(red: 0.62, green: 0.25, blue: 1.0).opacity(isLive ? 0.35 : 0.22),
+                    Color.clear
+                ],
+                center: .top,
+                startRadius: 20,
+                endRadius: 430
+            )
+
+            RadialGradient(
+                colors: [
+                    Color.white.opacity(0.12),
+                    color.opacity(0.12),
+                    Color.clear
+                ],
+                center: .center,
+                startRadius: 40,
+                endRadius: 390
+            )
+            .offset(y: -120)
+
+            VoiceNoiseField()
+                .opacity(0.18)
+        }
+    }
+}
+
+private struct VoiceNoiseField: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let height = max(proxy.size.height, 1)
+            Canvas { context, _ in
+                for index in 0..<230 {
+                    let x = seededUnit(index * 17 + 11) * width
+                    let y = seededUnit(index * 29 + 7) * height
+                    let alpha = 0.12 + seededUnit(index * 13 + 5) * 0.22
+                    let size = 0.7 + seededUnit(index * 31 + 3) * 1.2
+                    let rect = CGRect(x: x, y: y, width: size, height: size)
+                    context.fill(Path(ellipseIn: rect), with: .color(Color.white.opacity(alpha)))
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func seededUnit(_ seed: Int) -> CGFloat {
+        let value = sin(Double(seed) * 12.9898) * 43758.5453
+        return CGFloat(value - floor(value))
+    }
+}
+
+private struct VoiceModePill: View {
+    let title: String
+    let badge: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.94))
+                .lineLimit(1)
+
+            Text(badge)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.90))
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                .background(Color.white.opacity(0.12))
+                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                .clipShape(Capsule())
+        }
+        .padding(.leading, 22)
+        .padding(.trailing, 8)
+        .frame(height: 46)
+        .background(
+            LinearGradient(
+                colors: [
+                    color.opacity(0.84),
+                    Color(red: 0.77, green: 0.18, blue: 1.0).opacity(0.76)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+        .overlay(Capsule().stroke(Color.white.opacity(0.26), lineWidth: 1))
+        .clipShape(Capsule())
+        .shadow(color: color.opacity(0.44), radius: 22, y: 10)
+    }
+}
+
+private struct VoiceGlassIconButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.90))
+                .frame(width: 55, height: 55)
+                .background(Color.white.opacity(0.10))
+                .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                .clipShape(Circle())
+                .shadow(color: Color.black.opacity(0.22), radius: 14, y: 10)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+private struct VoicePromptStack: View {
+    let title: String
+    let text: String
+    let color: Color
+    let isLive: Bool
+
+    var body: some View {
+        VStack(spacing: 13) {
+            Text(title)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+
+            Text(text)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isLive ? 0.92 : 0.58),
+                            color.opacity(isLive ? 0.78 : 0.28)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .multilineTextAlignment(.center)
+                .lineSpacing(4)
+                .lineLimit(4)
+                .minimumScaleFactor(0.78)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct VoiceFluidOrb: View {
+    let level: Double
+    let isListening: Bool
+    let isThinking: Bool
+    let isSpeaking: Bool
+    let color: Color
+
+    private var isActive: Bool {
+        isListening || isThinking || isSpeaking
+    }
+
+    private var activity: Double {
+        if isListening { return max(level, 0.30) }
+        if isSpeaking { return 0.58 }
+        if isThinking { return 0.42 }
+        return 0.20
+    }
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let seconds = timeline.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .stroke(color.opacity(isActive ? 0.16 : 0.08), lineWidth: 1)
+                        .scaleEffect(1.0 + CGFloat(index) * 0.12 + CGFloat(activity) * 0.05)
+                        .blur(radius: CGFloat(index) * 3)
+                }
+
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(0.92),
+                                color.opacity(0.72),
+                                Color(red: 0.43, green: 0.16, blue: 1.0).opacity(0.90),
+                                Color(red: 0.12, green: 0.05, blue: 0.24).opacity(0.92)
+                            ],
+                            center: .topLeading,
+                            startRadius: 6,
+                            endRadius: 172
+                        )
+                    )
+                    .overlay(Circle().stroke(Color.white.opacity(0.45), lineWidth: 1.4))
+                    .shadow(color: color.opacity(isActive ? 0.72 : 0.42), radius: isActive ? 44 : 28)
+                    .scaleEffect(1 + CGFloat(activity) * 0.045)
+
+                VoiceOrbRibbonField(color: color, activity: activity, seconds: seconds)
+                    .clipShape(Circle())
+                    .padding(10)
+
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.42), Color.clear],
+                            startPoint: .topLeading,
+                            endPoint: .center
+                        )
+                    )
+                    .scaleEffect(0.92)
+                    .offset(x: -18, y: -20)
+                    .blur(radius: 10)
+                    .opacity(0.74)
+            }
+        }
+        .animation(.spring(response: 0.24, dampingFraction: 0.72), value: level)
+        .accessibilityLabel(isListening ? "Voice is listening" : isSpeaking ? "Voice is speaking" : "Voice")
+    }
+}
+
+private struct VoiceOrbRibbonField: View {
+    let color: Color
+    let activity: Double
+    let seconds: TimeInterval
+
+    var body: some View {
+        Canvas { context, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = min(size.width, size.height) * 0.36
+            for ribbon in 0..<8 {
+                var path = Path()
+                let phase = seconds * (0.64 + Double(ribbon) * 0.035) + Double(ribbon) * 0.78
+                for step in 0...96 {
+                    let t = Double(step) / 96.0
+                    let angle = t * .pi * 2
+                    let wobble = sin(angle * (2.0 + Double(ribbon % 3)) + phase) * (0.18 + activity * 0.10)
+                    let secondary = cos(angle * 3.0 - phase * 0.7) * (0.08 + activity * 0.06)
+                    let x = center.x + CGFloat(cos(angle + phase * 0.12) * radius * (1 + wobble))
+                    let y = center.y + CGFloat(sin(angle * (0.72 + secondary) + phase * 0.10) * radius * (0.58 + activity * 0.20))
+                    if step == 0 {
+                        path.move(to: CGPoint(x: x, y: y))
+                    } else {
+                        path.addLine(to: CGPoint(x: x, y: y))
+                    }
+                }
+                context.stroke(
+                    path,
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            Color.white.opacity(0.72),
+                            color.opacity(0.68),
+                            Color.white.opacity(0.34)
+                        ]),
+                        startPoint: CGPoint(x: 0, y: 0),
+                        endPoint: CGPoint(x: size.width, y: size.height)
+                    ),
+                    lineWidth: CGFloat(1.2 + activity * 2.8)
+                )
+            }
+        }
+        .blur(radius: 0.45)
+    }
+}
+
+private struct VoiceMicControlButton: View {
+    let isActive: Bool
+    let isCapturing: Bool
+    let isThinking: Bool
+    let color: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(color.opacity(isActive ? 0.16 - Double(index) * 0.035 : 0.07))
+                        .frame(width: 78 + CGFloat(index) * 20, height: 78 + CGFloat(index) * 20)
+                        .scaleEffect(isCapturing ? 1.08 : 1.0)
+                }
+
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(0.60),
+                                color.opacity(isActive ? 0.98 : 0.72),
+                                Color(red: 0.62, green: 0.12, blue: 0.92)
+                            ],
+                            center: .topLeading,
+                            startRadius: 2,
+                            endRadius: 60
+                        )
+                    )
+                    .frame(width: 66, height: 66)
+                    .overlay(Circle().stroke(Color.white.opacity(0.32), lineWidth: 1))
+                    .shadow(color: color.opacity(isActive ? 0.58 : 0.28), radius: 22, y: 10)
+
+                Image(systemName: isActive ? "stop.fill" : "mic.fill")
+                    .font(.system(size: isActive ? 22 : 28, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .symbolEffect(.pulse, options: .repeating, value: isCapturing || isThinking)
+            }
+            .frame(width: 112, height: 112)
+        }
+        .buttonStyle(.plain)
+        .help(isActive ? "Stop Listening" : "Start Listening")
+    }
+}
+
+private struct VoiceFloatingControlButton: View {
+    let symbol: String
+    let color: Color
+    let isActive: Bool
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .frame(width: 56, height: 56)
+                .background(Color.white.opacity(isActive ? 0.17 : 0.09))
+                .overlay(Circle().stroke((isActive ? color : Color.white).opacity(isActive ? 0.44 : 0.22), lineWidth: 1))
+                .clipShape(Circle())
+                .shadow(color: (isActive ? color : Color.black).opacity(isActive ? 0.24 : 0.18), radius: 14, y: 9)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+private struct VoiceOverlayCard<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial)
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.13), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(color: Color.black.opacity(0.18), radius: 18, y: 10)
+    }
+}
+
+private struct VoiceOverlayAvatar: View {
+    let symbol: String
+    let color: Color
+    let isAssistant: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(isAssistant ? Color.white : color)
+            .frame(width: 34, height: 34)
+            .background(isAssistant ? Color.black.opacity(0.88) : color.opacity(0.14))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isAssistant ? Color.white.opacity(0.12) : color.opacity(0.22), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct VoiceOverlayMetric: View {
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(1)
+            Text(value)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(PKTheme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            Capsule()
+                .fill(color.opacity(0.85))
+                .frame(width: 30, height: 3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(PKTheme.control.opacity(0.48))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct ProjectsPage: View {
     let snapshot: NativeStoreSnapshot
     @Binding var selectedWorkspaceId: EntityID?
@@ -4109,9 +7342,11 @@ private struct ProjectsPage: View {
                     selectedAgentKind: model.selectedAgentKind,
                     branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
                     branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
+                    activeRunId: model.activeRunId,
                     hideContext: { withAnimation(.easeInOut(duration: 0.16)) { contextVisible = false } },
                     refreshBranches: { Task { await model.refreshBranches(for: selectedWorkspace) } },
-                    switchBranch: { branch in Task { await model.switchBranch(branch, workspace: selectedWorkspace) } }
+                    switchBranch: { branch in Task { await model.switchBranch(branch, workspace: selectedWorkspace) } },
+                    selectChat: selectRecentChat
                 )
                 .frame(width: 300)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -4135,6 +7370,16 @@ private struct ProjectsPage: View {
     private func selectWorkspace(_ workspaceId: EntityID) {
         selectedWorkspaceId = workspaceId
         model.prepareNewChat()
+    }
+
+    private func selectRecentChat(_ run: AgentRun) {
+        selectedWorkspaceId = run.workspaceId
+        selectedWorkItemId = run.workItemId
+        model.activeRunId = run.id
+        model.draftPrompt = ""
+        if let workspace = snapshot.workspaces.first(where: { $0.id == run.workspaceId }) {
+            Task { await model.refreshBranches(for: workspace) }
+        }
     }
 }
 
@@ -4346,10 +7591,11 @@ private struct ProjectChatPane: View {
                         selectedWorkspaceId: $selectedWorkspaceId,
                         selectedWorkItemId: $selectedWorkItemId,
                         model: model,
+                        immersive: true,
                         newChat: model.prepareNewChat,
                         openWorkItem: { navigate(.workItems) }
                     )
-                    .padding(18)
+                    .padding(24)
                 } else {
                     ProjectChatStarter(
                         snapshot: snapshot,
@@ -4360,6 +7606,9 @@ private struct ProjectChatPane: View {
                         selectedAgentKind: model.selectedAgentKind,
                         draftPrompt: $model.draftPrompt,
                         isRunning: model.isRunning,
+                        openTerminal: {
+                            navigate(.terminal)
+                        },
                         captureWorkItem: {
                             Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId ?? selectedWorkspace.id) }
                         },
@@ -4399,25 +7648,30 @@ private struct ProjectChatStarter: View {
     let selectedAgentKind: NativeAgentKind
     @Binding var draftPrompt: String
     let isRunning: Bool
+    let openTerminal: () -> Void
     let captureWorkItem: () -> Void
     let send: () -> Void
     @FocusState private var focused: Bool
 
+    private var accent: Color {
+        agentTint(selectedAgentKind)
+    }
+
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(systemName: "folder")
+                Image(systemName: agentSymbol(selectedAgentKind))
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(PKTheme.primary)
-                    .frame(width: 34, height: 34)
-                    .background(PKTheme.primary.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 38, height: 38)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(project?.name ?? workspace.name)
-                        .font(.system(size: 20, weight: .semibold))
+                    Text("Project Chat")
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(PKTheme.text)
                         .lineLimit(1)
-                    Text(workspace.pathDisplay)
+                    Text(projectSubtitle)
                         .font(.caption)
                         .foregroundStyle(PKTheme.text3)
                         .lineLimit(1)
@@ -4425,9 +7679,29 @@ private struct ProjectChatStarter: View {
                 Spacer()
                 StatusPill(text: agentShortLabel(selectedAgentKind), color: agentTint(selectedAgentKind))
                 StatusPill(text: isRunning ? "RUNNING" : "PROJECT CHAT", color: isRunning ? PKTheme.warn : PKTheme.primary)
+                ComposerIconButton(symbol: "terminal", title: "Terminal", action: openTerminal)
             }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
 
-            Spacer(minLength: 0)
+            Rectangle()
+                .fill(PKTheme.edge.opacity(0.62))
+                .frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ConversationMessageBubble(
+                        title: agentShortLabel(selectedAgentKind),
+                        subtitle: project?.name ?? workspace.name,
+                        text: starterPrompt,
+                        symbol: agentSymbol(selectedAgentKind),
+                        accent: accent
+                    )
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             MinimalChatComposer(
                 snapshot: snapshot,
@@ -4438,18 +7712,32 @@ private struct ProjectChatStarter: View {
                 focused: $focused,
                 selectedAgentKind: selectedAgentKind,
                 isRunning: isRunning,
+                openTerminal: openTerminal,
                 captureWorkItem: captureWorkItem,
                 send: send
             )
-            .frame(maxWidth: 860)
-
-            Spacer(minLength: 0)
+            .padding(18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ProjectChatCanvasBackground(accent: accent, cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.32), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .shadow(color: accent.opacity(0.10), radius: 22, y: 14)
         .onAppear { focused = true }
         .onChange(of: workspace.id) { _, _ in
             focused = true
         }
+    }
+
+    private var projectSubtitle: String {
+        if let branch = workspace.currentBranch, !branch.isEmpty {
+            return "\(project?.name ?? workspace.name) · \(branch)"
+        }
+        return workspace.pathDisplay
+    }
+
+    private var starterPrompt: String {
+        "What should I work on in \(project?.name ?? workspace.name)?"
     }
 }
 
@@ -4487,9 +7775,11 @@ private struct ProjectContextSidebar: View {
     let selectedAgentKind: NativeAgentKind
     let branchOptions: [String]
     let branchStatus: String?
+    let activeRunId: EntityID?
     let hideContext: () -> Void
     let refreshBranches: () -> Void
     let switchBranch: (String) -> Void
+    let selectChat: (AgentRun) -> Void
 
     private var workspaceIds: [EntityID] {
         if let selectedProject, !selectedProject.workspaceIds.isEmpty {
@@ -4502,15 +7792,21 @@ private struct ProjectContextSidebar: View {
     }
 
     private var runs: [AgentRun] {
-        snapshot.runs.filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
+        snapshot.runs
+            .filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
+            .sorted { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+    }
+
+    private var chatGroups: [NativeChatRunGroup] {
+        nativeChatRunGroups(from: runs)
     }
 
     private var artifacts: [Artifact] {
         snapshot.artifacts.filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
     }
 
-    private var currentBranch: String {
-        selectedWorkspace?.currentBranch ?? branchOptions.first ?? "Unknown"
+    private var currentBranch: String? {
+        selectedWorkspace?.currentBranch ?? branchOptions.first
     }
 
     var body: some View {
@@ -4543,13 +7839,15 @@ private struct ProjectContextSidebar: View {
 
                 InspectorSection(title: "Project") {
                     InspectorMetric(label: "Workspace", value: selectedWorkspace?.name ?? "None")
-                    ProjectBranchPicker(
-                        currentBranch: currentBranch,
-                        branches: branchOptions,
-                        status: branchStatus,
-                        refresh: refreshBranches,
-                        switchBranch: switchBranch
-                    )
+                    if let currentBranch {
+                        ProjectBranchPicker(
+                            currentBranch: currentBranch,
+                            branches: branchOptions,
+                            status: branchStatus,
+                            refresh: refreshBranches,
+                            switchBranch: switchBranch
+                        )
+                    }
                     InspectorMetric(label: "Trust", value: selectedWorkspace?.trustState.rawValue ?? "unknown")
                     if let path = selectedWorkspace?.pathDisplay {
                         Text(path)
@@ -4561,10 +7859,14 @@ private struct ProjectContextSidebar: View {
                 }
 
                 InspectorSection(title: "Recent Chats") {
-                    ForEach(runs.prefix(4)) { run in
-                        InspectorRow(symbol: "text.bubble", title: run.promptSnapshot.firstLineFallback("Conversation"), subtitle: run.state.rawValue)
+                    ForEach(chatGroups.prefix(4)) { group in
+                        ProjectRecentChatGroupRow(
+                            group: group,
+                            selectedRunId: activeRunId,
+                            selectChat: selectChat
+                        )
                     }
-                    if runs.isEmpty {
+                    if chatGroups.isEmpty {
                         EmptyMiniState(title: "No project chats", subtitle: "Send a message to start this project chat.")
                     }
                 }
@@ -4584,58 +7886,140 @@ private struct ProjectContextSidebar: View {
     }
 }
 
+private struct ProjectRecentChatGroupRow: View {
+    let group: NativeChatRunGroup
+    let selectedRunId: EntityID?
+    let selectChat: (AgentRun) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            InspectorActionRow(
+                symbol: group.children.isEmpty ? "text.bubble" : "rectangle.split.2x1",
+                title: group.parent.promptSnapshot.firstLineFallback("Conversation"),
+                subtitle: group.children.isEmpty ? group.parent.state.rawValue : "\(group.children.count + 1) windows · \(group.parent.state.rawValue)",
+                selected: selectedRunId == group.parent.id || group.children.contains(where: { $0.id == selectedRunId }),
+                action: { selectChat(group.parent) }
+            )
+            if !group.children.isEmpty {
+                VStack(spacing: 4) {
+                    ForEach(group.children.prefix(3)) { child in
+                        Button {
+                            selectChat(group.parent)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "text.bubble")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(PKTheme.primary)
+                                Text(child.promptSnapshot.firstLineFallback("Side chat"))
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(PKTheme.text3)
+                                    .lineLimit(1)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 24)
+                            .background(PKTheme.panel.opacity(0.32))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.leading, 11)
+            }
+        }
+    }
+}
+
 private struct ProjectBranchPicker: View {
     let currentBranch: String
     let branches: [String]
     let status: String?
     let refresh: () -> Void
     let switchBranch: (String) -> Void
+    @State private var branchPickerOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Menu {
-                if branches.isEmpty {
-                    Button("Refresh Branches", systemImage: "arrow.clockwise", action: refresh)
-                    Divider()
-                    Button("No local branches") {}
-                        .disabled(true)
-                } else {
-                    ForEach(branches, id: \.self) { branch in
-                        Button {
-                            if branch != currentBranch {
-                                switchBranch(branch)
+            HStack {
+                Text("Branch")
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text3)
+                Spacer()
+                Button {
+                    branchPickerOpen.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(currentBranch)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(PKTheme.text2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(PKTheme.primary)
+                    }
+                    .frame(maxWidth: 172, alignment: .trailing)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $branchPickerOpen, arrowEdge: .trailing) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if branches.isEmpty {
+                            Button {
+                                refresh()
+                            } label: {
+                                Label("Refresh Branches", systemImage: "arrow.clockwise")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                        } label: {
-                            Label(branch, systemImage: branch == currentBranch ? "checkmark" : "arrow.triangle.branch")
+                            .buttonStyle(.plain)
+
+                            Text("No local branches")
+                                .font(.caption)
+                                .foregroundStyle(PKTheme.text3)
+                        } else {
+                            ForEach(branches, id: \.self) { branch in
+                                Button {
+                                    if branch != currentBranch {
+                                        switchBranch(branch)
+                                    }
+                                    branchPickerOpen = false
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: branch == currentBranch ? "checkmark" : "arrow.triangle.branch")
+                                            .frame(width: 14)
+                                        Text(branch)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Spacer()
+                                    }
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(branch == currentBranch ? PKTheme.primary : PKTheme.text2)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 28)
+                                    .background(branch == currentBranch ? PKTheme.selected : Color.clear)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Divider()
+
+                            Button {
+                                refresh()
+                            } label: {
+                                Label("Refresh Branches", systemImage: "arrow.clockwise")
+                                    .font(.caption.weight(.semibold))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
-                    Divider()
-                    Button("Refresh Branches", systemImage: "arrow.clockwise", action: refresh)
+                    .padding(10)
+                    .frame(width: 250)
+                    .background(PKTheme.panel)
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    Text("Branch")
-                        .font(.caption)
-                        .foregroundStyle(PKTheme.text3)
-                    Spacer(minLength: 8)
-                    Text(currentBranch)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(PKTheme.text2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(PKTheme.text3)
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-                .frame(maxWidth: .infinity)
-                .background(PKTheme.control.opacity(0.52))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .help("Switch Branch")
             }
-            .menuStyle(.borderlessButton)
-            .help("Switch Branch")
 
             if let status {
                 Text(status)
@@ -5208,7 +8592,7 @@ private struct MissionControlPage: View {
                 HStack(alignment: .top, spacing: 12) {
                     InspectorSection(title: "Runtime Queue") {
                         ForEach(snapshot.runs.prefix(6)) { run in
-                            InspectorRow(symbol: "terminal", title: run.state.rawValue, subtitle: run.promptSnapshot)
+                            InspectorRow(symbol: agentSymbol(agentKind(for: run, snapshot: snapshot)), title: run.state.rawValue, subtitle: run.promptSnapshot)
                         }
                     }
                     InspectorSection(title: "Capability Health") {
@@ -5362,7 +8746,7 @@ private struct AgentSetupWindow: View {
                 HStack(spacing: 8) {
                     SecondaryButton(title: "Detect", systemImage: "magnifyingglass") {}
                     SecondaryButton(title: "Login", systemImage: "key") {}
-                    PrimaryButton(title: "Open", systemImage: "terminal") {}
+                    PrimaryButton(title: "Open", systemImage: agentSymbol(profile?.kind ?? .customCLI)) {}
                 }
                 .padding(.top, 4)
             }
@@ -5488,7 +8872,7 @@ private struct SystemSurfacePage: View {
                     SurfaceCard(symbol: "ellipsis.bubble", title: "Dashboard", subtitle: "Native and web dashboard share orchestrator concepts.", badge: "Native")
                 case .agents:
                     ForEach(snapshot.agentProfiles) { agent in
-                        SurfaceCard(symbol: "terminal", title: agent.displayName, subtitle: agent.executableName, badge: agent.isEnabled ? "Ready" : "Off")
+                        SurfaceCard(symbol: agentSymbol(agent.kind), title: agent.displayName, subtitle: agent.executableName, badge: agent.isEnabled ? "Ready" : "Off")
                     }
                 case .assistants:
                     SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "MR Review Assistant", subtitle: "Review merge requests and attach repo evidence.", badge: "Default")
@@ -5967,6 +9351,33 @@ private struct InspectorRow: View {
     }
 }
 
+private struct InspectorActionRow: View {
+    let symbol: String
+    let title: String
+    let subtitle: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            InspectorRow(symbol: symbol, title: title, subtitle: subtitle)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(selected ? PKTheme.primary.opacity(0.11) : PKTheme.control.opacity(hovering ? 0.42 : 0.0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(selected ? PKTheme.primary.opacity(0.36) : PKTheme.edge.opacity(hovering ? 0.72 : 0.0), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .onHover { hovering = $0 }
+        .help("Open Chat")
+    }
+}
+
 private struct TimelineRow: View {
     let title: String
     let subtitle: String
@@ -6247,7 +9658,7 @@ private func agentShortLabel(_ kind: NativeAgentKind) -> String {
 private func agentSymbol(_ kind: NativeAgentKind) -> String {
     switch kind {
     case .claude: return "sparkles"
-    case .codex: return "terminal"
+    case .codex: return "curlybraces"
     case .cursor: return "cursorarrow.click"
     case .gemini: return "diamond"
     case .githubCopilot: return "person.crop.square"
@@ -6354,13 +9765,13 @@ private func projectTitle(for workspaceId: EntityID?, snapshot: NativeStoreSnaps
     return snapshot.workspaces.first(where: { $0.id == workspaceId })?.name ?? "Project"
 }
 
-private func branchTitle(for workspaceId: EntityID?, snapshot: NativeStoreSnapshot) -> String {
+private func branchTitle(for workspaceId: EntityID?, snapshot: NativeStoreSnapshot) -> String? {
     let workspace = workspaceId.flatMap { id in
         snapshot.workspaces.first(where: { $0.id == id })
     } ?? snapshot.workspaces.first
     guard let branch = workspace?.currentBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
           !branch.isEmpty else {
-        return "No branch"
+        return nil
     }
     return branch
 }
@@ -6373,7 +9784,16 @@ private func permissionTitle(_ mode: PermissionMode) -> String {
     }
 }
 
+private func copyTextToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
 private extension String {
+    var gitTrimmed: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func firstLineFallback(_ fallback: String) -> String {
         let first = split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)

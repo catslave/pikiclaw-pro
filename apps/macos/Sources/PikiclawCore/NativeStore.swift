@@ -80,6 +80,18 @@ public struct NativeStoreSnapshot: Codable, Sendable {
         }
         return changed
     }
+
+    @discardableResult
+    public mutating func mergeMissingCapabilities(from seed: NativeAppSeed) -> Bool {
+        var existingIds = Set(capabilities.map(\.id))
+        var changed = false
+        for capability in seed.capabilities where !existingIds.contains(capability.id) {
+            capabilities.append(capability)
+            existingIds.insert(capability.id)
+            changed = true
+        }
+        return changed
+    }
 }
 
 public protocol WorkspaceStore: Sendable {
@@ -177,9 +189,10 @@ public actor JSONNativeStore: WorkspaceStore, WorkItemStore, RunStore, ArtifactS
            let decoded = try? decoder.decode(NativeStoreSnapshot.self, from: data) {
             var next = decoded
             let merged = next.mergeMissingAgentProfiles(from: seed)
+            let mergedCapabilities = next.mergeMissingCapabilities(from: seed)
             let migrated = next.applyAgentAvailabilityDefaultsIfNeeded()
             self.snapshot = next
-            if merged || migrated {
+            if merged || mergedCapabilities || migrated {
                 try? FileManager.default.createDirectory(
                     at: fileURL.deletingLastPathComponent(),
                     withIntermediateDirectories: true

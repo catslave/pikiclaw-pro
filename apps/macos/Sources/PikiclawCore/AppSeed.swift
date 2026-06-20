@@ -110,6 +110,26 @@ public struct NativeAppSeed: Sendable {
             ],
             capabilities: [
                 Capability(
+                    id: "capability-skill-workspace-pikiclaw-iva-logtracer",
+                    kind: .skill,
+                    name: "IVA Log Tracer",
+                    scope: .workspace,
+                    installState: "installed",
+                    configState: "ready",
+                    trustLevel: .trusted,
+                    healthState: .healthy
+                ),
+                Capability(
+                    id: "capability-skill-workspace-pikiclaw-clickhouse",
+                    kind: .skill,
+                    name: "ClickHouse Query",
+                    scope: .workspace,
+                    installState: "installed",
+                    configState: "requires clickhouse-lab MCP",
+                    trustLevel: .trusted,
+                    healthState: .needsConfiguration
+                ),
+                Capability(
                     kind: .cliTool,
                     name: "Codex CLI",
                     scope: .workspace,
@@ -117,6 +137,26 @@ public struct NativeAppSeed: Sendable {
                     configState: "configured",
                     trustLevel: .trusted,
                     healthState: .healthy
+                ),
+                Capability(
+                    id: "capability-mcp-gitlab",
+                    kind: .mcpServer,
+                    name: "GitLab",
+                    scope: .global,
+                    installState: "available",
+                    configState: "pending",
+                    trustLevel: .restricted,
+                    healthState: .needsConfiguration
+                ),
+                Capability(
+                    id: "capability-mcp-confluence",
+                    kind: .mcpServer,
+                    name: "Confluence",
+                    scope: .global,
+                    installState: "available",
+                    configState: "pending",
+                    trustLevel: .restricted,
+                    healthState: .needsConfiguration
                 ),
                 Capability(
                     kind: .mcpServer,

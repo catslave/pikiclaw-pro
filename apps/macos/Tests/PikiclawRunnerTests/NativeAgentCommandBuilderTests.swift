@@ -12,10 +12,14 @@ import Testing
     let request = AgentLaunchRequest(workspacePath: "/tmp/project", prompt: "hello", run: run)
     let args = NativeAgentCommandBuilder.codexArguments(for: request)
 
-    #expect(args.contains("exec"))
-    #expect(args.contains("read-only"))
-    #expect(args.contains("/tmp/project"))
-    #expect(args.last == "hello")
+    #expect(args == [
+        "--ask-for-approval", "never",
+        "exec",
+        "--color", "never",
+        "--sandbox", "read-only",
+        "-C", "/tmp/project",
+        "hello"
+    ])
 }
 
 @Test func geminiArgumentsMapAutopilotToYolo() {
@@ -32,4 +36,3 @@ import Testing
     #expect(args.contains("hello"))
     #expect(args.contains("yolo"))
 }
-

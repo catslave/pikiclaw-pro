@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import PikiclawCore
 
@@ -15,3 +16,21 @@ import Testing
     #expect(artifacts.count == 1)
 }
 
+@Test func agentRunDecodesMissingSideChatFieldsAsStandalone() throws {
+    let json = """
+    {
+      "id": { "rawValue": "run-1" },
+      "workspaceId": { "rawValue": "workspace-1" },
+      "agentProfileId": { "rawValue": "agent-1" },
+      "permissionMode": "askBeforeEdit",
+      "state": "completed",
+      "promptSnapshot": "Hello",
+      "contextRefs": [],
+      "transcript": "Done"
+    }
+    """.data(using: .utf8)!
+
+    let run = try JSONDecoder().decode(AgentRun.self, from: json)
+    #expect(run.sideChatOfRunId == nil)
+    #expect(run.sideChatRunIds.isEmpty)
+}
