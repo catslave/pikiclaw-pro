@@ -185,6 +185,41 @@ agent CLI versions).
 
 </details>
 
+## Native macOS Development
+
+This branch is often used through the native Swift app under `apps/macos/`.
+After changing macOS app code, use the install-and-open path when you want the
+copy in `/Applications` to be current:
+
+```bash
+pnpm macos:open
+```
+
+Equivalent direct command:
+
+```bash
+./apps/macos/scripts/build-app.sh --install --open
+```
+
+Use `pnpm macos:build` only when you want to verify compilation or inspect the
+bundle at `apps/macos/Products/Pikiclaw.app`. That command does **not** update
+`/Applications/Pikiclaw.app`, and an already-running app process never picks up
+new code automatically.
+
+The install command builds the release binary, signs the bundle, quits the
+currently installed `/Applications/Pikiclaw.app` if it is running, replaces it,
+registers the installed copy with LaunchServices, and optionally opens it.
+
+By default the local bundle is ad-hoc signed. macOS privacy permissions such as
+Microphone and Speech Recognition are tied to both the bundle id and signing
+identity; repeated ad-hoc rebuilds can therefore trigger fresh permission
+prompts. If you have a stable local or Apple Developer signing identity, set it
+before installing:
+
+```bash
+PIKICLAW_CODESIGN_IDENTITY="Developer ID Application: Your Name" pnpm macos:open
+```
+
 ---
 
 ## How People Are Using It

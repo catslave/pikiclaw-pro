@@ -184,6 +184,38 @@ docker run -d --name pikiclaw -p 3939:3939 \
 
 </details>
 
+## Mac Native 开发流程
+
+当前分支经常通过 `apps/macos/` 下的 Swift 原生 App 使用。只要修改了
+macOS App 相关代码，并且希望 `/Applications` 里的 Pikiclaw 也变成最新，
+请使用安装并打开的统一入口：
+
+```bash
+pnpm macos:open
+```
+
+等价的直接命令是：
+
+```bash
+./apps/macos/scripts/build-app.sh --install --open
+```
+
+`pnpm macos:build` 只用于验证编译，或者检查
+`apps/macos/Products/Pikiclaw.app` 这个构建产物。它**不会**更新
+`/Applications/Pikiclaw.app`；已经运行中的 App 进程也不会自动加载新代码。
+
+安装命令会完成 release build、签名、退出正在运行的
+`/Applications/Pikiclaw.app`、替换安装目录里的 App、重新注册
+LaunchServices，并按需重新打开。
+
+默认本地包使用 ad-hoc 签名。macOS 的麦克风、语音识别等隐私权限绑定的是
+bundle id 和签名身份；如果每次 ad-hoc rebuild 后签名 hash 变化，系统可能会
+再次弹授权。若本机有稳定的本地签名或 Apple Developer 签名，可以安装前指定：
+
+```bash
+PIKICLAW_CODESIGN_IDENTITY="Developer ID Application: Your Name" pnpm macos:open
+```
+
 ---
 
 ## 典型的应用场景
