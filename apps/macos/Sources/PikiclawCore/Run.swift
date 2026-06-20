@@ -10,6 +10,7 @@ public enum RunState: String, Codable, Sendable, CaseIterable {
     case failed
     case cancelled
     case stale
+    case draft
 }
 
 public enum RunRole: String, Codable, Sendable, CaseIterable {

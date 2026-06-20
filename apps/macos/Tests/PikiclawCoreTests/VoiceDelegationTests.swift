@@ -76,6 +76,33 @@ import Testing
     #expect(plan.spokenPreview.contains("current run status"))
 }
 
+@Test func voicePlannerKeepsCapabilityQuestionsConversational() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "你可以做什么",
+        workspace: nil,
+        preferredAgent: .codex
+    )
+
+    #expect(plan.intent == .converse)
+    #expect(plan.needsConfirmation == true)
+}
+
+@Test func voicePlannerDelegatesActionableStateManagementRequests() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "帮我检查 voice 状态切换，从 listening 到 thinking 再到 speaking 是否自然",
+        workspace: Workspace(
+            id: "workspace",
+            name: "Pikiclaw",
+            pathDisplay: "/repo/pikiclaw",
+            trustState: .trusted
+        ),
+        preferredAgent: .codex
+    )
+
+    #expect(plan.intent == .delegate)
+    #expect(plan.needsConfirmation == false)
+}
+
 @Test func voiceReporterNarratesTerminalStates() {
     let plan = VoiceAssistantPlanner.makePlan(
         utterance: "Review the latest run",

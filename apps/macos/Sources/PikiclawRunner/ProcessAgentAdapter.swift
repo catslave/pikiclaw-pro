@@ -69,9 +69,10 @@ public struct ProcessAgentAdapter: AgentAdapter {
                     if let data = stdinText.data(using: .utf8) {
                         stdin.fileHandleForWriting.write(data)
                     }
-                    try? stdin.fileHandleForWriting.close()
                 }
+                try? stdin.fileHandleForWriting.close()
             } catch {
+                try? stdin.fileHandleForWriting.close()
                 continuation.yield(.failed(error.localizedDescription))
                 continuation.finish()
             }

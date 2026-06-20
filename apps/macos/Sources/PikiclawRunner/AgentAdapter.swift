@@ -99,6 +99,77 @@ public enum NativeAgentCommandBuilder {
         ]
     }
 
+    public static func claudeArguments(for request: AgentLaunchRequest) -> [String] {
+        [
+            "--print",
+            "--output-format", "text",
+            "--permission-mode", claudePermissionMode(for: request.run.permissionMode),
+            request.prompt
+        ]
+    }
+
+    public static func cursorArguments(for request: AgentLaunchRequest) -> [String] {
+        var arguments = [
+            "--print",
+            "--output-format", "text",
+            "--trust",
+            "--workspace", request.workspacePath
+        ]
+
+        switch request.run.permissionMode {
+        case .readOnly:
+            arguments.append(contentsOf: ["--mode", "plan"])
+        case .askBeforeEdit:
+            break
+        case .autopilot:
+            arguments.append("--yolo")
+        }
+
+        arguments.append(request.prompt)
+        return arguments
+    }
+
+    public static func githubCopilotArguments(for request: AgentLaunchRequest) -> [String] {
+        var arguments = [
+            "copilot",
+            "--no-color",
+            "--no-ask-user",
+            "--output-format", "text",
+            "-C", request.workspacePath
+        ]
+
+        switch request.run.permissionMode {
+        case .readOnly:
+            arguments.append("--plan")
+        case .askBeforeEdit:
+            break
+        case .autopilot:
+            arguments.append("--yolo")
+        }
+
+        arguments.append(contentsOf: ["-p", request.prompt])
+        return arguments
+    }
+
+    public static func hermesArguments(for request: AgentLaunchRequest) -> [String] {
+        var arguments = [
+            "chat",
+            "--quiet",
+            "--source", "pikiclaw-native",
+            "--query", request.prompt
+        ]
+
+        if request.run.permissionMode == .autopilot {
+            arguments.append("--yolo")
+        }
+
+        return arguments
+    }
+
+    public static func customCLIArguments(for request: AgentLaunchRequest) -> [String] {
+        [request.prompt]
+    }
+
     private static func codexSandbox(for mode: PermissionMode) -> String {
         switch mode {
         case .readOnly:
@@ -110,12 +181,23 @@ public enum NativeAgentCommandBuilder {
         }
     }
 
+    private static func claudePermissionMode(for mode: PermissionMode) -> String {
+        switch mode {
+        case .readOnly:
+            return "plan"
+        case .askBeforeEdit:
+            return "acceptEdits"
+        case .autopilot:
+            return "bypassPermissions"
+        }
+    }
+
     private static func geminiApprovalMode(for mode: PermissionMode) -> String {
         switch mode {
         case .readOnly:
             return "plan"
         case .askBeforeEdit:
-            return "default"
+            return "auto_edit"
         case .autopilot:
             return "yolo"
         }

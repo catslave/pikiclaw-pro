@@ -324,12 +324,21 @@ struct VoiceInputDeviceSelection {
 }
 
 enum VoiceInputDeviceManager {
+    private static let preserveVirtualInputKey = "PikiclawMac.voicePreserveVirtualInputForTesting"
+
     static func prepareVoiceInput() -> VoiceInputDeviceSelection {
         guard let current = defaultInputDevice() else {
             return VoiceInputDeviceSelection(
                 activeDevice: nil,
                 originalDeviceID: nil,
                 message: "Input: system default"
+            )
+        }
+        if current.isVirtual, UserDefaults.standard.bool(forKey: preserveVirtualInputKey) {
+            return VoiceInputDeviceSelection(
+                activeDevice: current,
+                originalDeviceID: nil,
+                message: "Input: \(current.name) · preserved virtual input"
             )
         }
         guard current.isVirtual, let preferred = preferredPhysicalInputDevice(excluding: current.id) else {
@@ -572,6 +581,7 @@ final class ContinuousVoiceSessionController: ObservableObject {
     private let liveTranscriptBuffer = VoiceLiveTranscriptBuffer()
     private var allowsBargeIn = false
     private var voiceboxSpeechID: UUID?
+    private var inputSuppressedUntil = Date.distantPast
     private var configuration = VoiceboxConfiguration(
         enabled: true,
         baseURLString: "http://127.0.0.1:17493",
@@ -587,6 +597,7 @@ final class ContinuousVoiceSessionController: ObservableObject {
     private let minTurnDuration = 0.45
     private let maxTurnDuration = 18.0
     private let silenceToEnd = 1.05
+    private let outputEchoSuppressionSeconds = 0.85
 
     var activityLabel: String {
         if isVoiceboxSpeaking { return "speaking" }
@@ -703,6 +714,7 @@ final class ContinuousVoiceSessionController: ObservableObject {
         liveTranscriptEnabled = false
         allowsBargeIn = false
         voiceboxSpeechID = nil
+        inputSuppressedUntil = .distantPast
         stopLiveTranscript(cancelTask: true)
         isConversationActive = false
         isListening = false
@@ -716,12 +728,13 @@ final class ContinuousVoiceSessionController: ObservableObject {
 
     func pauseForOutput(allowBargeIn: Bool = false) {
         guard isConversationActive else { return }
-        allowsBargeIn = allowBargeIn
-        isListening = allowBargeIn
+        allowsBargeIn = false
+        isListening = false
         isCapturingTurn = false
         stopLiveTranscript(cancelTask: true)
         currentSamples.removeAll(keepingCapacity: true)
-        statusLine = allowBargeIn ? "Speaking · listening for interruption" : "Speaking"
+        suppressInputForOutputTail(seconds: outputEchoSuppressionSeconds)
+        statusLine = "Speaking"
         diagnosticLine = statusLine
         VoiceDebugLog.write("conversation paused for output barge_in=\(allowBargeIn)")
     }
@@ -741,6 +754,7 @@ final class ContinuousVoiceSessionController: ObservableObject {
     func resumeListening() {
         guard isConversationActive, !isTranscribing, !isVoiceboxSpeaking else { return }
         allowsBargeIn = false
+        suppressInputForOutputTail(seconds: outputEchoSuppressionSeconds)
         isListening = true
         isCapturingTurn = false
         statusLine = configuration.enabled ? "Listening with Voicebox" : "Listening with Apple Speech"
@@ -840,6 +854,7 @@ final class ContinuousVoiceSessionController: ObservableObject {
         guard isConversationActive, isListening, !isTranscribing else { return }
 
         let now = Date()
+        guard now >= inputSuppressedUntil else { return }
         let hasVoice = packet.level >= startThreshold
         if allowsBargeIn && !isCapturingTurn && packet.level >= interruptionThreshold {
             allowsBargeIn = false
@@ -1057,6 +1072,10 @@ final class ContinuousVoiceSessionController: ObservableObject {
     private func estimatedSpeechSeconds(for text: String) -> Double {
         let characters = max(12, text.count)
         return min(16, max(1.8, Double(characters) / 9.5))
+    }
+
+    private func suppressInputForOutputTail(seconds: TimeInterval) {
+        inputSuppressedUntil = max(inputSuppressedUntil, Date().addingTimeInterval(seconds))
     }
 
     private func formatPercent(_ value: Double) -> String {

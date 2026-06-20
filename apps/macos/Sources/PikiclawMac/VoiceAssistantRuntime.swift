@@ -83,7 +83,7 @@ struct SystemSpeechVoiceOption: Identifiable, Hashable {
 
     static func options(for language: VoiceRecognitionLanguage) -> [SystemSpeechVoiceOption] {
         let voices = AVSpeechSynthesisVoice.speechVoices()
-        let matching = voices.filter { $0.language.hasPrefix(language.speechSynthesisLanguage.prefix(2)) }
+        let matching = voices.filter { isLanguage($0.language, compatibleWith: language) }
         let selectedVoices = matching.isEmpty ? voices : matching
         return selectedVoices
             .sorted { lhs, rhs in
@@ -105,6 +105,36 @@ struct SystemSpeechVoiceOption: Identifiable, Hashable {
         let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "Auto" }
         return options(for: language).first(where: { $0.id == trimmed })?.displayName ?? "Custom"
+    }
+
+    static func compatibleVoice(identifier: String, language: VoiceRecognitionLanguage) -> AVSpeechSynthesisVoice? {
+        let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty,
+           let selectedVoice = AVSpeechSynthesisVoice(identifier: trimmed),
+           isLanguage(selectedVoice.language, compatibleWith: language) {
+            return selectedVoice
+        }
+        if let exactVoice = AVSpeechSynthesisVoice(language: language.speechSynthesisLanguage) {
+            return exactVoice
+        }
+        return AVSpeechSynthesisVoice.speechVoices()
+            .first { isLanguage($0.language, compatibleWith: language) }
+    }
+
+    static func isLanguage(_ voiceLanguage: String, compatibleWith language: VoiceRecognitionLanguage) -> Bool {
+        let normalizedVoiceLanguage = normalizedLanguageIdentifier(voiceLanguage)
+        let normalizedTargetLanguage = normalizedLanguageIdentifier(language.speechSynthesisLanguage)
+        guard let targetBase = normalizedTargetLanguage.split(separator: "-").first else {
+            return normalizedVoiceLanguage == normalizedTargetLanguage
+        }
+        return normalizedVoiceLanguage == normalizedTargetLanguage
+            || normalizedVoiceLanguage.split(separator: "-").first == targetBase
+    }
+
+    private static func normalizedLanguageIdentifier(_ identifier: String) -> String {
+        identifier
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
     }
 }
 
@@ -343,7 +373,7 @@ final class VoiceReportSpeaker: NSObject, ObservableObject, AVSpeechSynthesizerD
         }
         let utterance = AVSpeechUtterance(string: trimmed)
         utterance.rate = 0.48
-        let selectedVoice = AVSpeechSynthesisVoice(identifier: voiceIdentifier.trimmingCharacters(in: .whitespacesAndNewlines))
+        let selectedVoice = SystemSpeechVoiceOption.compatibleVoice(identifier: voiceIdentifier, language: language)
         utterance.voice = selectedVoice
             ?? AVSpeechSynthesisVoice(language: language.speechSynthesisLanguage)
             ?? AVSpeechSynthesisVoice(language: "en-US")

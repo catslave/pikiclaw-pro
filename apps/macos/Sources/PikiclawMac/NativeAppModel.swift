@@ -11,6 +11,7 @@ final class NativeAppModel: ObservableObject {
     @Published var selectedAgentKind: NativeAgentKind = .codex
     @Published var statusLine = "Ready"
     @Published var isRunning = false
+    @Published private(set) var runningRunIds: Set<EntityID> = []
     @Published var activeRunId: EntityID?
     @Published var branchOptionsByWorkspace: [EntityID: [String]] = [:]
     @Published var branchStatusByWorkspace: [EntityID: String] = [:]
@@ -20,21 +21,23 @@ final class NativeAppModel: ObservableObject {
     @Published var terminalWorkingDirectories: [EntityID: String] = [:]
 
     private let store: JSONNativeStore
+    private let agentAdapterFactory: @Sendable (AgentDescriptor) -> any AgentAdapter
     @MainActor private static var restartInFlight = false
 
-    init(store: JSONNativeStore? = nil) {
+    init(
+        store: JSONNativeStore? = nil,
+        agentAdapterFactory: @escaping @Sendable (AgentDescriptor) -> any AgentAdapter = { descriptor in
+            ProcessAgentAdapter(descriptor: descriptor)
+        }
+    ) {
         self.store = store ?? JSONNativeStore()
+        self.agentAdapterFactory = agentAdapterFactory
         Task { await reload() }
     }
 
     var restartBlockedByActiveRun: Bool {
         isRunning || snapshot.runs.contains { run in
-            switch run.state {
-            case .queued, .starting, .running, .waitingForUser, .cancelling:
-                return true
-            case .completed, .failed, .cancelled, .stale:
-                return false
-            }
+            Self.isActiveExecutionState(run.state)
         }
     }
 
@@ -172,7 +175,28 @@ final class NativeAppModel: ObservableObject {
 
     func deleteChat(runId: EntityID) async {
         do {
-            try await store.deleteRun(id: runId)
+            var next = try await store.loadSnapshot()
+            guard next.runs.contains(where: { $0.id == runId }) else {
+                statusLine = "Chat not found"
+                return
+            }
+            next.runs = next.runs.map { run in
+                var updated = run
+                updated.sideChatRunIds.removeAll { $0 == runId }
+                if updated.sideChatOfRunId == runId {
+                    updated.sideChatOfRunId = nil
+                }
+                return updated
+            }
+            next.runs.removeAll { $0.id == runId }
+            next.workItems = next.workItems.map { item in
+                var updated = item
+                if updated.currentRunId == runId {
+                    updated.currentRunId = nil
+                }
+                return updated
+            }
+            try await store.replaceSnapshot(next)
             if activeRunId == runId {
                 activeRunId = nil
             }
@@ -200,6 +224,14 @@ final class NativeAppModel: ObservableObject {
             }
             guard !Self.wouldCreateSideChatCycle(parentRunId: parentRunId, childRunId: childRunId, runs: next.runs) else {
                 statusLine = "Cannot nest a parent chat into its child"
+                return
+            }
+            guard next.runs[parentIndex].sideChatOfRunId == nil else {
+                statusLine = "Side chats cannot contain other chats"
+                return
+            }
+            guard next.runs[childIndex].sideChatRunIds.isEmpty else {
+                statusLine = "Detach this chat's side chats before nesting it"
                 return
             }
 
@@ -264,7 +296,7 @@ final class NativeAppModel: ObservableObject {
                 teamProfileId: parent.teamProfileId,
                 permissionMode: parent.permissionMode,
                 modelProfileId: parent.modelProfileId,
-                state: .queued,
+                state: .draft,
                 startedAt: Date(),
                 sideChatOfRunId: parent.id,
                 promptSnapshot: "Side chat"
@@ -479,6 +511,208 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
+    func sendMessage(in runId: EntityID, message: String) async -> EntityID? {
+        let prompt = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            statusLine = "Type a message first"
+            return nil
+        }
+
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }) else {
+                statusLine = "Chat not found"
+                return nil
+            }
+            switch run.state {
+            case .queued, .starting, .running, .cancelling:
+                statusLine = "Current chat is still running"
+                return runId
+            case .waitingForUser, .completed, .failed, .cancelled, .stale, .draft:
+                break
+            }
+            guard let workspace = latest.workspaces.first(where: { $0.id == run.workspaceId }) else {
+                statusLine = "Workspace missing"
+                return nil
+            }
+            guard let profile = latest.agentProfiles.first(where: { $0.id == run.agentProfileId }) else {
+                statusLine = "Agent profile missing"
+                return nil
+            }
+            guard profile.isEnabled else {
+                statusLine = "\(profile.displayName) is disabled. Enable it in Agent Studio first."
+                return nil
+            }
+
+            let preservedActiveRunId = activeRunId ?? run.sideChatOfRunId ?? run.id
+            let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
+            run.promptSnapshot = prompt
+            run.transcript = ""
+            run.state = .queued
+            run.startedAt = Date()
+            run.endedAt = nil
+
+            statusLine = "Starting \(profile.displayName)"
+
+            try await store.saveRun(run)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .runStateChange,
+                actor: "runner",
+                summary: "Queued \(profile.displayName) pane message",
+                runId: run.id,
+                workItemId: run.workItemId,
+                workspaceId: launchWorkspace.id
+            ))
+            activeRunId = preservedActiveRunId
+            await reload()
+            activeRunId = preservedActiveRunId
+
+            return await launchAgentRun(run, profile: profile, workspace: launchWorkspace, preserveActiveRunId: preservedActiveRunId)
+        } catch {
+            statusLine = "Send failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    @discardableResult
+    func ensureVoiceConversation(workspaceId: EntityID?, focus: Bool = true) async -> EntityID? {
+        let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first
+        guard let workspace else {
+            statusLine = "Add a workspace first"
+            return nil
+        }
+        guard let profile = firstEnabledAgentProfile() else {
+            statusLine = "Enable an agent in Agent Studio first"
+            return nil
+        }
+
+        let run = AgentRun(
+            workspaceId: workspace.id,
+            agentProfileId: profile.id,
+            permissionMode: selectedPermissionMode,
+            state: .draft,
+            startedAt: Date(),
+            promptSnapshot: "Voice Conversation",
+            contextRefs: [
+                ContextRef(kind: "voice", label: "Voice Assistant"),
+                ContextRef(kind: "workspace", id: workspace.id, label: workspace.name, uri: workspace.pathDisplay)
+            ],
+            transcript: "[voice] Conversation opened.\n"
+        )
+
+        do {
+            try await store.saveRun(run)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .runStateChange,
+                actor: "voice-assistant",
+                summary: "Opened voice conversation",
+                runId: run.id,
+                workspaceId: workspace.id
+            ))
+            if focus {
+                activeRunId = run.id
+                selectedAgentKind = profile.kind
+            }
+            await reload()
+            if focus {
+                activeRunId = run.id
+            }
+            return run.id
+        } catch {
+            statusLine = "Voice conversation failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    @discardableResult
+    func submitVoiceTurn(
+        _ plan: VoiceDelegationPlan,
+        conversationRunId: EntityID?,
+        workspaceId: EntityID?,
+        targetWorkItemId: EntityID?,
+        preserveActiveRunId: EntityID? = nil
+    ) async -> EntityID? {
+        do {
+            let latest = try await store.loadSnapshot()
+            let requestedWorkspace = workspaceId.flatMap { id in
+                latest.workspaces.first(where: { $0.id == id })
+            }
+            let conversationWorkspace = conversationRunId
+                .flatMap { id in latest.runs.first(where: { $0.id == id })?.workspaceId }
+                .flatMap { id in latest.workspaces.first(where: { $0.id == id }) }
+            guard let workspace = requestedWorkspace ?? conversationWorkspace ?? latest.workspaces.first
+            else {
+                statusLine = "Add a workspace first"
+                return nil
+            }
+            guard let profile = voiceAgentProfile(for: plan, profiles: latest.agentProfiles) else {
+                statusLine = "Enable an agent in Agent Studio first"
+                return nil
+            }
+
+            let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
+            let currentConversationRun = conversationRunId.flatMap { id in latest.runs.first(where: { $0.id == id }) }
+            var run = currentConversationRun.flatMap { existingRun in
+                Self.isActiveExecutionState(existingRun.state) ? nil : existingRun
+            }
+                ?? AgentRun(
+                    workspaceId: launchWorkspace.id,
+                    agentProfileId: profile.id,
+                    permissionMode: selectedPermissionMode,
+                    state: .draft,
+                    promptSnapshot: "Voice Conversation"
+                )
+
+            run.workspaceId = launchWorkspace.id
+            run.agentProfileId = profile.id
+            run.permissionMode = selectedPermissionMode
+            run.workItemId = targetWorkItemId ?? run.workItemId
+            run.state = .queued
+            run.startedAt = Date()
+            run.endedAt = nil
+            let previousTranscript = run.transcript
+            run.promptSnapshot = Self.voiceConversationPrompt(for: plan, previousTranscript: previousTranscript)
+            run.contextRefs = Self.voiceContextRefs(
+                plan.contextRefs,
+                workspace: launchWorkspace
+            )
+            run.transcript = Self.appendingVoiceTurn(plan.capturedUtterance, to: run.transcript)
+
+            statusLine = "Starting \(profile.displayName)"
+            activeRunId = preserveActiveRunId ?? run.id
+            if preserveActiveRunId == nil {
+                selectedAgentKind = profile.kind
+            }
+            draftPrompt = ""
+
+            try await store.saveRun(run)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .runStateChange,
+                actor: "voice-assistant",
+                summary: "Submitted voice turn to \(profile.displayName)",
+                runId: run.id,
+                workItemId: run.workItemId,
+                workspaceId: launchWorkspace.id
+            ))
+            await reload()
+            activeRunId = preserveActiveRunId ?? run.id
+            markRunStarted(run.id)
+            Task { @MainActor [self, run, profile, launchWorkspace, preserveActiveRunId] in
+                _ = await self.launchAgentRun(
+                    run,
+                    profile: profile,
+                    workspace: launchWorkspace,
+                    preserveActiveRunId: preserveActiveRunId
+                )
+            }
+            return run.id
+        } catch {
+            statusLine = "Voice submission failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    @discardableResult
     func startVoiceDelegation(_ plan: VoiceDelegationPlan, workspaceId: EntityID?, targetWorkItemId: EntityID?) async -> EntityID? {
         let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first
         guard let workspace else {
@@ -544,10 +778,9 @@ final class NativeAppModel: ObservableObject {
             return nil
         }
 
-        isRunning = true
         statusLine = "Starting \(profile.displayName)"
 
-        var run = AgentRun(
+        let run = AgentRun(
             workItemId: item.id,
             workspaceId: launchWorkspace.id,
             agentProfileId: profile.id,
@@ -568,16 +801,31 @@ final class NativeAppModel: ObservableObject {
                 workspaceId: launchWorkspace.id
             ))
             await reload()
+            return await launchAgentRun(run, profile: profile, workspace: launchWorkspace)
+        } catch {
+            statusLine = "Run failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
 
+    private func launchAgentRun(
+        _ initialRun: AgentRun,
+        profile: AgentProfile,
+        workspace: Workspace,
+        preserveActiveRunId: EntityID? = nil
+    ) async -> EntityID? {
+        var run = initialRun
+        markRunStarted(run.id)
+        do {
             let descriptor = AgentDescriptor(
                 id: profile.id,
                 kind: profile.kind.runnerKind,
                 displayName: profile.displayName,
                 executableName: profile.executableName
             )
-            let adapter = ProcessAgentAdapter(descriptor: descriptor)
+            let adapter = agentAdapterFactory(descriptor)
             var request = AgentLaunchRequest(
-                workspacePath: launchWorkspace.pathDisplay,
+                workspacePath: workspace.pathDisplay,
                 prompt: run.promptSnapshot,
                 run: run
             )
@@ -587,6 +835,9 @@ final class NativeAppModel: ObservableObject {
                 apply(event, to: &run)
                 try await store.saveRun(run)
                 await reload()
+                if let preserveActiveRunId {
+                    activeRunId = preserveActiveRunId
+                }
             }
         } catch {
             run.state = .failed
@@ -596,8 +847,11 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Run failed: \(error.localizedDescription)"
         }
 
-        isRunning = false
+        markRunFinished(run.id)
         await reload()
+        if let preserveActiveRunId {
+            activeRunId = preserveActiveRunId
+        }
         return run.id
     }
 
@@ -639,6 +893,68 @@ final class NativeAppModel: ObservableObject {
     private func agentProfile(for kind: NativeAgentKind) -> AgentProfile? {
         snapshot.agentProfiles.first(where: { $0.kind == kind })
             ?? AgentProfile(kind: kind, displayName: kind.displayName, executableName: kind.defaultExecutableName, isEnabled: false)
+    }
+
+    private func firstEnabledAgentProfile() -> AgentProfile? {
+        snapshot.agentProfiles.first(where: \.isEnabled)
+    }
+
+    private func voiceAgentProfile(for plan: VoiceDelegationPlan, profiles: [AgentProfile]) -> AgentProfile? {
+        profiles.first(where: { $0.kind == plan.suggestedAgentKind && $0.isEnabled })
+            ?? profiles.first(where: \.isEnabled)
+    }
+
+    nonisolated private static func voiceConversationPrompt(
+        for plan: VoiceDelegationPlan,
+        previousTranscript: String
+    ) -> String {
+        let history = previousTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !history.isEmpty else { return plan.agentPrompt }
+        let cappedHistory = history.count > 3000 ? String(history.suffix(3000)) : history
+        return """
+        \(plan.agentPrompt)
+
+        Voice conversation context before this turn:
+        \(cappedHistory)
+        """
+    }
+
+    nonisolated private static func appendingVoiceTurn(_ utterance: String, to transcript: String) -> String {
+        let trimmed = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let turn = "[user voice]\n\(trimmed)\n"
+        guard !prefix.isEmpty else { return "\(turn)\n" }
+        return "\(prefix)\n\n\(turn)\n"
+    }
+
+    nonisolated private static func voiceContextRefs(_ refs: [ContextRef], workspace: Workspace) -> [ContextRef] {
+        var next = refs
+        if !next.contains(where: { $0.kind == "voice" }) {
+            next.insert(ContextRef(kind: "voice", label: "Voice Assistant"), at: 0)
+        }
+        if !next.contains(where: { $0.kind == "workspace" && $0.id == workspace.id }) {
+            next.append(ContextRef(kind: "workspace", id: workspace.id, label: workspace.name, uri: workspace.pathDisplay))
+        }
+        return next
+    }
+
+    nonisolated static func isActiveExecutionState(_ state: RunState) -> Bool {
+        switch state {
+        case .queued, .starting, .running, .waitingForUser, .cancelling:
+            return true
+        case .draft, .completed, .failed, .cancelled, .stale:
+            return false
+        }
+    }
+
+    private func markRunStarted(_ runId: EntityID) {
+        runningRunIds.insert(runId)
+        isRunning = !runningRunIds.isEmpty
+    }
+
+    private func markRunFinished(_ runId: EntityID) {
+        runningRunIds.remove(runId)
+        isRunning = !runningRunIds.isEmpty
     }
 
     nonisolated private static func wouldCreateSideChatCycle(
@@ -683,10 +999,16 @@ final class NativeAppModel: ObservableObject {
             return NativeAgentCommandBuilder.codexArguments(for: request)
         case .gemini:
             return NativeAgentCommandBuilder.geminiArguments(for: request)
+        case .claude:
+            return NativeAgentCommandBuilder.claudeArguments(for: request)
+        case .cursor:
+            return NativeAgentCommandBuilder.cursorArguments(for: request)
         case .githubCopilot:
-            return ["copilot", "suggest", request.prompt]
-        case .claude, .cursor, .hermes, .customCLI:
-            return [request.prompt]
+            return NativeAgentCommandBuilder.githubCopilotArguments(for: request)
+        case .hermes:
+            return NativeAgentCommandBuilder.hermesArguments(for: request)
+        case .customCLI:
+            return NativeAgentCommandBuilder.customCLIArguments(for: request)
         }
     }
 

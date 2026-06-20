@@ -128,6 +128,12 @@ public enum VoiceAssistantPlanner {
         }
 
         switch run.state {
+        case .draft:
+            return VoiceDelegationReport(
+                headline: "Voice conversation open",
+                spokenText: "I opened a voice conversation and I am ready to listen before routing the next actionable request.",
+                tone: "idle"
+            )
         case .queued, .starting:
             return VoiceDelegationReport(
                 headline: "Starting \(agentVoiceName(plan.suggestedAgentKind))",
@@ -199,18 +205,21 @@ public enum VoiceAssistantPlanner {
             return .cancel
         }
 
+        let strongDelegateSignals = [
+            "fix", "build", "implement", "run", "review", "test", "verify",
+            "create", "make", "change", "add", "design", "optimize", "improve",
+            "实现", "修复", "检查", "跑一下", "测试", "验证",
+            "创建", "生成", "整理", "分析", "查一下", "改成", "调整", "优化", "设计", "重构", "支持"
+        ]
+        let softDelegateSignals = ["help me", "please", "do ", "帮我", "我想", "希望", "需要", "做一下"]
+        let hasStrongDelegateSignal = strongDelegateSignals.contains(where: lower.contains)
+        let hasSoftDelegateSignal = softDelegateSignals.contains(where: lower.contains)
         let statusSignals = ["status", "progress", "进度", "状态", "怎么样了", "现在到哪", "运行情况"]
-        if statusSignals.contains(where: lower.contains) {
+        if statusSignals.contains(where: lower.contains), !hasStrongDelegateSignal {
             return .status
         }
 
-        let delegateSignals = [
-            "help me", "please", "do ", "fix", "build", "implement", "run", "review", "test", "verify",
-            "create", "make", "change", "add", "design", "optimize", "improve",
-            "帮我", "我想", "希望", "需要", "做一下", "实现", "修复", "检查", "跑一下", "测试", "验证",
-            "创建", "生成", "整理", "分析", "查一下", "改成", "调整", "优化", "设计", "重构", "支持"
-        ]
-        if delegateSignals.contains(where: lower.contains) {
+        if hasStrongDelegateSignal || hasSoftDelegateSignal {
             return .delegate
         }
 
