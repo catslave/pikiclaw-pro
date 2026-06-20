@@ -15,7 +15,7 @@ import {
 } from '../../agent/index.js';
 import { normalizeSessionContextSources } from '../../agent/context-sources.js';
 import { getSessionStatusForBot } from '../../bot/session-status.js';
-import { findPikiclawSession, moveManagedSessionToWorkspace } from '../../agent/session.js';
+import { attachSideChat, detachSideChat, findPikiclawSession, moveManagedSessionToWorkspace } from '../../agent/session.js';
 import {
   cancelSessionTask,
   stopSessionTasks,
@@ -956,6 +956,69 @@ app.post('/api/session-hub/session/fork', async (c) => {
       `[session-fork] queued task=${queued.taskId} parent=${agent}:${sessionId} child=${queued.sessionKey} atTurn=${atTurn}`
     );
     return c.json(queued);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/side-chat/attach', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
+    const parentAgent = typeof body?.parentAgent === 'string' ? body.parentAgent.trim() : '';
+    const parentSessionId = typeof body?.parentSessionId === 'string' ? body.parentSessionId.trim() : '';
+    const parentTitle = typeof body?.parentTitle === 'string' ? body.parentTitle.trim() : '';
+    const agent = typeof body?.agent === 'string' ? body.agent.trim() : '';
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    const title = typeof body?.title === 'string' ? body.title.trim() : '';
+    if (!workdir || !parentAgent || !parentSessionId || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, parentAgent, parentSessionId, agent, and sessionId are required' }, 400);
+    }
+    if (!runtime.isAgent(parentAgent)) {
+      return c.json({ ok: false, error: `Unknown parent agent: ${parentAgent}` }, 400);
+    }
+    if (!runtime.isAgent(agent)) {
+      return c.json({ ok: false, error: `Unknown agent: ${agent}` }, 400);
+    }
+    const result = attachSideChat(workdir, {
+      parent: { agent: parentAgent as Agent, sessionId: parentSessionId, title: parentTitle || null },
+      child: { agent: agent as Agent, sessionId, title: title || null },
+    });
+    if (!result.ok) {
+      const status = result.refusedReason === 'self-parent' || result.refusedReason === 'cycle' ? 409 : 400;
+      return c.json(result, status);
+    }
+    runtime.debug(`[session-side-chat-attach] parent=${parentAgent}:${parentSessionId} child=${agent}:${sessionId}`);
+    return c.json(result);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/side-chat/detach', async (c) => {
+  try {
+    const body = await c.req.json();
+    const workdir = typeof body?.workdir === 'string' ? body.workdir.trim() : '';
+    const parentAgent = typeof body?.parentAgent === 'string' ? body.parentAgent.trim() : '';
+    const parentSessionId = typeof body?.parentSessionId === 'string' ? body.parentSessionId.trim() : '';
+    const agent = typeof body?.agent === 'string' ? body.agent.trim() : '';
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    if (parentAgent && !runtime.isAgent(parentAgent)) {
+      return c.json({ ok: false, error: `Unknown parent agent: ${parentAgent}` }, 400);
+    }
+    if (!runtime.isAgent(agent)) {
+      return c.json({ ok: false, error: `Unknown agent: ${agent}` }, 400);
+    }
+    const result = detachSideChat(workdir, {
+      parent: parentAgent && parentSessionId ? { agent: parentAgent as Agent, sessionId: parentSessionId } : null,
+      child: { agent: agent as Agent, sessionId },
+    });
+    if (!result.ok) return c.json(result, 400);
+    runtime.debug(`[session-side-chat-detach] parent=${parentAgent}:${parentSessionId} child=${agent}:${sessionId}`);
+    return c.json(result);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }

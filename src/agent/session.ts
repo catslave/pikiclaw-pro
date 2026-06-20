@@ -988,13 +988,99 @@ export function recordSideChat(workdir: string, opts: {
   parent: { agent: Agent; sessionId: string };
   child: { agent: Agent; sessionId: string };
 }): boolean {
+  return attachSideChat(workdir, opts).ok;
+}
+
+type SideChatEndpoint = { agent: Agent; sessionId: string; title?: string | null };
+
+export type AttachSideChatRefusedReason = 'missing-session' | 'self-parent' | 'cycle';
+
+export interface AttachSideChatResult {
+  ok: boolean;
+  parent: SessionInfo | null;
+  child: SessionInfo | null;
+  refusedReason: AttachSideChatRefusedReason | null;
+  error?: string;
+}
+
+function targetKey(target: Pick<SideChatEndpoint, 'agent' | 'sessionId'>): string {
+  return `${target.agent}:${target.sessionId}`;
+}
+
+function wouldCreateSideChatCycle(
+  sessions: ManagedSessionRecord[],
+  parent: ManagedSessionRecord,
+  child: ManagedSessionRecord,
+): boolean {
+  const childKey = targetKey(child);
+  let cursor: ManagedSessionRecord | null = parent;
+  const seen = new Set<string>();
+  while (cursor?.sideChatOf) {
+    const cursorKey = targetKey(cursor);
+    if (seen.has(cursorKey)) return true;
+    seen.add(cursorKey);
+    if (cursorKey === childKey) return true;
+    const parentRef: SessionSideChatParentRef = cursor.sideChatOf;
+    cursor = sessions.find(entry => entry.agent === parentRef.agent && entry.sessionId === parentRef.sessionId) || null;
+  }
+  return cursor ? targetKey(cursor) === childKey : false;
+}
+
+export function attachSideChat(workdir: string, opts: {
+  parent: SideChatEndpoint;
+  child: SideChatEndpoint;
+}): AttachSideChatResult {
+  if (opts.parent.agent === opts.child.agent && opts.parent.sessionId === opts.child.sessionId) {
+    return { ok: false, parent: null, child: null, refusedReason: 'self-parent', error: 'A session cannot be nested into itself' };
+  }
+
   const resolvedWorkdir = path.resolve(workdir);
+  ensureManagedSession({
+    agent: opts.parent.agent,
+    workdir: resolvedWorkdir,
+    sessionId: opts.parent.sessionId,
+    title: opts.parent.title || undefined,
+  });
+  ensureManagedSession({
+    agent: opts.child.agent,
+    workdir: resolvedWorkdir,
+    sessionId: opts.child.sessionId,
+    title: opts.child.title || undefined,
+  });
+
   const index = loadSessionIndex(resolvedWorkdir);
   const parent = index.sessions.find(e => e.agent === opts.parent.agent && e.sessionId === opts.parent.sessionId);
   const child = index.sessions.find(e => e.agent === opts.child.agent && e.sessionId === opts.child.sessionId);
-  if (!parent || !child) return false;
+  if (!parent || !child) {
+    return {
+      ok: false,
+      parent: parent ? managedRecordToSessionInfo(parent) : null,
+      child: child ? managedRecordToSessionInfo(child) : null,
+      refusedReason: 'missing-session',
+      error: 'Parent or child session was not found',
+    };
+  }
+  if (wouldCreateSideChatCycle(index.sessions, parent, child)) {
+    return {
+      ok: false,
+      parent: managedRecordToSessionInfo(parent),
+      child: managedRecordToSessionInfo(child),
+      refusedReason: 'cycle',
+      error: 'Cannot nest a parent into one of its child sessions',
+    };
+  }
 
   const now = new Date().toISOString();
+  const previousParentRef = child.sideChatOf;
+  if (previousParentRef) {
+    const previousParent = index.sessions.find(e => e.agent === previousParentRef.agent && e.sessionId === previousParentRef.sessionId);
+    if (previousParent?.sideChats?.length) {
+      previousParent.sideChats = previousParent.sideChats.filter(ref => !(ref.agent === child.agent && ref.sessionId === child.sessionId));
+      previousParent.updatedAt = now;
+      writeSessionMeta(previousParent);
+    }
+  }
+
   child.sideChatOf = { agent: parent.agent, sessionId: parent.sessionId };
   upsertSideChatRef(parent, child, now);
   parent.updatedAt = now;
@@ -1003,7 +1089,66 @@ export function recordSideChat(workdir: string, opts: {
   writeSessionIndex(resolvedWorkdir, index.sessions);
   writeSessionMeta(parent);
   writeSessionMeta(child);
-  return true;
+  return {
+    ok: true,
+    parent: managedRecordToSessionInfo(parent),
+    child: managedRecordToSessionInfo(child),
+    refusedReason: null,
+  };
+}
+
+export interface DetachSideChatResult {
+  ok: boolean;
+  parent: SessionInfo | null;
+  child: SessionInfo | null;
+  sideChatRefRemoved: boolean;
+  error?: string;
+}
+
+export function detachSideChat(workdir: string, opts: {
+  parent?: Pick<SideChatEndpoint, 'agent' | 'sessionId'> | null;
+  child: Pick<SideChatEndpoint, 'agent' | 'sessionId'>;
+}): DetachSideChatResult {
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const child = index.sessions.find(e => e.agent === opts.child.agent && e.sessionId === opts.child.sessionId);
+  if (!child) {
+    return { ok: false, parent: null, child: null, sideChatRefRemoved: false, error: 'Child session was not found' };
+  }
+
+  const parentRef = opts.parent || child.sideChatOf || null;
+  const parent = parentRef
+    ? index.sessions.find(e => e.agent === parentRef.agent && e.sessionId === parentRef.sessionId) || null
+    : null;
+  const now = new Date().toISOString();
+  let sideChatRefRemoved = false;
+
+  if (parent?.sideChats?.length) {
+    const before = parent.sideChats.length;
+    parent.sideChats = parent.sideChats.filter(ref => !(ref.agent === child.agent && ref.sessionId === child.sessionId));
+    sideChatRefRemoved = parent.sideChats.length !== before;
+    if (sideChatRefRemoved) {
+      parent.updatedAt = now;
+      writeSessionMeta(parent);
+    }
+  }
+
+  if (
+    child.sideChatOf
+    && (!parentRef || (child.sideChatOf.agent === parentRef.agent && child.sideChatOf.sessionId === parentRef.sessionId))
+  ) {
+    child.sideChatOf = null;
+    child.updatedAt = now;
+    writeSessionMeta(child);
+  }
+
+  writeSessionIndex(resolvedWorkdir, index.sessions);
+  return {
+    ok: true,
+    parent: parent ? managedRecordToSessionInfo(parent) : null,
+    child: managedRecordToSessionInfo(child),
+    sideChatRefRemoved,
+  };
 }
 
 // ---------------------------------------------------------------------------

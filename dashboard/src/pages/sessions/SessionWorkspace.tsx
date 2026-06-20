@@ -45,6 +45,16 @@ import { ChatRecallRail } from './RecallIndex';
 import { formatFileSize, isImageFile } from './utils';
 import { TodoEvidenceSummary } from '../../work-items/TodoEvidenceSummary';
 import { todoToWorkItemDescription } from '../../work-items/todoWorkItemEvidence';
+import {
+  buildChatWorkspaceGroups,
+  canAttachChatWorkspaceSession,
+  chatWorkspacePaneGridClass,
+  chatWorkspaceSessionKey,
+  visibleChatWorkspaceChildren,
+  type ChatWorkspaceDropTarget,
+  type ChatWorkspaceGroup,
+  type ChatWorkspaceGroupChild,
+} from './chatWorkspaceGroups';
 
 // Kick off SessionPanel import the moment this module loads so the lazy boundary
 // resolves before the user can compose & send a new message. The previous
@@ -488,6 +498,20 @@ type ChatWorkspaceBetaItem = {
   workdir: string;
   workspaceName: string;
 };
+type ChatWorkspaceDragSession = {
+  workdir: string;
+  agent: string;
+  sessionId: string;
+  title: string;
+  parentAgent?: string;
+  parentSessionId?: string;
+};
+type ChatWorkspacePaneSlot = {
+  slot: SessionSlot;
+  info: SessionInfo;
+  role: 'parent' | 'child';
+  title: string;
+};
 type ChatWorkspaceProjectItem = {
   workspace: WorkspaceEntry;
   workspaceName: string;
@@ -875,6 +899,223 @@ function ChatWorkspaceWorkingItemCard({
   );
 }
 
+function ChatWorkspaceGroupCard({
+  group,
+  item,
+  selected,
+  open,
+  selectedChildKey,
+  draggingSession,
+  dropTargetKey,
+  onSelect,
+  onSelectChild,
+  onWarm,
+  onCancelWarm,
+  onShowMenu,
+  onCreateSchedule,
+  onDragSessionStart,
+  onDragSessionEnd,
+  onDragSessionOver,
+  onDragSessionLeave,
+  onDropSession,
+  onDetachChild,
+  t,
+}: {
+  group: ChatWorkspaceGroup;
+  item: ChatWorkspaceBetaItem;
+  selected: boolean;
+  open: boolean;
+  selectedChildKey: string | null;
+  draggingSession: ChatWorkspaceDragSession | null;
+  dropTargetKey: string | null;
+  onSelect: () => void;
+  onSelectChild: (child: ChatWorkspaceGroupChild) => void;
+  onWarm: () => void;
+  onCancelWarm: () => void;
+  onShowMenu: (anchor: DOMRect) => void;
+  onCreateSchedule: () => void;
+  onDragSessionStart: (session: ChatWorkspaceDragSession, event: ReactDragEvent<HTMLElement>) => void;
+  onDragSessionEnd: () => void;
+  onDragSessionOver: (target: ChatWorkspaceDropTarget, event: ReactDragEvent<HTMLElement>) => void;
+  onDragSessionLeave: (targetKey: string) => void;
+  onDropSession: (target: ChatWorkspaceDropTarget, event: ReactDragEvent<HTMLElement>) => void;
+  onDetachChild: (child: ChatWorkspaceGroupChild, focus: boolean) => void;
+  t: (key: string) => string;
+}) {
+  const session = item.session;
+  const title = sessionListDisplayText(session).slice(0, 160) || session.sessionId.slice(0, 16);
+  const detail = sessionListContextText(session, title).slice(0, 140);
+  const meta = getAgentMeta(session.agent || '');
+  const attentionVariant = sessionAttentionVariant(session);
+  const updatedAt = session.runUpdatedAt || session.createdAt || undefined;
+  const state = sessionDisplayState(session);
+  const parentTarget = { agent: session.agent || '', sessionId: session.sessionId, sideChatOf: session.sideChatOf ?? null };
+  const parentKey = chatWorkspaceSessionKey(parentTarget.agent, parentTarget.sessionId);
+  const canDrop = !!draggingSession && canAttachChatWorkspaceSession(parentTarget, draggingSession);
+  const dropActive = dropTargetKey === parentKey && canDrop;
+
+  return (
+    <div
+      className={cn(
+        'group/recent relative rounded-xl border transition-[background,border-color,transform,box-shadow] duration-150',
+        selected
+          ? 'border-primary/55 bg-primary/[0.08] text-fg shadow-[0_10px_24px_rgba(59,130,246,0.10)]'
+          : open
+            ? 'border-primary/24 bg-primary/[0.045] text-fg-2 hover:bg-primary/[0.065]'
+            : 'border-transparent bg-transparent text-fg-3 hover:translate-x-0.5 hover:border-edge/45 hover:bg-panel-h/52',
+        dropActive && 'translate-x-0 border-primary/55 bg-primary/[0.12] ring-2 ring-primary/20',
+      )}
+      draggable={!!session.agent && !!session.sessionId}
+      onDragStart={event => onDragSessionStart({
+        workdir: item.workdir,
+        agent: session.agent || '',
+        sessionId: session.sessionId,
+        title,
+      }, event)}
+      onDragEnd={onDragSessionEnd}
+      onDragOver={event => onDragSessionOver(parentTarget, event)}
+      onDragLeave={() => onDragSessionLeave(parentKey)}
+      onDrop={event => onDropSession(parentTarget, event)}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        onMouseEnter={onWarm}
+        onFocus={onWarm}
+        onMouseLeave={onCancelWarm}
+        onBlur={onCancelWarm}
+        className="flex w-full min-w-0 items-start gap-2 rounded-xl py-2 pl-2 pr-14 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+      >
+        <span className="relative mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border border-edge/45 bg-inset/80 shadow-sm">
+          <BrandIcon brand={session.agent || ''} size={13} />
+          {attentionVariant && (
+            <SessionAttentionDot kind={attentionVariant} compact className="absolute -right-0.5 -top-0.5 border-2 border-panel" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className={cn('min-w-0 flex-1 truncate text-[11.5px] font-semibold', (selected || open || state === 'running') && 'text-fg')}>
+              {title}
+            </span>
+            {group.children.length > 0 && (
+              <span className="shrink-0 rounded-md border border-primary/24 bg-primary/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-semibold text-primary">
+                {group.children.length + 1}
+              </span>
+            )}
+            {updatedAt && (
+              <span className="shrink-0 text-[9.5px] font-medium tabular-nums text-fg-5">
+                {fmtSidebarSessionTime(updatedAt)}
+              </span>
+            )}
+          </span>
+          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-fg-5">
+            <span className="min-w-0 truncate">{item.workspaceName}</span>
+            <span className="shrink-0">·</span>
+            <span className="shrink-0" style={{ color: meta.color }}>{meta.shortLabel}</span>
+          </span>
+          {detail && <span className="mt-1 block truncate text-[10px] text-fg-5/80">{detail}</span>}
+        </span>
+      </button>
+
+      {group.children.length > 0 && (
+        <div className="mx-2 mb-2 space-y-1 border-l border-primary/18 pl-2">
+          {group.children.map((child, index) => {
+            const childKey = chatWorkspaceSessionKey(child.agent, child.sessionId);
+            const childTitle = child.title || sideChatDisplayTitle(index, t('session.sideChat'));
+            const childActive = selectedChildKey === childKey;
+            return (
+              <div
+                key={childKey}
+                draggable
+                onDragStart={event => onDragSessionStart({
+                  workdir: item.workdir,
+                  agent: child.agent,
+                  sessionId: child.sessionId,
+                  title: childTitle,
+                  parentAgent: session.agent || '',
+                  parentSessionId: session.sessionId,
+                }, event)}
+                onDragEnd={onDragSessionEnd}
+                className={cn(
+                  'group/child flex h-8 min-w-0 items-center gap-1.5 rounded-lg border px-1.5 transition-[background,border-color]',
+                  childActive
+                    ? 'border-primary/35 bg-primary/[0.10] text-fg'
+                    : 'border-edge/35 bg-panel/35 text-fg-4 hover:border-edge/60 hover:bg-panel-h/55 hover:text-fg-2',
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={event => {
+                    event.stopPropagation();
+                    onSelectChild(child);
+                  }}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  title={childTitle}
+                >
+                  <BrandIcon brand={child.agent || ''} size={11} />
+                  <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{childTitle}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={event => {
+                    event.stopPropagation();
+                    onDetachChild(child, true);
+                  }}
+                  className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-5 opacity-0 transition-[opacity,background,color] hover:bg-panel-h hover:text-fg group-hover/child:opacity-100 focus-visible:opacity-100"
+                  title={t('chatWorkspace.detachChat')}
+                  aria-label={t('chatWorkspace.detachChat')}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M14 3h7v7" />
+                    <path d="M21 3 10 14" />
+                    <path d="M5 7v12h12" />
+                  </svg>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {dropActive && (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-xl bg-primary/[0.08] text-[11px] font-semibold text-primary backdrop-blur-[1px]">
+          {t('chatWorkspace.dropToNest')}
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={event => {
+          event.stopPropagation();
+          onCreateSchedule();
+        }}
+        onMouseDown={event => event.stopPropagation()}
+        className="absolute right-8 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-fg-5 opacity-0 transition-[background,color,opacity] hover:bg-primary/[0.10] hover:text-primary group-hover/recent:opacity-100 focus-visible:opacity-100"
+        title={t('session.createSchedule')}
+        aria-label={t('session.createSchedule')}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        onClick={event => {
+          event.stopPropagation();
+          onShowMenu(event.currentTarget.getBoundingClientRect());
+        }}
+        onMouseDown={event => event.stopPropagation()}
+        className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md text-[13px] font-semibold leading-none text-fg-5 opacity-0 transition-[background,color,opacity] hover:bg-panel-h hover:text-fg group-hover/recent:opacity-100 focus-visible:opacity-100"
+        title={t('session.openActions')}
+        aria-label={t('session.openActions')}
+      >
+        ...
+      </button>
+    </div>
+  );
+}
+
 function ChatWorkspaceProjectCard({
   item,
   active,
@@ -1081,37 +1322,62 @@ function ChatWorkspaceProjectRail({
 
 function ChatWorkspaceHistoryRail({
   activeWorkspace,
-  historyItems,
+  historyGroups,
   openItems,
   selectedKey,
+  selectedChildKey,
   selectedWorkdir,
   openSessionKeys,
+  draggingSession,
+  dropTargetKey,
+  rootDropActive,
   onSelectSession,
+  onSelectChildSession,
   onSelectOpenSlot,
   onWarmSession,
   onCancelWarmSession,
   onSessionMenuOpen,
   onCreateSchedule,
   onNewChat,
+  onDragSessionStart,
+  onDragSessionEnd,
+  onDragSessionOver,
+  onDragSessionLeave,
+  onDropSession,
+  onDropSessionToRoot,
+  onDetachChildSession,
   t,
 }: {
   activeWorkspace: WorkspaceEntry | null;
-  historyItems: ChatWorkspaceBetaItem[];
+  historyGroups: Array<{ group: ChatWorkspaceGroup; item: ChatWorkspaceBetaItem }>;
   openItems: Array<{ slot: SessionSlot; slotIdx: number; item: ChatWorkspaceBetaItem; live: LiveSessionState | null }>;
   selectedKey: string | null;
+  selectedChildKey: string | null;
   selectedWorkdir: string | null;
   openSessionKeys: Set<string>;
+  draggingSession: ChatWorkspaceDragSession | null;
+  dropTargetKey: string | null;
+  rootDropActive: boolean;
   onSelectSession: (session: SessionInfo, workdir: string) => void;
+  onSelectChildSession: (parent: SessionInfo, child: ChatWorkspaceGroupChild, workdir: string) => void;
   onSelectOpenSlot: (slotIdx: number, item: ChatWorkspaceBetaItem) => void;
   onWarmSession: (session: SessionInfo, workdir: string) => void;
   onCancelWarmSession: (session: SessionInfo, workdir: string) => void;
   onSessionMenuOpen: (anchor: DOMRect, session: SessionInfo, workdir: string) => void;
   onCreateSchedule: (session: SessionInfo, workdir: string) => void;
   onNewChat: (workdir: string) => void;
+  onDragSessionStart: (session: ChatWorkspaceDragSession, event: ReactDragEvent<HTMLElement>) => void;
+  onDragSessionEnd: () => void;
+  onDragSessionOver: (target: ChatWorkspaceDropTarget, event: ReactDragEvent<HTMLElement>) => void;
+  onDragSessionLeave: (targetKey: string) => void;
+  onDropSession: (target: ChatWorkspaceDropTarget, event: ReactDragEvent<HTMLElement>) => void;
+  onDropSessionToRoot: (event: ReactDragEvent<HTMLElement>) => void;
+  onDetachChildSession: (parent: SessionInfo, child: ChatWorkspaceGroupChild, workdir: string, focus: boolean) => void;
   t: (key: string) => string;
 }) {
   const workspaceName = activeWorkspace?.name || (activeWorkspace?.path ? workspaceBaseName(activeWorkspace.path) : t('hub.workspace'));
   const activePath = activeWorkspace?.path || '';
+  const historyCount = historyGroups.length;
 
   return (
     <aside className="flex max-h-[320px] min-h-0 shrink-0 flex-col overflow-hidden rounded-[18px] border border-edge/65 bg-panel/72 shadow-sm backdrop-blur-md xl:max-h-none xl:w-[336px]">
@@ -1121,7 +1387,7 @@ function ChatWorkspaceHistoryRail({
             <div className="flex min-w-0 items-center gap-2">
               <span className="truncate text-[12px] font-semibold text-fg">{workspaceName}</span>
               <span className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 font-mono text-[9px] font-semibold text-fg-5">
-                {historyItems.length}
+                {historyCount}
               </span>
             </div>
             <div className="mt-0.5 truncate text-[10px] text-fg-5" title={activePath}>
@@ -1170,23 +1436,51 @@ function ChatWorkspaceHistoryRail({
         <section>
           <div className="mb-2 flex items-center justify-between px-1">
             <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{t('chatWorkspace.recentConversations')}</div>
-            <span className="font-mono text-[10px] text-fg-5">{historyItems.length}</span>
+            <span className="font-mono text-[10px] text-fg-5">{historyCount}</span>
           </div>
-          {historyItems.length ? (
+          {draggingSession?.parentAgent && (
+            <div
+              className={cn(
+                'mb-2 rounded-lg border border-dashed px-3 py-2 text-center text-[11px] font-semibold transition-[background,border-color,color]',
+                rootDropActive
+                  ? 'border-primary/45 bg-primary/[0.10] text-primary'
+                  : 'border-edge/55 bg-inset/35 text-fg-5',
+              )}
+              onDragOver={event => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+              }}
+              onDrop={onDropSessionToRoot}
+            >
+              {t('chatWorkspace.dropToRoot')}
+            </div>
+          )}
+          {historyGroups.length ? (
             <div className="space-y-1">
-              {historyItems.map(item => {
+              {historyGroups.map(({ group, item }) => {
                 const itemKey = sKey(item.session.agent || '', item.session.sessionId);
                 return (
-                  <RecentConversationCard
+                  <ChatWorkspaceGroupCard
                     key={`${item.key}:project-history`}
+                    group={group}
                     item={item}
                     selected={selectedWorkdir === item.workdir && selectedKey === itemKey}
+                    selectedChildKey={selectedChildKey}
                     open={openSessionKeys.has(itemKey)}
                     onSelect={() => onSelectSession(item.session, item.workdir)}
+                    onSelectChild={child => onSelectChildSession(item.session, child, item.workdir)}
                     onWarm={() => onWarmSession(item.session, item.workdir)}
                     onCancelWarm={() => onCancelWarmSession(item.session, item.workdir)}
                     onShowMenu={anchor => onSessionMenuOpen(anchor, item.session, item.workdir)}
                     onCreateSchedule={() => onCreateSchedule(item.session, item.workdir)}
+                    draggingSession={draggingSession}
+                    dropTargetKey={dropTargetKey}
+                    onDragSessionStart={onDragSessionStart}
+                    onDragSessionEnd={onDragSessionEnd}
+                    onDragSessionOver={onDragSessionOver}
+                    onDragSessionLeave={onDragSessionLeave}
+                    onDropSession={onDropSession}
+                    onDetachChild={child => onDetachChildSession(item.session, child, item.workdir, true)}
                     t={t}
                   />
                 );
@@ -3535,6 +3829,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [chatTargetAssistantRequest, setChatTargetAssistantRequest] = useState<ChatTargetAssistantRequest | null>(null);
   const [chatLauncherWorkdir, setChatLauncherWorkdir] = useState<string | null>(null);
   const [chatWorkspaceFocusedSessionKey, setChatWorkspaceFocusedSessionKey] = useState<string | null>(null);
+  const [chatWorkspaceDraggingSession, setChatWorkspaceDraggingSession] = useState<ChatWorkspaceDragSession | null>(null);
+  const [chatWorkspaceDropTargetKey, setChatWorkspaceDropTargetKey] = useState<string | null>(null);
   const previousInboxAlertCountRef = useRef(-1);
   const previousRunningInboxKeysRef = useRef<Set<string>>(new Set());
   const openAssistantLibrary = useCallback((assistantId?: string) => {
@@ -7633,21 +7929,67 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       };
     });
   }, [chatWorkspaceOpenWindowItems, filteredByWs, liveSessionStates, workspaces]);
-  const chatWorkspaceHistoryItems = useMemo<ChatWorkspaceBetaItem[]>(() => {
+  const chatWorkspaceHistoryGroups = useMemo<Array<{ group: ChatWorkspaceGroup; item: ChatWorkspaceBetaItem }>>(() => {
     if (!chatWorkspaceActiveWorkdir) return [];
     const workspaceName = chatWorkspaceActiveWorkspace?.name || workspaceBaseName(chatWorkspaceActiveWorkdir);
-    return (filteredByWs[chatWorkspaceActiveWorkdir] || [])
-      .filter(session => !!session.agent && !!session.sessionId)
-      .map(session => ({
-        key: `${chatWorkspaceActiveWorkdir}:${sKey(session.agent || '', session.sessionId)}`,
-        session,
-        workdir: chatWorkspaceActiveWorkdir,
-        workspaceName,
+    return buildChatWorkspaceGroups(filteredByWs[chatWorkspaceActiveWorkdir] || [])
+      .filter(group => !!group.parent.agent && !!group.parent.sessionId)
+      .map(group => ({
+        group,
+        item: {
+          key: `${chatWorkspaceActiveWorkdir}:${sKey(group.parent.agent || '', group.parent.sessionId)}`,
+          session: group.parent,
+          workdir: chatWorkspaceActiveWorkdir,
+          workspaceName,
+        },
       }));
   }, [chatWorkspaceActiveWorkdir, chatWorkspaceActiveWorkspace?.name, filteredByWs]);
   const chatWorkspaceProjectOpenWindowItems = chatWorkspaceOpenWindowItems.filter(entry => entry.item.workdir === chatWorkspaceActiveWorkdir);
   const chatWorkspaceSelectedKey = chatWorkspaceFocusSlot ? sKey(chatWorkspaceFocusSlot.agent, chatWorkspaceFocusSlot.sessionId) : null;
   const chatWorkspaceSelectedWorkdir = chatWorkspaceFocusSlot?.workdir || null;
+  const chatWorkspaceFocusParentKey = chatWorkspaceFocusSlot ? sessionSlotStorageKey(chatWorkspaceFocusSlot) : null;
+  const chatWorkspaceSelectedChildKey = chatWorkspaceFocusParentKey ? activeSideChatByParent[chatWorkspaceFocusParentKey] || null : null;
+  const chatWorkspaceFocusSlotIndex = chatWorkspaceFocusSlot
+    ? openSessions.findIndex(slot => sessionSlotStorageKey(slot) === sessionSlotStorageKey(chatWorkspaceFocusSlot))
+    : -1;
+  const chatWorkspacePaneSlots = useMemo<ChatWorkspacePaneSlot[]>(() => {
+    if (!chatWorkspaceFocusSlot || !chatWorkspaceFocusInfo) return [];
+    const parentKey = sessionSlotStorageKey(chatWorkspaceFocusSlot);
+    const parentTitle = sessionListDisplayText(chatWorkspaceFocusInfo).slice(0, 160) || chatWorkspaceFocusSlot.sessionId.slice(0, 16);
+    const mergedRefs = mergeSideChatRefs(chatWorkspaceFocusInfo.sideChats, sideChatRefsByParent[parentKey]);
+    const visibleRefs = visibleChatWorkspaceChildren({ ...chatWorkspaceFocusInfo, sideChats: mergedRefs });
+    const refKeys = new Set(visibleRefs.map(ref => chatWorkspaceSessionKey(ref.agent, ref.sessionId)));
+    const openSideSlots = dedupeSideChatSlots(openSideChatsByParent[parentKey] || [])
+      .filter(sideSlot => refKeys.has(sideChatSlotKey(sideSlot)));
+    const refSlots: SessionSlot[] = visibleRefs.map(ref => {
+      const existing = openSideSlots.find(slot => slot.agent === ref.agent && slot.sessionId === ref.sessionId);
+      return existing || {
+        workdir: chatWorkspaceFocusSlot.workdir,
+        agent: ref.agent || chatWorkspaceFocusSlot.agent,
+        sessionId: ref.sessionId,
+        mountKey: `side-ref:${parentKey}:${ref.agent}:${ref.sessionId}`,
+      };
+    });
+    const sideSlots = dedupeSideChatSlots([...openSideSlots, ...refSlots]).slice(0, 5);
+    return [
+      {
+        slot: chatWorkspaceFocusSlot,
+        info: chatWorkspaceFocusInfo,
+        role: 'parent' as const,
+        title: parentTitle,
+      },
+      ...sideSlots.map((sideSlot, index) => {
+        const info = resolveSideSlotInfo(chatWorkspaceFocusInfo, sideSlot);
+        const ref = visibleRefs.find(item => item.agent === sideSlot.agent && item.sessionId === sideSlot.sessionId);
+        return {
+          slot: sideSlot,
+          info,
+          role: 'child' as const,
+          title: ref?.title || sessionListDisplayText(info).slice(0, 120) || sideChatDisplayTitle(index, t('session.sideChat')),
+        };
+      }),
+    ];
+  }, [chatWorkspaceFocusInfo, chatWorkspaceFocusSlot, openSideChatsByParent, resolveSideSlotInfo, sideChatRefsByParent, t]);
   const chatWorkspaceNewSessionWorkdir = chatWorkspaceActiveWorkdir;
   const handleChatWorkspaceProjectSelect = useCallback((workdir: string) => {
     setChatLauncherWorkdir(workdir);
@@ -7671,6 +8013,273 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     setShowNewSession(null);
     setActiveSlotIndex(slotIdx);
   }, [markSessionReadOnOpen, setActiveSlotIndex, setShowNewSession, warmSession]);
+
+  const handleChatWorkspaceDragStart = useCallback((session: ChatWorkspaceDragSession, event: ReactDragEvent<HTMLElement>) => {
+    if (!session.agent || !session.sessionId || !session.workdir) return;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-pikiclaw-session', JSON.stringify(session));
+    event.dataTransfer.setData('text/plain', `${session.agent}:${session.sessionId}`);
+    setChatWorkspaceDraggingSession(session);
+  }, []);
+
+  const clearChatWorkspaceDrag = useCallback(() => {
+    setChatWorkspaceDraggingSession(null);
+    setChatWorkspaceDropTargetKey(null);
+  }, []);
+
+  const handleChatWorkspaceDragOver = useCallback((target: ChatWorkspaceDropTarget, event: ReactDragEvent<HTMLElement>) => {
+    const drag = chatWorkspaceDraggingSession;
+    if (!drag || !canAttachChatWorkspaceSession(target, drag)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    setChatWorkspaceDropTargetKey(chatWorkspaceSessionKey(target.agent, target.sessionId));
+  }, [chatWorkspaceDraggingSession]);
+
+  const handleChatWorkspaceDragLeave = useCallback((targetKey: string) => {
+    setChatWorkspaceDropTargetKey(prev => (prev === targetKey ? null : prev));
+  }, []);
+
+  const syncAttachedSideChatState = useCallback((
+    workdir: string,
+    parent: SessionInfo,
+    child: SessionInfo,
+    previousParent?: Pick<ChatWorkspaceDragSession, 'parentAgent' | 'parentSessionId'> | null,
+  ) => {
+    const parentKey = sessionSlotStorageKey({ workdir, agent: parent.agent || '', sessionId: parent.sessionId });
+    const childSlot: SessionSlot = {
+      workdir,
+      agent: child.agent || parent.agent || '',
+      sessionId: child.sessionId,
+      mountKey: nextMountKey(),
+    };
+    const childKey = sideChatSlotKey(childSlot);
+    setSessionsMap(prev => {
+      const list = prev[workdir] || [];
+      const filtered = list.filter(session => !(session.agent === child.agent && session.sessionId === child.sessionId));
+      let parentFound = false;
+      const nextList = filtered.map(session => {
+        if (session.agent === parent.agent && session.sessionId === parent.sessionId) {
+          parentFound = true;
+          return { ...session, ...parent };
+        }
+        if (
+          previousParent?.parentAgent
+          && previousParent.parentSessionId
+          && session.agent === previousParent.parentAgent
+          && session.sessionId === previousParent.parentSessionId
+        ) {
+          return {
+            ...session,
+            sideChats: (session.sideChats || []).filter(ref => !(ref.agent === child.agent && ref.sessionId === child.sessionId)),
+          };
+        }
+        return session;
+      });
+      if (!parentFound) nextList.unshift(parent);
+      return { ...prev, [workdir]: nextList };
+    });
+    setSideChatInfoMap(prev => ({ ...prev, [sessionSlotStorageKey(childSlot)]: child }));
+    setSideChatRefsByParent(prev => {
+      const next = { ...prev, [parentKey]: mergeSideChatRefs(prev[parentKey], parent.sideChats) };
+      if (previousParent?.parentAgent && previousParent.parentSessionId) {
+        const oldParentKey = sessionSlotStorageKey({ workdir, agent: previousParent.parentAgent, sessionId: previousParent.parentSessionId });
+        if (oldParentKey !== parentKey && next[oldParentKey]) {
+          next[oldParentKey] = next[oldParentKey].filter(ref => !(ref.agent === child.agent && ref.sessionId === child.sessionId));
+        }
+      }
+      return next;
+    });
+    setOpenSideChatsByParent(prev => {
+      const next: OpenSideChatsMap = { ...prev };
+      if (previousParent?.parentAgent && previousParent.parentSessionId) {
+        const oldParentKey = sessionSlotStorageKey({ workdir, agent: previousParent.parentAgent, sessionId: previousParent.parentSessionId });
+        if (oldParentKey !== parentKey && next[oldParentKey]) {
+          next[oldParentKey] = next[oldParentKey].filter(slot => !sameSideChatIdentity(slot, childSlot));
+        }
+      }
+      next[parentKey] = dedupeSideChatSlots([...(next[parentKey] || []), childSlot]);
+      return next;
+    });
+    setActiveSideChatByParent(prev => ({ ...prev, [parentKey]: childKey }));
+    setOpenSessions(prev => {
+      const withoutChild = prev.filter(slot => !(slot.workdir === workdir && slot.agent === child.agent && slot.sessionId === child.sessionId));
+      const existingParentIdx = withoutChild.findIndex(slot => slot.workdir === workdir && slot.agent === parent.agent && slot.sessionId === parent.sessionId);
+      if (existingParentIdx >= 0) {
+        setActiveSlotIndex(existingParentIdx);
+        return withoutChild;
+      }
+      const parentSlot: SessionSlot = {
+        workdir,
+        agent: parent.agent || '',
+        sessionId: parent.sessionId,
+        mountKey: nextMountKey(),
+      };
+      const next = [...withoutChild, parentSlot];
+      setActiveSlotIndex(next.length - 1);
+      return next;
+    });
+    setChatLauncherWorkdir(workdir);
+    setChatWorkspaceFocusedSessionKey(parentKey);
+    warmSession(parent, workdir);
+    warmSession(child, workdir);
+  }, [setActiveSideChatByParent, setActiveSlotIndex, setOpenSessions, setOpenSideChatsByParent, warmSession]);
+
+  const handleChatWorkspaceDropSession = useCallback((target: ChatWorkspaceDropTarget, event: ReactDragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = chatWorkspaceDraggingSession;
+    if (!source || !canAttachChatWorkspaceSession(target, source)) {
+      clearChatWorkspaceDrag();
+      return;
+    }
+    const parentSession = (sessionsMap[source.workdir] || []).find(session => session.agent === target.agent && session.sessionId === target.sessionId)
+      || (target.agent && target.sessionId ? { agent: target.agent, sessionId: target.sessionId, runState: 'completed' as const } : null);
+    void api.attachSideChat(
+      source.workdir,
+      target.agent,
+      target.sessionId,
+      source.agent,
+      source.sessionId,
+      source.title,
+      parentSession ? sessionListDisplayText(parentSession).slice(0, 160) : null,
+    ).then(res => {
+      if (!res.ok || !res.parent || !res.child) throw new Error(res.error || t('session.sideChatFailed'));
+      syncAttachedSideChatState(source.workdir, res.parent, res.child, source);
+      void loadSessionsForWorkspace(source.workdir, { background: true, force: true });
+    }).catch((err: any) => {
+      toastSession(err?.message || t('session.sideChatFailed'), false);
+    }).finally(clearChatWorkspaceDrag);
+  }, [chatWorkspaceDraggingSession, clearChatWorkspaceDrag, loadSessionsForWorkspace, sessionsMap, syncAttachedSideChatState, t, toastSession]);
+
+  const syncDetachedSideChatState = useCallback((
+    workdir: string,
+    child: SessionInfo,
+    parent?: SessionInfo | null,
+    focus = false,
+  ) => {
+    const parentKey = parent?.agent && parent.sessionId
+      ? sessionSlotStorageKey({ workdir, agent: parent.agent, sessionId: parent.sessionId })
+      : null;
+    const childSlot: SessionSlot = {
+      workdir,
+      agent: child.agent || '',
+      sessionId: child.sessionId,
+      mountKey: nextMountKey(),
+    };
+    setSessionsMap(prev => {
+      const list = prev[workdir] || [];
+      const withoutChild = list.filter(session => !(session.agent === child.agent && session.sessionId === child.sessionId));
+      const mapped = withoutChild.map(session => (
+        parent && session.agent === parent.agent && session.sessionId === parent.sessionId
+          ? { ...session, ...parent }
+          : session
+      ));
+      return { ...prev, [workdir]: [{ ...child, sideChatOf: null }, ...mapped] };
+    });
+    if (parentKey) {
+      setSideChatRefsByParent(prev => ({
+        ...prev,
+        [parentKey]: (prev[parentKey] || []).filter(ref => !(ref.agent === child.agent && ref.sessionId === child.sessionId)),
+      }));
+      setOpenSideChatsByParent(prev => ({
+        ...prev,
+        [parentKey]: (prev[parentKey] || []).filter(slot => !(slot.agent === child.agent && slot.sessionId === child.sessionId)),
+      }));
+      setActiveSideChatByParent(prev => {
+        if (prev[parentKey] !== sideChatSlotKey(childSlot)) return prev;
+        const next = { ...prev };
+        delete next[parentKey];
+        return next;
+      });
+    }
+    setSideChatInfoMap(prev => {
+      const next = { ...prev };
+      delete next[sessionSlotStorageKey(childSlot)];
+      return next;
+    });
+    if (focus) {
+      setShowNewSession(null);
+      setOpenSessions(prev => {
+        const existingIdx = prev.findIndex(slot => slot.workdir === workdir && slot.agent === childSlot.agent && slot.sessionId === childSlot.sessionId);
+        if (existingIdx >= 0) {
+          setActiveSlotIndex(existingIdx);
+          return prev;
+        }
+        const next = [...prev, childSlot];
+        setActiveSlotIndex(next.length - 1);
+        return next;
+      });
+      setChatLauncherWorkdir(workdir);
+      setChatWorkspaceFocusedSessionKey(sessionSlotStorageKey(childSlot));
+      warmSession(child, workdir);
+    }
+  }, [setActiveSideChatByParent, setActiveSlotIndex, setOpenSessions, setOpenSideChatsByParent, setShowNewSession, warmSession]);
+
+  const detachChatWorkspaceChild = useCallback((
+    workdir: string,
+    parent: Pick<SessionInfo, 'agent' | 'sessionId'> | null,
+    child: Pick<SessionInfo, 'agent' | 'sessionId'>,
+    focus = false,
+  ) => {
+    if (!child.agent || !child.sessionId) return;
+    void api.detachSideChat(
+      workdir,
+      parent?.agent || null,
+      parent?.sessionId || null,
+      child.agent,
+      child.sessionId,
+    ).then(res => {
+      if (!res.ok || !res.child) throw new Error(res.error || t('session.sideChatFailed'));
+      syncDetachedSideChatState(workdir, res.child, res.parent || null, focus);
+      void loadSessionsForWorkspace(workdir, { background: true, force: true });
+    }).catch((err: any) => {
+      toastSession(err?.message || t('session.sideChatFailed'), false);
+    });
+  }, [loadSessionsForWorkspace, syncDetachedSideChatState, t, toastSession]);
+
+  const handleChatWorkspaceDropSessionToRoot = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = chatWorkspaceDraggingSession;
+    if (source?.parentAgent && source.parentSessionId) {
+      detachChatWorkspaceChild(
+        source.workdir,
+        { agent: source.parentAgent, sessionId: source.parentSessionId },
+        { agent: source.agent, sessionId: source.sessionId },
+        true,
+      );
+    }
+    clearChatWorkspaceDrag();
+  }, [chatWorkspaceDraggingSession, clearChatWorkspaceDrag, detachChatWorkspaceChild]);
+
+  const handleChatWorkspaceChildSelect = useCallback((parent: SessionInfo, child: ChatWorkspaceGroupChild, workdir: string) => {
+    const parentAgent = parent.agent || '';
+    if (!parentAgent || !parent.sessionId || !child.agent || !child.sessionId) return;
+    const parentSlot: SessionSlot = { workdir, agent: parentAgent, sessionId: parent.sessionId, mountKey: nextMountKey() };
+    const childSlot: SessionSlot = { workdir, agent: child.agent, sessionId: child.sessionId, mountKey: nextMountKey() };
+    const parentKey = sessionSlotStorageKey(parentSlot);
+    const childInfo: SessionInfo = {
+      sessionId: child.sessionId,
+      agent: child.agent,
+      title: child.title || undefined,
+      createdAt: child.createdAt,
+      runUpdatedAt: child.updatedAt,
+      runState: 'completed',
+      userStatus: child.userStatus ?? null,
+    };
+    setChatLauncherWorkdir(workdir);
+    setChatWorkspaceFocusedSessionKey(parentKey);
+    setSelectedSession(parentSlot);
+    setOpenSideChatsByParent(prev => ({
+      ...prev,
+      [parentKey]: dedupeSideChatSlots([...(prev[parentKey] || []), childSlot]),
+    }));
+    setActiveSideChatByParent(prev => ({ ...prev, [parentKey]: sideChatSlotKey(childSlot) }));
+    setSideChatInfoMap(prev => ({ ...prev, [sessionSlotStorageKey(childSlot)]: childInfo }));
+    warmSession(parent, workdir);
+    warmSession(childInfo, workdir);
+    markSessionReadOnOpen(childInfo, workdir);
+  }, [markSessionReadOnOpen, setActiveSideChatByParent, setOpenSideChatsByParent, setSelectedSession, warmSession]);
 
   if (false && mode === 'chat-workspace') {
     const betaItems: ChatWorkspaceBetaItem[] = [];
@@ -8197,42 +8806,194 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     'min-h-0 flex-1 overflow-hidden border border-[color:var(--th-chat-window-border-active)] bg-[var(--th-chat-window-bg)] shadow-[var(--th-chat-window-shadow-focus)] ring-1 ring-[color:var(--th-chat-window-ring)]',
                     chatWorkspaceSearchFocus ? 'rounded-none md:rounded-[18px]' : 'rounded-[18px]',
                   )}>
-                    {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo ? (() => {
+                    {chatWorkspaceFocusSlot && chatWorkspaceFocusInfo && chatWorkspacePaneSlots.length ? (() => {
                       const projectReference = resolveProjectReferenceForSession(chatWorkspaceFocusSlot, chatWorkspaceFocusInfo);
+                      const parentKey = sessionSlotStorageKey(chatWorkspaceFocusSlot);
+                      const parentSlotIndex = chatWorkspaceFocusSlotIndex >= 0 ? chatWorkspaceFocusSlotIndex : activeSlotIndex;
+                      const activeChildKey = activeSideChatByParent[parentKey] || null;
                       return (
-                        <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
-                          <SessionPanel
-                            key={chatWorkspaceFocusSlot.mountKey}
-                            session={chatWorkspaceFocusInfo}
-                            workdir={chatWorkspaceFocusSlot.workdir}
-                            active={active && !inboxOpen}
-                            readOnly={chatWorkspaceFocusSlot.archiveOnly === true}
-                            searchContext={searchContextForSlot(chatWorkspaceFocusSlot)}
-                            onSearchContextClear={() => clearSearchContextForSlot(chatWorkspaceFocusSlot)}
-                            referenceContextPrompt={projectReference?.prompt || null}
-                            referenceContextLabel={projectReference?.label || null}
-                            referenceContextProject={projectReference?.project || null}
-                            onReferenceContextClear={projectReference ? () => {
-                              markProjectContextAppliedLocal(
-                                chatWorkspaceFocusSlot.workdir,
-                                chatWorkspaceFocusSlot.agent,
-                                chatWorkspaceFocusSlot.sessionId,
-                                projectReference.project,
+                        <div className="flex h-full min-h-0 flex-col overflow-hidden">
+                          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg)] px-3">
+                            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
+                              <BrandIcon brand={chatWorkspaceFocusSlot.agent || ''} size={15} />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className="min-w-0 truncate text-[12.5px] font-semibold text-fg">{chatWorkspacePaneSlots[0]?.title}</span>
+                                <span className="shrink-0 rounded-md border border-primary/24 bg-primary/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-semibold text-primary">
+                                  {chatWorkspacePaneSlots.length}
+                                </span>
+                              </div>
+                              <div className="mt-0.5 truncate text-[10px] text-fg-5">{chatWorkspaceFocusWorkspaceName}</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { void createAndOpenSideChat(parentSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, { promote: false, openPanel: false, activate: true }); }}
+                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-edge/60 bg-panel/75 text-fg-4 transition-colors hover:border-primary/35 hover:bg-primary/[0.10] hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-selection-ring)]"
+                              title={t('session.newSideChat')}
+                              aria-label={t('session.newSideChat')}
+                            >
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                                <path d="M12 5v14" />
+                                <path d="M5 12h14" />
+                              </svg>
+                            </button>
+                          </div>
+                          <div className={cn(
+                            'grid min-h-0 flex-1 gap-2 overflow-y-auto p-2',
+                            chatWorkspacePaneGridClass(chatWorkspacePaneSlots.length),
+                          )}>
+                            {chatWorkspacePaneSlots.map((pane, paneIndex) => {
+                              const paneSlot = pane.slot;
+                              const paneIsChild = pane.role === 'child';
+                              const paneKey = paneIsChild ? sideChatSlotKey(paneSlot) : 'parent';
+                              const paneActive = paneIsChild ? activeChildKey === paneKey : !activeChildKey;
+                              const paneState = sessionDisplayState(pane.info);
+                              const paneAttention = paneState === 'running'
+                                ? 'running'
+                                : paneState === 'incomplete'
+                                  ? 'warn'
+                                  : shouldMarkSessionReadOnOpen(pane.info)
+                                    ? 'unread'
+                                    : null;
+                              return (
+                                <div
+                                  data-chat-workspace-pane={pane.role}
+                                  key={paneIsChild ? paneSlot.mountKey || sessionSlotStorageKey(paneSlot) : chatWorkspaceFocusSlot.mountKey}
+                                  className={cn(
+                                    'flex min-h-[360px] min-w-0 flex-col overflow-hidden rounded-xl border bg-[var(--th-session-bg)] transition-[border-color,box-shadow,transform]',
+                                    paneActive
+                                      ? 'border-[color:var(--th-chat-window-border-active)] shadow-[0_12px_34px_rgba(59,130,246,0.11)] ring-1 ring-[color:var(--th-chat-window-ring)]'
+                                      : 'border-[color:var(--th-chat-window-border)] hover:border-[color:var(--th-chat-window-border-active)]',
+                                  )}
+                                  onClick={() => {
+                                    if (paneIsChild) {
+                                      setActiveSideChatByParent(prev => ({ ...prev, [parentKey]: sideChatSlotKey(paneSlot) }));
+                                      markSessionReadOnOpen(pane.info, paneSlot.workdir);
+                                    } else {
+                                      setActiveSideChatByParent(prev => {
+                                        if (!prev[parentKey]) return prev;
+                                        const next = { ...prev };
+                                        delete next[parentKey];
+                                        return next;
+                                      });
+                                      markSessionReadOnOpen(chatWorkspaceFocusInfo, chatWorkspaceFocusSlot.workdir);
+                                    }
+                                  }}
+                                >
+                                  <div
+                                    draggable={paneIsChild}
+                                    onDragStart={paneIsChild ? event => handleChatWorkspaceDragStart({
+                                      workdir: paneSlot.workdir,
+                                      agent: paneSlot.agent,
+                                      sessionId: paneSlot.sessionId,
+                                      title: pane.title,
+                                      parentAgent: chatWorkspaceFocusSlot.agent,
+                                      parentSessionId: chatWorkspaceFocusSlot.sessionId,
+                                    }, event) : undefined}
+                                    onDragEnd={paneIsChild ? clearChatWorkspaceDrag : undefined}
+                                    className={cn(
+                                      'flex h-9 shrink-0 items-center gap-2 border-b border-[color:var(--th-chat-header-border)] bg-[var(--th-chat-header-bg)] px-2.5',
+                                      paneIsChild && 'cursor-grab select-none active:cursor-grabbing',
+                                    )}
+                                  >
+                                    <span className="relative grid h-6 w-6 shrink-0 place-items-center rounded-full border border-edge/55 bg-inset shadow-sm">
+                                      <BrandIcon brand={paneSlot.agent || ''} size={13} />
+                                      {paneAttention && <SessionAttentionDot kind={paneAttention} compact className="absolute -right-0.5 -top-0.5 border-2 border-panel" />}
+                                    </span>
+                                    <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-fg-2" title={pane.title}>
+                                      {pane.title}
+                                    </span>
+                                    <span className="shrink-0 rounded-md border border-edge/45 bg-inset px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-5">
+                                      {paneIsChild ? t('session.sideChat') : t('chatWorkspace.parentChat')}
+                                    </span>
+                                    {paneIsChild && (
+                                      <button
+                                        type="button"
+                                        onClick={event => {
+                                          event.stopPropagation();
+                                          detachChatWorkspaceChild(
+                                            paneSlot.workdir,
+                                            { agent: chatWorkspaceFocusSlot.agent, sessionId: chatWorkspaceFocusSlot.sessionId },
+                                            { agent: paneSlot.agent, sessionId: paneSlot.sessionId },
+                                            true,
+                                          );
+                                        }}
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-5 transition-colors hover:bg-panel-h hover:text-fg"
+                                        title={t('chatWorkspace.detachChat')}
+                                        aria-label={t('chatWorkspace.detachChat')}
+                                      >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                          <path d="M14 3h7v7" />
+                                          <path d="M21 3 10 14" />
+                                          <path d="M5 7v12h12" />
+                                        </svg>
+                                      </button>
+                                    )}
+                                  </div>
+                                  <div className="min-h-0 flex-1 overflow-hidden">
+                                    <Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="h-4 w-4 text-fg-5" /></div>}>
+                                      {paneIsChild ? (
+                                        <SessionPanel
+                                          key={paneSlot.mountKey}
+                                          session={pane.info}
+                                          workdir={paneSlot.workdir}
+                                          active={active && paneActive && !inboxOpen}
+                                          compact={chatWorkspacePaneSlots.length > 1}
+                                          transcriptHeader={(
+                                            <SideChatReturnHeader
+                                              title={pane.title}
+                                              outputCount={pane.info.outputs?.length || 0}
+                                              onReturn={() => handleReferenceSideChatBackToParent(parentSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, paneSlot, pane.info, pane.title)}
+                                              t={t}
+                                            />
+                                          )}
+                                          onSessionChange={(next) => handleSideChatSessionChange(chatWorkspaceFocusSlot, paneSlot, next)}
+                                          onOpenFileLink={(target) => handleOpenFileLink(parentSlotIndex, paneSlot.workdir, target)}
+                                          onCreateTodoFromSelection={(request) => handleCreateTodoFromSelection(paneSlot, request)}
+                                          onCreateReviewCommentFromSelection={(request) => handleCreateReviewCommentFromSelection(paneSlot, request)}
+                                        />
+                                      ) : (
+                                        <SessionPanel
+                                          key={paneSlot.mountKey}
+                                          session={pane.info}
+                                          workdir={paneSlot.workdir}
+                                          active={active && paneActive && !inboxOpen}
+                                          readOnly={paneSlot.archiveOnly === true}
+                                          compact={chatWorkspacePaneSlots.length > 1}
+                                          searchContext={searchContextForSlot(paneSlot)}
+                                          onSearchContextClear={() => clearSearchContextForSlot(paneSlot)}
+                                          referenceContextPrompt={projectReference?.prompt || null}
+                                          referenceContextLabel={projectReference?.label || null}
+                                          referenceContextProject={projectReference?.project || null}
+                                          onReferenceContextClear={projectReference ? () => {
+                                            markProjectContextAppliedLocal(
+                                              paneSlot.workdir,
+                                              paneSlot.agent,
+                                              paneSlot.sessionId,
+                                              projectReference.project,
+                                            );
+                                          } : undefined}
+                                          onSessionChange={paneSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, parentSlotIndex)}
+                                          onMultiSessionChange={paneSlot.archiveOnly ? undefined : handleMultiSessionCreated}
+                                          onOpenFileLink={(target) => handleOpenFileLink(parentSlotIndex, paneSlot.workdir, target)}
+                                          onCreateSideChatFromSelection={paneSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(parentSlotIndex, paneSlot, pane.info, request)}
+                                          onCreateTodoFromSelection={paneSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(paneSlot, request)}
+                                          onCreateReviewCommentFromSelection={paneSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(paneSlot, request)}
+                                          scrollToTurnRequest={chatWorkspaceFocusScrollRequest}
+                                          initialPendingPrompt={!paneSlot.archiveOnly && paneIndex === 0 ? newSessionPendingPrompt : null}
+                                          initialPendingImageUrls={!paneSlot.archiveOnly && paneIndex === 0 ? newSessionPendingImageUrls : undefined}
+                                          initialPendingCreatedAt={!paneSlot.archiveOnly && paneIndex === 0 ? newSessionPendingCreatedAt : null}
+                                          onPendingPromptConsumed={!paneSlot.archiveOnly && paneIndex === 0 ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
+                                        />
+                                      )}
+                                    </Suspense>
+                                  </div>
+                                </div>
                               );
-                            } : undefined}
-                            onSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : (next) => handlePanelSessionChange(next, activeSlotIndex)}
-                            onMultiSessionChange={chatWorkspaceFocusSlot.archiveOnly ? undefined : handleMultiSessionCreated}
-                            onOpenFileLink={(target) => handleOpenFileLink(activeSlotIndex, chatWorkspaceFocusSlot.workdir, target)}
-                            onCreateSideChatFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateSideChatFromSelection(activeSlotIndex, chatWorkspaceFocusSlot, chatWorkspaceFocusInfo, request)}
-                            onCreateTodoFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateTodoFromSelection(chatWorkspaceFocusSlot, request)}
-                            onCreateReviewCommentFromSelection={chatWorkspaceFocusSlot.archiveOnly ? undefined : (request) => handleCreateReviewCommentFromSelection(chatWorkspaceFocusSlot, request)}
-                            scrollToTurnRequest={chatWorkspaceFocusScrollRequest}
-                            initialPendingPrompt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingPrompt : null}
-                            initialPendingImageUrls={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingImageUrls : undefined}
-                            initialPendingCreatedAt={!chatWorkspaceFocusSlot.archiveOnly ? newSessionPendingCreatedAt : null}
-                            onPendingPromptConsumed={!chatWorkspaceFocusSlot.archiveOnly ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); setNewSessionPendingCreatedAt(null); } : undefined}
-                          />
-                        </Suspense>
+                            })}
+                          </div>
+                        </div>
                       );
                     })() : (
                       <div className="flex h-full items-center justify-center px-8 text-center">
@@ -8254,18 +9015,37 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 {!chatWorkspaceSearchFocus && (
                   <ChatWorkspaceHistoryRail
                     activeWorkspace={chatWorkspaceActiveWorkspace}
-                    historyItems={chatWorkspaceHistoryItems}
+                    historyGroups={chatWorkspaceHistoryGroups}
                     openItems={chatWorkspaceProjectOpenWindowItems}
                     selectedKey={chatWorkspaceSelectedKey}
+                    selectedChildKey={chatWorkspaceSelectedChildKey}
                     selectedWorkdir={chatWorkspaceSelectedWorkdir}
                     openSessionKeys={openSessionKeys}
+                    draggingSession={chatWorkspaceDraggingSession}
+                    dropTargetKey={chatWorkspaceDropTargetKey}
+                    rootDropActive={!!chatWorkspaceDraggingSession?.parentAgent}
                     onSelectSession={handleChatWorkspaceHistorySelect}
+                    onSelectChildSession={handleChatWorkspaceChildSelect}
                     onSelectOpenSlot={handleChatWorkspaceOpenSlotSelect}
                     onWarmSession={scheduleSessionWarmup}
                     onCancelWarmSession={cancelScheduledWarmup}
                     onSessionMenuOpen={handleSessionMenuOpen}
                     onCreateSchedule={openCreateScheduleForSession}
                     onNewChat={handleNewSessionRequest}
+                    onDragSessionStart={handleChatWorkspaceDragStart}
+                    onDragSessionEnd={clearChatWorkspaceDrag}
+                    onDragSessionOver={handleChatWorkspaceDragOver}
+                    onDragSessionLeave={handleChatWorkspaceDragLeave}
+                    onDropSession={handleChatWorkspaceDropSession}
+                    onDropSessionToRoot={handleChatWorkspaceDropSessionToRoot}
+                    onDetachChildSession={(parent, child, workdir, focus) => {
+                      detachChatWorkspaceChild(
+                        workdir,
+                        { agent: parent.agent || '', sessionId: parent.sessionId },
+                        { agent: child.agent, sessionId: child.sessionId },
+                        focus,
+                      );
+                    }}
                     t={t}
                   />
                 )}

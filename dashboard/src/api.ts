@@ -748,6 +748,46 @@ export const api = {
       { workdir, parentAgent, parentSessionId, agent, sessionId, purgeNative },
       opts,
     ),
+  attachSideChat: (
+    workdir: string,
+    parentAgent: string,
+    parentSessionId: string,
+    agent: string,
+    sessionId: string,
+    title?: string | null,
+    parentTitle?: string | null,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{
+      ok: boolean;
+      parent?: SessionInfo | null;
+      child?: SessionInfo | null;
+      refusedReason?: string | null;
+      error?: string;
+    }>(
+      '/api/session-hub/session/side-chat/attach',
+      { workdir, parentAgent, parentSessionId, agent, sessionId, title, parentTitle },
+      opts,
+    ),
+  detachSideChat: (
+    workdir: string,
+    parentAgent: string | null,
+    parentSessionId: string | null,
+    agent: string,
+    sessionId: string,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{
+      ok: boolean;
+      parent?: SessionInfo | null;
+      child?: SessionInfo | null;
+      sideChatRefRemoved?: boolean;
+      error?: string;
+    }>(
+      '/api/session-hub/session/side-chat/detach',
+      { workdir, parentAgent, parentSessionId, agent, sessionId },
+      opts,
+    ),
   addWorkspace: (wsPath: string, name?: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; workspace?: WorkspaceEntry; error?: string }>('/api/workspaces', { path: wsPath, name }, opts),
   updateWorkspace: (

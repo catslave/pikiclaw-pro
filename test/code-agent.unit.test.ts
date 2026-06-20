@@ -33,7 +33,7 @@ import {
   type StreamOpts,
 } from '../src/agent/index.ts';
 import { querySessions } from '../src/bot/session-hub.ts';
-import { saveSessionRecord } from '../src/agent/session.ts';
+import { attachSideChat, detachSideChat, saveSessionRecord } from '../src/agent/session.ts';
 import { makeTmpDir, withTempHome } from './support/env.ts';
 
 const tmpDir = path.join(os.tmpdir(), 'pikiclaw-test-' + process.pid);
@@ -854,6 +854,68 @@ describe('stageSessionFiles', () => {
     expect(parent?.sideChats.map(ref => ref.sessionId)).toEqual(['native-side-thread']);
     expect(child?.sideChatOf).toEqual({ agent: 'codex', sessionId: 'parent-thread' });
     expect(listPikiclawSessions(workdir, 'codex').map(entry => entry.sessionId)).not.toContain('native-side-thread');
+  });
+
+  it('attaches an existing chat as a side chat and detaches it back to the root list', () => {
+    const workdir = makeTmpDir('pikiclaw-side-attach-');
+    ensureManagedSession({
+      agent: 'codex',
+      workdir,
+      sessionId: 'parent-thread',
+      title: 'Parent chat',
+    });
+    ensureManagedSession({
+      agent: 'codex',
+      workdir,
+      sessionId: 'child-thread',
+      title: 'Investigate branch',
+    });
+
+    const attached = attachSideChat(workdir, {
+      parent: { agent: 'codex', sessionId: 'parent-thread' },
+      child: { agent: 'codex', sessionId: 'child-thread' },
+    });
+
+    expect(attached.ok).toBe(true);
+    expect(attached.parent?.sideChats).toEqual([expect.objectContaining({
+      agent: 'codex',
+      sessionId: 'child-thread',
+      title: 'Investigate branch',
+    })]);
+    expect(attached.child?.sideChatOf).toEqual({ agent: 'codex', sessionId: 'parent-thread' });
+    expect(listPikiclawSessions(workdir, 'codex').map(entry => entry.sessionId)).toEqual(['parent-thread']);
+
+    const detached = detachSideChat(workdir, {
+      parent: { agent: 'codex', sessionId: 'parent-thread' },
+      child: { agent: 'codex', sessionId: 'child-thread' },
+    });
+
+    expect(detached.ok).toBe(true);
+    expect(detached.parent?.sideChats).toEqual([]);
+    expect(detached.child?.sideChatOf).toBeNull();
+    const rootSessionIds = listPikiclawSessions(workdir, 'codex').map(entry => entry.sessionId);
+    expect(rootSessionIds).toHaveLength(2);
+    expect(rootSessionIds).toEqual(expect.arrayContaining(['child-thread', 'parent-thread']));
+  });
+
+  it('rejects side-chat nesting cycles', () => {
+    const workdir = makeTmpDir('pikiclaw-side-cycle-');
+    ensureManagedSession({ agent: 'codex', workdir, sessionId: 'parent-thread' });
+    ensureManagedSession({ agent: 'codex', workdir, sessionId: 'child-thread' });
+    expect(attachSideChat(workdir, {
+      parent: { agent: 'codex', sessionId: 'parent-thread' },
+      child: { agent: 'codex', sessionId: 'child-thread' },
+    }).ok).toBe(true);
+
+    const cycle = attachSideChat(workdir, {
+      parent: { agent: 'codex', sessionId: 'child-thread' },
+      child: { agent: 'codex', sessionId: 'parent-thread' },
+    });
+
+    expect(cycle.ok).toBe(false);
+    expect(cycle.refusedReason).toBe('cycle');
+    const all = listPikiclawSessions(workdir, 'codex', undefined, { includeSideChats: true });
+    expect(all.find(entry => entry.sessionId === 'child-thread')?.sideChatOf).toEqual({ agent: 'codex', sessionId: 'parent-thread' });
   });
 
   it('hides archived sessions from default hub queries and restores them on demand', async () => {
