@@ -2329,8 +2329,6 @@ private struct NewChatLauncher: View {
     let navigate: (NativeRoute) -> Void
     let openTerminal: () -> Void
     let send: () -> Void
-    @State private var selectedMode: NewChatMode = .engineering
-    @State private var launcherLibraryExpanded = false
 
     private var selectedWorkspace: Workspace? {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
@@ -2341,20 +2339,6 @@ private struct NewChatLauncher: View {
         return snapshot.workItems.first { item in
             item.id == selectedWorkItemId && selectedWorkspace.map { $0.id == item.workspaceId } != false
         }
-    }
-
-    private var assistantContextSummary: AssistantLaunchContextSummary {
-        model.assistantLaunchContextSummary(
-            workspaceId: selectedWorkspace?.id,
-            workItemId: selectedWorkItemId
-        )
-    }
-
-    private var assistantRecommendation: AssistantLaunchRecommendation? {
-        assistantLaunchRecommendation(
-            summary: assistantContextSummary,
-            workItem: selectedWorkItem
-        )
     }
 
     var body: some View {
@@ -2372,7 +2356,7 @@ private struct NewChatLauncher: View {
                     selectedWorkspaceId: $selectedWorkspaceId,
                     selectedPermissionMode: $model.selectedPermissionMode,
                     text: $model.draftPrompt,
-                    placeholder: "\(selectedMode.placeholder) \(agentShortLabel(model.selectedAgentKind)) what you need...",
+                    placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
                     focused: commandFocused,
                     selectedAgentKind: model.selectedAgentKind,
                     isRunning: model.isRunning,
@@ -2387,62 +2371,6 @@ private struct NewChatLauncher: View {
                     },
                     send: send
                 )
-
-                NewChatActionDock(
-                    openTerminal: openTerminal,
-                    openWorkItems: { navigate(.workItems) },
-                    openWorkflows: { navigate(.workflows) },
-                    openAssistants: { navigate(.assistants) }
-                )
-
-                NewChatSectionHeader(title: "Prompt Shortcuts", subtitle: selectedMode.title, count: quickActions(for: selectedMode).count)
-                NewChatCategoryStrip(mode: selectedMode) { action in
-                    applyPrompt(action.prompt)
-                }
-
-                DisclosureGroup(isExpanded: $launcherLibraryExpanded) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        NewChatSectionHeader(title: "Assistant Launchers", subtitle: "Stage a focused prompt", count: newChatAssistantQuickLaunchTemplates().count)
-                        NewChatAssistantStrip(
-                            templates: assistantLaunchTemplatesForContext(
-                                newChatAssistantQuickLaunchTemplates(),
-                                recommendation: assistantRecommendation
-                            ),
-                            currentPermissionMode: model.selectedPermissionMode,
-                            recommendation: assistantRecommendation
-                        ) { template in
-                            launchAssistant(template)
-                        }
-
-                        NewChatSectionHeader(title: "Jira Focus", subtitle: "Attach or start ticket work", count: jiraTicketCardCandidates(from: snapshot.workItems, selectedWorkItemId: selectedWorkItemId, limit: 4).count)
-                        JiraTicketQuickCard(
-                            snapshot: snapshot,
-                            selectedWorkspaceId: $selectedWorkspaceId,
-                            selectedWorkItemId: $selectedWorkItemId,
-                            model: model,
-                            parentRunId: nil,
-                            draftContext: { model.draftPrompt },
-                            focusComposer: {
-                                commandFocused.wrappedValue = true
-                            }
-                        )
-
-                        NewChatTemplateGallery(mode: selectedMode) { template in
-                            applyPrompt(template.prompt)
-                        }
-                    }
-                    .padding(.top, 12)
-                } label: {
-                    NewChatSectionHeader(
-                        title: "More Starters",
-                        subtitle: "Assistants, Jira, templates",
-                        count: newChatAssistantQuickLaunchTemplates().count + templates(for: selectedMode).count
-                    )
-                }
-                .padding(12)
-                .background(PKTheme.panel.opacity(0.46))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             .frame(maxWidth: 980, alignment: .leading)
             .padding(.vertical, 24)
@@ -2452,81 +2380,6 @@ private struct NewChatLauncher: View {
         .task(id: selectedWorkspace?.id) {
             await model.refreshBranches(for: selectedWorkspace)
         }
-    }
-
-    private func applyPrompt(_ prompt: String) {
-        let project = projectTitle(for: selectedWorkspaceId, snapshot: snapshot)
-        model.draftPrompt = prompt
-            .replacingOccurrences(of: "{project}", with: project)
-            .replacingOccurrences(of: "{agent}", with: agentShortLabel(model.selectedAgentKind))
-        commandFocused.wrappedValue = true
-    }
-
-    private func launchAssistant(_ template: AssistantLaunchTemplate) {
-        if model.stageAssistantPrompt(
-            title: template.title,
-            prompt: template.prompt,
-            agentKind: template.agentKind,
-            permissionMode: template.permissionMode,
-            workspaceId: selectedWorkspaceId,
-            workItemId: selectedWorkItemId,
-            userInput: model.draftPrompt
-        ) {
-            commandFocused.wrappedValue = true
-        }
-    }
-}
-
-private struct NewChatActionDock: View {
-    let openTerminal: () -> Void
-    let openWorkItems: () -> Void
-    let openWorkflows: () -> Void
-    let openAssistants: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            NewChatActionButton(symbol: "terminal", title: "Terminal", subtitle: "Run checks", action: openTerminal)
-            NewChatActionButton(symbol: "checklist", title: "Work Items", subtitle: "Triage tasks", action: openWorkItems)
-            NewChatActionButton(symbol: "point.3.connected.trianglepath.dotted", title: "Workflows", subtitle: "Reuse recipes", action: openWorkflows)
-            NewChatActionButton(symbol: "person.crop.circle.badge.plus", title: "Assistants", subtitle: "Open library", action: openAssistants)
-        }
-    }
-}
-
-private struct NewChatActionButton: View {
-    let symbol: String
-    let title: String
-    let subtitle: String
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: symbol)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(PKTheme.primary)
-                    .frame(width: 30, height: 30)
-                    .background(PKTheme.primary.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(PKTheme.text)
-                    Text(subtitle)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(PKTheme.text3)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 11)
-            .frame(height: 52)
-            .background(PKTheme.surfaceRaised.opacity(hovering ? 0.92 : 0.74))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(hovering ? PKTheme.primary.opacity(0.36) : PKTheme.edge, lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
     }
 }
 
