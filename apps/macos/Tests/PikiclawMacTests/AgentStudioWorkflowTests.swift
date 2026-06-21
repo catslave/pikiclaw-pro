@@ -1360,6 +1360,13 @@ import Testing
     #expect(composerSkillDraft(command: clickhouseCommand, existingText: "check IVAS-1234") == "/clickhouse check IVAS-1234")
 }
 
+@Test func composerSkillCardsHideAfterUserStartsTyping() {
+    #expect(composerShouldShowSkillCards(for: ""))
+    #expect(composerShouldShowSkillCards(for: "  \n  "))
+    #expect(!composerShouldShowSkillCards(for: "trace p-v-voice-123"))
+    #expect(!composerShouldShowSkillCards(for: "/logtrace env=lab conversationId=p-v-voice-123 last=24h"))
+}
+
 private struct DetectingAgentAdapter: AgentAdapter {
     let descriptor: AgentDescriptor
     let detection: AgentDetection

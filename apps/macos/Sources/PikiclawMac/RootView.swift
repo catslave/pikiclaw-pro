@@ -4898,6 +4898,10 @@ private func composerSkillPriority(for capability: Capability) -> Int {
     return 20
 }
 
+func composerShouldShowSkillCards(for text: String) -> Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+}
+
 private func isLogTraceSkillName(_ lowercasedName: String) -> Bool {
     lowercasedName.contains("logtrace")
         || lowercasedName.contains("log tracer")
@@ -4967,6 +4971,10 @@ private struct MinimalChatComposer: View {
     }
 
     private var skillCards: [ComposerSkillCardModel] {
+        guard composerShouldShowSkillCards(for: text) else {
+            return []
+        }
+
         let prioritized = snapshot.capabilities
             .filter { $0.kind == .skill }
             .sorted { lhs, rhs in
@@ -4983,7 +4991,7 @@ private struct MinimalChatComposer: View {
         for capability in prioritized {
             let command = composerSkillCommand(for: capability)
             guard seenCommands.insert(command).inserted else { continue }
-            cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: text))
+            cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: ""))
             if cards.count == 3 { break }
         }
         return cards
