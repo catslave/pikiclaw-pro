@@ -42,6 +42,7 @@ public enum WorkItemSourceType: String, Codable, Sendable, CaseIterable {
     case scheduledAutomation
     case connectorImport
     case voiceDelegation
+    case goal
 }
 
 public struct SourceRef: Hashable, Codable, Sendable {
@@ -72,6 +73,7 @@ public struct WorkItem: Identifiable, Hashable, Codable, Sendable {
     public var dueAt: Date?
     public var externalRefs: [SourceRef]
     public var currentRunId: EntityID?
+    public var jira: JiraWorkItemFields?
 
     public init(
         id: EntityID = EntityID(),
@@ -88,7 +90,8 @@ public struct WorkItem: Identifiable, Hashable, Codable, Sendable {
         updatedAt: Date = Date(),
         dueAt: Date? = nil,
         externalRefs: [SourceRef] = [],
-        currentRunId: EntityID? = nil
+        currentRunId: EntityID? = nil,
+        jira: JiraWorkItemFields? = nil
     ) {
         self.id = id
         self.workspaceId = workspaceId
@@ -105,5 +108,6 @@ public struct WorkItem: Identifiable, Hashable, Codable, Sendable {
         self.dueAt = dueAt
         self.externalRefs = externalRefs
         self.currentRunId = currentRunId
+        self.jira = jira
     }
 }

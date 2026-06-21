@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 
-import { isLogTraceSlash, parseLogTraceArgs, stripLogTraceSlash } from '../src/platform/logtrace.ts';
+import { buildKibanaEnvArgs, isLogTraceSlash, parseLogTraceArgs, resolveIvaLogTracerEnvFile, stripLogTraceSlash } from '../src/platform/logtrace.ts';
+import { makeTmpDir, withEnv } from './support/env.ts';
 
 describe('logtrace platform skill', () => {
   it('recognizes the slash command', () => {
@@ -100,6 +103,17 @@ describe('logtrace platform skill', () => {
       mode: 'stats',
       groupBy: 'level.keyword',
       limit: '10',
+    });
+  });
+
+  it('uses an explicit iva-logtracer env file for kibana-query while preserving env name', async () => {
+    const dir = makeTmpDir('pikiclaw-logtrace-env-');
+    const envFile = path.join(dir, '.env.stage');
+    fs.writeFileSync(envFile, 'KIBANA_URL=https://example.invalid\n');
+
+    await withEnv({ PIKICLAW_IVA_LOGTRACER_ENV_FILE: envFile, IVA_LOGTRACER_ENV_FILE: undefined }, () => {
+      expect(resolveIvaLogTracerEnvFile('stage')).toBe(envFile);
+      expect(buildKibanaEnvArgs('stage')).toEqual(['--env', 'stage', '--env-file', envFile]);
     });
   });
 });

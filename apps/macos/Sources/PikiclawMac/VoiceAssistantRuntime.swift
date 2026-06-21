@@ -34,28 +34,40 @@ enum VoicePermissionRequester {
 
 enum VoiceRecognitionLanguage: String, CaseIterable, Identifiable {
     case chinese
+    case cantonese
     case english
+    case japanese
+    case korean
 
     var id: String { rawValue }
 
     var shortTitle: String {
         switch self {
         case .chinese: return "中文"
+        case .cantonese: return "粤语"
         case .english: return "EN"
+        case .japanese: return "日本語"
+        case .korean: return "한국어"
         }
     }
 
     var displayName: String {
         switch self {
         case .chinese: return "中文"
+        case .cantonese: return "粤语"
         case .english: return "English"
+        case .japanese: return "日本語"
+        case .korean: return "한국어"
         }
     }
 
     var localeIdentifier: String {
         switch self {
         case .chinese: return "zh-CN"
+        case .cantonese: return "zh-HK"
         case .english: return "en-US"
+        case .japanese: return "ja-JP"
+        case .korean: return "ko-KR"
         }
     }
 
@@ -66,8 +78,88 @@ enum VoiceRecognitionLanguage: String, CaseIterable, Identifiable {
     var speechSynthesisLanguage: String {
         switch self {
         case .chinese: return "zh-CN"
+        case .cantonese: return "zh-HK"
         case .english: return "en-US"
+        case .japanese: return "ja-JP"
+        case .korean: return "ko-KR"
         }
+    }
+}
+
+enum VoiceReportTone: String, CaseIterable, Identifiable {
+    case natural
+    case warm
+    case close
+    case calm
+    case studio
+    case bright
+    case quick
+    case deep
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .natural: return "自然"
+        case .warm: return "温柔"
+        case .close: return "贴近"
+        case .calm: return "沉稳"
+        case .studio: return "播客"
+        case .bright: return "清亮"
+        case .quick: return "轻快"
+        case .deep: return "低柔"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .natural: return "Balanced and human"
+        case .warm: return "Soft and close"
+        case .close: return "Near and conversational"
+        case .calm: return "Slow and steady"
+        case .studio: return "Polished and steady"
+        case .bright: return "Clear and light"
+        case .quick: return "Fast and crisp"
+        case .deep: return "Lower and relaxed"
+        }
+    }
+
+    var speechRate: Float {
+        switch self {
+        case .natural: return 0.46
+        case .warm: return 0.47
+        case .close: return 0.44
+        case .calm: return 0.42
+        case .studio: return 0.48
+        case .bright: return 0.50
+        case .quick: return 0.54
+        case .deep: return 0.45
+        }
+    }
+
+    var pitchMultiplier: Float {
+        switch self {
+        case .natural: return 1.00
+        case .warm: return 1.02
+        case .close: return 0.98
+        case .calm: return 0.96
+        case .studio: return 1.03
+        case .bright: return 1.08
+        case .quick: return 1.04
+        case .deep: return 0.88
+        }
+    }
+
+    var volume: Float {
+        switch self {
+        case .close: return 0.92
+        case .deep: return 0.94
+        default: return 1.0
+        }
+    }
+
+    static func normalized(_ rawValue: String) -> VoiceReportTone {
+        VoiceReportTone(rawValue: rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) ?? .natural
     }
 }
 
@@ -78,7 +170,8 @@ struct SystemSpeechVoiceOption: Identifiable, Hashable {
 
     var displayName: String {
         let localizedLanguage = Locale.current.localizedString(forIdentifier: language) ?? language
-        return "\(name) · \(localizedLanguage)"
+        let badge = naturalnessScore > 0 ? "Natural · " : ""
+        return "\(badge)\(name) · \(localizedLanguage)"
     }
 
     static func options(for language: VoiceRecognitionLanguage) -> [SystemSpeechVoiceOption] {
@@ -99,6 +192,7 @@ struct SystemSpeechVoiceOption: Identifiable, Hashable {
                     language: voice.language
                 )
             }
+            .ranked(for: language)
     }
 
     static func displayName(for identifier: String, language: VoiceRecognitionLanguage) -> String {
@@ -113,6 +207,12 @@ struct SystemSpeechVoiceOption: Identifiable, Hashable {
            let selectedVoice = AVSpeechSynthesisVoice(identifier: trimmed),
            isLanguage(selectedVoice.language, compatibleWith: language) {
             return selectedVoice
+        }
+        for option in options(for: language) {
+            if let rankedVoice = AVSpeechSynthesisVoice(identifier: option.id),
+               isLanguage(rankedVoice.language, compatibleWith: language) {
+                return rankedVoice
+            }
         }
         if let exactVoice = AVSpeechSynthesisVoice(language: language.speechSynthesisLanguage) {
             return exactVoice
@@ -131,10 +231,51 @@ struct SystemSpeechVoiceOption: Identifiable, Hashable {
             || normalizedVoiceLanguage.split(separator: "-").first == targetBase
     }
 
+    static func ranked(_ options: [SystemSpeechVoiceOption], for language: VoiceRecognitionLanguage) -> [SystemSpeechVoiceOption] {
+        options.ranked(for: language)
+    }
+
+    fileprivate var naturalnessScore: Int {
+        let text = "\(name) \(id)".lowercased()
+        var score = 0
+        if text.contains("siri") { score += 42 }
+        if text.contains("premium") || text.contains("enhanced") || text.contains("natural") || text.contains("neural") { score += 34 }
+        if text.contains("tingting") || text.contains("sin-ji") || text.contains("meijia") || text.contains("li-mu")
+            || text.contains("kyoko") || text.contains("otoya") || text.contains("yuna")
+            || text.contains("samantha") || text.contains("ava") || text.contains("allison") || text.contains("victoria")
+            || text.contains("daniel") || text.contains("serena") {
+            score += 18
+        }
+        return score
+    }
+
+    fileprivate func languageScore(for language: VoiceRecognitionLanguage) -> Int {
+        Self.isLanguage(self.language, compatibleWith: language) ? 80 : 0
+    }
+
     private static func normalizedLanguageIdentifier(_ identifier: String) -> String {
         identifier
             .replacingOccurrences(of: "_", with: "-")
             .lowercased()
+    }
+}
+
+private extension Array where Element == SystemSpeechVoiceOption {
+    func ranked(for language: VoiceRecognitionLanguage) -> [SystemSpeechVoiceOption] {
+        enumerated()
+            .sorted { lhs, rhs in
+                let lhsScore = lhs.element.languageScore(for: language) + lhs.element.naturalnessScore
+                let rhsScore = rhs.element.languageScore(for: language) + rhs.element.naturalnessScore
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                if lhs.element.language != rhs.element.language {
+                    return lhs.element.language.localizedCaseInsensitiveCompare(rhs.element.language) == .orderedAscending
+                }
+                let nameOrder = lhs.element.name.localizedCaseInsensitiveCompare(rhs.element.name)
+                if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+                return lhs.offset < rhs.offset
+            }
+            .prefix(8)
+            .map(\.element)
     }
 }
 
@@ -364,7 +505,8 @@ final class VoiceReportSpeaker: NSObject, ObservableObject, AVSpeechSynthesizerD
     func speak(
         _ text: String,
         voiceIdentifier: String = "",
-        language: VoiceRecognitionLanguage = .chinese
+        language: VoiceRecognitionLanguage = .chinese,
+        tone: VoiceReportTone = .natural
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -372,7 +514,9 @@ final class VoiceReportSpeaker: NSObject, ObservableObject, AVSpeechSynthesizerD
             synthesizer.stopSpeaking(at: .immediate)
         }
         let utterance = AVSpeechUtterance(string: trimmed)
-        utterance.rate = 0.48
+        utterance.rate = tone.speechRate
+        utterance.pitchMultiplier = tone.pitchMultiplier
+        utterance.volume = tone.volume
         let selectedVoice = SystemSpeechVoiceOption.compatibleVoice(identifier: voiceIdentifier, language: language)
         utterance.voice = selectedVoice
             ?? AVSpeechSynthesisVoice(language: language.speechSynthesisLanguage)

@@ -41,7 +41,7 @@ public struct VoiceDelegationPlan: Identifiable, Hashable, Codable, Sendable {
         suggestedAgentKind: NativeAgentKind,
         permissionMode: PermissionMode,
         intent: VoiceDelegationIntent = .delegate,
-        routeSummary: String = "Agent delegation",
+        routeSummary: String = "Voice Assistant action",
         routeConfidence: Double = 0.5,
         acceptanceCriteria: [String],
         contextRefs: [ContextRef] = [],
@@ -121,7 +121,7 @@ public enum VoiceAssistantPlanner {
     public static func report(for plan: VoiceDelegationPlan, run: AgentRun?) -> VoiceDelegationReport {
         guard let run else {
             return VoiceDelegationReport(
-                headline: "Ready to delegate",
+                headline: "Voice Assistant ready",
                 spokenText: plan.spokenPreview,
                 tone: "idle"
             )
@@ -130,20 +130,20 @@ public enum VoiceAssistantPlanner {
         switch run.state {
         case .draft:
             return VoiceDelegationReport(
-                headline: "Voice conversation open",
-                spokenText: "I opened a voice conversation and I am ready to listen before routing the next actionable request.",
+                headline: "Voice Assistant open",
+                spokenText: "I opened the Voice Assistant conversation and I am ready to use Pikiclaw for your next request.",
                 tone: "idle"
             )
         case .queued, .starting:
             return VoiceDelegationReport(
-                headline: "Starting \(agentVoiceName(plan.suggestedAgentKind))",
-                spokenText: "I prepared the chat window and \(agentVoiceName(plan.suggestedAgentKind)) is starting now.",
+                headline: "Using \(agentVoiceName(plan.suggestedAgentKind))",
+                spokenText: "I prepared the Pikiclaw conversation and I am using \(agentVoiceName(plan.suggestedAgentKind)) for execution now.",
                 tone: "active"
             )
         case .running:
             return VoiceDelegationReport(
-                headline: "Agent is working",
-                spokenText: "\(agentVoiceName(plan.suggestedAgentKind)) is working on \(plan.title). I am watching the run and will report when it finishes.",
+                headline: "Voice Assistant working",
+                spokenText: "I am using \(agentVoiceName(plan.suggestedAgentKind)) to work on \(plan.title). I am watching the run and will report when it finishes.",
                 tone: "active"
             )
         case .waitingForUser:
@@ -152,7 +152,7 @@ public enum VoiceAssistantPlanner {
                 headline: "Needs your input",
                 spokenText: summary.isEmpty
                     ? "\(agentVoiceName(plan.suggestedAgentKind)) needs a decision before it can continue."
-                    : "\(agentVoiceName(plan.suggestedAgentKind)) needs a decision. \(summary)",
+                    : "I need your decision before \(agentVoiceName(plan.suggestedAgentKind)) can continue. \(summary)",
                 tone: "attention"
             )
         case .completed:
@@ -160,8 +160,8 @@ public enum VoiceAssistantPlanner {
             return VoiceDelegationReport(
                 headline: "Completed",
                 spokenText: summary.isEmpty
-                    ? "Done. \(agentVoiceName(plan.suggestedAgentKind)) completed \(plan.title). I saved the conversation and the transcript is ready for review."
-                    : "Done. \(agentVoiceName(plan.suggestedAgentKind)) completed \(plan.title). \(summary)",
+                    ? "Done. I completed \(plan.title) through Pikiclaw and saved the conversation transcript."
+                    : "Done. I completed \(plan.title) through Pikiclaw. \(summary)",
                 tone: "done"
             )
         case .failed:
@@ -169,20 +169,20 @@ public enum VoiceAssistantPlanner {
             return VoiceDelegationReport(
                 headline: "Run failed",
                 spokenText: summary.isEmpty
-                    ? "\(agentVoiceName(plan.suggestedAgentKind)) could not finish \(plan.title). I saved the failure output so you can inspect the blocker."
-                    : "\(agentVoiceName(plan.suggestedAgentKind)) could not finish \(plan.title). \(summary)",
+                    ? "I could not finish \(plan.title). I saved the failure output so you can inspect the blocker."
+                    : "I could not finish \(plan.title). \(summary)",
                 tone: "failed"
             )
         case .cancelling, .cancelled:
             return VoiceDelegationReport(
                 headline: "Cancelled",
-                spokenText: "I stopped the delegated run for \(plan.title).",
+                spokenText: "I stopped the Pikiclaw run for \(plan.title).",
                 tone: "failed"
             )
         case .stale:
             return VoiceDelegationReport(
                 headline: "Stale run",
-                spokenText: "The delegated run for \(plan.title) looks stale. It may need a fresh retry.",
+                spokenText: "The Pikiclaw run for \(plan.title) looks stale. I may need to retry it.",
                 tone: "attention"
             )
         }
@@ -194,7 +194,7 @@ public enum VoiceAssistantPlanner {
             .first
             .map(String.init)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !firstLine.isEmpty else { return "Voice delegated task" }
+        guard !firstLine.isEmpty else { return "Voice Assistant task" }
         return String(firstLine.prefix(72))
     }
 
@@ -208,13 +208,24 @@ public enum VoiceAssistantPlanner {
         let strongDelegateSignals = [
             "fix", "build", "implement", "run", "review", "test", "verify",
             "create", "make", "change", "add", "design", "optimize", "improve",
-            "实现", "修复", "检查", "跑一下", "测试", "验证",
+            "实现", "修复", "检查", "跑一下", "测试", "验证", "提交",
             "创建", "生成", "整理", "分析", "查一下", "改成", "调整", "优化", "设计", "重构", "支持"
         ]
         let softDelegateSignals = ["help me", "please", "do ", "帮我", "我想", "希望", "需要", "做一下"]
+        let voiceConfigurationSignals = [
+            "voice setting", "voice settings", "change voice", "switch voice", "select voice",
+            "different voice", "other voice", "voice sounds unnatural",
+            "语音设置", "语音选择", "选择语音", "切换语音", "换语音", "其他语音",
+            "声音设置", "声音选择", "选择声音", "切换声音", "换声音", "其他声音",
+            "音色", "声音不自然", "语音不自然"
+        ]
         let hasStrongDelegateSignal = strongDelegateSignals.contains(where: lower.contains)
+            || voiceConfigurationSignals.contains(where: lower.contains)
         let hasSoftDelegateSignal = softDelegateSignals.contains(where: lower.contains)
-        let statusSignals = ["status", "progress", "进度", "状态", "怎么样了", "现在到哪", "运行情况"]
+        let statusSignals = [
+            "status", "progress", "active task", "active tasks", "running task", "running tasks", "current task", "current tasks",
+            "进度", "状态", "怎么样了", "现在到哪", "运行情况", "当前任务", "正在工作的任务", "还在工作的任务", "当前还在工作", "还在工作"
+        ]
         if statusSignals.contains(where: lower.contains), !hasStrongDelegateSignal {
             return .status
         }
@@ -241,8 +252,8 @@ public enum VoiceAssistantPlanner {
 
     private static func acceptanceCriteria(for utterance: String) -> [String] {
         var criteria = [
-            "Clarify the requested outcome before acting when the instruction is ambiguous",
-            "Complete the delegated agent run or stop with a clear blocker",
+            "Voice Assistant owns the user request until it is completed or clearly blocked",
+            "Use the relevant Pikiclaw capability: Conversation, Agent run, Work Item, status tracking, or transcript",
             "Summarize what changed, what was verified, and what still needs attention"
         ]
 
@@ -281,7 +292,18 @@ public enum VoiceAssistantPlanner {
         let workspaceLine = workspace.map { "- Workspace: \($0.name) (\($0.pathDisplay))" } ?? "- Workspace: use the currently selected project if available"
         let criteriaLines = acceptanceCriteria.map { "- \($0)" }.joined(separator: "\n")
         return """
-        Voice delegated request: \(title)
+        You are Pikiclaw Voice Assistant Agent, an independent orchestration agent inside Pikiclaw.
+
+        Voice Assistant Agent role:
+        - Own the user's spoken or typed request end-to-end.
+        - Use Pikiclaw's existing capabilities to complete it: continue the current Conversation, create or update a Work Item, start the right agent run, track progress, inspect status, and report the result.
+        - Treat specialist agents such as Codex, Claude, Gemini, Hermes, Cursor, or Copilot as execution tools that you can route work to when needed.
+        - Keep progress observable: start with a short plan, update the transcript when meaningful progress happens, and finish with a concise result the voice surface can speak.
+        - Ask for clarification only when acting would require a risky guess.
+        - Do not behave like a dictation box or generic chat input. You are the assistant operating Pikiclaw for the user.
+        - Do not add ceremonial chatter.
+
+        Voice Assistant request: \(title)
 
         Route:
         - Intent: \(intent.rawValue)
@@ -310,15 +332,15 @@ public enum VoiceAssistantPlanner {
         switch intent {
         case .delegate:
             if let recentWorkItem {
-                return "Continue from \(recentWorkItem.title) in \(project) with \(agentVoiceName(agent))"
+                return "Voice Assistant will continue \(recentWorkItem.title) in \(project), using \(agentVoiceName(agent)) when execution is needed"
             }
-            return "Create an agent task in \(project) with \(agentVoiceName(agent))"
+            return "Voice Assistant will use Pikiclaw in \(project), routing execution to \(agentVoiceName(agent)) when needed"
         case .status:
-            return "Answer from the currently supervised run before starting new work"
+            return "Voice Assistant will answer from the currently supervised run before starting new work"
         case .cancel:
-            return "Keep the voice session conversational and avoid starting a new run"
+            return "Voice Assistant will keep the session conversational and avoid starting a new run"
         case .converse:
-            return "Hold the utterance as context until the user gives an actionable task"
+            return "Voice Assistant will hold the utterance as context until the user gives an actionable task"
         }
     }
 
@@ -347,7 +369,7 @@ public enum VoiceAssistantPlanner {
     ) -> String {
         switch intent {
         case .delegate:
-            return "I will ask \(agentVoiceName(agent)) to handle \(title) and report back with results, verification, and any blockers."
+            return "I will handle \(title) in Pikiclaw, use \(agentVoiceName(agent)) if execution is needed, and report back with results, verification, and any blockers."
         case .status:
             return "I will check the current run status first. \(routeSummary)."
         case .cancel:

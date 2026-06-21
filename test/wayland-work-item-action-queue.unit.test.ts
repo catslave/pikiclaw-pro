@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DailyItem, JiraRemoteUpdateRun, NotePage, ProTask, TodoItem } from '../dashboard/src/types';
+import type { DailyItem, JiraRemoteUpdateRun, NotePage, ProTask, ProTaskEvent, TodoItem } from '../dashboard/src/types';
 import {
   balanceWorkItemActionQueueItems,
   buildWorkItemActionQueueItems,
@@ -74,6 +74,14 @@ function run(input: Partial<JiraRemoteUpdateRun> & Pick<JiraRemoteUpdateRun, 'id
     createdAt: now,
     updatedAt: now,
     events: [],
+    ...input,
+  };
+}
+
+function event(input: Partial<ProTaskEvent> & Pick<ProTaskEvent, 'id' | 'type' | 'actor' | 'summary'>): ProTaskEvent {
+  return {
+    taskId: 'task-1',
+    createdAt: now,
     ...input,
   };
 }
@@ -168,6 +176,89 @@ describe('Wayland Work Item action queue', () => {
       tone: 'warn',
     });
     expect(items[0].to).toBe('/work-items?task=thin-task&tab=source');
+  });
+
+  it('surfaces decision audit review before ordinary source repair', () => {
+    const auditTask = task({
+      id: 'audit-task',
+      title: 'Review guarded event',
+      kind: 'manual',
+      description: 'Rich enough not to trigger source repair.',
+      events: [
+        event({ id: 'deploy', type: 'deployment-linked', actor: 'system', summary: 'Deployment linked.' }),
+      ],
+    });
+    const thinTodoTask = task({
+      id: 'thin-task',
+      kind: 'todo',
+      title: 'Thin promoted todo',
+    });
+
+    const items = buildWorkItemActionQueueItems({
+      tasks: [thinTodoTask, auditTask],
+      todos: [],
+      dailyItems: [],
+      notePages: [],
+      todayDate: '2026-06-16',
+    });
+
+    expect(items[0]).toMatchObject({
+      key: 'decision-audit:audit-task',
+      kind: 'audit',
+      sourceLabel: 'Audit',
+      actionLabel: 'Audit',
+      tone: 'warn',
+    });
+    expect(items[0].to).toBe('/work-items?task=audit-task&tab=timeline');
+  });
+
+  it('surfaces coding handoff with launch prompt when no more specific task action exists', () => {
+    const codingTask = task({
+      id: 'coding-task',
+      title: 'Continue handoff',
+      status: 'coding',
+      description: 'Enough context to avoid source repair.',
+    });
+
+    const items = buildWorkItemActionQueueItems({
+      tasks: [codingTask],
+      todos: [],
+      dailyItems: [],
+      notePages: [],
+      todayDate: '2026-06-16',
+    });
+
+    expect(items[0]).toMatchObject({
+      key: 'handoff:coding-task',
+      kind: 'handoff',
+      sourceLabel: 'Handoff',
+      actionLabel: 'Continue',
+      to: '/chat',
+      taskId: 'coding-task',
+      secondaryTo: '/work-items?task=coding-task&tab=summary',
+      secondaryLabel: 'Details',
+      tone: 'primary',
+    });
+    expect(items[0].promptDraft).toContain('Handoff capsule:\n# Work Item Handoff');
+  });
+
+  it('keeps source repair ahead of handoff for the same Work Item', () => {
+    const thinCodingTodo = task({
+      id: 'thin-coding-todo',
+      kind: 'todo',
+      status: 'coding',
+      title: 'Thin coding todo',
+    });
+
+    const items = buildWorkItemActionQueueItems({
+      tasks: [thinCodingTodo],
+      todos: [],
+      dailyItems: [],
+      notePages: [],
+      todayDate: '2026-06-16',
+    });
+
+    expect(items.map(item => item.key)).toEqual(['source-refresh:thin-coding-todo']);
   });
 
   it('respects the requested limit after ranking', () => {

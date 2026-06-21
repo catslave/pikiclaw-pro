@@ -22,7 +22,11 @@ import Testing
     #expect(plan.needsConfirmation == false)
     #expect(plan.routeSummary.contains("Codex"))
     #expect(plan.contextRefs.contains { $0.kind == "workspace" && $0.label == "Pikiclaw" })
-    #expect(plan.agentPrompt.contains("Voice delegated request"))
+    #expect(plan.agentPrompt.contains("You are Pikiclaw Voice Assistant Agent"))
+    #expect(plan.agentPrompt.contains("Own the user's spoken or typed request end-to-end."))
+    #expect(plan.agentPrompt.contains("Use Pikiclaw's existing capabilities"))
+    #expect(plan.agentPrompt.contains("specialist agents such as Codex"))
+    #expect(plan.agentPrompt.contains("Voice Assistant request"))
     #expect(plan.agentPrompt.contains("Intent: delegate"))
     #expect(plan.agentPrompt.contains("Acceptance criteria"))
     #expect(plan.acceptanceCriteria.contains("Run the narrowest relevant verification available"))
@@ -47,6 +51,24 @@ import Testing
     #expect(plan.acceptanceCriteria.contains("Check the primary UI path for layout, contrast, and text overflow"))
 }
 
+@Test func voicePlannerDelegatesChineseCommitRequestsToCodex() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "本地代码提交",
+        workspace: Workspace(
+            id: "workspace",
+            name: "Pikiclaw",
+            pathDisplay: "/repo/pikiclaw",
+            trustState: .trusted
+        ),
+        preferredAgent: .hermes
+    )
+
+    #expect(plan.intent == .delegate)
+    #expect(plan.suggestedAgentKind == .codex)
+    #expect(plan.needsConfirmation == false)
+    #expect(plan.acceptanceCriteria.contains("Ask before committing, pushing, or writing to external systems"))
+}
+
 @Test func voicePlannerTreatsChineseProductRequestsAsDelegation() {
     let plan = VoiceAssistantPlanner.makePlan(
         utterance: "我想重新设计一下 mac native voice assistant，让它自然对话",
@@ -64,6 +86,24 @@ import Testing
     #expect(plan.acceptanceCriteria.contains("Check the primary UI path for layout, contrast, and text overflow"))
 }
 
+@Test func voicePlannerDelegatesVoiceConfigurationComplaints() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "还有其他语音可以选择吗，因为我觉得你目前的声音很不自然",
+        workspace: Workspace(
+            id: "workspace",
+            name: "Pikiclaw",
+            pathDisplay: "/repo/pikiclaw",
+            trustState: .trusted
+        ),
+        preferredAgent: .codex
+    )
+
+    #expect(plan.intent == .delegate)
+    #expect(plan.suggestedAgentKind == .codex)
+    #expect(plan.needsConfirmation == false)
+    #expect(plan.agentPrompt.contains("声音很不自然"))
+}
+
 @Test func voicePlannerKeepsStatusAsConversationalIntent() {
     let plan = VoiceAssistantPlanner.makePlan(
         utterance: "现在进度怎么样了",
@@ -74,6 +114,17 @@ import Testing
     #expect(plan.intent == .status)
     #expect(plan.needsConfirmation == true)
     #expect(plan.spokenPreview.contains("current run status"))
+}
+
+@Test func voicePlannerTreatsActiveWorkQuestionsAsStatusIntent() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "当前还在工作的任务",
+        workspace: nil,
+        preferredAgent: .codex
+    )
+
+    #expect(plan.intent == .status)
+    #expect(plan.needsConfirmation == true)
 }
 
 @Test func voicePlannerKeepsCapabilityQuestionsConversational() {

@@ -38,6 +38,7 @@ interface CommandSpec {
 }
 
 const SHARE_LIBS_LOGTRACER = '/Users/michael.yang/Codes/RC/AIR/iva-share-tool-libs/packages/iva-logtracer';
+const IVA_LOGTRACER_CONFIG_DIR = path.join(os.homedir(), '.config', 'iva-logtracer');
 const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_CAPTURE_CHARS = 80_000;
 const DEFAULT_TRACE_SIZE = '10000';
@@ -257,11 +258,16 @@ function resolveKibanaQueryCommand(): CommandSpec | null {
   return null;
 }
 
-function runCommand(spec: CommandSpec, extraArgs: string[], timeoutMs = DEFAULT_TIMEOUT_MS): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+function runCommand(
+  spec: CommandSpec,
+  extraArgs: string[],
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  extraEnv: NodeJS.ProcessEnv = {},
+): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const child = spawn(spec.cmd, [...spec.args, ...extraArgs], {
       cwd: process.cwd(),
-      env: process.env,
+      env: { ...process.env, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -309,10 +315,33 @@ function safeFileSlug(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'logtrace';
 }
 
-function envArgs(env: string): string[] {
-  const envFile = path.join(os.homedir(), '.config', 'iva-logtracer', `.env.${env}`);
-  if (fs.existsSync(envFile)) return ['--env-file', envFile];
-  return ['--env', env];
+export function resolveIvaLogTracerEnvFile(env: string): string | null {
+  const configured = process.env.PIKICLAW_IVA_LOGTRACER_ENV_FILE?.trim()
+    || process.env.IVA_LOGTRACER_ENV_FILE?.trim()
+    || '';
+  if (configured && fs.existsSync(configured)) return configured;
+
+  const cleanEnv = env.trim();
+  const candidates = [
+    cleanEnv ? path.join(IVA_LOGTRACER_CONFIG_DIR, `.env.${cleanEnv}`) : '',
+    path.join(IVA_LOGTRACER_CONFIG_DIR, '.env'),
+  ].filter(Boolean);
+  return candidates.find(filePath => fs.existsSync(filePath)) || null;
+}
+
+export function buildKibanaEnvArgs(env: string): string[] {
+  const cleanEnv = env.trim() || 'lab';
+  const envFile = resolveIvaLogTracerEnvFile(cleanEnv);
+  return [
+    '--env',
+    cleanEnv,
+    ...(envFile ? ['--env-file', envFile] : []),
+  ];
+}
+
+function logTraceCommandEnv(env: string): NodeJS.ProcessEnv {
+  const envFile = resolveIvaLogTracerEnvFile(env);
+  return envFile ? { IVA_LOGTRACER_ENV_FILE: envFile } : {};
 }
 
 function boundedIntString(value: string, fallback: string, max: number): string {
@@ -424,10 +453,11 @@ async function runTraceMode(req: LogTraceRequest, args: ParsedLogTraceArgs): Pro
   }
 
   let traceArgs = buildTraceCommandArgs(args);
-  let trace = await runCommand(command, traceArgs);
+  const commandEnv = logTraceCommandEnv(args.env);
+  let trace = await runCommand(command, traceArgs, DEFAULT_TIMEOUT_MS, commandEnv);
   if (shouldRetryLegacyTrace(trace)) {
     traceArgs = buildTraceCommandArgs(args, true);
-    trace = await runCommand(command, traceArgs);
+    trace = await runCommand(command, traceArgs, DEFAULT_TIMEOUT_MS, commandEnv);
   }
   const outputDir = findOutputDir(trace.stdout);
 
@@ -552,7 +582,7 @@ async function runKibanaMode(req: LogTraceRequest, args: ParsedLogTraceArgs): Pr
     };
   }
 
-  const commonArgs = [...envArgs(args.env), '--last', args.last, '--format', 'json'];
+  const commonArgs = [...buildKibanaEnvArgs(args.env), '--last', args.last, '--format', 'json'];
   if (args.index) commonArgs.push('--index', args.index);
   const commandArgs = args.mode === 'stats'
     ? [

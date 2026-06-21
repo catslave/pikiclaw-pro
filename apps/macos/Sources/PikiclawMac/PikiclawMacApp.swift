@@ -9,6 +9,15 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
+        NotificationCenter.default.addObserver(
+            forName: .pikiclawShowMainWindow,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.showMainWindow()
+            }
+        }
         showMainWindow()
     }
 
@@ -95,53 +104,96 @@ struct PikiclawMacApp: App {
 
             CommandMenu("Navigate") {
                 Button("Chat") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "chat")
                 }
                 .keyboardShortcut("1", modifiers: [.command])
 
                 Button("Projects") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "projects")
                 }
                 .keyboardShortcut("2", modifiers: [.command])
 
                 Button("Work Items") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "workItems")
                 }
                 .keyboardShortcut("3", modifiers: [.command])
 
                 Button("Work Plan") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "workPlan")
                 }
                 .keyboardShortcut("4", modifiers: [.command])
 
                 Button("Workflows") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "workflows")
                 }
                 .keyboardShortcut("5", modifiers: [.command])
 
                 Button("Mission Control") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "missionControl")
                 }
                 .keyboardShortcut("6", modifiers: [.command])
 
                 Button("Agent Studio") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "agents")
                 }
                 .keyboardShortcut("7", modifiers: [.command])
 
+                Button("Assistant") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawNavigate, object: "assistants")
+                }
+                .keyboardShortcut("8", modifiers: [.command])
+
+                Button("Notes") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawNavigate, object: "notes")
+                }
+
+                Button("Memory") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawNavigate, object: "memory")
+                }
+
+                Button("Extensions") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawNavigate, object: "extensions")
+                }
+                .keyboardShortcut("9", modifiers: [.command])
+
+                Button("Settings") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawNavigate, object: "settings")
+                }
+                .keyboardShortcut("0", modifiers: [.command])
+
                 Button("Context Terminal") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawOpenContextTerminal, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
 
                 Button("Voice Lens") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawToggleVoiceAssistant, object: nil)
                 }
                 .keyboardShortcut(" ", modifiers: [.command, .shift])
 
                 Divider()
 
+                Button("Show Main Window") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+
                 Button("Focus Command Center") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawFocusCommandCenter, object: nil)
                 }
                 .keyboardShortcut("k", modifiers: [.command])
@@ -157,21 +209,49 @@ struct PikiclawMacApp: App {
                 }
             }
 
+            CommandMenu("Jira") {
+                Button("Sync Current Sprint") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawSyncJiraCurrentSprint, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: [.command, .option])
+
+                Button("Open Jira Queue") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawOpenJiraQueue, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: [.command, .shift])
+
+                Button("Start Selected Ticket") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawStartSelectedJiraTicket, object: nil)
+                }
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
+            }
+
             CommandMenu("Run") {
                 Button("Run Selected Work") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawRunSelectedWork, object: nil)
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
 
                 Button("Restart Pikiclaw") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawRestartApplication, object: nil)
                 }
                 .keyboardShortcut("r", modifiers: [.command, .control])
 
                 Button("Open Mission Control") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
                     NotificationCenter.default.post(name: .pikiclawNavigate, object: "missionControl")
                 }
             }
         }
+
+        MenuBarExtra("Jira", systemImage: "checklist") {
+            JiraMenuBarView()
+        }
+        .menuBarExtraStyle(.window)
     }
 }

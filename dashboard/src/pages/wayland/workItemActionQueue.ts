@@ -1,16 +1,20 @@
 import type { DailyItem, JiraRemoteUpdateRun, NotePage, ProTask, TodoItem } from '../../types';
 import { buildWorkItemDailyCommandItems } from './workItemDailyCommand';
+import { buildWorkItemDecisionAuditCommandItems } from './workItemDecisionAuditCommand';
 import { buildWorkItemDeliverableCommandItems } from './workItemDeliverableCommand';
 import { buildWorkItemInboxCommandItems } from './workItemInboxCommand';
 import { buildWorkItemJiraReviewCommandItems } from './workItemJiraReviewCommand';
 import { buildWorkItemNoteCommandItems } from './workItemNoteCommand';
+import { buildWorkItemHandoffCommandItems } from './workItemHandoffCommand';
 import { compareWorkItemsBySourceRefresh, summarizeWorkItemSourceHealth, workItemSourceNeedsRefresh } from './workItemSourceHealth';
 import type { WorkItemCommandLane } from './workItemCommandLanes';
 
 export type WorkItemActionQueueKind =
   | 'jira'
+  | 'audit'
   | 'source'
   | 'deliverable'
+  | 'handoff'
   | 'inbox'
   | 'daily'
   | 'note';
@@ -25,6 +29,8 @@ export interface WorkItemActionQueueItem {
   title: string;
   detail: string;
   to: string;
+  taskId?: string;
+  promptDraft?: string;
   secondaryTo?: string;
   secondaryLabel?: string;
   priority: number;
@@ -85,7 +91,7 @@ function dedupeActionQueue(items: WorkItemActionQueueItem[]): WorkItemActionQueu
   const seen = new Set<string>();
   const result: WorkItemActionQueueItem[] = [];
   for (const item of items) {
-    const taskKey = item.to.match(/[?&]task=([^&]+)/)?.[1];
+    const taskKey = item.taskId || item.to.match(/[?&]task=([^&]+)/)?.[1];
     const dedupeKey = taskKey ? `task:${taskKey}` : item.key;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
@@ -151,6 +157,13 @@ export function buildWorkItemActionQueueItems(input: BuildWorkItemActionQueueInp
       actionLabel: item.keys[0] || 'Review',
       priority: item.priority || 0,
     })),
+    ...buildWorkItemDecisionAuditCommandItems(input.tasks, { limit: 12 }).map(item => ({
+      ...item,
+      kind: 'audit' as const,
+      sourceLabel: 'Audit',
+      actionLabel: item.keys[0] || 'Review',
+      priority: item.priority || 0,
+    })),
     ...sourceRefreshItems(input.tasks),
     ...buildWorkItemDeliverableCommandItems(input.tasks, { limit: 12 }).map(item => ({
       ...item,
@@ -158,6 +171,15 @@ export function buildWorkItemActionQueueItems(input: BuildWorkItemActionQueueInp
       sourceLabel: 'Output',
       actionLabel: item.keys[0] || 'Open',
       priority: item.priority || 0,
+    })),
+    ...buildWorkItemHandoffCommandItems(input.tasks, { limit: 12 }).map(item => ({
+      ...item,
+      kind: 'handoff' as const,
+      sourceLabel: 'Handoff',
+      actionLabel: item.keys[1] || 'Continue',
+      priority: item.priority || 0,
+      secondaryTo: `/work-items?task=${encodeURIComponent(item.taskId)}&tab=summary`,
+      secondaryLabel: 'Details',
     })),
     ...buildWorkItemInboxCommandItems(input.todos, { limit: 12 }).map(item => ({
       ...item,

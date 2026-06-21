@@ -255,6 +255,10 @@ describe('Wayland Chat Home next actions', () => {
     expect(chatHomeNextActionTaskId({
       to: '/work-items?task=task-1&tab=source',
     })).toBe('task-1');
+    expect(chatHomeNextActionTaskId(queueItem('handoff', 35, 'handoff-task', {
+      taskId: 'task-42',
+      to: '/chat',
+    }))).toBe('task-42');
     expect(chatHomeNextActionTaskId({
       to: '/work-items?source=inbox&todo=todo-1',
     })).toBeNull();

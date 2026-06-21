@@ -746,7 +746,7 @@ final class ContinuousVoiceSessionController: ObservableObject {
         isCapturingTurn = false
         stopLiveTranscript(cancelTask: true)
         currentSamples.removeAll(keepingCapacity: true)
-        statusLine = "Agent is working"
+        statusLine = "Voice Assistant is working"
         diagnosticLine = statusLine
         VoiceDebugLog.write("conversation paused for agent run")
     }
@@ -1192,11 +1192,14 @@ private final class AppleSpeechRecognitionState: @unchecked Sendable {
     }
 }
 
-private extension VoiceRecognitionLanguage {
+extension VoiceRecognitionLanguage {
     var voiceboxLanguageCode: String {
         switch self {
         case .chinese: return "zh"
+        case .cantonese: return "yue"
         case .english: return "en"
+        case .japanese: return "ja"
+        case .korean: return "ko"
         }
     }
 }

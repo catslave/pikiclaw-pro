@@ -138,7 +138,8 @@ export function buildChatHomeNextActionItems(input: BuildChatHomeNextActionsInpu
   return balanceChatHomeNextActionItems(items, limit);
 }
 
-export function chatHomeNextActionTaskId(item: Pick<WorkItemActionQueueItem, 'to'>): string | null {
+export function chatHomeNextActionTaskId(item: Pick<WorkItemActionQueueItem, 'to' | 'taskId'>): string | null {
+  if (item.taskId) return item.taskId;
   const queryStart = item.to.indexOf('?');
   if (queryStart < 0) return null;
   const params = new URLSearchParams(item.to.slice(queryStart + 1));

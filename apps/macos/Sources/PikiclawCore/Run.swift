@@ -34,6 +34,25 @@ public struct ContextRef: Hashable, Codable, Sendable {
     }
 }
 
+public struct AgentRunMessage: Identifiable, Hashable, Codable, Sendable {
+    public var id: EntityID
+    public var role: RunRole
+    public var content: String
+    public var createdAt: Date
+
+    public init(
+        id: EntityID = EntityID(),
+        role: RunRole,
+        content: String,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.createdAt = createdAt
+    }
+}
+
 public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var id: EntityID
     public var workItemId: EntityID?
@@ -51,7 +70,9 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var sideChatRunIds: [EntityID]
     public var promptSnapshot: String
     public var contextRefs: [ContextRef]
+    public var messages: [AgentRunMessage]
     public var transcript: String
+    public var readAt: Date?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -70,7 +91,9 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         case sideChatRunIds
         case promptSnapshot
         case contextRefs
+        case messages
         case transcript
+        case readAt
     }
 
     public init(
@@ -90,6 +113,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         sideChatRunIds: [EntityID] = [],
         promptSnapshot: String,
         contextRefs: [ContextRef] = [],
+        messages: [AgentRunMessage] = [],
         transcript: String = ""
     ) {
         self.id = id
@@ -108,7 +132,9 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.sideChatRunIds = sideChatRunIds
         self.promptSnapshot = promptSnapshot
         self.contextRefs = contextRefs
+        self.messages = messages
         self.transcript = transcript
+        self.readAt = nil
     }
 
     public init(from decoder: Decoder) throws {
@@ -129,7 +155,15 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.sideChatRunIds = try container.decodeIfPresent([EntityID].self, forKey: .sideChatRunIds) ?? []
         self.promptSnapshot = try container.decode(String.self, forKey: .promptSnapshot)
         self.contextRefs = try container.decodeIfPresent([ContextRef].self, forKey: .contextRefs) ?? []
+        self.messages = try container.decodeIfPresent([AgentRunMessage].self, forKey: .messages) ?? []
         self.transcript = try container.decodeIfPresent(String.self, forKey: .transcript) ?? ""
+        self.readAt = try container.decodeIfPresent(Date.self, forKey: .readAt)
+    }
+}
+
+public extension AgentRun {
+    var isCompletedUnread: Bool {
+        state == .completed && readAt == nil
     }
 }
 

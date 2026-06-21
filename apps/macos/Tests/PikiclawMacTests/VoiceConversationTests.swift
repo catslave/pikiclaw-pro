@@ -5,6 +5,60 @@ import Testing
 @testable import PikiclawRunner
 
 @MainActor
+@Test func nativeModelMarksPersistedActiveVoiceRunsStaleOnLaunch() async throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-voice-stale-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let workspace = Workspace(
+        id: "workspace-voice-stale",
+        name: "Voice Stale",
+        pathDisplay: dir.path,
+        trustState: .trusted
+    )
+    let codex = AgentProfile(
+        id: "agent-codex-stale",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let staleCandidate = AgentRun(
+        id: "run-voice-orphan",
+        workspaceId: workspace.id,
+        agentProfileId: codex.id,
+        state: .running,
+        startedAt: Date(),
+        promptSnapshot: "Voice Assistant request: orphaned task",
+        contextRefs: [ContextRef(kind: "voice", label: "Voice Assistant")]
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [staleCandidate],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [codex],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: dir.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(store: store)
+
+    await model.reload()
+
+    let snapshot = try await store.loadSnapshot()
+    let recoveredRun = try #require(snapshot.runs.first(where: { $0.id == staleCandidate.id }))
+    #expect(recoveredRun.state == .stale)
+    #expect(recoveredRun.endedAt != nil)
+    #expect(recoveredRun.transcript.contains("Marked stale because Pikiclaw restarted"))
+    #expect(model.restartBlockedByActiveRun == false)
+}
+
+@MainActor
 @Test func voiceConversationOpensDraftRunWithFirstEnabledAgent() async throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-voice-conversation-\(UUID().uuidString)", isDirectory: true)
@@ -61,6 +115,8 @@ import Testing
     #expect(run.state == .draft)
     #expect(run.workspaceId == workspace.id)
     #expect(run.agentProfileId == firstEnabled.id)
+    #expect(run.promptSnapshot == "Pikiclaw Voice Assistant Agent")
+    #expect(run.contextRefs.contains(where: { $0.kind == "voiceAssistantAgent" }))
     #expect(model.activeRunId == run.id)
     #expect(model.selectedAgentKind == firstEnabled.kind)
     #expect(model.restartBlockedByActiveRun == false)
@@ -125,6 +181,71 @@ import Testing
     #expect(run.transcript.contains("你好，我在。你可以直接说要做什么。"))
     #expect(run.transcript.contains("[user voice · You · Live]"))
     #expect(run.transcript.contains("你可以做什么"))
+}
+
+@MainActor
+@Test func voiceConversationRoutesVoiceConfigurationRequestToAgentRun() async throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-voice-config-route-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let workspace = Workspace(
+        id: "workspace-voice-config-route",
+        name: "Voice Config Route",
+        pathDisplay: dir.path,
+        trustState: .trusted
+    )
+    let codex = AgentProfile(
+        id: "agent-codex-config-route",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [codex],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: dir.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            VoiceScenarioAgentAdapter(descriptor: descriptor)
+        }
+    )
+    await model.reload()
+
+    let conversationRunId = try #require(await model.ensureVoiceConversation(workspaceId: workspace.id, focus: false))
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "还有其他语音可以选择吗，因为我觉得你目前的声音很不自然",
+        workspace: workspace,
+        preferredAgent: codex.kind
+    )
+
+    #expect(plan.intent == .delegate)
+    let submittedRunId = try #require(await model.submitVoiceTurn(
+        plan,
+        conversationRunId: conversationRunId,
+        workspaceId: workspace.id,
+        targetWorkItemId: nil
+    ))
+    let run = try await waitForRun(submittedRunId, in: store) { $0.state == .completed }
+    try await waitForModelIdle(model)
+
+    #expect(run.id == conversationRunId)
+    #expect(run.state == .completed)
+    #expect(run.transcript.contains("[user voice]"))
+    #expect(run.transcript.contains("声音很不自然"))
+    #expect(run.transcript.contains("[scenario completed]"))
 }
 
 @MainActor
@@ -214,7 +335,7 @@ import Testing
         #expect(run.transcript.contains("[user voice]"))
         #expect(run.transcript.contains(utterance))
         #expect(run.transcript.contains("[scenario completed]"))
-        #expect(run.promptSnapshot.contains("Voice conversation context before this turn"))
+        #expect(run.promptSnapshot.contains("Voice Assistant Agent working memory before this turn"))
         #expect(model.restartBlockedByActiveRun == false)
         completedRunIds.append(run.id)
     }
@@ -307,6 +428,66 @@ import Testing
     #expect(secondCompletedRun.transcript.contains("chat message"))
     #expect(model.runningRunIds.isEmpty)
     #expect(model.isRunning == false)
+}
+
+@MainActor
+@Test func voiceConversationCanSubmitTextInputFromVoiceSurface() async throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-voice-text-input-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let workspace = Workspace(
+        id: "workspace-voice-text-input",
+        name: "Voice Text Input",
+        pathDisplay: dir.path,
+        trustState: .trusted
+    )
+    let codex = AgentProfile(
+        id: "agent-codex-text-input",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [codex],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: dir.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            VoiceScenarioAgentAdapter(descriptor: descriptor)
+        }
+    )
+    await model.reload()
+
+    let conversationRunId = try #require(await model.ensureVoiceConversation(workspaceId: workspace.id, focus: false))
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "用文本输入提交一个后台任务。",
+        workspace: workspace,
+        preferredAgent: codex.kind
+    )
+    let submittedRunId = try #require(await model.submitVoiceTurn(
+        plan,
+        conversationRunId: conversationRunId,
+        workspaceId: workspace.id,
+        targetWorkItemId: nil,
+        inputRole: "user text"
+    ))
+    let run = try await waitForRun(submittedRunId, in: store) { $0.state == .completed }
+
+    #expect(run.transcript.contains("[user text]"))
+    #expect(run.transcript.contains("用文本输入提交一个后台任务"))
 }
 
 @MainActor

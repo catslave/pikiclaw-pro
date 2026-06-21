@@ -13,6 +13,7 @@ public struct NativeStoreSnapshot: Codable, Sendable {
     public var agentProfiles: [AgentProfile]
     public var providerProfiles: [ProviderProfile]
     public var auditEvents: [AuditEvent]
+    public var jiraSync: JiraSyncState?
 
     public init(
         projects: [Project] = [],
@@ -26,7 +27,8 @@ public struct NativeStoreSnapshot: Codable, Sendable {
         agentProfiles: [AgentProfile] = [],
         providerProfiles: [ProviderProfile] = [],
         auditEvents: [AuditEvent] = [],
-        agentAvailabilityPolicyVersion: Int? = 1
+        agentAvailabilityPolicyVersion: Int? = 1,
+        jiraSync: JiraSyncState? = nil
     ) {
         self.agentAvailabilityPolicyVersion = agentAvailabilityPolicyVersion
         self.projects = projects
@@ -40,6 +42,7 @@ public struct NativeStoreSnapshot: Codable, Sendable {
         self.agentProfiles = agentProfiles
         self.providerProfiles = providerProfiles
         self.auditEvents = auditEvents
+        self.jiraSync = jiraSync
     }
 
     public init(seed: NativeAppSeed) {
@@ -54,7 +57,8 @@ public struct NativeStoreSnapshot: Codable, Sendable {
             automations: seed.automations,
             agentProfiles: seed.agentProfiles,
             providerProfiles: seed.providerProfiles,
-            auditEvents: []
+            auditEvents: [],
+            jiraSync: JiraSyncState()
         )
     }
 
@@ -91,6 +95,185 @@ public struct NativeStoreSnapshot: Codable, Sendable {
             changed = true
         }
         return changed
+    }
+
+    @discardableResult
+    public mutating func ensureEnterpriseAlignmentGoal(fallbackSeed seed: NativeAppSeed) -> Bool {
+        guard !workItems.contains(where: { $0.id == AgentEnterpriseAlignment.goalWorkItemId }) else {
+            return false
+        }
+        guard let workspaceId = workspaces.first?.id ?? seed.workspaces.first?.id else {
+            return false
+        }
+        let projectId = projects.first { project in
+            project.workspaceIds.contains(workspaceId)
+        }?.id ?? seed.projects.first?.id
+        workItems.append(AgentEnterpriseAlignment.goalWorkItem(
+            workspaceId: workspaceId,
+            projectId: projectId
+        ))
+        return true
+    }
+
+    @discardableResult
+    public mutating func ensureEnterpriseAlignmentGoalArtifact(fallbackSeed seed: NativeAppSeed) -> Bool {
+        let artifactId = EntityID("artifact-enterprise-agent-parity-goal")
+        guard !artifacts.contains(where: { $0.id == artifactId }) else {
+            return false
+        }
+        let goal = workItems.first(where: { $0.id == AgentEnterpriseAlignment.goalWorkItemId })
+        guard let workspaceId = goal?.workspaceId ?? workspaces.first?.id ?? seed.workspaces.first?.id else {
+            return false
+        }
+        artifacts.append(Artifact(
+            id: artifactId,
+            workspaceId: workspaceId,
+            workItemId: AgentEnterpriseAlignment.goalWorkItemId,
+            kind: .obsidianNote,
+            title: "Enterprise Agent Parity Goal",
+            uri: "/Users/michael.yang/Documents/Obsidian Vault/repo/Personal/pikiclaw/mac-native-enterprise-agent-parity-goal.md",
+            status: .ready,
+            provenance: "Goal tracker"
+        ))
+        return true
+    }
+
+    @discardableResult
+    public mutating func applyJiraTickets(
+        _ tickets: [JiraTicket],
+        workspaceId: EntityID,
+        projectId: EntityID? = nil
+    ) -> JiraTicketApplySummary {
+        var created = 0
+        var updated = 0
+        var unchanged = 0
+        var selectedWorkItemId: EntityID?
+
+        for ticket in tickets {
+            let normalizedKey = ticket.key.uppercased()
+            if let index = workItems.firstIndex(where: {
+                $0.jira?.key.uppercased() == normalizedKey
+                    || $0.sourceRefs.contains(where: { $0.kind == "jira" && $0.label.uppercased() == normalizedKey })
+            }) {
+                let current = workItems[index]
+                let next = current.updatedFromJiraTicket(ticket)
+                selectedWorkItemId = selectedWorkItemId ?? next.id
+                var comparableNext = next
+                comparableNext.updatedAt = current.updatedAt
+                if comparableNext == current {
+                    unchanged += 1
+                } else {
+                    updated += 1
+                    workItems[index] = next
+                }
+            } else {
+                let item = WorkItem.fromJiraTicket(ticket, workspaceId: workspaceId, projectId: projectId)
+                selectedWorkItemId = selectedWorkItemId ?? item.id
+                created += 1
+                workItems.append(item)
+            }
+        }
+
+        workItems.sort { $0.updatedAt > $1.updatedAt }
+        return JiraTicketApplySummary(
+            created: created,
+            updated: updated,
+            unchanged: unchanged,
+            selectedWorkItemId: selectedWorkItemId
+        )
+    }
+}
+
+public extension WorkItem {
+    static func fromJiraTicket(_ ticket: JiraTicket, workspaceId: EntityID, projectId: EntityID? = nil) -> WorkItem {
+        WorkItem(
+            id: EntityID("jira-\(ticket.key.lowercased())"),
+            workspaceId: workspaceId,
+            projectId: projectId,
+            title: "\(ticket.key): \(ticket.title)",
+            description: jiraDescription(for: ticket),
+            sourceType: .jira,
+            sourceRefs: [
+                SourceRef(kind: "jira", label: ticket.key, uri: ticket.url),
+                SourceRef(kind: "jira-status", label: ticket.status ?? "Unknown")
+            ],
+            state: state(forJiraStatus: ticket.status),
+            priority: priorityRank(ticket.priority),
+            acceptanceCriteria: [
+                "Understand Jira scope and acceptance boundary",
+                "Run the implementation or investigation from this Work Item",
+                "Capture durable outputs before Jira write-back"
+            ],
+            externalRefs: ticket.url.map { [SourceRef(kind: "jira", label: "Open \(ticket.key)", uri: $0)] } ?? [],
+            jira: JiraWorkItemFields(ticket: ticket)
+        )
+    }
+
+    func updatedFromJiraTicket(_ ticket: JiraTicket) -> WorkItem {
+        var next = self
+        next.title = "\(ticket.key): \(ticket.title)"
+        next.description = Self.jiraDescription(for: ticket)
+        next.sourceType = .jira
+        next.sourceRefs = [
+            SourceRef(kind: "jira", label: ticket.key, uri: ticket.url),
+            SourceRef(kind: "jira-status", label: ticket.status ?? "Unknown")
+        ]
+        if let url = ticket.url {
+            next.externalRefs = [SourceRef(kind: "jira", label: "Open \(ticket.key)", uri: url)]
+        }
+        next.priority = Self.priorityRank(ticket.priority)
+        next.jira = JiraWorkItemFields(ticket: ticket)
+        if next.state == .inbox || next.state == .planned {
+            next.state = Self.state(forJiraStatus: ticket.status)
+        }
+        next.updatedAt = Date()
+        return next
+    }
+
+    private static func jiraDescription(for ticket: JiraTicket) -> String {
+        [
+            "Jira: \(ticket.key)",
+            ticket.status.map { "Status: \($0)" },
+            ticket.sprint.map { "Sprint: \($0)" },
+            ticket.assignee.map { "Assignee: \($0)" },
+            "",
+            ticket.description.isEmpty ? ticket.title : ticket.description
+        ]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+    }
+
+    private static func state(forJiraStatus status: String?) -> WorkItemState {
+        let value = (status ?? "").lowercased()
+        if value.contains("cancel") { return .cancelled }
+        if value.contains("done") || value.contains("closed") || value.contains("resolved") { return .done }
+        if value.contains("block") { return .blocked }
+        if value.contains("review") || value.contains("qa") { return .review }
+        if value.contains("progress") || value.contains("doing") { return .active }
+        return .planned
+    }
+
+    private static func priorityRank(_ priority: String?) -> Int {
+        let value = (priority ?? "").lowercased()
+        if value.contains("blocker") || value.contains("highest") || value.contains("critical") { return 0 }
+        if value.contains("high") { return 1 }
+        if value.contains("low") { return 3 }
+        return 2
+    }
+}
+
+private extension JiraWorkItemFields {
+    init(ticket: JiraTicket) {
+        self.init(
+            key: ticket.key,
+            url: ticket.url,
+            status: ticket.status,
+            assignee: ticket.assignee,
+            priority: ticket.priority,
+            issueType: ticket.issueType,
+            sprint: ticket.sprint,
+            remoteUpdatedAt: ticket.updatedAt
+        )
     }
 }
 
@@ -190,9 +373,11 @@ public actor JSONNativeStore: WorkspaceStore, WorkItemStore, RunStore, ArtifactS
             var next = decoded
             let merged = next.mergeMissingAgentProfiles(from: seed)
             let mergedCapabilities = next.mergeMissingCapabilities(from: seed)
+            let mergedGoalWorkItems = next.ensureEnterpriseAlignmentGoal(fallbackSeed: seed)
+            let mergedGoalArtifacts = next.ensureEnterpriseAlignmentGoalArtifact(fallbackSeed: seed)
             let migrated = next.applyAgentAvailabilityDefaultsIfNeeded()
             self.snapshot = next
-            if merged || mergedCapabilities || migrated {
+            if merged || mergedCapabilities || mergedGoalWorkItems || mergedGoalArtifacts || migrated {
                 try? FileManager.default.createDirectory(
                     at: fileURL.deletingLastPathComponent(),
                     withIntermediateDirectories: true

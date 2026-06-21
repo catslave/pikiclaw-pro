@@ -18,6 +18,8 @@ import { buildWorkflowAskAnswerEnvelope, extractWorkflowAskMarkers, latestWorkfl
 import { scheduleProposalSignature } from './scheduleProposal';
 import { InteractionPromptModal } from './InteractionPromptModal';
 import type { OpenFileLinkHandler } from './markdown';
+import { summarizeForkCapability } from './forkCapability';
+import { summarizeGoalCapability } from './goalCapability';
 import {
   normalizeTurnHistory,
   mergeOlderHistory,
@@ -256,6 +258,7 @@ function GoalStatusBar({
   const canPause = actions.has('pause');
   const canResume = actions.has('resume');
   const canClear = actions.has('clear');
+  const goalCapability = summarizeGoalCapability(capability);
   if (compact) {
     const statusLabel = `${goal.source}:${goal.status}`;
     return (
@@ -267,6 +270,12 @@ function GoalStatusBar({
           <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-emerald-400/80' : paused ? 'bg-amber-400/80' : 'bg-fg-5/50')} />
           <span className="shrink-0 font-semibold uppercase tracking-wider text-fg-5">Goal</span>
           <span className="min-w-0 truncate text-fg-3">{goal.objective}</span>
+          <span
+            className="hidden shrink-0 rounded border border-edge/30 bg-control/75 px-1.5 py-[1px] text-[9px] font-semibold text-fg-5 sm:inline"
+            title={goalCapability.title}
+          >
+            {goalCapability.label}
+          </span>
           <span className="shrink-0 rounded border border-edge/30 bg-control/75 px-1.5 py-[1px] font-mono text-[9px] text-fg-5">
             {statusLabel}
           </span>
@@ -289,6 +298,17 @@ function GoalStatusBar({
         <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', active ? 'bg-emerald-400/80' : 'bg-fg-5/50')} />
         <span className="shrink-0 font-semibold uppercase tracking-wider text-fg-5">Goal</span>
         <span className="min-w-0 truncate text-fg-2">{goal.objective}</span>
+        <span
+          className="shrink-0 rounded border border-edge/35 bg-control px-1.5 py-[1px] text-[10px] font-semibold text-fg-5"
+          title={goalCapability.title}
+        >
+          {goalCapability.label}
+        </span>
+        {goalCapability.controlHint && (
+          <span className="hidden shrink-0 rounded border border-amber-500/25 bg-amber-500/[0.08] px-1.5 py-[1px] text-[10px] font-semibold text-amber-300 sm:inline">
+            {goalCapability.controlHint}
+          </span>
+        )}
         <span className="shrink-0 rounded border border-edge/35 bg-control px-1.5 py-[1px] font-mono text-[10px] text-fg-5">
           {goal.source}:{goal.status}
         </span>
@@ -633,6 +653,10 @@ export const SessionPanel = memo(function SessionPanel({
   const [forkPrompt, setForkPrompt] = useState('');
   const [forkSubmitting, setForkSubmitting] = useState(false);
   const canFork = !!session.agent && !!session.sessionId;
+  const forkCapability = useMemo(
+    () => summarizeForkCapability(agentRuntime?.capabilities || null),
+    [agentRuntime?.capabilities],
+  );
   const submitForkRef = useRef<(() => Promise<void>) | null>(null);
   const pendingImageUrlsRef = useRef<string[]>(initialPendingImageUrls || []);
   const liveStreamRef = useRef(liveStream);
@@ -2839,6 +2863,21 @@ export const SessionPanel = memo(function SessionPanel({
             description={t('hub.forkPromptHint')}
             onClose={() => { if (!forkSubmitting) setForkRequest(null); }}
           />
+          <div
+            className="mb-3 rounded-lg border border-edge bg-panel-alt/75 px-3 py-2 text-[11.5px] leading-relaxed text-fg-4"
+            title={forkCapability.title}
+          >
+            <div className="mb-1 flex min-w-0 items-center gap-2">
+              <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', forkCapability.tone === 'ok' ? 'bg-emerald-400/80' : 'bg-primary/80')} />
+              <span className="font-semibold text-fg-3">{forkCapability.label}</span>
+              {typeof forkRequest.atTurn === 'number' && (
+                <span className="rounded border border-edge/50 bg-control px-1.5 py-[1px] font-mono text-[10px] text-fg-5">
+                  turn {forkRequest.atTurn + 1}
+                </span>
+              )}
+            </div>
+            <p className="text-fg-5">{forkCapability.detail}</p>
+          </div>
           <textarea
             autoFocus
             value={forkPrompt}

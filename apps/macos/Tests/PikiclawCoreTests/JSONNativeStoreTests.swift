@@ -50,3 +50,66 @@ import Testing
     #expect(profiles[.claude]?.isEnabled == false)
     #expect(migrated.agentAvailabilityPolicyVersion == 1)
 }
+
+@Test func jsonNativeStoreMigratesEnterpriseAlignmentGoalIntoExistingWorkspace() async throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-json-store-goal-\(UUID().uuidString)", isDirectory: true)
+    let file = dir.appendingPathComponent("state.json")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    let workspace = Workspace(
+        id: "workspace-existing",
+        name: "Existing Workspace",
+        pathDisplay: "/tmp/existing",
+        trustState: .trusted
+    )
+    let project = Project(
+        id: "project-existing",
+        name: "Existing Project",
+        workspaceIds: [workspace.id]
+    )
+    let oldSnapshot = NativeStoreSnapshot(
+        projects: [project],
+        workspaces: [workspace],
+        workItems: [],
+        artifacts: [],
+        agentProfiles: [
+            AgentProfile(
+                id: "agent-codex",
+                kind: .codex,
+                displayName: "Codex",
+                executableName: "codex"
+            )
+        ],
+        agentAvailabilityPolicyVersion: nil
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(oldSnapshot).write(to: file, options: .atomic)
+
+    let store = JSONNativeStore(fileURL: file, seed: .preview())
+    let migrated = try await store.loadSnapshot()
+    let goal = try #require(migrated.workItems.first { $0.id == AgentEnterpriseAlignment.goalWorkItemId })
+    let artifact = try #require(migrated.artifacts.first { $0.workItemId == goal.id })
+
+    #expect(goal.workspaceId == workspace.id)
+    #expect(goal.projectId == project.id)
+    #expect(goal.sourceType == .goal)
+    #expect(artifact.workspaceId == workspace.id)
+    #expect(artifact.status == .ready)
+}
+
+@Test func previewSeedDoesNotStartWithActiveRuns() {
+    let seed = NativeAppSeed.preview()
+    let activeRuns = seed.runs.filter { run in
+        switch run.state {
+        case .queued, .starting, .running, .waitingForUser, .cancelling:
+            return true
+        case .draft, .completed, .failed, .cancelled, .stale:
+            return false
+        }
+    }
+
+    #expect(activeRuns.isEmpty)
+}

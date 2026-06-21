@@ -82,6 +82,10 @@ public struct NativeAppSeed: Sendable {
                         "Runner boundary is explicit"
                     ],
                     currentRunId: runId
+                ),
+                AgentEnterpriseAlignment.goalWorkItem(
+                    workspaceId: workspaceId,
+                    projectId: projectId
                 )
             ],
             runs: [
@@ -91,8 +95,9 @@ public struct NativeAppSeed: Sendable {
                     workspaceId: workspaceId,
                     agentProfileId: agentProfileId,
                     permissionMode: .askBeforeEdit,
-                    state: .running,
+                    state: .completed,
                     startedAt: Date(),
+                    endedAt: Date(),
                     promptSnapshot: "Scaffold Pikiclaw Mac Native v2."
                 )
             ],
@@ -106,6 +111,16 @@ public struct NativeAppSeed: Sendable {
                     uri: "/Users/michael.yang/Documents/Obsidian Vault/repo/pikiclaw/2026-06-18-pikiclaw-mac-native-v2-blueprint.md",
                     status: .ready,
                     provenance: "Design blueprint"
+                ),
+                Artifact(
+                    id: "artifact-enterprise-agent-parity-goal",
+                    workspaceId: workspaceId,
+                    workItemId: AgentEnterpriseAlignment.goalWorkItemId,
+                    kind: .obsidianNote,
+                    title: "Enterprise Agent Parity Goal",
+                    uri: "/Users/michael.yang/Documents/Obsidian Vault/repo/Personal/pikiclaw/mac-native-enterprise-agent-parity-goal.md",
+                    status: .ready,
+                    provenance: "Goal tracker"
                 )
             ],
             capabilities: [
@@ -128,6 +143,16 @@ public struct NativeAppSeed: Sendable {
                     configState: "requires clickhouse-lab MCP",
                     trustLevel: .trusted,
                     healthState: .needsConfiguration
+                ),
+                Capability(
+                    id: "capability-skill-global-using-superpowers",
+                    kind: .skill,
+                    name: "Using Superpowers",
+                    scope: .global,
+                    installState: "installed",
+                    configState: "ready",
+                    trustLevel: .trusted,
+                    healthState: .healthy
                 ),
                 Capability(
                     kind: .cliTool,

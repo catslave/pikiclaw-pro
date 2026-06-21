@@ -93,10 +93,12 @@ import type { SessionPanelChange, SessionPanelScrollRequest, SessionPanelSearchC
 import { ASSISTANT_LAUNCHPAD_MAX, ASSISTANT_LAUNCHPAD_STORAGE_KEY, addAssistantLaunchpadId, assistantLaunchpadCandidates, defaultAssistantLaunchpadIds, moveAssistantLaunchpadId, normalizeAssistantLaunchpadIds, removeAssistantLaunchpadId, resolveAssistantLaunchpadEntries } from './assistantLaunchpad';
 import { parseAssistantImportText, type AssistantImportInput } from './assistantImport';
 import { ASSISTANT_DOMAIN_LABELS, ASSISTANT_DOMAIN_VALUES, assistantLibrarySearchText, filterAssistantLibrary, normalizeAssistantDomain, normalizeAssistantFilter, resolveAssistantDomain, summarizeAssistantLibraryDetail, type AssistantDomain, type AssistantLibraryFilter } from './assistantLibrary';
+import { summarizeAgentParity, type AgentParityRow } from './agentParity';
 import { summarizeCapabilityAvailability, type CapabilityAvailabilityLane } from './capabilityAvailability';
 import { detectCapabilityImportKind, type CapabilityImportKind, type CapabilityImportMode } from './capabilityImport';
 import { batchConversationExportFilename, composeBatchConversationMarkdown, type BatchConversationExportEntry, type BatchConversationExportError } from './conversationExport';
 import { buildExecutionObjects } from './executionObjects';
+import { summarizeEnterpriseReadiness, type EnterpriseReadinessRow } from './enterpriseReadiness';
 import {
   CHAT_HOME_DAILY_ASSISTANT_ID,
   buildChatHomeNextActionItems,
@@ -246,6 +248,7 @@ import {
   type WorkItemActionQueueFocusCommand,
 } from './workItemActionQueue';
 import { buildWorkItemDeliverableCommandItems } from './workItemDeliverableCommand';
+import { buildWorkItemDecisionAuditCommandItems, summarizeWorkItemDecisionAudit } from './workItemDecisionAuditCommand';
 import { commandLane, type WorkItemCommandLane } from './workItemCommandLanes';
 import { summarizeWorkItemDeliverableReadiness, type WorkItemDeliverableReadinessTone } from './workItemDeliverableReadiness';
 import { buildWorkItemDailyCommandItems } from './workItemDailyCommand';
@@ -273,6 +276,8 @@ import {
   summarizeWorkItemRemoteBoundary,
   type WorkItemRemoteBoundaryTone,
 } from './workItemRemoteBoundary';
+import { buildWorkItemAgentLaunchPrompt, buildWorkItemHandoffCapsule } from './workItemHandoffCapsule';
+import { buildWorkItemHandoffCommandItems } from './workItemHandoffCommand';
 import {
   buildWorkItemStatusGrammar,
   type WorkItemStatusTone,
@@ -5743,6 +5748,13 @@ function ChatHome({
     const task = taskId ? workItems.find(candidate => candidate.id === taskId) || null : null;
     if (task) {
       launchWorkItemFromWorkObject(task);
+      if (item.promptDraft) {
+        const context = parseChatWorkItemLaunchContext(item.promptDraft);
+        if (context) {
+          setLaunchWorkItemContext({ ...context, taskId: task.id });
+          setPrompt(context.instruction || '');
+        }
+      }
       return;
     }
     setLaunchWorkItemContext(null);
@@ -6347,9 +6359,13 @@ function ChatHome({
                       style={{ '--pk-action-index': index } as CSSProperties}
                       data-testid="chat-home-next-action-card"
                     >
-                      <Link
-                        to={item.to}
-                        className="block min-w-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
+	                  <Link
+	                    to={item.to}
+                      state={item.promptDraft ? {
+                        chatPromptDraft: item.promptDraft,
+                        chatPromptNonce: `${item.key}:${item.promptDraft.length}`,
+                      } : undefined}
+	                    className="block min-w-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
                         data-chat-home-next-action-focus="true"
                         data-testid="chat-home-next-action-primary"
                       >
@@ -13000,28 +13016,17 @@ function workItemPrimaryAction(task: ProTask): WorkItemPrimaryAction {
 }
 
 function workItemActionPrompt(task: ProTask, action: WorkItemPrimaryAction): string {
-  const latestStage = latestWorkItemStage(task);
-  const outputs = workItemDeliverables(task).slice(0, 4);
   const actionInstruction = action.key === 'code'
     ? 'Help me implement this Work Item. Inspect the relevant project context first, keep the changes focused, and stop for review before committing or updating remote Jira.'
     : action.key === 'review'
       ? 'Review this Work Item and its outputs. Focus on correctness, missing validation, follow-up risk, and whether it is ready to close. Do not modify files unless I explicitly ask.'
       : action.key === 'continue'
-        ? 'Continue the active or interrupted Work Item flow. Reconstruct current state from the context below, then recommend or take the next useful chat-first step.'
-        : 'Clarify this Work Item before implementation. Produce a concise goal, assumptions, open questions, acceptance criteria, risks, and recommended next step.';
-  return [
-    `Work Item action: ${action.label}`,
-    `Title: ${task.title}`,
-    `Status: ${task.status}`,
-    `Source: ${workItemSourceLabel(task)}`,
-    task.jiraKey ? `Ticket: ${task.jiraKey}${task.jiraUrl ? ` (${task.jiraUrl})` : ''}` : '',
-    task.workdir ? `Project path: ${task.workdir}` : '',
-    task.description ? `Description:\n${task.description}` : '',
-    latestStage ? `Latest stage: ${latestStage.stage} · ${latestStage.status}` : '',
-    outputs.length ? `Recent deliverables:\n${outputs.map(output => `- ${output.title}${output.summary ? `: ${output.summary}` : ''}`).join('\n')}` : '',
-    '',
+      ? 'Continue the active or interrupted Work Item flow. Reconstruct current state from the context below, then recommend or take the next useful chat-first step.'
+      : 'Clarify this Work Item before implementation. Produce a concise goal, assumptions, open questions, acceptance criteria, risks, and recommended next step.';
+  return buildWorkItemAgentLaunchPrompt(task, {
+    actionLabel: action.label,
     actionInstruction,
-  ].filter(Boolean).join('\n');
+  });
 }
 
 function workItemChatLaunchUrl(task: ProTask, action: WorkItemPrimaryAction): string {
@@ -15541,6 +15546,8 @@ function WorkItemsView({
     const latestStage = latestWorkItemStage(task);
     const outputs = workItemDeliverables(task);
     const recentEvents = (task.events || []).slice(0, 5);
+    const decisionAudit = summarizeWorkItemDecisionAudit(task);
+    const handoffCapsule = buildWorkItemHandoffCapsule(task);
     const primaryAction = workItemPrimaryAction(task);
     const operational = summarizeWorkItemOperationalState(task);
     const sourceHealth = summarizeWorkItemSourceHealth(task);
@@ -16101,6 +16108,41 @@ function WorkItemsView({
         ) : (
           emptyPanel('No description yet.')
         )}
+        <section className="rounded-lg border border-edge/70 bg-inset px-3 py-2" data-testid="work-item-handoff-capsule">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-fg-5">Handoff capsule</div>
+              <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-fg-4">{handoffCapsule.summary}</div>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-[10.5px]"
+              onClick={() => { void copyWorkItemAssetText(handoffCapsule.markdown, 'Handoff capsule'); }}
+              data-testid="work-item-copy-handoff-capsule"
+            >
+              Copy
+            </Button>
+          </div>
+          <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+            {[
+              { label: 'Source', value: handoffCapsule.sourceCount },
+              { label: 'Runs', value: handoffCapsule.runCount },
+              { label: 'Output', value: handoffCapsule.outputCount },
+              { label: 'Timeline', value: handoffCapsule.eventCount },
+            ].map(item => (
+              <span key={item.label} className="inline-flex h-6 items-center gap-1 rounded-md border border-edge/70 bg-panel/70 px-1.5 text-[10px] font-semibold text-fg-5">
+                <span>{item.label}</span>
+                <span className="text-fg-4">{item.value}</span>
+              </span>
+            ))}
+            {handoffCapsule.needsDecisionReview && (
+              <span className="inline-flex h-6 items-center rounded-md border border-amber-300/45 bg-amber-50/45 px-1.5 text-[10px] font-semibold text-amber-700 dark:border-amber-400/25 dark:bg-amber-400/8 dark:text-amber-100">
+                Decision review
+              </span>
+            )}
+          </div>
+        </section>
         <div className="grid grid-cols-3 gap-2 text-[11px] text-fg-5">
           <div className="min-w-0 rounded-lg border border-edge/70 bg-inset px-2 py-1.5">
             <div className="font-semibold text-fg-4">{copy.source}</div>
@@ -17253,6 +17295,37 @@ function WorkItemsView({
     );
     const renderTimelinePanel = () => (
       <div className="space-y-2">
+        {decisionAudit.needsReview && (
+          <section
+            className="rounded-lg border border-amber-300/45 bg-amber-50/45 px-3 py-2 dark:border-amber-400/25 dark:bg-amber-400/8"
+            data-testid="work-item-decision-audit-panel"
+          >
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-100">Decision audit</div>
+                <div className="mt-1 text-[11.5px] leading-relaxed text-fg-4">{decisionAudit.detail}</div>
+              </div>
+              <span className="shrink-0 rounded-md border border-amber-300/45 bg-panel/70 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:border-amber-400/25 dark:text-amber-100">
+                {decisionAudit.guardedChangeCount}
+              </span>
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {decisionAudit.guardedEvents.slice(0, 3).map(event => (
+                <div
+                  key={event.id}
+                  className="min-w-0 rounded-md border border-edge/70 bg-panel/70 px-2 py-1.5"
+                  data-testid="work-item-decision-audit-event"
+                >
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <span className="rounded border border-edge/70 bg-inset px-1.5 py-0.5 text-[9.5px] font-semibold uppercase text-fg-5">{event.type}</span>
+                    <span className="text-[10px] text-fg-5">{event.actor} · {formatShortDate(event.createdAt)}</span>
+                  </div>
+                  <div className="mt-1 truncate text-[11px] font-medium text-fg">{event.summary}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
         {recentEvents.length ? recentEvents.map((event, index) => (
           <div
             key={event.id}
@@ -25484,6 +25557,14 @@ function CommandPalette({
       ...item,
       kind: copy.workItems,
     }));
+    const decisionAuditCommandItems = buildWorkItemDecisionAuditCommandItems(workItems, { limit: 12 }).map(item => ({
+      ...item,
+      kind: copy.workItems,
+    }));
+    const handoffCommandItems = buildWorkItemHandoffCommandItems(workItems, { limit: 12 }).map(item => ({
+      ...item,
+      kind: copy.workItems,
+    }));
     const deliverableCommandItems = buildWorkItemDeliverableCommandItems(workItems, { limit: 12 }).map(item => ({
       ...item,
       kind: copy.workItems,
@@ -25569,6 +25650,8 @@ function CommandPalette({
       ...assistantItems,
       ...activeWorkflowItems,
       ...jiraReviewCommandItems,
+      ...decisionAuditCommandItems,
+      ...handoffCommandItems,
       ...executionItems,
       ...sourceRefreshItems,
       ...deliverableCommandItems,
@@ -25937,6 +26020,7 @@ function CapabilityHubView({
   assistants,
   automations,
   workflowRecipes,
+  workItems,
   agentStatus,
   onOpenBrowserSetup,
   onAssistantsImported,
@@ -25946,6 +26030,7 @@ function CapabilityHubView({
   assistants: AgentAssistant[];
   automations: AutomationRule[];
   workflowRecipes: WorkflowRecipe[];
+  workItems: ProTask[];
   agentStatus: AgentStatusResponse | null;
   onOpenBrowserSetup: () => void;
   onAssistantsImported: (created: AgentAssistant[]) => void;
@@ -26588,6 +26673,22 @@ function CapabilityHubView({
     installedAgents,
     primaryWorkspace,
   }), [assistants, automations, cliItems, installedAgents, installedSkills, mcpItems, primaryWorkspace, skillItems, workflowRecipes.length]);
+  const agentParityRows = useMemo<AgentParityRow[]>(
+    () => summarizeAgentParity(allAgents.filter(item => item.agent !== 'openclaw')),
+    [allAgents],
+  );
+  const enterpriseReadinessRows = useMemo<EnterpriseReadinessRow[]>(() => summarizeEnterpriseReadiness({
+    mcpItems,
+    skillItems,
+    installedSkills,
+    skillQuarantineRecords,
+    cliItems,
+    automations,
+    workflowRecipeCount: workflowRecipes.length,
+    installedAgents,
+    primaryWorkspace,
+    workItems,
+  }), [automations, cliItems, installedAgents, installedSkills, mcpItems, primaryWorkspace, skillItems, skillQuarantineRecords, workflowRecipes.length, workItems]);
   const skillHealthCards = [
     {
       label: 'Skills scanned',
@@ -26739,6 +26840,117 @@ function CapabilityHubView({
                 ))}
               </span>
             </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="mt-5" data-testid="agent-parity-board">
+        <div className="mb-3 flex min-w-0 flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-[15px] font-semibold text-fg">Agent Parity</h2>
+            <p className="mt-1 max-w-[760px] text-[12px] leading-relaxed text-fg-4">Codex, Claude, and Gemini capability contracts compared against the enterprise agent platform target.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => navigate('/agents')}
+            className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-edge bg-panel px-3 text-[12px] font-semibold text-fg-3 transition-colors hover:border-edge-h hover:bg-panel-h"
+          >
+            <Icon name="assistant" />
+            Agents
+          </button>
+        </div>
+        <div className="overflow-hidden rounded-xl border border-edge bg-panel/76 shadow-sm">
+          {agentParityRows.map(row => (
+            <article
+              key={row.key}
+              data-testid="agent-parity-row"
+              data-capability={row.key}
+              className="grid min-w-0 gap-3 border-b border-edge/70 px-3 py-3 last:border-b-0 md:grid-cols-[minmax(150px,0.9fr)_minmax(0,1.4fr)_minmax(280px,1.3fr)] md:items-start md:px-4"
+            >
+              <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Dot variant={row.tone} pulse={row.tone === 'warn' || row.tone === 'active'} />
+                  <span className="truncate text-[13px] font-semibold text-fg">{row.title}</span>
+                </div>
+                <div className="mt-1 text-[11px] text-fg-5">{row.coverageLabel}</div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {row.chips.map(chip => (
+                    <span key={`${row.key}:${chip}`} className="rounded-md border border-edge bg-inset px-1.5 py-0.5 text-[10px] font-semibold text-fg-5">{chip}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="grid min-w-0 gap-1.5 sm:grid-cols-3">
+                {(['codex', 'claude', 'gemini'] as const).map(agent => {
+                  const cell = row.cells[agent];
+                  return (
+                    <div key={`${row.key}:${agent}`} className="min-w-0 rounded-md border border-edge bg-inset px-2 py-2" data-testid={`agent-parity-cell-${agent}`}>
+                      <div className="flex min-w-0 items-center justify-between gap-2">
+                        <span className="truncate text-[11px] font-semibold text-fg">{cell.agentLabel}</span>
+                        <span className="inline-flex shrink-0 items-center gap-1 text-[10px] font-semibold text-fg-5">
+                          <Dot variant={cell.tone} />
+                          {cell.modeLabel}
+                        </span>
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-[10.5px] leading-relaxed text-fg-5">{cell.summary}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="min-w-0 rounded-md border border-edge bg-panel px-2.5 py-2">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-fg-5">Gap</div>
+                <p className="mt-1 text-[11.5px] leading-relaxed text-fg-4">{row.gap}</p>
+                <div className="mt-2 border-t border-edge/70 pt-2 text-[11px] leading-relaxed text-fg-5">{row.nextAction}</div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="mt-5" data-testid="enterprise-readiness-board">
+        <div className="mb-3 flex min-w-0 flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-[15px] font-semibold text-fg">Enterprise Readiness</h2>
+            <p className="mt-1 max-w-[760px] text-[12px] leading-relaxed text-fg-4">Platform-level readiness across workbench context, agent fleet, connectors, artifacts, run lineage, decision audit, automation, and governance.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => navigate('/mission-control')}
+            className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-edge bg-panel px-3 text-[12px] font-semibold text-fg-3 transition-colors hover:border-edge-h hover:bg-panel-h"
+          >
+            <Icon name="gauge" />
+            Mission Control
+          </button>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {enterpriseReadinessRows.map(row => (
+            <article key={row.key} className="min-w-0 rounded-xl border border-edge bg-panel/82 p-3 shadow-sm" data-testid="enterprise-readiness-row" data-readiness={row.key}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-fg-5">{row.title}</div>
+                  <div className="mt-2 truncate text-[21px] font-semibold tracking-tight text-fg" title={row.value}>{row.value}</div>
+                </div>
+                <Dot variant={row.tone} pulse={row.tone === 'warn' || row.tone === 'active'} />
+              </div>
+              <p className="mt-1 min-h-10 text-[11.5px] leading-relaxed text-fg-4">{row.detail}</p>
+              <div className="mt-3 grid grid-cols-3 gap-1.5">
+                {[
+                  { label: 'Ready', value: row.ready },
+                  { label: 'Attention', value: row.attention },
+                  { label: 'Missing', value: row.missing },
+                ].map(item => (
+                  <span key={`${row.key}:${item.label}`} className="min-w-0 rounded-md border border-edge bg-inset px-1.5 py-1">
+                    <span className="block truncate text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-5">{item.label}</span>
+                    <span className="mt-0.5 block text-[13px] font-semibold text-fg">{item.value}</span>
+                  </span>
+                ))}
+              </div>
+              <div className="mt-3 flex min-w-0 flex-wrap gap-1.5">
+                {row.chips.slice(0, 3).map(chip => (
+                  <span key={`${row.key}:${chip}`} className="max-w-full truncate rounded-md border border-edge bg-panel px-1.5 py-0.5 text-[10px] font-semibold text-fg-5">{chip}</span>
+                ))}
+              </div>
+              <div className="mt-3 border-t border-edge/70 pt-2 text-[11px] leading-relaxed text-fg-5">{row.nextAction}</div>
+            </article>
           ))}
         </div>
       </section>
@@ -31557,6 +31769,7 @@ export function WaylandShell({
           assistants={assistants}
           automations={automations}
           workflowRecipes={workflowRecipes}
+          workItems={launchpadWorkItems}
           agentStatus={agentStatus}
           onOpenBrowserSetup={onOpenBrowserSetup}
           onAssistantsImported={mergeImportedAssistants}

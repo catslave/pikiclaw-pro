@@ -9,6 +9,7 @@ import Testing
     #expect(args == [
         "--ask-for-approval", "never",
         "exec",
+        "--json",
         "--color", "never",
         "--sandbox", "read-only",
         "-C", "/tmp/project",

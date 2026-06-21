@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: 'iva-logtracer skill routing regression suite (MiniMax OpenAI-compatible)'
+
+prompts:
+  - file://../../scripts/promptfoo/create_prompt_minimax.py:create_prompt
+
+providers:
+  - id: file://../../scripts/promptfoo/provider_minimax.py
+    label: minimax-custom-provider-minimax-m2.7
+    config:
+      api_base_url: https://api.minimaxi.com/v1
+      api_key_env: MINIMAX_API_KEY
+      model: MiniMax-M2.7
+      temperature: 0.1
+      max_tokens: 1200
+
+tests:
+  - path: file://../../scripts/promptfoo/generate_tests.py:create_tests
+    config:
+      dataset: assets/eval-dataset.jsonl
+
+defaultTest:
+  assert:
+    - type: python
+      value: file://../../scripts/promptfoo/assert_route_minimax.py:check_route

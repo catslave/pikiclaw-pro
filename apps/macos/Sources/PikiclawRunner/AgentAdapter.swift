@@ -85,6 +85,7 @@ public enum NativeAgentCommandBuilder {
         [
             "--ask-for-approval", "never",
             "exec",
+            "--json",
             "--color", "never",
             "--sandbox", codexSandbox(for: request.run.permissionMode),
             "-C", request.workspacePath,

@@ -1,6 +1,9 @@
 ---
 label: ClickHouse Query
 description: Query the configured ClickHouse MCP server with SQL.
+category: observability
+tags: [clickhouse, sql, trace, otel, spans, ConversationId, TraceId, gen_eva_trace_v2, 慢查询, 查数, 链路]
+keywords: [clickhouse, chsql, sql, trace lookup, span analysis, otel_traces_main]
 mcp_requires:
   - clickhouse-lab
 ---
@@ -36,6 +39,14 @@ Most slash command arguments are either a `ConversationId` or a `TraceId`.
 - If the input is a 32-character hex string, treat it as a `TraceId`.
 - Prefer `TraceId = '<normalizedTraceId>'` for the first query. It is usually the fastest lookup.
 - Only fall back to `ConversationId = '<input>'` or `replaceAll(ConversationId, '-', '') = '<traceId>'` if the `TraceId` query returns no rows and the user needs the fallback.
+
+Common task shortcuts may arrive from the macOS composer as natural-language task strings:
+
+- `trace lookup TraceId=<id> limit=<n>`: preview the trace chronologically.
+- `show slow spans for TraceId=<id> [ConversationId=<id>] limit=<n>`: return the highest-duration spans first.
+- `show error spans for TraceId=<id> [ConversationId=<id>] limit=<n>`: return failed/error spans first.
+
+Treat `limit=<n>` as an output limit, cap unexpectedly large values to `500`, and default to `config.defaultLimit` for preview/error lookups and `config.topSpanLimit` for slow spans.
 
 For a bare ID, use this preview query shape:
 
@@ -87,6 +98,28 @@ FROM gen_eva_trace_v2.otel_traces_main
 WHERE TraceId = '<normalized_trace_id>'
 ORDER BY Duration DESC
 LIMIT 10
+```
+
+For error spans, use:
+
+```sql
+SELECT
+  Timestamp,
+  ServiceName,
+  SpanName,
+  SpanId,
+  ParentSpanId,
+  round(Duration / 1000000, 2) AS duration_ms,
+  StatusCode,
+  StatusMessage
+FROM gen_eva_trace_v2.otel_traces_main
+WHERE TraceId = '<normalized_trace_id>'
+  AND (
+    StatusCode = 'Error'
+    OR notEmpty(StatusMessage)
+  )
+ORDER BY Timestamp ASC
+LIMIT 20
 ```
 
 ## Analysis Output
