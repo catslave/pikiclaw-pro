@@ -65,6 +65,63 @@ import Testing
     #expect(goal.ready == 1)
 }
 
+@Test func enterpriseGoalMissionSummaryKeepsGoalVisibleForMissionControl() throws {
+    let snapshot = NativeStoreSnapshot(seed: .preview())
+    let summary = try #require(AgentEnterpriseAlignment.missionSummary(snapshot: snapshot))
+
+    #expect(summary.workItemId == AgentEnterpriseAlignment.goalWorkItemId)
+    #expect(summary.title.contains("Codex"))
+    #expect(summary.title.contains("Claude"))
+    #expect(summary.title.contains("Gemini"))
+    #expect(summary.state == .active)
+    #expect(summary.coverageLabel.contains("/"))
+    #expect(summary.readyArtifactCount == 1)
+    #expect(summary.totalArtifactCount == 1)
+    #expect(summary.readinessReady > 0)
+    #expect(summary.readinessAttention > 0)
+    #expect(summary.capabilityReady > 0)
+    #expect(summary.capabilityAttention > 0)
+    #expect(!summary.nextAction.isEmpty)
+}
+
+@Test func enterpriseAlignmentTracksIssueWorkflowAcrossFocusAgents() throws {
+    let profiles = [
+        AgentProfile(id: "agent-codex", kind: .codex, displayName: "Codex", executableName: "codex"),
+        AgentProfile(id: "agent-claude", kind: .claude, displayName: "Claude", executableName: "claude"),
+        AgentProfile(id: "agent-gemini", kind: .gemini, displayName: "Gemini", executableName: "gemini")
+    ]
+    let capabilities = [
+        Capability(kind: .cliTool, name: "Codex CLI", scope: .agent, trustLevel: .trusted, healthState: .healthy),
+        Capability(kind: .cliTool, name: "Claude CLI", scope: .agent, trustLevel: .trusted, healthState: .healthy),
+        Capability(kind: .cliTool, name: "Gemini CLI", scope: .agent, trustLevel: .trusted, healthState: .healthy)
+    ]
+    let snapshot = NativeStoreSnapshot(seed: NativeAppSeed(
+        projects: [],
+        workspaces: [],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: capabilities,
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: profiles,
+        providerProfiles: []
+    ))
+
+    let rows = AgentEnterpriseAlignment.parityRows(snapshot: snapshot)
+    let issueRow = try #require(rows.first { $0.key == AgentEnterpriseCapabilityKey.issueWorkflow })
+    let modes: [NativeAgentKind: AgentEnterpriseCapabilityMode] = Dictionary(uniqueKeysWithValues: issueRow.cells.map { ($0.agentKind, $0.mode) })
+
+    #expect(AgentEnterpriseCapabilityKey.allCases.contains(.issueWorkflow))
+    #expect(AgentEnterpriseCapabilityKey.issueWorkflow.target.contains("paste-ready updates"))
+    #expect(issueRow.coverageLabel == "3/3")
+    #expect(issueRow.readyCount == 3)
+    #expect(modes[NativeAgentKind.codex] == AgentEnterpriseCapabilityMode.native)
+    #expect(modes[NativeAgentKind.claude] == AgentEnterpriseCapabilityMode.portable)
+    #expect(modes[NativeAgentKind.gemini] == AgentEnterpriseCapabilityMode.portable)
+    #expect(issueRow.nextAction.contains("Jira or issue intake"))
+}
+
 @Test func agentRunDecodesMissingSideChatFieldsAsStandalone() throws {
     let json = """
     {

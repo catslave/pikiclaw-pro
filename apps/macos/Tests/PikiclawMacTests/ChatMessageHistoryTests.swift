@@ -863,6 +863,7 @@ import Testing
 
     #expect(chatCanCaptureEvidence(run: completedRun, assistantText: "Validated current sprint sync.") == true)
     #expect(chatCanCaptureEvidence(run: completedRun, assistantText: "No assistant output yet.") == false)
+    #expect(chatCanCaptureEvidence(run: completedRun, assistantText: "Reading additional input from stdin...") == false)
     #expect(chatCanCaptureEvidence(run: runningRun, assistantText: "Partial stream") == false)
 }
 

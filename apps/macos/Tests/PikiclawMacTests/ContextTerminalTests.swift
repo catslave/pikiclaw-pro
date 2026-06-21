@@ -72,6 +72,8 @@ import Testing
     #expect(model.draftPrompt.contains("Work Item: Investigate terminal output"))
     #expect(model.draftPrompt.contains("Active Chat: Fix failing native terminal flow"))
     #expect(model.draftPrompt.contains("Run State: failed"))
+    #expect(model.draftPrompt.contains("Build discipline: many chats may edit this repo concurrently"))
+    #expect(model.draftPrompt.contains("./apps/macos/scripts/build-app.sh"))
     #expect(model.draftPrompt.contains("Terminal Output:"))
     #expect(model.draftPrompt.contains(root.path))
 }

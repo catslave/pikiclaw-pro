@@ -13,7 +13,7 @@ import Testing
         "--color", "never",
         "--sandbox", "read-only",
         "-C", "/tmp/project",
-        "hello"
+        "-"
     ])
 }
 

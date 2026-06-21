@@ -762,6 +762,7 @@ import Testing
         Risk: full app smoke has not run.
         Open question: whether voice flow needs a manual smoke pass.
         Next action: run the focused validation and paste the result into Jira.
+        Validation: git diff --check passed
         Next command: `swift test --filter ChatMessageHistoryTests`
         """,
         createdAt: Date(timeIntervalSince1970: 20)
@@ -839,6 +840,7 @@ import Testing
     #expect(summary.outputCount == 1)
     #expect(summary.artifactRefCount == 1)
     #expect(summary.pendingCommands == ["swift test --filter ChatMessageHistoryTests"])
+    #expect(summary.validationEvidence == ["git diff --check (passed)"])
     #expect(summary.decisionSignals == [
         "Decision: not ready to merge until retry validation is captured.",
         "Readiness: Blocked on missing nil workspace guard. | Approval can proceed after focused validation.",
@@ -864,6 +866,7 @@ import Testing
     #expect(model.draftPrompt.contains("Relevant outputs: commandOutputSummary ready: Evidence: validation passed"))
     #expect(model.draftPrompt.contains("Decision signals: Decision: not ready to merge until retry validation is captured.; Readiness: Blocked on missing nil workspace guard. | Approval can proceed after focused validation.; Approval: add the guard before posting Jira done."))
     #expect(model.draftPrompt.contains("Actionable notes: Blocker: waiting for Jira write permission.; Risk: full app smoke has not run.; Open question: whether voice flow needs a manual smoke pass.; Next action: run the focused validation and paste the result into Jira."))
+    #expect(model.draftPrompt.contains("Validation evidence: git diff --check (passed)"))
     #expect(model.draftPrompt.contains("Artifact refs: Evidence: validation passed (pikiclaw://runs/run-evidence-context/evidence)"))
     #expect(model.draftPrompt.contains("Pending commands: swift test --filter ChatMessageHistoryTests"))
     #expect(model.draftPrompt.contains("Knowledge cards: Evidence workflow shortcut [output,jira]: Saved outputs can drive follow-up assistant prompts."))
@@ -1059,6 +1062,7 @@ import Testing
     #expect(Set(ids).count == ids.count)
     #expect(ids.contains("bug-analysis"))
     #expect(ids.contains("mr-review"))
+    #expect(ids.contains("validation"))
     #expect(ids.contains("jira-execution"))
     #expect(ids.contains("log-analysis"))
     #expect(ids.contains("skill-hardening"))
@@ -1072,6 +1076,7 @@ import Testing
     #expect(logAnalysis?.prompt.contains("/clickhouse") == true)
 
     #expect(templates.first(where: { $0.id == "mr-review" })?.permissionMode == .readOnly)
+    #expect(templates.first(where: { $0.id == "validation" })?.permissionMode == .askBeforeEdit)
     #expect(templates.first(where: { $0.id == "jira-execution" })?.permissionMode == .askBeforeEdit)
     #expect(templates.first(where: { $0.id == "log-analysis" })?.permissionMode == .readOnly)
     #expect(assistantLaunchTemplates.first(where: { $0.id == "release-check" })?.permissionMode == .readOnly)
@@ -1081,10 +1086,12 @@ import Testing
     let review = try #require(templates.first(where: { $0.id == "mr-review" }))
     let jira = try #require(templates.first(where: { $0.id == "jira-execution" }))
     let bug = try #require(templates.first(where: { $0.id == "bug-analysis" }))
+    let validation = try #require(templates.first(where: { $0.id == "validation" }))
     let skillTemplate = try #require(templates.first(where: { $0.id == "skill-hardening" }))
     let logs = try #require(templates.first(where: { $0.id == "log-analysis" }))
     let release = try #require(assistantLaunchTemplates.first(where: { $0.id == "release-check" }))
     #expect(assistantTemplatePermissionMode(review, current: .autopilot) == .readOnly)
+    #expect(assistantTemplatePermissionMode(validation, current: .readOnly) == .askBeforeEdit)
     #expect(assistantTemplatePermissionMode(jira, current: .readOnly) == .askBeforeEdit)
     #expect(assistantTemplatePermissionMode(bug, current: .autopilot) == .readOnly)
     #expect(assistantTemplatePermissionMode(skillTemplate, current: .autopilot) == .askBeforeEdit)
@@ -1097,6 +1104,9 @@ import Testing
     #expect(review.prompt.contains("findings, open questions, verification gaps, and ready/not-ready"))
     #expect(review.prompt.contains("paste-ready MR review comment"))
     #expect(review.prompt.contains("merge readiness"))
+    #expect(validation.prompt.contains("check run, result, evidence, and next action"))
+    #expect(validation.prompt.contains("ready-to-paste validation note"))
+    #expect(validation.prompt.contains("Do not modify implementation during this validation pass"))
     #expect(jira.prompt.contains("ticket boundary, implementation seam, change plan, validation, and Jira update"))
     #expect(jira.prompt.contains("paste-ready Jira update"))
     #expect(jira.prompt.contains("Preserve acceptance criteria, source refs, external refs, and ticket key"))

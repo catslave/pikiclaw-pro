@@ -5,6 +5,7 @@ public enum AgentEnterpriseCapabilityKey: String, Codable, Sendable, CaseIterabl
     case goalContinuity
     case humanLoop
     case approvalGate
+    case issueWorkflow
     case artifacts
     case resume
     case forkWorktree
@@ -18,6 +19,7 @@ public enum AgentEnterpriseCapabilityKey: String, Codable, Sendable, CaseIterabl
         case .goalContinuity: return "Goal continuity"
         case .humanLoop: return "Human loop"
         case .approvalGate: return "Approval gate"
+        case .issueWorkflow: return "Issue workflow"
         case .artifacts: return "Artifacts"
         case .resume: return "Resume"
         case .forkWorktree: return "Fork / worktree"
@@ -37,6 +39,8 @@ public enum AgentEnterpriseCapabilityKey: String, Codable, Sendable, CaseIterabl
             return "Let agents ask structured questions without losing the run context."
         case .approvalGate:
             return "Keep command, edit, and tool decisions explicit and auditable."
+        case .issueWorkflow:
+            return "Turn Jira or issue intake into scoped agent work, evidence, validation, and paste-ready updates."
         case .artifacts:
             return "Attach files, diffs, notes, and decisions to durable Work Items."
         case .resume:
@@ -160,6 +164,50 @@ public struct EnterpriseReadinessRow: Identifiable, Hashable, Codable, Sendable 
     }
 }
 
+public struct EnterpriseGoalMissionSummary: Identifiable, Hashable, Codable, Sendable {
+    public var id: EntityID { workItemId }
+    public var workItemId: EntityID
+    public var workspaceId: EntityID
+    public var title: String
+    public var state: WorkItemState
+    public var coverageLabel: String
+    public var readyArtifactCount: Int
+    public var totalArtifactCount: Int
+    public var readinessReady: Int
+    public var readinessAttention: Int
+    public var capabilityReady: Int
+    public var capabilityAttention: Int
+    public var nextAction: String
+
+    public init(
+        workItemId: EntityID,
+        workspaceId: EntityID,
+        title: String,
+        state: WorkItemState,
+        coverageLabel: String,
+        readyArtifactCount: Int,
+        totalArtifactCount: Int,
+        readinessReady: Int,
+        readinessAttention: Int,
+        capabilityReady: Int,
+        capabilityAttention: Int,
+        nextAction: String
+    ) {
+        self.workItemId = workItemId
+        self.workspaceId = workspaceId
+        self.title = title
+        self.state = state
+        self.coverageLabel = coverageLabel
+        self.readyArtifactCount = readyArtifactCount
+        self.totalArtifactCount = totalArtifactCount
+        self.readinessReady = readinessReady
+        self.readinessAttention = readinessAttention
+        self.capabilityReady = capabilityReady
+        self.capabilityAttention = capabilityAttention
+        self.nextAction = nextAction
+    }
+}
+
 public enum AgentEnterpriseAlignment {
     public static let focusAgents: [NativeAgentKind] = [.codex, .claude, .gemini]
     public static let goalWorkItemId = EntityID("workitem-agent-enterprise-parity-goal")
@@ -249,6 +297,40 @@ public enum AgentEnterpriseAlignment {
                 nextAction: "Prefer native actions that append audit events before mutating state."
             )
         ]
+    }
+
+    public static func missionSummary(snapshot: NativeStoreSnapshot) -> EnterpriseGoalMissionSummary? {
+        guard let goal = snapshot.workItems.first(where: { $0.id == goalWorkItemId }) else {
+            return nil
+        }
+        let readiness = readinessRows(snapshot: snapshot)
+        let parity = parityRows(snapshot: snapshot)
+        let readinessReady = readiness.reduce(0) { $0 + $1.ready }
+        let readinessAttention = readiness.reduce(0) { $0 + $1.attention }
+        let capabilityReady = parity.reduce(0) { $0 + $1.readyCount }
+        let capabilityAttention = parity.reduce(0) { $0 + $1.attentionCount }
+        let totalCapabilities = max(1, capabilityReady + capabilityAttention)
+        let artifacts = snapshot.artifacts.filter { $0.workItemId == goal.id }
+        let readyArtifacts = artifacts.filter { $0.status == .ready || $0.status == .verified }
+        let nextAction = readiness.first(where: { $0.attention > 0 })?.nextAction
+            ?? parity.first(where: { $0.attentionCount > 0 })?.nextAction
+            ?? goal.acceptanceCriteria.first
+            ?? "Continue the enterprise parity audit and attach the result to this goal."
+
+        return EnterpriseGoalMissionSummary(
+            workItemId: goal.id,
+            workspaceId: goal.workspaceId,
+            title: goal.title,
+            state: goal.state,
+            coverageLabel: "\(capabilityReady)/\(totalCapabilities)",
+            readyArtifactCount: readyArtifacts.count,
+            totalArtifactCount: artifacts.count,
+            readinessReady: readinessReady,
+            readinessAttention: readinessAttention,
+            capabilityReady: capabilityReady,
+            capabilityAttention: capabilityAttention,
+            nextAction: nextAction
+        )
     }
 
     public static func goalWorkItem(workspaceId: EntityID, projectId: EntityID? = nil, createdAt: Date = Date()) -> WorkItem {
@@ -342,6 +424,8 @@ public enum AgentEnterpriseAlignment {
             return native(agentKind, "Structured user-input pauses map cleanly to Pikiclaw's human loop.", "Surface questions in the same native answer tray.")
         case (.codex, .approvalGate):
             return native(agentKind, "Approval and sandbox modes are part of the launch boundary.", "Expose permission mode before every run.")
+        case (.codex, .issueWorkflow):
+            return native(agentKind, "Jira tickets can launch Codex with scoped briefs, evidence, validation, and paste-ready updates.", "Keep Copy Update and run evidence visible in the Jira workbench.")
         case (.codex, .artifacts):
             return native(agentKind, "Code diffs, files, reviews, and generated media can become artifacts.", "Attach outputs to the selected Work Item.")
         case (.codex, .resume):
@@ -363,6 +447,8 @@ public enum AgentEnterpriseAlignment {
             return portable(agentKind, "Questions can be normalized into Pikiclaw's answer surface.", "Convert asks into structured native prompts.")
         case (.claude, .approvalGate):
             return native(agentKind, "Permission modes and hooks support governed execution.", "Mirror permission mode in the native launch boundary.")
+        case (.claude, .issueWorkflow):
+            return portable(agentKind, "Claude issue work can use Pikiclaw's Jira Work Item, brief, and update-draft layer.", "Keep ticket evidence outside transcript text.")
         case (.claude, .artifacts):
             return portable(agentKind, "Claude outputs should be captured into Pikiclaw artifacts.", "Save files, plans, and decisions outside transcript text.")
         case (.claude, .resume):
@@ -384,6 +470,8 @@ public enum AgentEnterpriseAlignment {
             return portable(agentKind, "Human loop questions should be normalized by Pikiclaw.", "Route asks through the native answer tray.")
         case (.gemini, .approvalGate):
             return portable(agentKind, "Enterprise governance can be represented by Pikiclaw permission and audit layers.", "Record approvals as audit events.")
+        case (.gemini, .issueWorkflow):
+            return portable(agentKind, "Gemini Enterprise-style issue workflows can land in the same Jira Work Item and update draft.", "Use native issue workflow as the durable control plane.")
         case (.gemini, .artifacts):
             return portable(agentKind, "Enterprise agent outputs should land in the artifact model.", "Attach generated deliverables to Work Items.")
         case (.gemini, .resume):

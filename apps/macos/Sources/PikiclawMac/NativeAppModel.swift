@@ -20,6 +20,7 @@ struct AssistantLaunchContextSummary: Hashable {
     var outputCount: Int
     var artifactRefCount: Int
     var pendingCommands: [String]
+    var validationEvidence: [String]
     var decisionSignals: [String]
     var actionableNotes: [String]
     var knowledgeCardCount: Int
@@ -27,6 +28,10 @@ struct AssistantLaunchContextSummary: Hashable {
 
     var pendingCommandCount: Int {
         pendingCommands.count
+    }
+
+    var validationEvidenceCount: Int {
+        validationEvidence.count
     }
 
     var decisionSignalCount: Int {
@@ -41,6 +46,7 @@ struct AssistantLaunchContextSummary: Hashable {
         outputCount > 0
             || artifactRefCount > 0
             || pendingCommandCount > 0
+            || validationEvidenceCount > 0
             || decisionSignalCount > 0
             || actionableNoteCount > 0
             || knowledgeCardCount > 0
@@ -110,7 +116,7 @@ let nativeWorkflowLaunchTemplates: [NativeWorkflowLaunchTemplate] = [
         prompt: """
         Validate the Pikiclaw mac native client for {project}.
 
-        Focus on the Swift package under apps/macos when present. Run the most relevant focused tests first, then the full package test/build only if the focused pass is clean. Report exact commands, failures, and the next smallest fix if validation does not pass.
+        Focus on the Swift package under apps/macos when present. Run the most relevant focused tests first. For a full app rebuild, use the shared build script from the repo root (`./apps/macos/scripts/build-app.sh`) or from apps/macos (`./scripts/build-app.sh`) instead of launching parallel Swift builds. Report exact commands, failures, and the next smallest fix if validation does not pass.
         """
     ),
     NativeWorkflowLaunchTemplate(
@@ -1246,6 +1252,7 @@ final class NativeAppModel: ObservableObject {
         let artifacts = relevantArtifacts(workspace: workspace, workItem: workItem)
         let cards = relevantKnowledgeCards(for: artifacts, workItem: workItem, workspace: workspace)
         let commands = Array(Self.dedupedContextValues(artifacts.flatMap(Self.pendingCommands(from:))).prefix(4))
+        let validationEvidence = Array(Self.dedupedContextValues(artifacts.flatMap(Self.validationEvidence(from:))).prefix(4))
         let decisionSignals = Array(Self.dedupedContextValues(artifacts.flatMap(Self.decisionSignals(from:))).prefix(4))
         let actionableNotes = Array(Self.dedupedContextValues(artifacts.flatMap(Self.actionableNotes(from:))).prefix(4))
         let artifactRefs = artifacts
@@ -1257,6 +1264,7 @@ final class NativeAppModel: ObservableObject {
             outputCount: artifacts.count,
             artifactRefCount: artifactRefs.count,
             pendingCommands: commands,
+            validationEvidence: validationEvidence,
             decisionSignals: decisionSignals,
             actionableNotes: actionableNotes,
             knowledgeCardCount: cards.count,
@@ -1405,6 +1413,7 @@ final class NativeAppModel: ObservableObject {
                 lines.append("Branch: \(branch)")
             }
             lines.append("cwd: \(terminalCurrentDirectory(for: workspace) ?? workspace.pathDisplay)")
+            lines.append(contentsOf: macOSBuildDisciplineContextLines(for: workspace))
         }
         if let agentKind {
             lines.append("Target Agent: \(agentKind.rawValue)")
@@ -2026,6 +2035,9 @@ final class NativeAppModel: ObservableObject {
                 prompt: launchPrompt,
                 run: run
             )
+            if profile.kind == .codex {
+                request.stdinText = launchPrompt
+            }
             request.arguments = arguments(for: profile.kind, request: request)
 
             for try await event in adapter.start(request) {
@@ -2714,6 +2726,7 @@ final class NativeAppModel: ObservableObject {
         if let skills = skillInventoryContextLine() {
             lines.append(skills)
         }
+        lines.append(contentsOf: macOSBuildDisciplineContextLines(for: workspace))
 
         if let workItem {
             lines.append("- Work item: \(workItem.title)")
@@ -2772,6 +2785,28 @@ final class NativeAppModel: ObservableObject {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private func macOSBuildDisciplineContextLines(for workspace: Workspace?) -> [String] {
+        guard let workspace else { return [] }
+        let workspaceURL = URL(fileURLWithPath: workspace.pathDisplay, isDirectory: true)
+        let macOSPackagePath = workspaceURL
+            .appendingPathComponent("apps/macos", isDirectory: true)
+            .path
+        let packagePath = workspaceURL.appendingPathComponent("Package.swift").path
+        let isMacOSPackageRoot = workspaceURL.lastPathComponent == "macos"
+            && workspaceURL.deletingLastPathComponent().lastPathComponent == "apps"
+            && FileManager.default.fileExists(atPath: packagePath)
+        let isPikiclawWorkspace = workspace.pathDisplay.localizedCaseInsensitiveContains("pikiclaw")
+        guard Self.directoryExists(macOSPackagePath) || isMacOSPackageRoot || isPikiclawWorkspace else {
+            return []
+        }
+
+        let buildCommand = isMacOSPackageRoot ? "./scripts/build-app.sh" : "./apps/macos/scripts/build-app.sh"
+        return [
+            "- Build discipline: many chats may edit this repo concurrently; run focused tests per chat, but use \(buildCommand) for full macOS app rebuilds so requests coalesce instead of competing for SwiftPM .build locks.",
+            "- Avoid launching parallel `swift build`, `swift test`, or build-app jobs in apps/macos unless a lock wait is intentional."
+        ]
     }
 
     private func gitChangesContextLine(for workspace: Workspace) -> String? {
@@ -2882,6 +2917,9 @@ final class NativeAppModel: ObservableObject {
         }
         if let actionableLine = actionableNotesContextLine(artifacts) {
             lines.append(actionableLine)
+        }
+        if let validationLine = validationEvidenceContextLine(artifacts) {
+            lines.append(validationLine)
         }
         if let refsLine = artifactRefsContextLine(artifacts) {
             lines.append(refsLine)
@@ -3005,6 +3043,16 @@ final class NativeAppModel: ObservableObject {
         return "- Actionable notes: \(deduped)"
     }
 
+    private func validationEvidenceContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.validationEvidence(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Validation evidence: \(deduped)"
+    }
+
     private func pendingCommandsContextLine(_ artifacts: [Artifact]) -> String? {
         let values = artifacts
             .flatMap(Self.pendingCommands(from:))
@@ -3097,18 +3145,108 @@ final class NativeAppModel: ObservableObject {
         return notes
     }
 
-    nonisolated private static func actionableNote(from line: String) -> String? {
-        for separator in [":", "："] {
-            guard let range = line.range(of: separator) else { continue }
-            let field = String(line[..<range.lowerBound])
-            let body = compactedContextLine(String(line[range.upperBound...]))
-            guard let label = actionableLabel(for: field),
-                  !body.isEmpty else {
-                continue
+    nonisolated private static func validationEvidence(from artifact: Artifact) -> [String] {
+        artifact.provenance
+            .split(whereSeparator: \.isNewline)
+            .compactMap { validationEvidence(from: String($0)) }
+    }
+
+    nonisolated private static func validationEvidence(from line: String) -> String? {
+        let stripped = strippedContextHeadingPrefix(strippedContextListPrefix(line))
+        let lower = stripped.lowercased()
+        let isValidationField: Bool
+        if let (field, _) = labeledContextBody(from: stripped) {
+            let normalized = normalizedContextField(field)
+            isValidationField = normalized == "validation"
+                || normalized == "verification"
+                || normalized == "validation command"
+                || normalized == "verification command"
+        } else {
+            isValidationField = false
+        }
+        guard isValidationField
+            || lower.contains("validation")
+            || lower.contains("test")
+            || lower.contains("build")
+            || lower.contains("check") else {
+            return nil
+        }
+
+        let result = validationResult(from: stripped)
+        if let command = validationCommand(from: stripped) {
+            if let result {
+                return "\(command) (\(result))"
             }
-            return "\(label): \(body)"
+            return isValidationField ? command : nil
+        }
+        guard let result else { return nil }
+        return "\(compactedContextLine(stripped)) (\(result))"
+    }
+
+    nonisolated private static func validationCommand(from line: String) -> String? {
+        let stripped = strippedContextHeadingPrefix(strippedContextListPrefix(line))
+        let body: String
+        if let (field, value) = labeledContextBody(from: stripped),
+           ["validation", "verification", "validation command", "verification command"].contains(normalizedContextField(field)) {
+            body = value
+        } else {
+            body = stripped
+        }
+        for candidate in backtickValues(in: body) + [body] {
+            guard let command = validationCommandValue(candidate) else { continue }
+            return command
         }
         return nil
+    }
+
+    nonisolated private static func validationCommandValue(_ value: String) -> String? {
+        var command = value
+            .gitTrimmed
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+        let lower = command.lowercased()
+        for marker in validationResultMarkers {
+            guard let range = lower.range(of: marker) else { continue }
+            command = String(command[..<range.lowerBound]).gitTrimmed
+            break
+        }
+        command = command.trimmingCharacters(in: CharacterSet(charactersIn: "`.,;"))
+        guard !command.isEmpty,
+              looksLikeContextShellCommand(command) else {
+            return nil
+        }
+        return command
+    }
+
+    nonisolated private static func validationResult(from line: String) -> String? {
+        let lower = line.lowercased()
+        if lower.contains("failed")
+            || lower.contains("failure")
+            || lower.contains("errored")
+            || lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("❌") {
+            return "failed"
+        }
+        if lower.contains("passed")
+            || lower.contains("succeeded")
+            || lower.contains("success")
+            || lower.contains("build complete")
+            || lower.contains("✅") {
+            return "passed"
+        }
+        return nil
+    }
+
+    nonisolated private static func actionableNote(from line: String) -> String? {
+        guard let (field, value) = labeledContextBody(from: line) else {
+            return nil
+        }
+        let body = compactedContextLine(value)
+        guard let label = actionableLabel(for: field),
+              !body.isEmpty else {
+            return nil
+        }
+        return "\(label): \(body)"
     }
 
     nonisolated private static func actionableSectionLabel(from line: String) -> String? {
@@ -3271,14 +3409,11 @@ final class NativeAppModel: ObservableObject {
     }
 
     nonisolated private static func pendingCommandBody(from line: String) -> String? {
-        for separator in [":", "："] {
-            guard let range = line.range(of: separator) else { continue }
-            let field = String(line[..<range.lowerBound])
-            guard pendingCommandLabel(for: field) != nil else { continue }
-            let body = String(line[range.upperBound...]).gitTrimmed
-            return body.isEmpty ? nil : body
+        guard let (field, body) = labeledContextBody(from: line),
+              pendingCommandLabel(for: field) != nil else {
+            return nil
         }
-        return nil
+        return body.isEmpty ? nil : body
     }
 
     nonisolated private static func pendingCommandLabel(for value: String) -> String? {
@@ -3332,6 +3467,25 @@ final class NativeAppModel: ObservableObject {
             text = String(text.dropFirst()).gitTrimmed
         }
         return text
+    }
+
+    nonisolated private static func labeledContextBody(from line: String) -> (field: String, body: String)? {
+        for separator in [":", "："] {
+            guard let range = line.range(of: separator) else { continue }
+            let field = String(line[..<range.lowerBound])
+            let body = String(line[range.upperBound...]).gitTrimmed
+            return (field, body)
+        }
+        return nil
+    }
+
+    nonisolated private static func normalizedContextField(_ value: String) -> String {
+        value
+            .gitTrimmed
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "  ", with: " ")
     }
 
     nonisolated private static func compactedContextLine(_ value: String) -> String {
@@ -3396,6 +3550,11 @@ final class NativeAppModel: ObservableObject {
     }
 
     nonisolated private static let pendingCommandTrailingCharacters = CharacterSet(charactersIn: ".,;)]}")
+
+    nonisolated private static let validationResultMarkers = [
+        " passed", " pass", " succeeded", " success", " failed", " failure",
+        " errored", " timed out", " timeout", " ✅", " ❌"
+    ]
 
     nonisolated private static let contextSectionHeadings: Set<String> = [
         "status", "result", "summary", "validation", "tests", "changed files",

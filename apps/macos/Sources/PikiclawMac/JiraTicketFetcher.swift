@@ -8,6 +8,7 @@ struct JiraTicketFetchResult {
 
 enum JiraTicketFetcher {
     private static let defaultJiraMCPServiceURL = "http://xia01-i01-dkr01.int.rclabenv.com:8000/mcp/"
+    private static let defaultJiraAssignee = "Michael Yang"
     private static let jiraSyncFields = "summary,description,issuetype,status,assignee,reporter,fixVersions,duedate,priority,labels,updated,issuelinks,customfield_10652"
 
     static func fetch(scope: JiraTicketSyncScope) async throws -> JiraTicketFetchResult {
@@ -50,15 +51,16 @@ enum JiraTicketFetcher {
         if let override = environment["PIKICLAW_JIRA_JQL"], !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return override
         }
+        let assignee = assigneeClause(environment: environment)
         switch scope {
         case .mine:
-            return "assignee = currentUser() AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC"
+            return "\(assignee) AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC"
         case .currentSprint:
-            return "assignee = currentUser() AND sprint in openSprints() AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC"
+            return "\(assignee) AND sprint in openSprints() AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC"
         case .review:
-            return "assignee = currentUser() AND status in (Review, \"In Review\", QA, \"Ready for QA\") ORDER BY updated DESC"
+            return "\(assignee) AND status in (Review, \"In Review\", QA, \"Ready for QA\") ORDER BY updated DESC"
         case .blocked:
-            return "assignee = currentUser() AND status in (Blocked, \"In Blocked\") ORDER BY updated DESC"
+            return "\(assignee) AND status in (Blocked, \"In Blocked\") ORDER BY updated DESC"
         }
     }
 
@@ -202,10 +204,18 @@ enum JiraTicketFetcher {
         }
         switch scope {
         case .currentSprint:
-            return "assignee = currentUser() AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC"
+            return "\(assigneeClause(environment: environment)) AND status NOT IN (Closed, Cancelled) ORDER BY updated DESC"
         default:
             return jql(for: scope, environment: environment)
         }
+    }
+
+    private static func assigneeClause(environment: [String: String]) -> String {
+        let assignee = firstNonEmpty([
+            environment["PIKICLAW_JIRA_ASSIGNEE"],
+            environment["RC_JIRA_ASSIGNEE"]
+        ]) ?? defaultJiraAssignee
+        return "assignee = \"\(assignee.replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 
     private static func initializeMCPSession(config: JiraMCPConfiguration) async throws -> String? {

@@ -79,6 +79,20 @@ import Testing
     #expect(config?.headers["confluence-read-token"] == "confluence-token")
 }
 
+@Test func jiraFetcherDefaultsJQLToMichaelYangInsteadOfCurrentUser() throws {
+    let currentSprint = JiraTicketFetcher.jql(for: .currentSprint, environment: [:])
+    let mine = JiraTicketFetcher.jql(for: .mine, environment: [:])
+    let override = JiraTicketFetcher.jql(for: .currentSprint, environment: [
+        "PIKICLAW_JIRA_ASSIGNEE": "Another User"
+    ])
+
+    #expect(currentSprint.contains("assignee = \"Michael Yang\""))
+    #expect(currentSprint.contains("sprint in openSprints()"))
+    #expect(mine.contains("assignee = \"Michael Yang\""))
+    #expect(override.contains("assignee = \"Another User\""))
+    #expect(!currentSprint.contains("currentUser()"))
+}
+
 @Test func jiraFetcherParsesMCPJiraSearchTextResult() throws {
     let result: [String: Any] = [
         "content": [
@@ -164,6 +178,11 @@ import Testing
         status: .ready,
         provenance: """
         Captured previous startup-flow analysis.
+        Decision: not ready to start until saved validation is reviewed.
+        Blockers:
+        - waiting for Jira write permission.
+        Risk: app-wide smoke has not run.
+        Validation: swift test --filter JiraNativeWorkflowTests passed
         Next command: `swift build --product PikiclawMac`
         """,
         createdAt: Date(timeIntervalSince1970: 20)
@@ -255,6 +274,9 @@ import Testing
     #expect(run.promptSnapshot.contains("do not mix in unrelated work items"))
     #expect(run.promptSnapshot.contains("Preserve Artifact refs as Evidence"))
     #expect(run.promptSnapshot.contains("Relevant outputs: commandOutputSummary ready: Prior Jira diagnosis"))
+    #expect(run.promptSnapshot.contains("Decision signals: Decision: not ready to start until saved validation is reviewed."))
+    #expect(run.promptSnapshot.contains("Actionable notes: Blocker: waiting for Jira write permission.; Risk: app-wide smoke has not run."))
+    #expect(run.promptSnapshot.contains("Validation evidence: swift test --filter JiraNativeWorkflowTests (passed)"))
     #expect(run.promptSnapshot.contains("Artifact refs: Prior Jira diagnosis (pikiclaw://runs/run-jira-start-evidence/evidence)"))
     #expect(run.promptSnapshot.contains("Pending commands: swift build --product PikiclawMac"))
     #expect(run.promptSnapshot.contains("Knowledge cards: Jira evidence pattern [jira,evidence]: Reuse previous validation notes before changing code."))

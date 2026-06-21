@@ -116,6 +116,37 @@ npm test                               # Vitest unit suite
 npx vitest run test/<file>.unit.test.ts
 ```
 
+## Trellis Project Management
+
+Pikiclaw is Trellis-managed. Treat `AGENTS.md` / `CLAUDE.md`, `.trellis/workflow.md`, `.trellis/tasks/**`, and `.trellis/spec/**` as the shared project-management contract for non-trivial work.
+
+Before implementation work:
+
+```bash
+python3 ./.trellis/scripts/get_context.py --mode packages
+python3 ./.trellis/scripts/task.py current --source
+```
+
+- If a Trellis task is active, read its `prd.md` and relevant `.trellis/spec/**` files before editing.
+- If no task is active and the work spans product surfaces, architecture, or multiple sessions, create/start a Trellis task before implementing.
+- Keep stable product or architecture decisions in `.trellis/spec/**`; keep polished external analyses in Obsidian.
+- Treat `.trellis/.runtime/**` and `.trellis/.developer` as local/session state, not team-shared source of truth.
+
+## macOS Concurrent Build Discipline
+
+Multiple chats may edit this repository at the same time. Run the narrowest
+useful focused tests in each chat, but do not start parallel full macOS app
+rebuilds. For a full native app rebuild, use the shared script:
+
+```bash
+./apps/macos/scripts/build-app.sh
+```
+
+Use `./apps/macos/scripts/build-app.sh --install --open` when the rebuilt app
+also needs to be installed and launched. The script coalesces concurrent rebuild
+requests so several chats can share one SwiftPM build instead of queueing on the
+same `apps/macos/.build` lock.
+
 ## Notes
 
 - Persistent config is `~/.pikiclaw/setting.json`

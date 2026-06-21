@@ -7,6 +7,8 @@ import Testing
     plugin.json
     2026-06-20T13:53:31.328495Z WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
     hook: SessionStart
+    Reading additional input from stdin...
+    Reading prompt from stdin...
     I am checking the repository first.
     [tool] exec_command
     [artifact] changed-files

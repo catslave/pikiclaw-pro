@@ -2,11 +2,12 @@
 
 ## Core Principles
 
-1. **Product memory before process** - Trellis exists to preserve product taste, architecture boundaries, and decisions across sessions.
-2. **Small fixes stay light** - trivial Q&A or one-file fixes can be done directly after reading the relevant specs.
-3. **Long work gets a task** - anything that continues across days, spans product surfaces, or changes architecture should get a Trellis task.
-4. **Specs are living rules** - when a task reveals a stable principle, update `.trellis/spec/` before calling it done.
-5. **Pikiclaw remains conversation-first** - task management supports the chat-centered workspace; it should not replace the product's own Pro/Jira/Todo workflow.
+1. **Trellis is the project spine** - all non-trivial Pikiclaw implementation work should flow through Trellis context, tasks, and specs.
+2. **Product memory before process** - Trellis exists to preserve product taste, architecture boundaries, and decisions across sessions.
+3. **Small fixes stay light** - trivial Q&A or one-file fixes can be done directly after reading the relevant specs.
+4. **Long work gets a task** - anything that continues across days, spans product surfaces, or changes architecture should get a Trellis task.
+5. **Specs are living rules** - when a task reveals a stable principle, update `.trellis/spec/` before calling it done.
+6. **Pikiclaw remains conversation-first** - task management supports the chat-centered workspace; it should not replace the product's own Pro/Jira/Todo workflow.
 
 ## Quick Commands
 
@@ -45,7 +46,7 @@ Phase 3: Finish  -> update spec, record outcome, and leave the next session with
 ```
 
 [workflow-state:no_task]
-No active Trellis task. For explanation or very small edits, answer directly after reading the relevant spec. For implementation, cross-surface UX, product direction, or multi-day work, create a task first with `python3 ./.trellis/scripts/task.py create "<title>" --slug <slug>`.
+No active Trellis task. For explanation or very small edits, answer directly after reading the relevant spec. For implementation, cross-surface UX, product direction, or multi-day work, create a task first with `python3 ./.trellis/scripts/task.py create "<title>" --slug <slug>`, then start it before editing.
 [/workflow-state:no_task]
 
 [workflow-state:planning]

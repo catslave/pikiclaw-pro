@@ -89,7 +89,7 @@ public enum NativeAgentCommandBuilder {
             "--color", "never",
             "--sandbox", codexSandbox(for: request.run.permissionMode),
             "-C", request.workspacePath,
-            request.prompt
+            "-"
         ]
     }
 

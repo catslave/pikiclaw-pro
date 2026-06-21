@@ -374,6 +374,10 @@ struct RootView: View {
         case .missionControl:
             MissionControlPage(
                 snapshot: model.snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                selectedWorkItemId: $selectedWorkItemId,
+                model: model,
+                navigate: navigate,
                 refresh: {
                     Task { await model.reload() }
                 }
@@ -627,14 +631,6 @@ private struct AgentDock: View {
     let openAgentStudio: () -> Void
     let openMissionControl: () -> Void
 
-    private var selectedWorkspace: Workspace? {
-        snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
-    }
-
-    private var runningRunCount: Int {
-        snapshot.runs.filter { isLiveRunState($0.state) }.count
-    }
-
     private var attentionRunCount: Int {
         snapshot.runs.filter { $0.state == .waitingForUser || $0.state == .failed }.count
     }
@@ -645,12 +641,6 @@ private struct AgentDock: View {
                 .padding(.top, 12)
                 .help("Pikiclaw")
 
-            DockProjectBadge(
-                title: projectTitle(for: selectedWorkspaceId, snapshot: snapshot),
-                subtitle: selectedWorkspace.map { shortDisplayPath($0.pathDisplay) } ?? "No workspace",
-                action: openProjects
-            )
-
             Button(action: newChat) {
                 VStack(spacing: 3) {
                     Image(systemName: "plus")
@@ -658,10 +648,11 @@ private struct AgentDock: View {
                     Text("New")
                         .font(.system(size: 8.5, weight: .bold))
                 }
-                .frame(width: 54, height: 48)
+                .frame(width: 54, height: 52)
                 .background(PKTheme.primary)
                 .foregroundStyle(PKTheme.primaryText)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(PKTheme.primary.opacity(0.95), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 11))
             }
             .buttonStyle(.plain)
             .help("New \(agentShortLabel(selectedAgentKind)) chat in \(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))")
@@ -690,6 +681,9 @@ private struct AgentDock: View {
             VStack(spacing: 8) {
                 ForEach(enabledAgentProfiles(in: snapshot)) { profile in
                     let kind = profile.kind
+                    let profileRuns = snapshot.runs.filter { $0.agentProfileId == profile.id }
+                    let profileAttentionCount = profileRuns.filter { $0.state == .waitingForUser || $0.state == .failed }.count
+                    let profileHasActiveRun = profileRuns.contains { isLiveRunState($0.state) }
                     Button {
                         selectAgent(kind)
                     } label: {
@@ -705,8 +699,13 @@ private struct AgentDock: View {
                             }
                             .frame(width: 54, height: 52)
 
-                            Dot(color: agentHealthColor(agentCapability(for: profile, snapshot: snapshot)?.healthState))
-                                .padding(6)
+                            if profileAttentionCount > 0 {
+                                DockBadge(text: profileAttentionCount > 9 ? "9+" : "\(profileAttentionCount)", color: PKTheme.warn)
+                                    .offset(x: 6, y: -5)
+                            } else if profileHasActiveRun {
+                                Dot(color: PKTheme.ok)
+                                    .padding(6)
+                            }
                         }
                         .frame(width: 54, height: 52)
                         .foregroundStyle(isSelected ? PKTheme.primaryText : PKTheme.text3)
@@ -718,7 +717,7 @@ private struct AgentDock: View {
                         .clipShape(RoundedRectangle(cornerRadius: 11))
                     }
                     .buttonStyle(.plain)
-                    .help("\(profile.displayName) · \(agentHealthText(agentCapability(for: profile, snapshot: snapshot)?.healthState))")
+                    .help(agentDockHelp(profile: profile, active: profileHasActiveRun, attentionCount: profileAttentionCount, snapshot: snapshot))
                 }
             }
 
@@ -766,102 +765,10 @@ private struct AgentDock: View {
             }
             .buttonStyle(.plain)
             .help(attentionRunCount > 0 ? "\(attentionRunCount) run(s) need attention" : statusLine)
-
-            DockRuntimeStatus(
-                isRunning: isRunning,
-                runningCount: runningRunCount,
-                attentionCount: attentionRunCount,
-                statusLine: statusLine
-            )
             .padding(.bottom, 12)
         }
         .frame(width: 82)
         .background(PKTheme.sidebar)
-    }
-}
-
-private struct DockProjectBadge: View {
-    let title: String
-    let subtitle: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Text(initials(title))
-                    .font(.system(size: 11, weight: .heavy))
-                    .foregroundStyle(PKTheme.primaryText)
-                    .frame(width: 30, height: 22)
-                    .background(PKTheme.primary.opacity(0.94))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-
-                Text(title)
-                    .font(.system(size: 8.5, weight: .bold))
-                    .foregroundStyle(PKTheme.text2)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.62)
-            }
-            .frame(width: 54, height: 48)
-            .background(PKTheme.panel.opacity(0.54))
-            .overlay(RoundedRectangle(cornerRadius: 11).stroke(PKTheme.primary.opacity(0.24), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 11))
-        }
-        .buttonStyle(.plain)
-        .help("\(title) · \(subtitle)")
-    }
-}
-
-private struct DockRuntimeStatus: View {
-    let isRunning: Bool
-    let runningCount: Int
-    let attentionCount: Int
-    let statusLine: String
-
-    private var color: Color {
-        if attentionCount > 0 { return PKTheme.warn }
-        return isRunning ? PKTheme.ok : PKTheme.primary
-    }
-
-    private var label: String {
-        if attentionCount > 0 { return "ASK" }
-        return isRunning ? "RUN" : "READY"
-    }
-
-    private var countText: String {
-        if attentionCount > 0 { return attentionCount > 9 ? "9+" : "\(attentionCount)" }
-        if runningCount > 0 { return runningCount > 9 ? "9+" : "\(runningCount)" }
-        return ""
-    }
-
-    var body: some View {
-        VStack(spacing: 3) {
-            HStack(spacing: 4) {
-                Dot(color: color)
-                Text(label)
-                    .font(.system(size: 8.5, weight: .heavy))
-                    .lineLimit(1)
-                if !countText.isEmpty {
-                    Text(countText)
-                        .font(.system(size: 8, weight: .heavy))
-                        .foregroundStyle(PKTheme.primaryText)
-                        .frame(minWidth: 14, minHeight: 14)
-                        .background(color)
-                        .clipShape(Capsule())
-                }
-            }
-            .foregroundStyle(color)
-
-            Text(statusLine)
-                .font(.system(size: 7.5, weight: .medium))
-                .foregroundStyle(PKTheme.text4)
-                .lineLimit(1)
-                .minimumScaleFactor(0.55)
-        }
-        .frame(width: 60, height: 38)
-        .background(PKTheme.panel.opacity(0.46))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(color.opacity(0.24), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 9))
-        .help(statusLine)
     }
 }
 
@@ -937,14 +844,14 @@ private struct ProjectDockTile: View {
 
             Button(action: openJira) {
                 ZStack(alignment: .topTrailing) {
-                    VStack(spacing: 3) {
+                    VStack(spacing: 4) {
                         Image(systemName: isSyncingJira ? "arrow.triangle.2.circlepath" : "checklist")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                         Text("Jira")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .lineLimit(1)
                     }
-                    .frame(width: 44, height: 38)
+                    .frame(width: 54, height: 52)
 
                     if jiraCount > 0 {
                         Text(jiraCount > 9 ? "9+" : "\(jiraCount)")
@@ -953,19 +860,20 @@ private struct ProjectDockTile: View {
                             .frame(minWidth: 15, minHeight: 15)
                             .background(PKTheme.primary)
                             .clipShape(Circle())
-                            .offset(x: 5, y: -5)
+                            .offset(x: 6, y: -6)
                     } else if isSyncingJira {
                         Dot(color: PKTheme.ok)
-                            .offset(x: 5, y: -5)
+                            .offset(x: 6, y: -6)
                     }
                 }
+                .frame(width: 54, height: 52)
                 .foregroundStyle(isJiraSelected ? PKTheme.primaryText : isSyncingJira ? PKTheme.ok : jiraCount > 0 ? PKTheme.primary : PKTheme.text3)
                 .background(isJiraSelected ? PKTheme.primary : PKTheme.panel.opacity(0.46))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: 11)
                         .stroke(isJiraSelected ? PKTheme.primary.opacity(0.95) : isSyncingJira ? PKTheme.ok.opacity(0.42) : jiraCount > 0 ? PKTheme.primary.opacity(0.34) : PKTheme.edge, lineWidth: 1)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: 11))
             }
             .buttonStyle(.plain)
             .contextMenu {
@@ -3235,6 +3143,8 @@ private struct NewChatAssistantCard: View {
             return PKTheme.err
         case "mr-review":
             return PKTheme.ok
+        case "validation":
+            return Color(red: 0.62, green: 0.86, blue: 0.72)
         case "jira-execution":
             return PKTheme.warn
         case "log-analysis":
@@ -8765,21 +8675,6 @@ private struct AgentOutputReviewStrip: View {
         presentation.finalText
     }
 
-    private var outputWords: Int {
-        finalText.split { $0.isWhitespace || $0.isNewline }.count
-    }
-
-    private var outputLines: [String] {
-        finalText
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    private var artifactCount: Int {
-        presentation.generativeItems.filter { $0.title == "Artifact" }.count
-    }
-
     private var signalSummary: AgentOutputReviewSignalSummary {
         agentOutputReviewSignalSummary(finalText)
     }
@@ -8808,53 +8703,37 @@ private struct AgentOutputReviewStrip: View {
         return "Use follow-up actions or copy the cleaned result."
     }
 
-    private var metrics: [AgentOutputReviewMetricModel] {
-        [
-            AgentOutputReviewMetricModel(symbol: "waveform.path.ecg", label: "State", value: presentation.phaseTitle, tone: reviewColor),
-            AgentOutputReviewMetricModel(symbol: "text.word.spacing", label: "Words", value: outputWords == 0 ? "None" : "\(outputWords)", tone: outputWords == 0 ? PKTheme.text3 : accent),
-            AgentOutputReviewMetricModel(symbol: "list.bullet.rectangle", label: "Activity", value: "\(presentation.activityItems.count)", tone: presentation.activityItems.isEmpty ? PKTheme.text3 : PKTheme.primary),
-            AgentOutputReviewMetricModel(symbol: "shippingbox", label: "Artifacts", value: "\(artifactCount)", tone: artifactCount == 0 ? PKTheme.text3 : PKTheme.ok),
-            AgentOutputReviewMetricModel(symbol: "exclamationmark.triangle", label: "Decision", value: "\(signalSummary.decisionSignalCount)", tone: signalSummary.decisionSignalCount == 0 ? PKTheme.text3 : PKTheme.warn),
-            AgentOutputReviewMetricModel(symbol: "checklist", label: "Actions", value: "\(signalSummary.actionableNoteCount)", tone: signalSummary.actionableNoteCount == 0 ? PKTheme.text3 : PKTheme.primary),
-            AgentOutputReviewMetricModel(symbol: "checkmark.seal", label: "Validation", value: "\(signalSummary.validationSignalCount)", tone: signalSummary.validationSignalCount == 0 ? PKTheme.text3 : PKTheme.ok),
-            AgentOutputReviewMetricModel(symbol: "curlybraces", label: "Code refs", value: "\(signalSummary.codeReferenceCount)", tone: signalSummary.codeReferenceCount == 0 ? PKTheme.text3 : PKTheme.primary),
-            AgentOutputReviewMetricModel(symbol: "archivebox", label: "Evidence", value: canSaveEvidence ? "Ready" : "Wait", tone: canSaveEvidence ? PKTheme.ok : PKTheme.text3),
-            AgentOutputReviewMetricModel(symbol: "arrow.turn.down.right", label: "Next", value: followUpCount == 0 ? "None" : "\(followUpCount)", tone: followUpCount == 0 ? PKTheme.text3 : accent)
-        ]
+    private var statusText: String {
+        if signalSummary.hasDecisionOrAction { return "ACTION" }
+        if canSaveEvidence { return "CAPTURE" }
+        if followUpCount > 0 { return "\(followUpCount) NEXT" }
+        return presentation.phaseTitle.uppercased()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 9) {
-                Image(systemName: canSaveEvidence ? "archivebox.fill" : "doc.text.magnifyingglass")
+        HStack(spacing: 9) {
+            Image(systemName: canSaveEvidence ? "archivebox.fill" : "doc.text.magnifyingglass")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 26, height: 26)
+                .background(reviewColor)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(reviewTitle)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(PKTheme.primaryText)
-                    .frame(width: 26, height: 26)
-                    .background(reviewColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(reviewTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(PKTheme.text2)
-                    Text(reviewSubtitle)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(PKTheme.text4)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 0)
-
-                StatusPill(text: canSaveEvidence ? "CAPTURE" : presentation.phaseTitle.uppercased(), color: reviewColor)
+                    .foregroundStyle(PKTheme.text2)
+                Text(reviewSubtitle)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(PKTheme.text4)
+                    .lineLimit(1)
             }
 
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 102), spacing: 7), count: 4), spacing: 7) {
-                ForEach(metrics) { metric in
-                    AgentOutputReviewMetric(metric: metric)
-                }
-            }
+            Spacer(minLength: 0)
+
+            StatusPill(text: statusText, color: reviewColor)
         }
-        .padding(11)
+        .padding(10)
         .background(PKTheme.inset.opacity(0.58))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(reviewColor.opacity(0.22), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -8903,47 +8782,6 @@ func agentOutputReviewSignalSummary(_ text: String) -> AgentOutputReviewSignalSu
     )
 }
 
-private struct AgentOutputReviewMetricModel: Identifiable {
-    let symbol: String
-    let label: String
-    let value: String
-    let tone: Color
-
-    var id: String { label }
-}
-
-private struct AgentOutputReviewMetric: View {
-    let metric: AgentOutputReviewMetricModel
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: metric.symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(metric.tone)
-                .frame(width: 20, height: 20)
-                .background(metric.tone.opacity(0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-            VStack(alignment: .leading, spacing: 0) {
-                Text(metric.label)
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(PKTheme.text4)
-                Text(metric.value)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(PKTheme.text2)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 7)
-        .frame(height: 34)
-        .background(PKTheme.surfaceRaised.opacity(0.52))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .help("\(metric.label): \(metric.value)")
-    }
-}
-
 private struct AssistantResponseCard: View {
     let title: String
     let text: String
@@ -8965,6 +8803,12 @@ private struct AssistantResponseCard: View {
 
     private var presentation: AgentResponsePresentation {
         AgentResponsePresentation(text: cleanedText, state: state, isRunning: isRunning)
+    }
+
+    private var showsOutputReview: Bool {
+        !presentation.isActive
+            && presentation.showsFinalResponse
+            && (onSaveEvidence != nil || !followUpActions.isEmpty)
     }
 
     var body: some View {
@@ -9011,12 +8855,14 @@ private struct AssistantResponseCard: View {
                     )
                 }
 
-                AgentOutputReviewStrip(
-                    presentation: presentation,
-                    followUpCount: followUpActions.count,
-                    canSaveEvidence: onSaveEvidence != nil,
-                    accent: accent
-                )
+                if showsOutputReview {
+                    AgentOutputReviewStrip(
+                        presentation: presentation,
+                        followUpCount: followUpActions.count,
+                        canSaveEvidence: onSaveEvidence != nil,
+                        accent: accent
+                    )
+                }
 
                 if presentation.activityItems.isEmpty && !presentation.generativeItems.isEmpty {
                     GenerativeUIRail(items: presentation.generativeItems, accent: accent)
@@ -10309,6 +10155,9 @@ func friendlyAgentOutput(_ text: String) -> String {
 
 private func isHiddenAgentCLIDiagnosticLine(_ trimmed: String) -> Bool {
     let lower = trimmed.lowercased()
+    if lower == "reading additional input from stdin..." || lower == "reading prompt from stdin..." {
+        return true
+    }
     if lower == "plugin.json" || lower == "sessionstart" { return true }
     if lower.hasPrefix("hook: ") { return true }
     if lower.hasPrefix("path=") && lower.contains("/.codex/") { return true }
@@ -11297,18 +11146,26 @@ private struct VoiceDockButton: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isSelected ? PKTheme.primary.opacity(0.22) : hovering ? PKTheme.control.opacity(0.72) : PKTheme.panel.opacity(0.62))
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(isSelected ? PKTheme.primary : hovering ? PKTheme.control.opacity(0.72) : PKTheme.panel.opacity(0.62))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(accent.opacity(isSelected || hovering ? 0.74 : 0.36), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(isSelected ? PKTheme.primary.opacity(0.95) : accent.opacity(hovering ? 0.74 : 0.36), lineWidth: 1)
                 )
                 .shadow(color: accent.opacity(isSelected || hovering ? 0.16 : 0.0), radius: 12, y: 6)
 
-            Image(systemName: isLive ? "waveform.path.ecg" : "waveform")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(isSelected ? PKTheme.primaryText : accent)
-                .scaleEffect(isLive && pulse ? 1.06 : 1)
+            VStack(spacing: 4) {
+                Image(systemName: isLive ? "waveform.path.ecg" : "waveform")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 28, height: 24)
+                    .scaleEffect(isLive && pulse ? 1.06 : 1)
+                Text("Voice")
+                    .font(.system(size: 9, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(width: 54, height: 52)
+            .foregroundStyle(isSelected ? PKTheme.primaryText : accent)
 
             if isLive || isSelected {
                 Circle()
@@ -11318,8 +11175,8 @@ private struct VoiceDockButton: View {
                     .opacity(isLive && pulse ? 0.62 : 1)
             }
         }
-        .frame(width: 42, height: 42)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(width: 54, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .onHover { inside in
             withAnimation(.easeInOut(duration: 0.14)) {
                 hovering = inside
@@ -17079,6 +16936,10 @@ private struct WorkflowPage: View {
 
 private struct MissionControlPage: View {
     let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkspaceId: EntityID?
+    @Binding var selectedWorkItemId: EntityID?
+    @ObservedObject var model: NativeAppModel
+    let navigate: (NativeRoute) -> Void
     let refresh: () -> Void
 
     private var activeRuns: [AgentRun] {
@@ -17122,6 +16983,10 @@ private struct MissionControlPage: View {
         snapshot.capabilities.filter { $0.healthState == .unavailable || $0.healthState == .failed }.count
     }
 
+    private var enterpriseGoalSummary: EnterpriseGoalMissionSummary? {
+        AgentEnterpriseAlignment.missionSummary(snapshot: snapshot)
+    }
+
     var body: some View {
         PageFrame(route: .missionControl) {
             VStack(alignment: .leading, spacing: 14) {
@@ -17138,6 +17003,14 @@ private struct MissionControlPage: View {
                     failedRuns: failedRuns.count,
                     readyEvidenceCount: readyEvidenceCount
                 )
+
+                if let enterpriseGoalSummary {
+                    MissionEnterpriseGoalCard(
+                        summary: enterpriseGoalSummary,
+                        openGoal: openEnterpriseGoal,
+                        stageAudit: stageEnterpriseParityAudit
+                    )
+                }
 
                 MissionAgentLoadStrip(snapshot: snapshot)
 
@@ -17156,8 +17029,81 @@ private struct MissionControlPage: View {
                 }
             }
         } actions: {
+            SecondaryButton(title: "Audit", systemImage: "checklist.checked", action: stageEnterpriseParityAudit)
             SecondaryButton(title: "Refresh", systemImage: "arrow.clockwise", action: refresh)
         }
+    }
+
+    private func openEnterpriseGoal() {
+        guard let summary = enterpriseGoalSummary else { return }
+        selectedWorkspaceId = summary.workspaceId
+        selectedWorkItemId = summary.workItemId
+    }
+
+    private func stageEnterpriseParityAudit() {
+        guard let summary = enterpriseGoalSummary else { return }
+        selectedWorkspaceId = summary.workspaceId
+        selectedWorkItemId = summary.workItemId
+        if model.stageEnterpriseParityAudit(workspaceId: summary.workspaceId, workItemId: summary.workItemId) {
+            navigate(.chat)
+            NotificationCenter.default.post(name: .pikiclawFocusCommandCenter, object: nil)
+        }
+    }
+}
+
+private struct MissionEnterpriseGoalCard: View {
+    let summary: EnterpriseGoalMissionSummary
+    let openGoal: () -> Void
+    let stageAudit: () -> Void
+
+    private var tone: Color {
+        if summary.readinessAttention > 0 || summary.capabilityAttention > 0 { return PKTheme.warn }
+        return summary.readyArtifactCount > 0 ? PKTheme.ok : PKTheme.primary
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "scope")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 34, height: 34)
+                .background(tone)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Text(summary.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    StatusPill(text: summary.state.rawValue, color: statusColor(summary.state))
+                    CountBadge(text: "\(summary.readyArtifactCount)/\(summary.totalArtifactCount) artifacts")
+                }
+
+                Text(summary.nextAction)
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 8) {
+                MetricBox(label: "PARITY", value: summary.coverageLabel)
+                MetricBox(label: "READY", value: "\(summary.readinessReady)")
+                MetricBox(label: "CHECK", value: "\(summary.readinessAttention + summary.capabilityAttention)")
+            }
+
+            HStack(spacing: 8) {
+                SecondaryButton(title: "Open", systemImage: "target", action: openGoal)
+                PrimaryButton(title: "Audit", systemImage: "checklist.checked", action: stageAudit)
+            }
+        }
+        .padding(12)
+        .background(PKTheme.panel.opacity(0.70))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(tone.opacity(0.26), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help("Enterprise parity goal · \(summary.nextAction)")
     }
 }
 
@@ -18134,7 +18080,9 @@ private struct PageFrame<Content: View, Actions: View>: View {
                 }
                 content
             }
-            .padding(32)
+            .padding(.horizontal, 32)
+            .padding(.bottom, 32)
+            .padding(.top, showsHeader ? 32 : 72)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
@@ -18567,6 +18515,7 @@ private struct AssistantContextPackPreview: View {
             "Outputs: \(summary.outputCount)",
             "Artifact refs: \(summary.artifactRefCount)",
             "Pending commands: \(summary.pendingCommandCount)",
+            "Validation evidence: \(summary.validationEvidenceCount)",
             "Decision signals: \(summary.decisionSignalCount)",
             "Actionable notes: \(summary.actionableNoteCount)",
             "Knowledge cards: \(summary.knowledgeCardCount)",
@@ -18574,6 +18523,9 @@ private struct AssistantContextPackPreview: View {
         ]
         if !summary.pendingCommands.isEmpty {
             parts.append(summary.pendingCommands.joined(separator: "\n"))
+        }
+        if !summary.validationEvidence.isEmpty {
+            parts.append(summary.validationEvidence.joined(separator: "\n"))
         }
         if !summary.decisionSignals.isEmpty {
             parts.append(summary.decisionSignals.joined(separator: "\n"))
@@ -18589,6 +18541,7 @@ private struct AssistantContextPackPreview: View {
             AssistantContextPackChip(symbol: "shippingbox", value: summary.outputCount, title: "Outputs")
             AssistantContextPackChip(symbol: "link", value: summary.artifactRefCount, title: "Artifact refs")
             AssistantContextPackChip(symbol: "terminal", value: summary.pendingCommandCount, title: "Pending commands")
+            AssistantContextPackChip(symbol: "checkmark.seal", value: summary.validationEvidenceCount, title: "Validation evidence")
             AssistantContextPackChip(symbol: "exclamationmark.triangle", value: summary.decisionSignalCount, title: "Decision signals")
             AssistantContextPackChip(symbol: "checklist", value: summary.actionableNoteCount, title: "Actionable notes")
             AssistantContextPackChip(symbol: "rectangle.stack", value: summary.knowledgeCardCount, title: "Knowledge cards")
@@ -18996,6 +18949,13 @@ private func assistantLaunchHandoffContract(for templateId: String) -> String {
         - Preserve source refs, changed files, validation commands, and residual risk from Context.
         - Keep merge readiness separate from nice-to-have cleanup.
         """
+    case "validation":
+        return """
+        Efficiency handoff:
+        - End with a ready-to-paste validation note: checks run, result, evidence, blocker if any, and next action.
+        - Preserve pending commands and prior validation evidence from Context without claiming pending checks already ran.
+        - If validation fails, stop at the smallest confirmed failure and name the next fix candidate separately.
+        """
     case "jira-execution":
         return """
         Efficiency handoff:
@@ -19066,6 +19026,20 @@ let assistantLaunchTemplates: [AssistantLaunchTemplate] = [
         Review the current changes in {project}.
 
         Use a code-review stance: prioritize bugs, regressions, risky behavior, security or data-loss concerns, and missing tests. Present findings first with file and line references when available, then open questions, then a short verification note.
+        """
+    ),
+    AssistantLaunchTemplate(
+        id: "validation",
+        title: "Validation Assistant",
+        subtitle: "Run the smallest useful check, separate pending commands from evidence, and report readiness.",
+        badge: "Verify",
+        symbol: "checkmark.seal",
+        agentKind: .codex,
+        permissionMode: .askBeforeEdit,
+        prompt: """
+        Validate the current work in {project}.
+
+        Start from the selected workspace, work item, and saved context. Prefer the narrowest relevant pending command when one is present; otherwise choose the smallest useful test, build, or manual check. Report exact checks, pass/fail evidence, blockers, and the next action. Do not modify implementation during this validation pass; if a fix is needed, describe it separately.
         """
     ),
     AssistantLaunchTemplate(
@@ -19142,6 +19116,7 @@ let assistantLaunchTemplates: [AssistantLaunchTemplate] = [
 let newChatAssistantQuickLaunchTemplateIDs = [
     "bug-analysis",
     "mr-review",
+    "validation",
     "jira-execution",
     "log-analysis",
     "skill-hardening"
@@ -19483,6 +19458,16 @@ private func agentHealthText(_ health: CapabilityHealthState?) -> String {
     case .unavailable, .failed:
         return "Missing"
     }
+}
+
+private func agentDockHelp(profile: AgentProfile, active: Bool, attentionCount: Int, snapshot: NativeStoreSnapshot) -> String {
+    if attentionCount > 0 {
+        return "\(profile.displayName) · \(attentionCount) run(s) need attention"
+    }
+    if active {
+        return "\(profile.displayName) · running"
+    }
+    return "\(profile.displayName) · \(agentHealthText(agentCapability(for: profile, snapshot: snapshot)?.healthState))"
 }
 
 private func enterpriseModeColor(_ mode: AgentEnterpriseCapabilityMode) -> Color {
