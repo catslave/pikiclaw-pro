@@ -511,6 +511,72 @@ import Testing
 }
 
 @MainActor
+@Test func enterpriseParityAuditRunAutoCapturesGoalEvidence() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-enterprise-parity-evidence-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-enterprise-parity-evidence",
+        name: "Enterprise Parity Evidence",
+        pathDisplay: directory.path,
+        currentBranch: "codex/enterprise-parity-evidence",
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-codex-enterprise-parity",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let goal = AgentEnterpriseAlignment.goalWorkItem(workspaceId: workspace.id)
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [goal],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let capture = SmokePromptCapture()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            SmokeAgentAdapter(descriptor: descriptor, capture: capture)
+        }
+    )
+    await model.reload()
+
+    #expect(model.stageEnterpriseParityAudit(workspaceId: workspace.id))
+    let runId = try #require(await model.run(workItemId: goal.id, promptOverride: model.draftPrompt))
+    let snapshot = try await store.loadSnapshot()
+    let run = try #require(snapshot.runs.first(where: { $0.id == runId }))
+    let artifact = try #require(snapshot.artifacts.first { artifact in
+        artifact.runId == runId
+            && artifact.workItemId == goal.id
+            && artifact.kind == .commandOutputSummary
+    })
+
+    #expect(run.state == .completed)
+    #expect(run.permissionMode == .readOnly)
+    #expect(artifact.status == .ready)
+    #expect(artifact.title == "Evidence: Align Mac Native with Codex, Claude, and Gemini Enterprise")
+    #expect(artifact.uri == "pikiclaw://runs/\(runId.rawValue)/evidence")
+    #expect(artifact.provenance.contains("smoke ok"))
+    #expect(artifact.sourceRefs.contains(SourceRef(kind: "work-item", label: goal.title, uri: "pikiclaw://work-items/\(goal.id.rawValue)")))
+    #expect(artifact.sourceRefs.contains { $0.kind == "chat-run" && $0.uri == "pikiclaw://runs/\(runId.rawValue)" })
+    #expect(model.statusLine == "Enterprise parity evidence saved")
+    #expect(capture.prompts.last?.contains("Run an enterprise agent parity audit") == true)
+}
+
+@MainActor
 @Test func assistantTemplatePromptAppliesReadOnlyGuardOnlyWhenEffectivePermissionIsReadOnly() async throws {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-assistant-template-guard-\(UUID().uuidString)", isDirectory: true)
