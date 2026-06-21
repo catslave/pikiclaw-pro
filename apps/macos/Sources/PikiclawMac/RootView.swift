@@ -1378,7 +1378,6 @@ private struct ChatHomeView: View {
                         selectedWorkItemId: $selectedWorkItemId,
                         commandFocused: commandFocused,
                         model: model,
-                        navigate: navigate,
                         openTerminal: {
                             navigate(.terminal)
                         },
@@ -2326,7 +2325,6 @@ private struct NewChatLauncher: View {
     @Binding var selectedWorkItemId: EntityID?
     var commandFocused: FocusState<Bool>.Binding
     @ObservedObject var model: NativeAppModel
-    let navigate: (NativeRoute) -> Void
     let openTerminal: () -> Void
     let send: () -> Void
 
@@ -2334,47 +2332,51 @@ private struct NewChatLauncher: View {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
     }
 
-    private var selectedWorkItem: WorkItem? {
-        guard let selectedWorkItemId else { return nil }
-        return snapshot.workItems.first { item in
-            item.id == selectedWorkItemId && selectedWorkspace.map { $0.id == item.workspaceId } != false
-        }
-    }
-
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                NewChatHero(
-                    snapshot: snapshot,
-                    selectedWorkspaceId: selectedWorkspaceId,
-                    selectedAgentKind: model.selectedAgentKind,
-                    isRunning: model.isRunning
-                )
+        GeometryReader { proxy in
+            let contentWidth = min(max(proxy.size.width - 72, 320), 820)
+            ScrollView {
+                VStack(spacing: 44) {
+                    Spacer(minLength: 0)
 
-                MinimalChatComposer(
-                    snapshot: snapshot,
-                    selectedWorkspaceId: $selectedWorkspaceId,
-                    selectedPermissionMode: $model.selectedPermissionMode,
-                    text: $model.draftPrompt,
-                    placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
-                    focused: commandFocused,
-                    selectedAgentKind: model.selectedAgentKind,
-                    isRunning: model.isRunning,
-                    branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
-                    branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
-                    openTerminal: openTerminal,
-                    captureWorkItem: {
-                        Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
-                    },
-                    switchBranch: { branch in
-                        Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
-                    },
-                    send: send
-                )
+                    NewChatHero(
+                        snapshot: snapshot,
+                        selectedWorkspaceId: selectedWorkspaceId,
+                        selectedAgentKind: model.selectedAgentKind,
+                        isRunning: model.isRunning
+                    )
+
+                    MinimalChatComposer(
+                        snapshot: snapshot,
+                        selectedWorkspaceId: $selectedWorkspaceId,
+                        selectedPermissionMode: $model.selectedPermissionMode,
+                        text: $model.draftPrompt,
+                        placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
+                        focused: commandFocused,
+                        selectedAgentKind: model.selectedAgentKind,
+                        isRunning: model.isRunning,
+                        showsSkillCards: false,
+                        branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
+                        branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
+                        openTerminal: openTerminal,
+                        captureWorkItem: {
+                            Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
+                        },
+                        switchBranch: { branch in
+                            Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
+                        },
+                        send: send
+                    )
+                    .frame(width: contentWidth)
+
+                    Spacer(minLength: 0)
+                }
+                .frame(width: contentWidth)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: proxy.size.height)
+                .padding(.top, max(34, proxy.size.height * 0.12))
+                .padding(.bottom, max(42, proxy.size.height * 0.10))
             }
-            .frame(maxWidth: 980, alignment: .leading)
-            .padding(.vertical, 24)
-            .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: selectedWorkspace?.id) {
@@ -2413,59 +2415,58 @@ private struct NewChatHero: View {
     let isRunning: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(greeting)
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundStyle(PKTheme.text)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                    Text(observation)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(PKTheme.text3)
-                        .lineLimit(2)
-                }
-
-                Spacer(minLength: 0)
-
-                if let branch = branchTitle(for: selectedWorkspaceId, snapshot: snapshot) {
-                    NewChatFocusPill(
-                        title: branch,
-                        subtitle: "Current branch",
-                        tint: PKTheme.primary
+        VStack(spacing: 14) {
+            Image(systemName: agentSymbol(selectedAgentKind))
+                .font(.system(size: 19, weight: .bold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 54, height: 54)
+                .background(
+                    LinearGradient(
+                        colors: [accent, accent.opacity(0.66)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-                }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .shadow(color: accent.opacity(0.26), radius: 18, x: 0, y: 8)
+
+            VStack(spacing: 6) {
+                Text("Welcome to Pikiclaw")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+
+                Text("How can \(agentShortLabel(selectedAgentKind)) help today?")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.76)
+
+                Text(subtitle)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
             }
-
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: 640)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        let name = NSFullUserName().split(separator: " ").first.map(String.init) ?? "Michael"
-        switch hour {
-        case 5..<12:
-            return "Good morning, \(name)"
-        case 12..<18:
-            return "Good afternoon, \(name)"
-        default:
-            return "Good evening, \(name)"
-        }
+    private var accent: Color {
+        agentTint(selectedAgentKind)
     }
 
-    private var observation: String {
+    private var subtitle: String {
         if isRunning || runningRuns > 0 {
-            return "\(agentShortLabel(selectedAgentKind)) is already moving. I can keep the next step in \(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))."
+            return "\(agentShortLabel(selectedAgentKind)) is already moving in \(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))."
         }
         if failedRuns >= 3 {
-            return "\(agentShortLabel(selectedAgentKind)) has a few recent failed runs. Tiny hint: setup may want a quick look before the next send."
+            return "\(agentShortLabel(selectedAgentKind)) has a few recent failed runs. Keep the next prompt specific."
         }
-        if snapshot.workItems.contains(where: { $0.state == .active }) {
-            return "I found active work nearby. Choose a project, then say the outcome."
-        }
-        return "\(projectTitle(for: selectedWorkspaceId, snapshot: snapshot)) is ready. Say the outcome and I will route the work."
+        return "\(projectTitle(for: selectedWorkspaceId, snapshot: snapshot)) is selected. Say the outcome and I will route the work."
     }
 
     private var failedRuns: Int {
@@ -2478,68 +2479,6 @@ private struct NewChatHero: View {
         snapshot.runs.filter { run in
             agentKind(for: run, snapshot: snapshot) == selectedAgentKind && run.state == .running
         }.count
-    }
-
-    private var runPulse: String {
-        if isRunning || runningRuns > 0 { return "Live run" }
-        if failedRuns > 0 { return "\(failedRuns) failed" }
-        return "Ready"
-    }
-
-    private var runTint: Color {
-        if isRunning || runningRuns > 0 { return PKTheme.ok }
-        if failedRuns > 0 { return PKTheme.err }
-        return PKTheme.text3
-    }
-
-    private var focusTitle: String {
-        if isRunning || runningRuns > 0 { return "Live run" }
-        if failedRuns > 0 { return "\(failedRuns) needs review" }
-        return "\(snapshot.workItems.filter { $0.state == .active }.count) active items"
-    }
-
-    private var focusSubtitle: String {
-        if isRunning || runningRuns > 0 { return "Agent is working" }
-        if failedRuns > 0 { return "Recent failures" }
-        return "Ready"
-    }
-}
-
-private struct NewChatFocusPill: View {
-    let title: String
-    let subtitle: String
-    let tint: Color
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "scope")
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 28, height: 28)
-                .foregroundStyle(PKTheme.primaryText)
-                .background(tint)
-                .clipShape(Circle())
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(PKTheme.text)
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(PKTheme.text3)
-                    .lineLimit(1)
-            }
-
-            Image(systemName: "chevron.right")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(PKTheme.text4)
-        }
-        .padding(.leading, 8)
-        .padding(.trailing, 11)
-        .frame(height: 44)
-        .background(PKTheme.surfaceRaised.opacity(0.86))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -4508,6 +4447,7 @@ private struct MinimalChatComposer: View {
     var focused: FocusState<Bool>.Binding
     let selectedAgentKind: NativeAgentKind
     let isRunning: Bool
+    var showsSkillCards = true
     var branchOptions: [String] = []
     var branchStatus: String?
     var openTerminal: () -> Void = {}
@@ -4545,6 +4485,9 @@ private struct MinimalChatComposer: View {
     }
 
     private var skillCards: [ComposerSkillCardModel] {
+        guard showsSkillCards else {
+            return []
+        }
         guard composerShouldShowSkillCards(for: text) else {
             return []
         }
@@ -4590,8 +4533,8 @@ private struct MinimalChatComposer: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(PKTheme.text4.opacity(0.62))
                         }
-                        .padding(.top, 18)
-                        .padding(.leading, 15)
+                        .padding(.top, 20)
+                        .padding(.leading, 18)
                         .allowsHitTesting(false)
                     }
 
@@ -4605,10 +4548,10 @@ private struct MinimalChatComposer: View {
                         onPasteImages: pasteImagesFromClipboard,
                         onFocusChange: { editorFocused = $0 }
                     )
-                    .frame(minHeight: 104, maxHeight: 136)
-                    .padding(.top, 18)
-                    .padding(.horizontal, 15)
-                    .padding(.bottom, 2)
+                    .frame(minHeight: 126, maxHeight: 176)
+                    .padding(.top, 20)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 4)
                 }
 
                 if !imageAttachments.isEmpty || attachmentError != nil {
@@ -4683,8 +4626,8 @@ private struct MinimalChatComposer: View {
                     .help(sendHelpText)
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-                .padding(.top, 10)
+                .padding(.bottom, 14)
+                .padding(.top, 11)
             }
             .background(
                 LinearGradient(
@@ -4700,14 +4643,8 @@ private struct MinimalChatComposer: View {
                 RoundedRectangle(cornerRadius: 10)
                     .stroke(focused.wrappedValue ? accent.opacity(0.72) : PKTheme.edgeStrong.opacity(isHovering ? 0.78 : 0.52), lineWidth: 1)
             )
-            .overlay(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(accent.opacity(focused.wrappedValue ? 0.92 : 0.40))
-                    .frame(width: 2)
-                    .padding(.vertical, 10)
-            }
             .clipShape(RoundedRectangle(cornerRadius: 10))
-            .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.20 : 0.11), radius: focused.wrappedValue ? 18 : 12, x: 0, y: 10)
+            .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.22 : 0.12), radius: focused.wrappedValue ? 24 : 16, x: 0, y: 14)
             .onHover { isHovering = $0 }
             .onPasteCommand(of: [.image, .fileURL]) { _ in
                 addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
