@@ -1120,6 +1120,92 @@ import Testing
     #expect(release.prompt.contains("ready-to-use handoff"))
 }
 
+@Test func assistantLaunchRecommendationPrioritizesContextSignals() throws {
+    let jiraItem = WorkItem(
+        id: "jira-recommendation",
+        workspaceId: "workspace-recommendation",
+        title: "IVAS-9300: Reduce launch friction",
+        sourceType: .jira,
+        jira: JiraWorkItemFields(key: "IVAS-9300", status: "In Progress")
+    )
+    let pendingValidation = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+
+    let validation = try #require(assistantLaunchRecommendation(summary: pendingValidation, workItem: jiraItem))
+    #expect(validation.templateId == "validation")
+    #expect(validation.reason == "Pending check")
+    #expect(assistantLaunchTemplatesForContext(newChatAssistantQuickLaunchTemplates(), recommendation: validation).first?.id == "validation")
+
+    let logContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["/logtrace env=lab conversationId=p-v-voice last=24h"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    #expect(assistantLaunchRecommendation(summary: logContext, workItem: jiraItem)?.templateId == "log-analysis")
+
+    let skillContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing."],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    #expect(assistantLaunchRecommendation(summary: skillContext, workItem: jiraItem)?.templateId == "skill-hardening")
+
+    let blockedContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: ["Decision: not ready to merge until validation is captured."],
+        actionableNotes: [],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    #expect(assistantLaunchRecommendation(summary: blockedContext, workItem: nil)?.templateId == "bug-analysis")
+
+    let reviewReady = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: ["swift test --filter AgentStudioWorkflowTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: [],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    #expect(assistantLaunchRecommendation(summary: reviewReady, workItem: nil)?.templateId == "mr-review")
+
+    let emptyContext = AssistantLaunchContextSummary(
+        outputCount: 0,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    #expect(assistantLaunchRecommendation(summary: emptyContext, workItem: jiraItem)?.templateId == "jira-execution")
+    #expect(assistantLaunchRecommendation(summary: emptyContext, workItem: nil) == nil)
+}
+
 @Test func composerSkillDraftsKeepExistingInputAsSkillArguments() {
     let logtrace = Capability(
         kind: .skill,

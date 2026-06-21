@@ -1414,6 +1414,7 @@ final class NativeAppModel: ObservableObject {
             }
             lines.append("cwd: \(terminalCurrentDirectory(for: workspace) ?? workspace.pathDisplay)")
             lines.append(contentsOf: macOSBuildDisciplineContextLines(for: workspace))
+            lines.append(contentsOf: trellisManagementContextLines(for: workspace))
         }
         if let agentKind {
             lines.append("Target Agent: \(agentKind.rawValue)")
@@ -2727,6 +2728,7 @@ final class NativeAppModel: ObservableObject {
             lines.append(skills)
         }
         lines.append(contentsOf: macOSBuildDisciplineContextLines(for: workspace))
+        lines.append(contentsOf: trellisManagementContextLines(for: workspace))
 
         if let workItem {
             lines.append("- Work item: \(workItem.title)")
@@ -2807,6 +2809,38 @@ final class NativeAppModel: ObservableObject {
             "- Build discipline: many chats may edit this repo concurrently; run focused tests per chat, but use \(buildCommand) for full macOS app rebuilds so requests coalesce instead of competing for SwiftPM .build locks.",
             "- Avoid launching parallel `swift build`, `swift test`, or build-app jobs in apps/macos unless a lock wait is intentional."
         ]
+    }
+
+    private func trellisManagementContextLines(for workspace: Workspace?) -> [String] {
+        guard let workspace,
+              let trellisRoot = Self.trellisRootURL(for: workspace.pathDisplay) else {
+            return []
+        }
+
+        return [
+            "- Trellis: this workspace is managed at \(Self.shortTerminalPath(trellisRoot.path)); use `.trellis/workflow.md`, the active Trellis task, and relevant `.trellis/spec/**` before non-trivial edits.",
+            "- Trellis commands: `python3 ./.trellis/scripts/get_context.py --mode packages`; `python3 ./.trellis/scripts/task.py current --source`; create/start a Trellis task when no active task covers implementation work."
+        ]
+    }
+
+    nonisolated private static func trellisRootURL(for path: String) -> URL? {
+        var current = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        for _ in 0..<4 {
+            let configPath = current
+                .appendingPathComponent(".trellis", isDirectory: true)
+                .appendingPathComponent("config.yaml")
+                .path
+            if FileManager.default.fileExists(atPath: configPath) {
+                return current
+            }
+
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            if parent.path == current.path {
+                break
+            }
+            current = parent
+        }
+        return nil
     }
 
     private func gitChangesContextLine(for workspace: Workspace) -> String? {

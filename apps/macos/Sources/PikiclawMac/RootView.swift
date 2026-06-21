@@ -2343,6 +2343,20 @@ private struct NewChatLauncher: View {
         }
     }
 
+    private var assistantContextSummary: AssistantLaunchContextSummary {
+        model.assistantLaunchContextSummary(
+            workspaceId: selectedWorkspace?.id,
+            workItemId: selectedWorkItemId
+        )
+    }
+
+    private var assistantRecommendation: AssistantLaunchRecommendation? {
+        assistantLaunchRecommendation(
+            summary: assistantContextSummary,
+            workItem: selectedWorkItem
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -2414,8 +2428,12 @@ private struct NewChatLauncher: View {
                     VStack(alignment: .leading, spacing: 14) {
                         NewChatSectionHeader(title: "Assistant Launchers", subtitle: "Stage a focused prompt", count: newChatAssistantQuickLaunchTemplates().count)
                         NewChatAssistantStrip(
-                            templates: newChatAssistantQuickLaunchTemplates(),
-                            currentPermissionMode: model.selectedPermissionMode
+                            templates: assistantLaunchTemplatesForContext(
+                                newChatAssistantQuickLaunchTemplates(),
+                                recommendation: assistantRecommendation
+                            ),
+                            currentPermissionMode: model.selectedPermissionMode,
+                            recommendation: assistantRecommendation
                         ) { template in
                             launchAssistant(template)
                         }
@@ -3109,6 +3127,7 @@ private struct NewChatCategoryStrip: View {
 private struct NewChatAssistantStrip: View {
     let templates: [AssistantLaunchTemplate]
     let currentPermissionMode: PermissionMode
+    let recommendation: AssistantLaunchRecommendation?
     let launch: (AssistantLaunchTemplate) -> Void
 
     var body: some View {
@@ -3120,11 +3139,12 @@ private struct NewChatAssistantStrip: View {
                     } label: {
                         NewChatAssistantCard(
                             template: template,
-                            currentPermissionMode: currentPermissionMode
+                            currentPermissionMode: currentPermissionMode,
+                            recommendationReason: recommendation?.templateId == template.id ? recommendation?.reason : nil
                         )
                     }
                     .buttonStyle(.plain)
-                    .help(template.title)
+                    .help(recommendation?.templateId == template.id ? "\(template.title) - \(recommendation?.reason ?? "")" : template.title)
                 }
             }
             .padding(.vertical, 1)
@@ -3135,7 +3155,12 @@ private struct NewChatAssistantStrip: View {
 private struct NewChatAssistantCard: View {
     let template: AssistantLaunchTemplate
     let currentPermissionMode: PermissionMode
+    let recommendationReason: String?
     @State private var hovering = false
+
+    private var isRecommended: Bool {
+        recommendationReason != nil
+    }
 
     private var tint: Color {
         switch template.id {
@@ -3185,6 +3210,9 @@ private struct NewChatAssistantCard: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 6) {
+                    if isRecommended {
+                        CountBadge(text: "Suggested")
+                    }
                     CountBadge(text: agentShortLabel(template.agentKind))
                     CountBadge(text: permissionTitle(assistantTemplatePermissionMode(template, current: currentPermissionMode)))
                     Spacer(minLength: 0)
@@ -3201,14 +3229,14 @@ private struct NewChatAssistantCard: View {
         .background(
             LinearGradient(
                 colors: [
-                    tint.opacity(hovering ? 0.13 : 0.08),
+                    tint.opacity(isRecommended ? 0.16 : hovering ? 0.13 : 0.08),
                     PKTheme.surfaceRaised.opacity(0.76)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
         )
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(hovering ? tint.opacity(0.42) : PKTheme.edge, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isRecommended ? tint.opacity(0.62) : hovering ? tint.opacity(0.42) : PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onHover { hovering = $0 }
     }
@@ -17373,6 +17401,24 @@ private struct AssistantSurfacePage: View {
         )
     }
 
+    private var assistantRecommendation: AssistantLaunchRecommendation? {
+        assistantLaunchRecommendation(
+            summary: assistantContextSummary,
+            workItem: selectedWorkItem
+        )
+    }
+
+    private func recommendationReason(for template: AssistantLaunchTemplate) -> String? {
+        assistantRecommendation?.templateId == template.id ? assistantRecommendation?.reason : nil
+    }
+
+    private func templateHelp(_ template: AssistantLaunchTemplate) -> String {
+        guard let reason = recommendationReason(for: template) else {
+            return "Stage \(template.title)"
+        }
+        return "Stage \(template.title) - \(reason)"
+    }
+
     var body: some View {
         PageFrame(route: .assistants) {
             VStack(alignment: .leading, spacing: 14) {
@@ -17392,11 +17438,12 @@ private struct AssistantSurfacePage: View {
                             AssistantTemplateCard(
                                 template: template,
                                 currentPermissionMode: model.selectedPermissionMode,
-                                contextSummary: assistantContextSummary
+                                contextSummary: assistantContextSummary,
+                                recommendationReason: recommendationReason(for: template)
                             )
                         }
                         .buttonStyle(.plain)
-                        .help("Stage \(template.title)")
+                        .help(templateHelp(template))
                     }
                 }
 
@@ -18465,6 +18512,11 @@ private struct AssistantTemplateCard: View {
     let template: AssistantLaunchTemplate
     let currentPermissionMode: PermissionMode
     let contextSummary: AssistantLaunchContextSummary
+    let recommendationReason: String?
+
+    private var isRecommended: Bool {
+        recommendationReason != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -18476,6 +18528,9 @@ private struct AssistantTemplateCard: View {
                     .background(PKTheme.primary.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 Spacer()
+                if isRecommended {
+                    StatusPill(text: "Suggested", color: PKTheme.ok)
+                }
                 StatusPill(text: template.badge, color: PKTheme.primary)
             }
             Text(template.title)
@@ -18497,8 +18552,8 @@ private struct AssistantTemplateCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
-        .background(PKTheme.panel.opacity(0.72))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .background(isRecommended ? PKTheme.panelAlt.opacity(0.86) : PKTheme.panel.opacity(0.72))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isRecommended ? PKTheme.ok.opacity(0.46) : PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -18882,6 +18937,11 @@ struct AssistantLaunchTemplate: Identifiable, Hashable {
     }
 }
 
+struct AssistantLaunchRecommendation: Hashable {
+    let templateId: String
+    let reason: String
+}
+
 private func assistantLaunchPrompt(_ prompt: String, templateId: String) -> String {
     [
         runFollowUpNonEmpty(prompt),
@@ -19126,6 +19186,89 @@ func newChatAssistantQuickLaunchTemplates() -> [AssistantLaunchTemplate] {
     newChatAssistantQuickLaunchTemplateIDs.compactMap { id in
         assistantLaunchTemplates.first(where: { $0.id == id })
     }
+}
+
+func assistantLaunchTemplatesForContext(
+    _ templates: [AssistantLaunchTemplate],
+    recommendation: AssistantLaunchRecommendation?
+) -> [AssistantLaunchTemplate] {
+    guard let recommendation,
+          let index = templates.firstIndex(where: { $0.id == recommendation.templateId }) else {
+        return templates
+    }
+    var ordered = templates
+    let recommended = ordered.remove(at: index)
+    ordered.insert(recommended, at: 0)
+    return ordered
+}
+
+func assistantLaunchRecommendation(
+    summary: AssistantLaunchContextSummary,
+    workItem: WorkItem?
+) -> AssistantLaunchRecommendation? {
+    let signalText = assistantRecommendationSignalText(summary)
+    if assistantSignalContainsSkillFailure(signalText) {
+        return AssistantLaunchRecommendation(templateId: "skill-hardening", reason: "Skill signal")
+    }
+    if assistantSignalContainsLogSignal(signalText) {
+        return AssistantLaunchRecommendation(templateId: "log-analysis", reason: "Log lookup")
+    }
+    if summary.pendingCommandCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "validation", reason: "Pending check")
+    }
+    if assistantSignalContainsBlockingSignal(signalText) {
+        return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Blocked output")
+    }
+    if summary.validationEvidenceCount > 0 || summary.decisionSignalCount > 0 || summary.actionableNoteCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "mr-review", reason: "Review-ready context")
+    }
+    if workItem?.sourceType == .jira || workItem?.jira != nil {
+        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Selected Jira")
+    }
+    return nil
+}
+
+private func assistantRecommendationSignalText(_ summary: AssistantLaunchContextSummary) -> String {
+    (summary.pendingCommands + summary.validationEvidence + summary.decisionSignals + summary.actionableNotes)
+        .joined(separator: "\n")
+        .lowercased()
+}
+
+private func assistantSignalContainsSkillFailure(_ text: String) -> Bool {
+    guard text.contains("skill")
+        || text.contains("skill.md")
+        || text.contains("iva_logtracer")
+        || text.contains("/logtrace")
+        || text.contains("/clickhouse") else {
+        return false
+    }
+    return text.contains("failed")
+        || text.contains("failure")
+        || text.contains("missing")
+        || text.contains("not found")
+        || text.contains("cannot")
+        || text.contains("unable")
+}
+
+private func assistantSignalContainsLogSignal(_ text: String) -> Bool {
+    text.contains("/logtrace")
+        || text.contains("/clickhouse")
+        || text.contains("conversationid")
+        || text.contains("sessionid")
+        || text.contains("traceid")
+        || text.contains("requestid")
+        || text.contains("taskid")
+}
+
+private func assistantSignalContainsBlockingSignal(_ text: String) -> Bool {
+    text.contains("blocker")
+        || text.contains("blocked")
+        || text.contains("not ready")
+        || text.contains("request changes")
+        || text.contains("failed")
+        || text.contains("failure")
+        || text.contains("risk:")
+        || text.contains("missing")
 }
 
 func assistantTemplatePermissionMode(

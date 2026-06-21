@@ -148,6 +148,16 @@ public struct NativeStoreSnapshot: Codable, Sendable {
         var updated = 0
         var unchanged = 0
         var selectedWorkItemId: EntityID?
+        let syncedKeys = Set(tickets.map { $0.key.uppercased() })
+        let protectedWorkItemIds = Set(runs.compactMap(\.workItemId) + artifacts.compactMap(\.workItemId))
+
+        if !syncedKeys.isEmpty {
+            workItems.removeAll { item in
+                guard item.sourceType == .jira, !protectedWorkItemIds.contains(item.id) else { return false }
+                guard let key = nativeStoreJiraKey(for: item) else { return true }
+                return !syncedKeys.contains(key)
+            }
+        }
 
         for ticket in tickets {
             let normalizedKey = ticket.key.uppercased()
@@ -182,6 +192,16 @@ public struct NativeStoreSnapshot: Codable, Sendable {
             selectedWorkItemId: selectedWorkItemId
         )
     }
+}
+
+private func nativeStoreJiraKey(for item: WorkItem) -> String? {
+    if let key = item.jira?.key.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+        return key.uppercased()
+    }
+    let label = item.sourceRefs.first { $0.kind == "jira" }?
+        .label
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return label.isEmpty ? nil : label.uppercased()
 }
 
 public extension WorkItem {

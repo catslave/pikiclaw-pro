@@ -32,6 +32,9 @@ import Testing
         .appendingPathComponent("pikiclaw-terminal-stage-\(UUID().uuidString)", isDirectory: true)
         .resolvingSymlinksInPath()
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let trellisRoot = root.appendingPathComponent(".trellis", isDirectory: true)
+    try FileManager.default.createDirectory(at: trellisRoot, withIntermediateDirectories: true)
+    try Data("session_commit_message: test\n".utf8).write(to: trellisRoot.appendingPathComponent("config.yaml"))
     defer { try? FileManager.default.removeItem(at: root) }
 
     let store = JSONNativeStore(fileURL: root.appendingPathComponent("state.json"))
@@ -74,6 +77,8 @@ import Testing
     #expect(model.draftPrompt.contains("Run State: failed"))
     #expect(model.draftPrompt.contains("Build discipline: many chats may edit this repo concurrently"))
     #expect(model.draftPrompt.contains("./apps/macos/scripts/build-app.sh"))
+    #expect(model.draftPrompt.contains("Trellis: this workspace is managed"))
+    #expect(model.draftPrompt.contains("python3 ./.trellis/scripts/task.py current --source"))
     #expect(model.draftPrompt.contains("Terminal Output:"))
     #expect(model.draftPrompt.contains(root.path))
 }

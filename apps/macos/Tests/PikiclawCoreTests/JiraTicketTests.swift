@@ -61,6 +61,49 @@ import Testing
     #expect(snapshot.workItems[0].externalRefs.first?.uri == "https://jira.example.com/browse/IVAS-1234")
 }
 
+@Test func nativeSnapshotPrunesUnreferencedJiraTicketsMissingFromLatestSync() {
+    let workspaceId = EntityID("workspace-test")
+    let stale = WorkItem(
+        id: EntityID("jira-ai-service"),
+        workspaceId: workspaceId,
+        title: "ENV-1: Wrong assignee",
+        sourceType: .jira,
+        jira: JiraWorkItemFields(key: "ENV-1", assignee: "AI Service")
+    )
+    let protected = WorkItem(
+        id: EntityID("jira-protected"),
+        workspaceId: workspaceId,
+        title: "ENV-2: Has run history",
+        sourceType: .jira,
+        jira: JiraWorkItemFields(key: "ENV-2", assignee: "AI Service")
+    )
+    let latest = JiraTicket(
+        key: "IVAS-8550",
+        title: "Add NCA health check",
+        status: "In Progress",
+        assignee: "Michael Yang"
+    )
+    var snapshot = NativeStoreSnapshot(
+        workspaces: [Workspace(id: workspaceId, name: "Test", pathDisplay: "/tmp/test")],
+        workItems: [stale, protected],
+        runs: [
+            AgentRun(
+                id: EntityID("run-protected"),
+                workItemId: protected.id,
+                workspaceId: workspaceId,
+                agentProfileId: EntityID("agent-codex"),
+                promptSnapshot: "Keep historical Jira run"
+            )
+        ]
+    )
+
+    _ = snapshot.applyJiraTickets([latest], workspaceId: workspaceId)
+
+    #expect(!snapshot.workItems.contains { $0.id == stale.id })
+    #expect(snapshot.workItems.contains { $0.id == protected.id })
+    #expect(snapshot.workItems.contains { $0.jira?.key == "IVAS-8550" && $0.jira?.assignee == "Michael Yang" })
+}
+
 @Test func jiraTicketCardCandidatesPrioritizeSelectedAndActionableTickets() {
     let workspaceId = EntityID("workspace-test")
     let selected = WorkItem(
