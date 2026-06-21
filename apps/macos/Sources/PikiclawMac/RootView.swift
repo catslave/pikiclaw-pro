@@ -2334,53 +2334,134 @@ private struct NewChatLauncher: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let contentWidth = min(max(proxy.size.width - 72, 320), 820)
-            ScrollView {
-                VStack(spacing: 44) {
-                    Spacer(minLength: 0)
+            let stageInset: CGFloat = proxy.size.width < 700 ? 12 : 22
+            let stageHeight = max(0, proxy.size.height - 36)
+            let contentWidth = min(max(proxy.size.width - stageInset * 2 - 72, 320), 820)
+            ZStack {
+                NewChatStageBackdrop(accent: agentTint(model.selectedAgentKind))
 
-                    NewChatHero(
-                        snapshot: snapshot,
-                        selectedWorkspaceId: selectedWorkspaceId,
-                        selectedAgentKind: model.selectedAgentKind,
-                        isRunning: model.isRunning
-                    )
+                ScrollView {
+                    VStack(spacing: 44) {
+                        Spacer(minLength: 0)
 
-                    MinimalChatComposer(
-                        snapshot: snapshot,
-                        selectedWorkspaceId: $selectedWorkspaceId,
-                        selectedPermissionMode: $model.selectedPermissionMode,
-                        text: $model.draftPrompt,
-                        placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
-                        focused: commandFocused,
-                        selectedAgentKind: model.selectedAgentKind,
-                        isRunning: model.isRunning,
-                        showsSkillCards: false,
-                        branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
-                        branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
-                        openTerminal: openTerminal,
-                        captureWorkItem: {
-                            Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
-                        },
-                        switchBranch: { branch in
-                            Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
-                        },
-                        send: send
-                    )
+                        NewChatHero(
+                            snapshot: snapshot,
+                            selectedWorkspaceId: selectedWorkspaceId,
+                            selectedAgentKind: model.selectedAgentKind,
+                            isRunning: model.isRunning
+                        )
+
+                        MinimalChatComposer(
+                            snapshot: snapshot,
+                            selectedWorkspaceId: $selectedWorkspaceId,
+                            selectedPermissionMode: $model.selectedPermissionMode,
+                            text: $model.draftPrompt,
+                            placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
+                            focused: commandFocused,
+                            selectedAgentKind: model.selectedAgentKind,
+                            isRunning: model.isRunning,
+                            showsSkillCards: false,
+                            branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
+                            branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
+                            openTerminal: openTerminal,
+                            captureWorkItem: {
+                                Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
+                            },
+                            switchBranch: { branch in
+                                Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
+                            },
+                            send: send
+                        )
+                        .frame(width: contentWidth)
+
+                        Spacer(minLength: 0)
+                    }
                     .frame(width: contentWidth)
-
-                    Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: stageHeight)
+                    .padding(.top, max(34, stageHeight * 0.12))
+                    .padding(.bottom, max(42, stageHeight * 0.10))
                 }
-                .frame(width: contentWidth)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: proxy.size.height)
-                .padding(.top, max(34, proxy.size.height * 0.12))
-                .padding(.bottom, max(42, proxy.size.height * 0.10))
             }
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(PKTheme.edgeStrong.opacity(0.62), lineWidth: 1))
+            .shadow(color: Color.black.opacity(0.20), radius: 26, x: 0, y: 18)
+            .padding(.horizontal, stageInset)
+            .padding(.vertical, 18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: selectedWorkspace?.id) {
             await model.refreshBranches(for: selectedWorkspace)
+        }
+    }
+}
+
+private struct NewChatStageBackdrop: View {
+    let accent: Color
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.92),
+                    PKTheme.surface.opacity(0.96),
+                    Color.black.opacity(0.86)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.13),
+                            Color.white.opacity(0.03),
+                            Color.clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: 190)
+                .rotationEffect(.degrees(14))
+                .offset(x: -170, y: -190)
+                .blur(radius: 38)
+
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            accent.opacity(0.18),
+                            PKTheme.warn.opacity(0.07),
+                            Color.clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: 260)
+                .rotationEffect(.degrees(-16))
+                .offset(x: 260, y: -130)
+                .blur(radius: 48)
+
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            PKTheme.primary.opacity(0.10),
+                            Color.clear
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(height: 210)
+                .offset(y: 210)
+                .blur(radius: 54)
+
+            PikiclawGridBackground()
+                .opacity(0.16)
         }
     }
 }
@@ -4632,8 +4713,9 @@ private struct MinimalChatComposer: View {
             .background(
                 LinearGradient(
                     colors: [
-                        accent.opacity(0.07),
-                        PKTheme.surfaceRaised.opacity(0.95)
+                        Color.black.opacity(0.50),
+                        PKTheme.surface.opacity(0.92),
+                        accent.opacity(0.08)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
