@@ -2364,7 +2364,6 @@ private struct NewChatLauncher: View {
                     snapshot: snapshot,
                     selectedWorkspaceId: selectedWorkspaceId,
                     selectedAgentKind: model.selectedAgentKind,
-                    selectedMode: $selectedMode,
                     isRunning: model.isRunning
                 )
 
@@ -2768,7 +2767,7 @@ private struct NewChatActionDock: View {
             NewChatActionButton(symbol: "terminal", title: "Terminal", subtitle: "Run checks", action: openTerminal)
             NewChatActionButton(symbol: "checklist", title: "Work Items", subtitle: "Triage tasks", action: openWorkItems)
             NewChatActionButton(symbol: "point.3.connected.trianglepath.dotted", title: "Workflows", subtitle: "Reuse recipes", action: openWorkflows)
-            NewChatActionButton(symbol: "person.crop.circle.badge.plus", title: "Assistants", subtitle: "Pick a mode", action: openAssistants)
+            NewChatActionButton(symbol: "person.crop.circle.badge.plus", title: "Assistants", subtitle: "Open library", action: openAssistants)
         }
     }
 }
@@ -2837,7 +2836,6 @@ private struct NewChatHero: View {
     let snapshot: NativeStoreSnapshot
     let selectedWorkspaceId: EntityID?
     let selectedAgentKind: NativeAgentKind
-    @Binding var selectedMode: NewChatMode
     let isRunning: Bool
 
     var body: some View {
@@ -2866,7 +2864,6 @@ private struct NewChatHero: View {
                 }
             }
 
-            NewChatModePicker(selectedMode: $selectedMode)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2892,7 +2889,7 @@ private struct NewChatHero: View {
             return "\(agentShortLabel(selectedAgentKind)) has a few recent failed runs. Tiny hint: setup may want a quick look before the next send."
         }
         if snapshot.workItems.contains(where: { $0.state == .active }) {
-            return "I found active work nearby. Pick a mode, choose a project, then say the outcome."
+            return "I found active work nearby. Choose a project, then say the outcome."
         }
         return "\(projectTitle(for: selectedWorkspaceId, snapshot: snapshot)) is ready. Say the outcome and I will route the work."
     }
@@ -2930,7 +2927,7 @@ private struct NewChatHero: View {
     private var focusSubtitle: String {
         if isRunning || runningRuns > 0 { return "Agent is working" }
         if failedRuns > 0 { return "Recent failures" }
-        return selectedMode.title
+        return "Ready"
     }
 }
 
@@ -3001,37 +2998,6 @@ private enum NewChatMode: String, CaseIterable, Identifiable {
         case .engineering: return "Tell"
         case .creative: return "Describe"
         }
-    }
-}
-
-private struct NewChatModePicker: View {
-    @Binding var selectedMode: NewChatMode
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(NewChatMode.allCases) { mode in
-                Button {
-                    selectedMode = mode
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: mode.symbol)
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(mode.title)
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(selectedMode == mode ? PKTheme.primaryText : PKTheme.text2)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .background(selectedMode == mode ? PKTheme.primary : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .background(PKTheme.control.opacity(0.92))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
