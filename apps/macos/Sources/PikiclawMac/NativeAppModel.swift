@@ -1013,7 +1013,7 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
-    func captureRunEvidence(runId: EntityID) async -> EntityID? {
+    func captureRunEvidence(runId: EntityID, actor: String = "user") async -> EntityID? {
         do {
             var next = try await store.loadSnapshot()
             guard let run = next.runs.first(where: { $0.id == runId }) else {
@@ -1080,7 +1080,7 @@ final class NativeAppModel: ObservableObject {
             try await store.replaceSnapshot(next)
             try await store.appendAuditEvent(AuditEvent(
                 kind: .artifactCreated,
-                actor: "user",
+                actor: actor,
                 summary: "\(created ? "Saved" : "Updated") chat evidence for \(run.promptSnapshot.firstLineFallback("chat"))",
                 runId: run.id,
                 workItemId: run.workItemId,
@@ -2059,10 +2059,27 @@ final class NativeAppModel: ObservableObject {
 
         markRunFinished(run.id)
         await reload()
+        await autoCaptureEnterpriseParityEvidenceIfNeeded(for: run)
         if let preserveActiveRunId {
             activeRunId = preserveActiveRunId
         }
         return run.id
+    }
+
+    private func autoCaptureEnterpriseParityEvidenceIfNeeded(for run: AgentRun) async {
+        guard Self.shouldAutoCaptureEnterpriseParityEvidence(for: run) else { return }
+        guard await captureRunEvidence(runId: run.id, actor: "runner") != nil else { return }
+        statusLine = run.state == .completed ? "Enterprise parity evidence saved" : "Enterprise parity failure evidence saved"
+    }
+
+    nonisolated private static func shouldAutoCaptureEnterpriseParityEvidence(for run: AgentRun) -> Bool {
+        guard run.workItemId == AgentEnterpriseAlignment.goalWorkItemId else { return false }
+        switch run.state {
+        case .completed, .failed:
+            return canCaptureEvidence(from: run)
+        case .queued, .starting, .running, .waitingForUser, .cancelling, .cancelled, .stale, .draft:
+            return false
+        }
     }
 
     nonisolated private static func agentDescriptor(for profile: AgentProfile) -> AgentDescriptor {
