@@ -2360,11 +2360,6 @@ private struct NewChatLauncher: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                NewChatAgentRail(
-                    selectedAgentKind: $model.selectedAgentKind,
-                    availableProfiles: enabledAgentProfiles(in: snapshot)
-                )
-
                 NewChatHero(
                     snapshot: snapshot,
                     selectedWorkspaceId: selectedWorkspaceId,
@@ -3037,58 +3032,6 @@ private struct NewChatModePicker: View {
         .background(PKTheme.control.opacity(0.92))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct NewChatAgentRail: View {
-    @Binding var selectedAgentKind: NativeAgentKind
-    let availableProfiles: [AgentProfile]
-
-    private var enabledKinds: Set<NativeAgentKind> {
-        Set(availableProfiles.map(\.kind))
-    }
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(agentDockKinds, id: \.self) { kind in
-                    let isEnabled = enabledKinds.isEmpty || enabledKinds.contains(kind)
-                    Button {
-                        selectedAgentKind = kind
-                    } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: agentSymbol(kind))
-                                .font(.system(size: 11, weight: .bold))
-                                .frame(width: 22, height: 22)
-                                .foregroundStyle(agentTint(kind))
-                                .background(agentTint(kind).opacity(selectedAgentKind == kind ? 0.20 : 0.10))
-                                .clipShape(Circle())
-                            Text(agentDisplayName(kind))
-                                .font(.system(size: 12, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(isEnabled ? PKTheme.text2 : PKTheme.text4)
-                        .padding(.leading, 8)
-                        .padding(.trailing, 12)
-                        .frame(height: 36)
-                        .background(selectedAgentKind == kind ? agentTint(kind).opacity(0.13) : PKTheme.surfaceRaised.opacity(0.74))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(selectedAgentKind == kind ? agentTint(kind).opacity(0.58) : PKTheme.edge, lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!isEnabled)
-                    .help(agentDisplayName(kind))
-                }
-            }
-            .padding(6)
-        }
-        .background(PKTheme.panel.opacity(0.72))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(color: Color.black.opacity(0.10), radius: 14, x: 0, y: 8)
     }
 }
 
