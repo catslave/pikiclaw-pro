@@ -684,6 +684,7 @@ private struct AgentDock: View {
                     let profileRuns = snapshot.runs.filter { $0.agentProfileId == profile.id }
                     let profileAttentionCount = profileRuns.filter { $0.state == .waitingForUser || $0.state == .failed }.count
                     let profileHasActiveRun = profileRuns.contains { isLiveRunState($0.state) }
+                    let health = agentCapability(for: profile, snapshot: snapshot)?.healthState
                     Button {
                         selectAgent(kind)
                     } label: {
@@ -701,10 +702,16 @@ private struct AgentDock: View {
 
                             if profileAttentionCount > 0 {
                                 DockBadge(text: profileAttentionCount > 9 ? "9+" : "\(profileAttentionCount)", color: PKTheme.warn)
-                                    .offset(x: 6, y: -5)
+                                    .padding(.top, 4)
+                                    .padding(.trailing, 4)
                             } else if profileHasActiveRun {
-                                Dot(color: PKTheme.ok)
-                                    .padding(6)
+                                DockStatusDot(color: PKTheme.ok)
+                                    .padding(.top, 7)
+                                    .padding(.trailing, 7)
+                            } else if health != .healthy {
+                                DockStatusDot(color: agentHealthColor(health))
+                                    .padding(.top, 7)
+                                    .padding(.trailing, 7)
                             }
                         }
                         .frame(width: 54, height: 52)
@@ -783,6 +790,18 @@ private struct DockBadge: View {
             .frame(minWidth: 16, minHeight: 16)
             .background(color)
             .clipShape(Capsule())
+    }
+}
+
+private struct DockStatusDot: View {
+    let color: Color
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 8, height: 8)
+            .overlay(Circle().stroke(PKTheme.sidebar, lineWidth: 2))
+            .shadow(color: color.opacity(0.36), radius: 5)
     }
 }
 
