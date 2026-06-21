@@ -1505,7 +1505,8 @@ final class NativeAppModel: ObservableObject {
                 workItemId: item.id,
                 workspaceId: workspace.id
             ))
-            await reload()
+            publishWorkItemLocally(item)
+            statusLine = "Created \(item.title)"
             return item.id
         } catch {
             statusLine = "Create work item failed: \(error.localizedDescription)"
@@ -1519,11 +1520,6 @@ final class NativeAppModel: ObservableObject {
         guard !prompt.isEmpty else {
             statusLine = "Type a message first"
             return nil
-        }
-
-        let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first
-        if let workspace {
-            await refreshBranches(for: workspace)
         }
 
         let target = snapshot.workItems.first(where: { $0.id == targetWorkItemId })
@@ -1583,7 +1579,7 @@ final class NativeAppModel: ObservableObject {
             }
 
             let preservedActiveRunId = activeRunId ?? run.sideChatOfRunId ?? run.id
-            let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
+            let launchWorkspace = workspace
             run.messages = Self.appendingCurrentChatTurnMessages(
                 to: run.messages,
                 prompt: run.promptSnapshot,
@@ -1612,7 +1608,7 @@ final class NativeAppModel: ObservableObject {
                 workspaceId: launchWorkspace.id
             ))
             activeRunId = preservedActiveRunId
-            await reload()
+            publishRunLocally(run, preserveActiveRunId: preservedActiveRunId)
             activeRunId = preservedActiveRunId
 
             return await launchAgentRun(run, profile: profile, workspace: launchWorkspace, preserveActiveRunId: preservedActiveRunId)
@@ -1624,8 +1620,6 @@ final class NativeAppModel: ObservableObject {
 
     @discardableResult
     func rerunChat(runId: EntityID) async -> EntityID? {
-        guard !isRunning else { return activeRunId }
-
         do {
             let latest = try await store.loadSnapshot()
             guard var run = latest.runs.first(where: { $0.id == runId }) else {
@@ -1653,7 +1647,7 @@ final class NativeAppModel: ObservableObject {
             }
 
             let preservedActiveRunId = activeRunId ?? run.sideChatOfRunId ?? run.id
-            let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
+            let launchWorkspace = workspace
             run.messages = Self.appendingCurrentChatTurnMessages(
                 to: run.messages,
                 prompt: run.promptSnapshot,
@@ -1678,7 +1672,7 @@ final class NativeAppModel: ObservableObject {
                 workspaceId: launchWorkspace.id
             ))
             activeRunId = preservedActiveRunId
-            await reload()
+            publishRunLocally(run, preserveActiveRunId: preservedActiveRunId)
             activeRunId = preservedActiveRunId
 
             return await launchAgentRun(run, profile: profile, workspace: launchWorkspace, preserveActiveRunId: preservedActiveRunId)
@@ -1820,7 +1814,7 @@ final class NativeAppModel: ObservableObject {
                 return nil
             }
 
-            let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
+            let launchWorkspace = workspace
             let currentConversationRun = conversationRunId.flatMap { id in latest.runs.first(where: { $0.id == id }) }
             var run = currentConversationRun.flatMap { existingRun in
                 Self.isActiveExecutionState(existingRun.state) ? nil : existingRun
@@ -1864,7 +1858,7 @@ final class NativeAppModel: ObservableObject {
                 workItemId: run.workItemId,
                 workspaceId: launchWorkspace.id
             ))
-            await reload()
+            publishRunLocally(run, preserveActiveRunId: preserveActiveRunId ?? run.id)
             activeRunId = preserveActiveRunId ?? run.id
             markRunStarted(run.id)
             Task { @MainActor [self, run, profile, launchWorkspace, preserveActiveRunId] in
@@ -1933,7 +1927,6 @@ final class NativeAppModel: ObservableObject {
         sideChatOfRunId: EntityID? = nil,
         promptOverride: String? = nil
     ) async -> EntityID? {
-        guard !isRunning else { return activeRunId }
         guard let item = snapshot.workItems.first(where: { $0.id == workItemId }) ?? snapshot.workItems.first else {
             guard let created = await createWorkItem() else { return nil }
             return await run(workItemId: created)
@@ -1942,7 +1935,7 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Workspace missing"
             return nil
         }
-        let launchWorkspace = await refreshBranches(for: workspace) ?? workspace
+        let launchWorkspace = workspace
         guard let profile = agentProfile(for: selectedAgentKind) else {
             statusLine = "Agent profile missing"
             return nil
@@ -1991,7 +1984,11 @@ final class NativeAppModel: ObservableObject {
                 workItemId: item.id,
                 workspaceId: launchWorkspace.id
             ))
-            await reload()
+            if let sideChatOfRunId {
+                linkSideChatLocally(parentRunId: sideChatOfRunId, childRunId: run.id)
+            }
+            publishWorkItemLocally(runningItem)
+            publishRunLocally(run)
             return await launchAgentRun(run, profile: profile, workspace: launchWorkspace)
         } catch {
             statusLine = "Run failed: \(error.localizedDescription)"
@@ -2028,6 +2025,14 @@ final class NativeAppModel: ObservableObject {
         var run = initialRun
         markRunStarted(run.id)
         do {
+            run.state = .starting
+            if run.startedAt == nil {
+                run.startedAt = Date()
+            }
+            statusLine = "Launching \(profile.displayName)"
+            try await store.saveRun(run)
+            publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
+
             let descriptor = Self.agentDescriptor(for: profile)
             let adapter = agentAdapterFactory(descriptor)
             let launchPrompt = Self.agentPrompt(for: run)
@@ -2044,21 +2049,23 @@ final class NativeAppModel: ObservableObject {
             for try await event in adapter.start(request) {
                 apply(event, to: &run)
                 try await store.saveRun(run)
-                await reload()
-                if let preserveActiveRunId {
-                    activeRunId = preserveActiveRunId
-                }
+                publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
             }
         } catch {
             run.state = .failed
             run.endedAt = Date()
             run.transcript += "\n[runner failed] \(error.localizedDescription)\n"
             try? await store.saveRun(run)
+            publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
             statusLine = "Run failed: \(error.localizedDescription)"
         }
 
+        let terminalStatusLine = statusLine
         markRunFinished(run.id)
         await reload()
+        if statusLine.hasPrefix("Loaded ") {
+            statusLine = terminalStatusLine
+        }
         await autoCaptureEnterpriseParityEvidenceIfNeeded(for: run)
         if let preserveActiveRunId {
             activeRunId = preserveActiveRunId
@@ -3854,6 +3861,48 @@ final class NativeAppModel: ObservableObject {
     private func markRunFinished(_ runId: EntityID) {
         runningRunIds.remove(runId)
         isRunning = !runningRunIds.isEmpty
+    }
+
+    private func publishRunLocally(_ run: AgentRun, preserveActiveRunId: EntityID? = nil) {
+        var next = snapshot
+        Self.upsertRun(run, into: &next.runs)
+        snapshot = next
+        if let preserveActiveRunId {
+            activeRunId = preserveActiveRunId
+        }
+    }
+
+    private func publishWorkItemLocally(_ item: WorkItem) {
+        var next = snapshot
+        Self.upsertWorkItem(item, into: &next.workItems)
+        snapshot = next
+    }
+
+    private func linkSideChatLocally(parentRunId: EntityID, childRunId: EntityID) {
+        var next = snapshot
+        guard let parentIndex = next.runs.firstIndex(where: { $0.id == parentRunId }) else { return }
+        guard !next.runs[parentIndex].sideChatRunIds.contains(childRunId) else { return }
+        next.runs[parentIndex].sideChatRunIds.append(childRunId)
+        next.runs[parentIndex].sideChatRunIds = Self.dedupedRunIds(next.runs[parentIndex].sideChatRunIds)
+        snapshot = next
+    }
+
+    nonisolated private static func upsertRun(_ run: AgentRun, into runs: inout [AgentRun]) {
+        if let index = runs.firstIndex(where: { $0.id == run.id }) {
+            runs[index] = run
+        } else {
+            runs.insert(run, at: 0)
+        }
+        runs.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+    }
+
+    nonisolated private static func upsertWorkItem(_ item: WorkItem, into workItems: inout [WorkItem]) {
+        if let index = workItems.firstIndex(where: { $0.id == item.id }) {
+            workItems[index] = item
+        } else {
+            workItems.insert(item, at: 0)
+        }
+        workItems.sort { $0.updatedAt > $1.updatedAt }
     }
 
     nonisolated private static func wouldCreateSideChatCycle(

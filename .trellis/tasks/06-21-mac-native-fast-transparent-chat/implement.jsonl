@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/product/index.md", "reason": "chat is the primary working surface and agent steering should stay conversation-first"}
+{"file": ".trellis/spec/agent/index.md", "reason": "agent CLI launch and streaming behavior must preserve official driver semantics while surfacing failures clearly"}
+{"file": ".trellis/spec/architecture/index.md", "reason": "keep mac native changes scoped and avoid crossing unrelated runtime boundaries"}
+{"file": ".trellis/spec/quality/index.md", "reason": "protect local WIP and verify the narrow native chat hot path"}

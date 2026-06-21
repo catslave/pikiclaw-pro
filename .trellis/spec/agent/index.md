@@ -17,6 +17,8 @@ Driver work should preserve:
 - `src/agent/stream.ts` owns CLI spawn and stream orchestration.
 - `src/bot/bot.ts` owns shared runtime state and `runStream()`.
 - `src/bot/human-loop.ts` is the shared state machine for Codex user-input and `im_ask_user`.
+- For macOS native chat, keep the agent CLI hot path low latency: publish run state/output into the in-memory snapshot as events arrive, persist durably in the background path, and avoid full store reloads for every token or status event.
+- Do not block a new native chat lane on synchronous branch refresh or another unrelated active run; the UI may warn about active work, but separate chat lanes should be able to start.
 
 ## Capability Design
 

@@ -5,6 +5,169 @@ import Testing
 @testable import PikiclawRunner
 
 @MainActor
+@Test func startingChatPublishesStreamingStateBeforeCompletion() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-fast-stream-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-fast-stream",
+        name: "Fast Stream",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-fast-stream",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let item = WorkItem(
+        id: "workitem-fast-stream",
+        workspaceId: workspace.id,
+        title: "Fast streaming chat",
+        description: "Start quickly and stream transparently",
+        sourceType: .manualPrompt,
+        state: .active
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let probe = StreamingRunProbe()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            StreamingRunProbeAdapter(descriptor: descriptor, probe: probe)
+        }
+    )
+    await model.reload()
+
+    let task = Task { @MainActor in
+        await model.run(workItemId: item.id)
+    }
+    await probe.waitForFirstOutput()
+
+    var streamingRun: AgentRun?
+    for _ in 0..<50 {
+        streamingRun = model.snapshot.runs.first(where: { $0.workItemId == item.id })
+        if streamingRun?.state == .running,
+           streamingRun?.transcript.contains("first token") == true {
+            break
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    let visibleRun = try #require(streamingRun)
+    #expect(visibleRun.state == .running)
+    #expect(visibleRun.transcript.contains("first token"))
+    #expect(model.statusLine == "Streaming output")
+
+    probe.finish(exitCode: 0)
+    let runId = try #require(await task.value)
+    let finished = try #require((try await store.loadSnapshot()).runs.first(where: { $0.id == runId }))
+    #expect(finished.state == .completed)
+    #expect(finished.transcript.contains("first token"))
+    #expect(model.statusLine == "Run completed")
+}
+
+@MainActor
+@Test func startingAnotherChatDoesNotWaitForActiveRunToFinish() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-parallel-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-parallel-chat",
+        name: "Parallel Chat",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-parallel-chat",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let firstItem = WorkItem(
+        id: "workitem-parallel-first",
+        workspaceId: workspace.id,
+        title: "First chat",
+        description: "Keep streaming",
+        sourceType: .manualPrompt,
+        state: .active
+    )
+    let secondItem = WorkItem(
+        id: "workitem-parallel-second",
+        workspaceId: workspace.id,
+        title: "Second chat",
+        description: "Start without waiting",
+        sourceType: .manualPrompt,
+        state: .active
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [firstItem, secondItem],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let probe = StreamingRunProbe()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            StreamingRunProbeAdapter(descriptor: descriptor, probe: probe)
+        }
+    )
+    await model.reload()
+
+    let firstTask = Task { @MainActor in
+        await model.run(workItemId: firstItem.id)
+    }
+    await probe.waitForFirstOutput()
+
+    let secondTask = Task { @MainActor in
+        await model.run(workItemId: secondItem.id)
+    }
+    for _ in 0..<50 {
+        if probe.emittedOutputCount >= 2 { break }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    #expect(probe.emittedOutputCount == 2)
+    let activeWorkItemIds = Set(
+        model.snapshot.runs
+            .filter { $0.state == .running }
+            .compactMap(\.workItemId)
+    )
+    #expect(activeWorkItemIds == [firstItem.id, secondItem.id])
+
+    probe.finishAll(exitCode: 0)
+    let firstRunId = try #require(await firstTask.value)
+    let secondRunId = try #require(await secondTask.value)
+    #expect(firstRunId != secondRunId)
+}
+
+@MainActor
 @Test func sendingNextChatMessagePreservesPreviousTurnInHistory() async throws {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-chat-history-\(UUID().uuidString)", isDirectory: true)
@@ -1443,5 +1606,79 @@ private struct CapturingAgentAdapter: AgentAdapter {
             continuation.yield(.completed(exitCode: 0))
             continuation.finish()
         }
+    }
+}
+
+
+private final class StreamingRunProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [AsyncThrowingStream<RunnerEvent, Error>.Continuation] = []
+    private var outputCount = 0
+    private var outputWaiters: [(count: Int, waiter: CheckedContinuation<Void, Never>)] = []
+
+    var emittedOutputCount: Int {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return outputCount
+    }
+
+    func stream() -> AsyncThrowingStream<RunnerEvent, Error> {
+        AsyncThrowingStream { continuation in
+            self.lock.lock()
+            self.continuations.append(continuation)
+            self.outputCount += 1
+            let readyWaiters = self.outputWaiters.filter { self.outputCount >= $0.count }
+            self.outputWaiters.removeAll { self.outputCount >= $0.count }
+            self.lock.unlock()
+
+            continuation.yield(.stateChanged(.running))
+            continuation.yield(.output("first token\n"))
+            readyWaiters.forEach { $0.waiter.resume() }
+        }
+    }
+
+    func waitForFirstOutput() async {
+        await waitForOutputCount(1)
+    }
+
+    func waitForOutputCount(_ count: Int) async {
+        await withCheckedContinuation { waiter in
+            self.lock.lock()
+            if self.outputCount >= count {
+                self.lock.unlock()
+                waiter.resume()
+                return
+            }
+            self.outputWaiters.append((count, waiter))
+            self.lock.unlock()
+        }
+    }
+
+    func finish(exitCode: Int32) {
+        finishAll(exitCode: exitCode)
+    }
+
+    func finishAll(exitCode: Int32) {
+        self.lock.lock()
+        let continuations = self.continuations
+        self.continuations.removeAll()
+        self.lock.unlock()
+        for continuation in continuations {
+            continuation.yield(.completed(exitCode: exitCode))
+            continuation.finish()
+        }
+    }
+}
+
+private struct StreamingRunProbeAdapter: AgentAdapter {
+    let descriptor: AgentDescriptor
+    let probe: StreamingRunProbe
+
+    func detect() async -> AgentDetection {
+        AgentDetection(isAvailable: true)
+    }
+
+    func start(_ request: AgentLaunchRequest) -> AsyncThrowingStream<RunnerEvent, Error> {
+        probe.stream()
     }
 }

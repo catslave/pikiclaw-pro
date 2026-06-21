@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/quality/index.md", "reason": "verification should be focused on macOS native tests and exact blockers"}
+{"file": ".trellis/spec/agent/index.md", "reason": "check that launch/stream transparency does not hide CLI failures"}
