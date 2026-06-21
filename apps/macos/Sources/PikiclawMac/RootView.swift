@@ -6476,6 +6476,12 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
     let context = runFollowUpContext(run: run, workItem: workItem, output: output)
     var actions: [RunFollowUpAction] = []
 
+    guard runFollowUpShouldOfferWorkflowActions(
+        run: run,
+        workItem: workItem,
+        output: output
+    ) else { return [] }
+
     if run.state == .failed
         || run.state == .stale
         || outputContainsFailureSignal(output)
@@ -6586,6 +6592,73 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
     }
 
     return visibleRunFollowUpActions(actions)
+}
+
+private func runFollowUpShouldOfferWorkflowActions(
+    run: AgentRun,
+    workItem: WorkItem?,
+    output: String
+) -> Bool {
+    switch run.state {
+    case .failed, .cancelled, .stale, .waitingForUser:
+        return true
+    case .queued, .starting, .running, .cancelling, .draft, .completed:
+        break
+    }
+
+    if let workItem {
+        if workItem.sourceType != .manualPrompt || workItem.jira != nil {
+            return true
+        }
+        if !workItem.sourceRefs.isEmpty || !workItem.externalRefs.isEmpty {
+            return true
+        }
+    }
+
+    if outputContainsFailureSignal(output)
+        || followUpContainsBlockingDecisionSignal(output)
+        || followUpContainsLogSignal(run: run, output: output)
+        || followUpContainsJiraSignal(run: run, output: output)
+        || followUpContainsSkillSignal(run: run, output: output) {
+        return true
+    }
+
+    if !runFollowUpDecisionSignals(from: output).isEmpty
+        || !runFollowUpReproductionNotes(from: output).isEmpty
+        || !runFollowUpDiagnosisNotes(from: output).isEmpty
+        || !runFollowUpHandoffDrafts(from: output).isEmpty
+        || !runFollowUpExternalLinks(from: output).isEmpty
+        || !runFollowUpArtifactRefs(from: output).isEmpty
+        || !runFollowUpGitRefs(run: run, output: output).isEmpty
+        || !runFollowUpEnvironmentRefs(run: run, output: output).isEmpty
+        || !runFollowUpTicketRefs(run: run, workItem: workItem, output: output).isEmpty
+        || !runFollowUpSkillRefs(run: run, output: output).isEmpty
+        || !runFollowUpFailureSignals(from: output).isEmpty
+        || !runFollowUpFileRefs(from: output).isEmpty
+        || !runFollowUpValidationEvidence(from: output).isEmpty
+        || !runFollowUpActionableNotes(from: output).isEmpty
+        || !runFollowUpNextCommands(run: run, output: output).isEmpty
+        || !runFollowUpSuggestedLogCommands(run: run, output: output).isEmpty {
+        return true
+    }
+
+    return runFollowUpOutputLooksDurableEvidence(output)
+}
+
+private func runFollowUpOutputLooksDurableEvidence(_ output: String) -> Bool {
+    output
+        .split(whereSeparator: \.isNewline)
+        .map { runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(String($0))).gitTrimmed }
+        .contains { line in
+            let lower = line.lowercased()
+            return lower.hasPrefix("validated ")
+                || lower.hasPrefix("verified ")
+                || lower.hasPrefix("evidence:")
+                || lower.hasPrefix("validation:")
+                || lower.hasPrefix("verification:")
+                || line.hasPrefix("已验证")
+                || line.hasPrefix("验证通过")
+        }
 }
 
 private func visibleRunFollowUpActions(_ actions: [RunFollowUpAction], limit: Int = 4) -> [RunFollowUpAction] {
@@ -8484,7 +8557,14 @@ func chatCanCaptureEvidence(run: AgentRun?, assistantText: String) -> Bool {
         return false
     case .waitingForUser, .completed, .failed, .cancelled, .stale:
         let output = friendlyAgentOutput(assistantText).trimmingCharacters(in: .whitespacesAndNewlines)
-        return !output.isEmpty && output != "No assistant output yet."
+        guard !output.isEmpty && output != "No assistant output yet." else {
+            return false
+        }
+        return runFollowUpShouldOfferWorkflowActions(
+            run: run,
+            workItem: nil,
+            output: output
+        )
     }
 }
 
@@ -8861,10 +8941,6 @@ private struct AssistantResponseCard: View {
                     StatusPill(text: state?.rawValue ?? "starting", color: runStateColor(state))
                 }
 
-                if !presentation.activityItems.isEmpty {
-                    AgentActivityTimeline(items: presentation.activityItems, accent: accent)
-                }
-
                 if presentation.showsFinalResponse {
                     Text(presentation.finalText)
                         .font(.system(size: 13))
@@ -8876,7 +8952,15 @@ private struct AssistantResponseCard: View {
                         .background(PKTheme.inset.opacity(0.78))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else if presentation.activityItems.isEmpty {
+                }
+
+                if !presentation.activityItems.isEmpty {
+                    AgentActivityTimeline(
+                        items: presentation.activityItems,
+                        accent: accent,
+                        startsExpanded: !presentation.showsFinalResponse
+                    )
+                } else if !presentation.showsFinalResponse {
                     AgentExecutionProgressCard(
                         presentation: presentation,
                         accent: accent
@@ -9200,29 +9284,58 @@ private struct AgentActivityItem: Hashable {
 private struct AgentActivityTimeline: View {
     let items: [AgentActivityItem]
     let accent: Color
+    @State private var isExpanded: Bool
+
+    init(items: [AgentActivityItem], accent: Color, startsExpanded: Bool = true) {
+        self.items = items
+        self.accent = accent
+        _isExpanded = State(initialValue: startsExpanded)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: item.symbol)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(accent.opacity(0.9))
-                        .frame(width: 18, height: 18)
-                        .padding(.top, 1)
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(accent)
+                        .frame(width: 14)
+                    Text("Thinking & tools")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(PKTheme.text3)
+                    CountBadge(value: items.count)
+                    Spacer(minLength: 0)
+                }
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? "Hide thinking and tool activity" : "Show thinking and tool activity")
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.title)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(PKTheme.text3)
-                        Text(item.detail)
-                            .font(.system(size: 13))
-                            .lineSpacing(3)
-                            .foregroundStyle(PKTheme.text2)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
+            if isExpanded {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: item.symbol)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(accent.opacity(0.9))
+                            .frame(width: 18, height: 18)
+                            .padding(.top, 1)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(PKTheme.text3)
+                            Text(item.detail)
+                                .font(.system(size: 13))
+                                .lineSpacing(3)
+                                .foregroundStyle(PKTheme.text2)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

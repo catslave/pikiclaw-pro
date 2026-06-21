@@ -519,6 +519,37 @@ import Testing
     #expect(actions.allSatisfy { $0.prompt.contains("Prior queue triage") })
 }
 
+@Test func chatRunFollowUpActionsStayHiddenForSimpleStatusAnswer() {
+    let assistantOutput = "Agent: 当前没有 active goal，数量是 0。"
+    let run = AgentRun(
+        id: "run-simple-goal-count",
+        workspaceId: "workspace-simple-goal-count",
+        agentProfileId: "agent-simple-goal-count",
+        state: .completed,
+        promptSnapshot: "当前有多少个 goal",
+        transcript: assistantOutput
+    )
+    let workItem = WorkItem(
+        id: "workitem-simple-goal-count",
+        workspaceId: "workspace-simple-goal-count",
+        title: "当前有多少个 goal",
+        description: "当前有多少个 goal",
+        sourceType: .manualPrompt,
+        state: .active
+    )
+
+    let actions = chatRunFollowUpActions(
+        run: run,
+        workItem: workItem,
+        assistantText: assistantOutput
+    )
+    let confirmedStatusOutput = "Confirmed no active goal is active."
+
+    #expect(actions.isEmpty)
+    #expect(chatCanCaptureEvidence(run: run, assistantText: assistantOutput) == false)
+    #expect(chatCanCaptureEvidence(run: run, assistantText: confirmedStatusOutput) == false)
+}
+
 @Test func chatRunFollowUpActionsPreserveDecisionSignalsForBugReviewAndJira() {
     let assistantOutput = """
     Decision: not ready to merge until retry validation covers the nil workspace case.
