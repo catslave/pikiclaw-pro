@@ -23443,18 +23443,48 @@ private struct JiraTicketChatWorkbench: View {
                     .background(PKTheme.control.opacity(0.62))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .help(ticketCardExpanded ? "Collapse ticket details" : "Expand ticket details")
+                    .help(ticketCardExpanded ? "Collapse the ticket detail card." : "Expand the ticket detail card.")
 
-                    ComposerIconButton(symbol: "arrow.clockwise", title: "Sync Jira", action: sync)
+                    ComposerIconButton(
+                        symbol: "arrow.clockwise",
+                        title: "Sync Jira",
+                        help: "Refresh this ticket from Jira and update local ticket data.",
+                        action: sync
+                    )
                         .disabled(isSyncing)
-                    ComposerIconButton(symbol: "doc.on.doc", title: "Copy Brief", action: copyBrief)
-                    ComposerIconButton(symbol: "text.bubble", title: "Copy Update", action: copyUpdate)
-                    ComposerIconButton(symbol: isPostingUpdate ? "paperplane.fill" : "paperplane", title: "Post Update", action: postUpdate)
+                    ComposerIconButton(
+                        symbol: "doc.on.doc",
+                        title: "Copy Brief",
+                        help: "Copy a compact ticket brief for sharing or pasting into chat.",
+                        action: copyBrief
+                    )
+                    ComposerIconButton(
+                        symbol: "text.bubble",
+                        title: "Copy Update",
+                        help: "Copy a Jira-ready progress update based on the current ticket work.",
+                        action: copyUpdate
+                    )
+                    ComposerIconButton(
+                        symbol: isPostingUpdate ? "paperplane.fill" : "paperplane",
+                        title: "Post Update",
+                        help: "Post the prepared progress update back to Jira.",
+                        action: postUpdate
+                    )
                         .disabled(isPostingUpdate)
                     if item.jira?.url?.isEmpty == false {
-                        ComposerIconButton(symbol: "arrow.up.right.square", title: "Open Jira", action: openJira)
+                        ComposerIconButton(
+                            symbol: "arrow.up.right.square",
+                            title: "Open Jira",
+                            help: "Open this ticket in Jira.",
+                            action: openJira
+                        )
                     }
-                    PrimaryButton(title: isRunning ? "Running" : "Start", systemImage: "play.fill", action: start)
+                    PrimaryButton(
+                        title: isRunning ? "Running" : "Start",
+                        systemImage: "play.fill",
+                        help: isRunning ? "This ticket chat is already running." : "Start working on this Jira ticket in the selected workspace.",
+                        action: start
+                    )
                         .disabled(isRunning)
                 }
                 .fixedSize(horizontal: true, vertical: false)
@@ -29412,6 +29442,7 @@ private struct Dot: View {
 private struct PrimaryButton: View {
     let title: String
     let systemImage: String
+    var help: String? = nil
     let action: () -> Void
 
     var body: some View {
@@ -29425,12 +29456,15 @@ private struct PrimaryButton: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .help(help ?? title)
+        .accessibilityLabel(Text(title))
     }
 }
 
 private struct SecondaryButton: View {
     let title: String
     let systemImage: String
+    var help: String? = nil
     let action: () -> Void
 
     var body: some View {
@@ -29445,6 +29479,8 @@ private struct SecondaryButton: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .help(help ?? title)
+        .accessibilityLabel(Text(title))
     }
 }
 
