@@ -1,14 +1,23 @@
 import AppKit
 import SwiftUI
+@preconcurrency import UserNotifications
+
+let pikiclawMainWindowIdentifierRaw = "PikiclawMainWindow"
+let pikiclawSettingsWindowTitle = "Pikiclaw Settings"
+
+func pikiclawShouldCloseRestoredSettingsWindow(title: String, identifier: String?) -> Bool {
+    title == pikiclawSettingsWindowTitle && identifier != pikiclawMainWindowIdentifierRaw
+}
 
 @MainActor
-final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     private var window: NSWindow?
-    private let mainWindowIdentifier = NSUserInterfaceItemIdentifier("PikiclawMainWindow")
+    private let mainWindowIdentifier = NSUserInterfaceItemIdentifier(pikiclawMainWindowIdentifierRaw)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
+        UNUserNotificationCenter.current().delegate = self
         NotificationCenter.default.addObserver(
             forName: .pikiclawShowMainWindow,
             object: nil,
@@ -19,11 +28,48 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
         }
         showMainWindow()
+        DispatchQueue.main.async { [weak self] in
+            self?.closeRestoredSettingsWindows()
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        closeRestoredSettingsWindows()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showMainWindow()
         return false
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        showMainWindow()
+        for url in urls {
+            postDeepLink(url)
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        guard let url = pikiclawNotificationDeepLinkURL(
+            from: response.notification.request.content.userInfo
+        ) else {
+            return
+        }
+        await MainActor.run {
+            self.openNotificationDeepLink(url)
+        }
+    }
+
+    private func openNotificationDeepLink(_ url: URL) {
+        showMainWindow()
+        postDeepLink(url)
+    }
+
+    private func postDeepLink(_ url: URL) {
+        NotificationCenter.default.post(name: .pikiclawOpenDeepLink, object: url)
     }
 
     private func showMainWindow() {
@@ -48,7 +94,7 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
 
         let rootView = RootView()
-            .frame(minWidth: 1120, minHeight: 700)
+            .frame(minWidth: 1120, maxWidth: .infinity, minHeight: 700, maxHeight: .infinity, alignment: .topLeading)
             .tint(PKTheme.primary)
 
         let window = NSWindow(
@@ -70,6 +116,15 @@ final class PikiclawAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private func closeRestoredSettingsWindows() {
+        for candidate in NSApp.windows where pikiclawShouldCloseRestoredSettingsWindow(
+            title: candidate.title,
+            identifier: candidate.identifier?.rawValue
+        ) {
+            candidate.close()
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let closedWindow = notification.object as? NSWindow, closedWindow === window else { return }
         window = nil
@@ -85,6 +140,14 @@ struct PikiclawMacApp: App {
             EmptyView()
         }
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings") {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawNavigate, object: "settings")
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("New Chat") {
                     NotificationCenter.default.post(name: .pikiclawNewChat, object: nil)
@@ -235,6 +298,30 @@ struct PikiclawMacApp: App {
                     NotificationCenter.default.post(name: .pikiclawRunSelectedWork, object: nil)
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
+
+                Button(missionOpenFocusedLaneCommandTitle) {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawOpenFocusedMissionLane, object: nil)
+                }
+                .keyboardShortcut(.return, modifiers: [.command, .option])
+
+                Button(generatedUIStageFocusedActionCommandTitle) {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawStageFocusedGeneratedUIAction, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+
+                Button(missionFocusNextLaneCommandTitle) {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawFocusNextMissionLane, object: nil)
+                }
+                .keyboardShortcut("]", modifiers: [.command, .option])
+
+                Button(missionFocusPreviousLaneCommandTitle) {
+                    NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)
+                    NotificationCenter.default.post(name: .pikiclawFocusPreviousMissionLane, object: nil)
+                }
+                .keyboardShortcut("[", modifiers: [.command, .option])
 
                 Button("Restart Pikiclaw") {
                     NotificationCenter.default.post(name: .pikiclawShowMainWindow, object: nil)

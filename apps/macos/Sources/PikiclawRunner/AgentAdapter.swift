@@ -82,7 +82,21 @@ public protocol AgentAdapter: Sendable {
 
 public enum NativeAgentCommandBuilder {
     public static func codexArguments(for request: AgentLaunchRequest) -> [String] {
-        [
+        if let nativeSessionRef = request.run.nativeSessionRef?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !nativeSessionRef.isEmpty {
+            return [
+                "--ask-for-approval", "never",
+                "--sandbox", codexSandbox(for: request.run.permissionMode),
+                "-C", request.workspacePath,
+                "exec",
+                "resume",
+                "--json",
+                nativeSessionRef,
+                "-"
+            ]
+        }
+
+        return [
             "--ask-for-approval", "never",
             "exec",
             "--json",

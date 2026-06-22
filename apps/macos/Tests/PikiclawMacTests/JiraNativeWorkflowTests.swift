@@ -79,6 +79,81 @@ import Testing
     #expect(config?.headers["confluence-read-token"] == "confluence-token")
 }
 
+@Test func jiraFetcherReadsPrivateTokenFileDeclaredByWorkspaceSkill() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pikiclaw-jira-skill-\(UUID().uuidString)", isDirectory: true)
+    let skillDirectory = directory.appendingPathComponent(".pikiclaw/skills/jira", isDirectory: true)
+    let localDirectory = directory.appendingPathComponent(".pikiclaw/local", isDirectory: true)
+    try FileManager.default.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: localDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let skill = """
+    # Jira Sync
+
+    - `PIKICLAW_JIRA_ENV_FILE`: `.pikiclaw/local/jira.env`
+    - `PIKICLAW_JIRA_ASSIGNEE`: `Michael Yang`
+    """
+    let privateEnvironment = """
+    RC_JIRA_READ_TOKEN=skill-token
+    RC_CONFLUENCE_READ_TOKEN=confluence-skill-token
+    """
+    try skill.data(using: .utf8)!.write(to: skillDirectory.appendingPathComponent("SKILL.md"))
+    try privateEnvironment.data(using: .utf8)!.write(to: localDirectory.appendingPathComponent("jira.env"))
+
+    let environment = JiraTicketFetcher.jiraEnvironment(
+        base: ["RC_JIRA_READ_TOKEN": "session-token"],
+        workspacePath: directory.path,
+        loadShellEnvironment: false
+    )
+    let config = JiraTicketFetcher.mcpConfiguration(environment: environment)
+
+    #expect(environment["RC_JIRA_READ_TOKEN"] == "skill-token")
+    #expect(environment["RC_CONFLUENCE_READ_TOKEN"] == "confluence-skill-token")
+    #expect(environment["PIKICLAW_JIRA_ASSIGNEE"] == "Michael Yang")
+    #expect(config?.headers["jira-read-token"] == "skill-token")
+    #expect(config?.headers["confluence-read-token"] == "confluence-skill-token")
+}
+
+@Test func jiraFetcherReadsPermanentTicketDirectlyFromWorkspaceSkill() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pikiclaw-jira-raw-skill-\(UUID().uuidString)", isDirectory: true)
+    let skillDirectory = directory.appendingPathComponent(".pikiclaw/skills/jira", isDirectory: true)
+    let localDirectory = directory.appendingPathComponent(".pikiclaw/local", isDirectory: true)
+    try FileManager.default.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: localDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let skill = """
+    # Jira Sync
+
+    - `RC_JIRA_READ_TOKEN`: `skill-token`
+    - `RC_CONFLUENCE_READ_TOKEN`: `confluence-skill-token`
+    - `PIKICLAW_JIRA_ENV_FILE`: `.pikiclaw/local/jira.env`
+    """
+    let privateEnvironment = """
+    RC_JIRA_READ_TOKEN=local-file-token
+    RC_CONFLUENCE_READ_TOKEN=confluence-local-file-token
+    PIKICLAW_JIRA_API_VERSION=3
+    """
+    try skill.data(using: .utf8)!.write(to: skillDirectory.appendingPathComponent("SKILL.md"))
+    try privateEnvironment.data(using: .utf8)!.write(to: localDirectory.appendingPathComponent("jira.env"))
+
+    let environment = JiraTicketFetcher.jiraEnvironment(
+        base: ["RC_JIRA_READ_TOKEN": "session-token"],
+        workspacePath: directory.path,
+        loadShellEnvironment: false
+    )
+
+    let config = JiraTicketFetcher.mcpConfiguration(environment: environment)
+
+    #expect(environment["RC_JIRA_READ_TOKEN"] == "skill-token")
+    #expect(environment["RC_CONFLUENCE_READ_TOKEN"] == "confluence-skill-token")
+    #expect(environment["PIKICLAW_JIRA_API_VERSION"] == "3")
+    #expect(config?.headers["jira-read-token"] == "skill-token")
+    #expect(config?.headers["confluence-read-token"] == "confluence-skill-token")
+}
+
 @Test func jiraFetcherDefaultsJQLToMichaelYangInsteadOfCurrentUser() throws {
     let currentSprint = JiraTicketFetcher.jql(for: .currentSprint, environment: [:])
     let mine = JiraTicketFetcher.jql(for: .mine, environment: [:])
@@ -91,6 +166,140 @@ import Testing
     #expect(mine.contains("assignee = \"Michael Yang\""))
     #expect(override.contains("assignee = \"Another User\""))
     #expect(!currentSprint.contains("currentUser()"))
+}
+
+@Test func jiraFetcherBuildsJiraCommentWriteBackRequestWithWriteToken() throws {
+    let request = try JiraTicketFetcher.jiraCommentRequest(
+        issueKey: " IVAS-7200 ",
+        comment: "  Reviewed update  ",
+        environment: [
+            "PIKICLAW_JIRA_BASE_URL": "https://jira.example.com/",
+            "PIKICLAW_JIRA_API_VERSION": "3",
+            "PIKICLAW_JIRA_WRITE_TOKEN": "write-token",
+            "PIKICLAW_JIRA_API_TOKEN": "generic-token",
+            "PIKICLAW_JIRA_WRITE_EMAIL": "writer@example.com"
+        ]
+    )
+    let bodyData = try #require(request.httpBody)
+    let body = try #require(JSONSerialization.jsonObject(with: bodyData) as? [String: String])
+    let credential = Data("writer@example.com:write-token".utf8).base64EncodedString()
+
+    #expect(request.url?.absoluteString == "https://jira.example.com/rest/api/3/issue/IVAS-7200/comment")
+    #expect(request.httpMethod == "POST")
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Basic \(credential)")
+    #expect(body["body"] == "Reviewed update")
+}
+
+@Test func jiraFetcherReportsWriteBackReadinessWithoutLeakingTokens() throws {
+    let missing = JiraTicketFetcher.writeBackReadiness(environment: [
+        "RC_JIRA_READ_TOKEN": "read-token"
+    ])
+    let invalid = JiraTicketFetcher.writeBackReadiness(environment: [
+        "PIKICLAW_JIRA_BASE_URL": "://bad url",
+        "PIKICLAW_JIRA_WRITE_TOKEN": "write-token"
+    ])
+    let ready = JiraTicketFetcher.writeBackReadiness(environment: [
+        "PIKICLAW_JIRA_BASE_URL": "https://jira.example.com",
+        "PIKICLAW_JIRA_WRITE_TOKEN": "write-token"
+    ])
+
+    #expect(missing.state == .missingConfiguration)
+    #expect(missing.missingItems == ["Jira base URL", "write-capable token"])
+    #expect(missing.detail.contains("read-token") == false)
+    #expect(invalid.state == .invalidBaseURL)
+    #expect(invalid.detail.contains("write-token") == false)
+    #expect(ready.state == .ready)
+    #expect(ready.isReady)
+    #expect(ready.detail.contains("write-token") == false)
+}
+
+@Test func jiraFetcherBuildsWorkspaceScopedWriteBackSetupGuide() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pikiclaw-jira-writeback-guide-\(UUID().uuidString)", isDirectory: true)
+    let skillDirectory = directory.appendingPathComponent(".pikiclaw/skills/jira", isDirectory: true)
+    let privateDirectory = directory.appendingPathComponent(".pikiclaw/private", isDirectory: true)
+    try FileManager.default.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: privateDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let skill = """
+    # Jira Sync
+
+    - `PIKICLAW_JIRA_ENV_FILE`: `.pikiclaw/private/jira-write.env`
+    """
+    try skill.data(using: .utf8)!.write(to: skillDirectory.appendingPathComponent("SKILL.md"))
+
+    let readiness = JiraTicketFetcher.writeBackReadiness(environment: [
+        "RC_JIRA_READ_TOKEN": "read-token"
+    ])
+    let guide = JiraTicketFetcher.writeBackSetupGuide(
+        workspacePath: directory.path,
+        readiness: readiness
+    )
+
+    #expect(guide.envFilePath == directory.appendingPathComponent(".pikiclaw/private/jira-write.env").path)
+    #expect(guide.envDirectoryPath == privateDirectory.path)
+    #expect(guide.revealDirectoryPath == privateDirectory.path)
+    #expect(guide.envDirectoryExists)
+    #expect(!guide.envFileExists)
+    #expect(guide.missingItems == ["Jira base URL", "write-capable token"])
+    #expect(guide.summary.contains("Jira base URL"))
+    #expect(guide.summary.contains("write-capable token"))
+    #expect(guide.summary.contains("read-token") == false)
+    #expect(guide.template.contains("PIKICLAW_JIRA_BASE_URL="))
+    #expect(guide.template.contains("PIKICLAW_JIRA_WRITE_TOKEN="))
+    #expect(guide.template.contains("read-token") == false)
+    #expect(guide.template.contains("write-token") == false)
+}
+
+@Test func jiraFetcherSetupGuideRevealsNearestExistingDirectoryWithoutCreatingPrivateFolder() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pikiclaw-jira-writeback-reveal-\(UUID().uuidString)", isDirectory: true)
+    let skillDirectory = directory.appendingPathComponent(".pikiclaw/skills/jira", isDirectory: true)
+    let pikiclawDirectory = directory.appendingPathComponent(".pikiclaw", isDirectory: true)
+    let privateDirectory = directory.appendingPathComponent(".pikiclaw/private", isDirectory: true)
+    try FileManager.default.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let skill = """
+    # Jira Sync
+
+    - `PIKICLAW_JIRA_ENV_FILE`: `.pikiclaw/private/jira-write.env`
+    """
+    try skill.data(using: .utf8)!.write(to: skillDirectory.appendingPathComponent("SKILL.md"))
+
+    let guide = JiraTicketFetcher.writeBackSetupGuide(
+        workspacePath: directory.path,
+        readiness: JiraTicketFetcher.writeBackReadiness(environment: [:])
+    )
+
+    #expect(guide.envFilePath == privateDirectory.appendingPathComponent("jira-write.env").path)
+    #expect(guide.envDirectoryPath == privateDirectory.path)
+    #expect(guide.revealDirectoryPath == pikiclawDirectory.path)
+    #expect(!guide.envDirectoryExists)
+    #expect(!guide.envFileExists)
+    #expect(!FileManager.default.fileExists(atPath: privateDirectory.path))
+    #expect(guide.template.contains("PIKICLAW_JIRA_WRITE_TOKEN="))
+    #expect(guide.template.contains("read-token") == false)
+    #expect(guide.template.contains("write-token") == false)
+}
+
+@Test func jiraFetcherDoesNotUseReadTokenForWriteBack() throws {
+    do {
+        _ = try JiraTicketFetcher.jiraCommentRequest(
+            issueKey: "IVAS-7200",
+            comment: "Reviewed update",
+            environment: [
+                "PIKICLAW_JIRA_BASE_URL": "https://jira.example.com",
+                "RC_JIRA_READ_TOKEN": "read-token"
+            ]
+        )
+        Issue.record("Expected Jira write-back request to require a write-capable token.")
+    } catch JiraTicketFetchError.missingToken {
+        return
+    } catch {
+        Issue.record("Expected missingToken, got \(error).")
+    }
 }
 
 @Test func jiraFetcherParsesMCPJiraSearchTextResult() throws {
@@ -140,6 +349,14 @@ import Testing
         id: "workspace-jira-start",
         name: "Jira Start",
         pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let launchDirectory = directory.appendingPathComponent("actual-workspace", isDirectory: true)
+    try FileManager.default.createDirectory(at: launchDirectory, withIntermediateDirectories: true)
+    let launchWorkspace = Workspace(
+        id: "workspace-jira-start-override",
+        name: "Jira Start Override",
+        pathDisplay: launchDirectory.path,
         trustState: .trusted
     )
     let agent = AgentProfile(
@@ -234,7 +451,7 @@ import Testing
     )
     let seed = NativeAppSeed(
         projects: [],
-        workspaces: [workspace],
+        workspaces: [workspace, launchWorkspace],
         workItems: [item],
         runs: [failedRun, unrelatedRun],
         artifacts: [artifact, unrelatedArtifact],
@@ -256,15 +473,20 @@ import Testing
 
     let runId = try #require(await model.startJiraTicketFromChat(
         workItemId: item.id,
-        userInput: "User note: start from the native Jira menu state."
+        userInput: "User note: start from the native Jira menu state.",
+        workspaceId: launchWorkspace.id
     ))
-    let run = try #require((try await store.loadSnapshot()).runs.first(where: { $0.id == runId }))
+    let updatedSnapshot = try await store.loadSnapshot()
+    let run = try #require(updatedSnapshot.runs.first(where: { $0.id == runId }))
+    let updatedItem = try #require(updatedSnapshot.workItems.first(where: { $0.id == item.id }))
 
     #expect(model.selectedPermissionMode == .askBeforeEdit)
     #expect(run.permissionMode == .askBeforeEdit)
+    #expect(run.workspaceId == launchWorkspace.id)
+    #expect(updatedItem.workspaceId == launchWorkspace.id)
     #expect(run.promptSnapshot.contains("Jira: IVAS-7777"))
     #expect(run.promptSnapshot.contains("User-provided context:\nUser note: start from the native Jira menu state."))
-    #expect(run.promptSnapshot.contains("Path: \(directory.path)"))
+    #expect(run.promptSnapshot.contains("Path: \(launchDirectory.path)"))
     #expect(run.promptSnapshot.contains("Source References:"))
     #expect(run.promptSnapshot.contains("- chat-run: Prior Jira diagnosis (pikiclaw://runs/run-jira-start-evidence)"))
     #expect(run.promptSnapshot.contains("Acceptance Criteria:"))
@@ -284,4 +506,86 @@ import Testing
     #expect(!run.promptSnapshot.contains("Unrelated diagnosis"))
     #expect(!run.promptSnapshot.contains("Should not leak into Jira start prompt"))
     #expect(run.transcript.contains("done"))
+}
+
+@MainActor
+@Test func jiraWriteBackRequiresApprovalBeforePosting() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pikiclaw-jira-writeback-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-jira-writeback",
+        name: "Jira Writeback",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let item = WorkItem(
+        id: "jira-writeback-item",
+        workspaceId: workspace.id,
+        title: "IVAS-7200: Post reviewed update",
+        sourceType: .jira,
+        state: .review,
+        jira: JiraWorkItemFields(
+            key: "IVAS-7200",
+            url: "https://jira.example.com/browse/IVAS-7200",
+            status: "In Review"
+        )
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    model.selectedPermissionMode = .readOnly
+    let denied = try #require(model.jiraWriteBackPlan(workItemId: item.id))
+    #expect(denied.gate == .denied)
+    #expect(denied.permissionDecision == .deny)
+
+    model.selectedPermissionMode = .askBeforeEdit
+    let staged = try #require(model.jiraWriteBackPlan(workItemId: item.id))
+    #expect(staged.gate == .requiresApproval)
+    #expect(staged.requiresExplicitApproval)
+
+    let posted = await model.postJiraWriteBack(workItemId: item.id, approved: false)
+    let snapshot = try await store.loadSnapshot()
+
+    #expect(!posted)
+    #expect(snapshot.auditEvents.isEmpty)
+    #expect(model.statusLine == "Jira write-back needs explicit approval")
+    #expect(!model.jiraWriteBackIsPosting)
+
+    let localConfig = directory.appendingPathComponent(".pikiclaw/local", isDirectory: true)
+    try FileManager.default.createDirectory(at: localConfig, withIntermediateDirectories: true)
+    try """
+    PIKICLAW_JIRA_BASE_URL=://bad url
+    PIKICLAW_JIRA_WRITE_TOKEN=write-token
+    PIKICLAW_JIRA_WRITE_EMAIL=writer@example.com
+    """.write(to: localConfig.appendingPathComponent("jira.env"), atomically: true, encoding: .utf8)
+
+    let failed = await model.postJiraWriteBack(workItemId: item.id, approved: true)
+    let failedSnapshot = try await store.loadSnapshot()
+    let failureArtifact = try #require(failedSnapshot.artifacts.first { artifact in
+        artifact.sourceRefs.contains(SourceRef(kind: "jira-write-back", label: "failed", uri: "https://jira.example.com/browse/IVAS-7200"))
+    })
+
+    #expect(!failed)
+    #expect(failureArtifact.title == "Jira write-back failed: IVAS-7200")
+    #expect(failureArtifact.status == .failed)
+    #expect(failureArtifact.provenance.contains("Jira write-back: Failed IVAS-7200"))
+    #expect(failedSnapshot.auditEvents.contains { $0.summary.contains("Jira write-back failed for IVAS-7200") })
+    #expect(model.statusLine.contains("Jira write-back failed"))
+    #expect(!model.jiraWriteBackIsPosting)
 }

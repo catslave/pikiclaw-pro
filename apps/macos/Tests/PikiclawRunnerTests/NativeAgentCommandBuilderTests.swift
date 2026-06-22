@@ -17,6 +17,23 @@ import Testing
     ])
 }
 
+@Test func codexArgumentsResumeNativeSessionWhenAvailable() {
+    var request = launchRequest(permissionMode: .readOnly)
+    request.run.nativeSessionRef = "019eed67-c4fb-7812-8584-84500b29fd4a"
+    let args = NativeAgentCommandBuilder.codexArguments(for: request)
+
+    #expect(args == [
+        "--ask-for-approval", "never",
+        "--sandbox", "read-only",
+        "-C", "/tmp/project",
+        "exec",
+        "resume",
+        "--json",
+        "019eed67-c4fb-7812-8584-84500b29fd4a",
+        "-"
+    ])
+}
+
 @Test func geminiArgumentsMapAutopilotToYolo() {
     let request = launchRequest(permissionMode: .autopilot)
     let args = NativeAgentCommandBuilder.geminiArguments(for: request)
@@ -87,7 +104,8 @@ private func launchRequest(permissionMode: PermissionMode = .askBeforeEdit) -> A
         workspaceId: "workspace",
         agentProfileId: "agent",
         permissionMode: permissionMode,
-        promptSnapshot: "hello"
+        promptSnapshot: "hello",
+        pinnedAt: nil
     )
     return AgentLaunchRequest(workspacePath: "/tmp/project", prompt: "hello", run: run)
 }

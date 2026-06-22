@@ -3,7 +3,7 @@ import PikiclawCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-private enum NativeRoute: String, CaseIterable, Identifiable {
+enum NativeRoute: String, CaseIterable, Identifiable {
     case chat
     case voice
     case terminal
@@ -114,6 +114,36 @@ private enum NativeRoute: String, CaseIterable, Identifiable {
         case .settings: "gearshape"
         }
     }
+
+    static func matching(_ rawValue: String) -> NativeRoute? {
+        let key = normalizedRouteKey(rawValue)
+        guard !key.isEmpty else { return nil }
+        return allCases.first {
+            normalizedRouteKey($0.rawValue) == key
+                || normalizedRouteKey($0.title) == key
+                || normalizedRouteKey($0.sidebarTitle) == key
+        }
+    }
+}
+
+let nativeInitialRouteEnvironmentKey = "PIKICLAW_MAC_NATIVE_START_ROUTE"
+
+func nativeInitialRoute(environment: [String: String] = ProcessInfo.processInfo.environment) -> NativeRoute {
+    guard let rawRoute = environment[nativeInitialRouteEnvironmentKey],
+          let route = NativeRoute.matching(rawRoute) else {
+        return .chat
+    }
+    return route
+}
+
+func nativeDeferredRouteCommitTarget(requested: NativeRoute, dockRoute: NativeRoute) -> NativeRoute? {
+    dockRoute == requested ? requested : nil
+}
+
+private func normalizedRouteKey(_ value: String) -> String {
+    value
+        .lowercased()
+        .filter { $0.isLetter || $0.isNumber }
 }
 
 private enum DetailTab: String, CaseIterable, Identifiable {
@@ -132,10 +162,20 @@ private enum DetailTab: String, CaseIterable, Identifiable {
     }
 }
 
+private let composerPasteCommandTypes: [UTType] = [
+    .image,
+    .png,
+    .jpeg,
+    .tiff,
+    .gif,
+    .fileURL,
+]
+
 struct RootView: View {
     @AppStorage(PKThemePreference.storageKey) private var themePreferenceRaw = PKThemePreference.dark.rawValue
     @StateObject private var model = NativeAppModel()
-    @State private var route: NativeRoute = .chat
+    @State private var route: NativeRoute = nativeInitialRoute()
+    @State private var dockRoute: NativeRoute = nativeInitialRoute()
     @State private var selectedWorkspaceId: EntityID? = "workspace-pikiclaw"
     @State private var selectedWorkItemId: EntityID? = "workitem-native-v2"
     @State private var detailTab: DetailTab = .activity
@@ -145,6 +185,8 @@ struct RootView: View {
     @State private var voiceOverlayAutoStart = false
     @State private var agentChatHistoryMode = false
     @State private var jiraQueueFocused = false
+    @State private var focusedMissionLaneLabel: String?
+    @State private var focusedGeneratedUIAction: GeneratedUIActionFocus?
     @FocusState private var commandFocused: Bool
 
     private var themePreference: PKThemePreference {
@@ -165,49 +207,94 @@ struct RootView: View {
     }
 
     var body: some View {
-        ZStack {
+        rootContent
+            .preferredColorScheme(themePreference.colorScheme)
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawNewChat)) { _ in
+                openNewChat()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawNewWorkItem)) { _ in
+                Task<Void, Never> {
+                    await model.createWorkItem(workspaceId: selectedWorkspaceId)
+                    selectedWorkItemId = model.snapshot.workItems.first?.id
+                    setRouteResponsively(.workItems)
+                    jiraQueueFocused = false
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawAddWorkspace)) { _ in
+                chooseWorkspace()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawRunSelectedWork)) { _ in
+                Task<Void, Never> { await model.run(workItemId: selectedWorkItemId) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawRestartApplication)) { _ in
+                model.restartApplication()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawFocusCommandCenter)) { _ in
+                setRouteImmediately(.chat)
+                jiraQueueFocused = false
+                commandFocused = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawToggleVoiceAssistant)) { _ in
+                openVoiceAssistant()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawOpenContextTerminal)) { _ in
+                openContextTerminal()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawOpenFocusedMissionLane)) { _ in
+                if route != .missionControl {
+                    navigate(.missionControl)
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: .pikiclawOpenFocusedMissionLane, object: nil)
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawFocusNextMissionLane)) { _ in
+                if route != .missionControl {
+                    navigate(.missionControl)
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: .pikiclawFocusNextMissionLane, object: nil)
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawFocusPreviousMissionLane)) { _ in
+                if route != .missionControl {
+                    navigate(.missionControl)
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: .pikiclawFocusPreviousMissionLane, object: nil)
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawNavigate)) { note in
+                if let raw = note.object as? String, let destination = NativeRoute(rawValue: raw) {
+                    navigate(destination)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .pikiclawOpenDeepLink)) { note in
+                if let url = note.object as? URL {
+                    openDeepLink(url)
+                }
+            }
+            .background(
+                JiraCommandBridge(
+                    model: model,
+                    selectedWorkspaceId: $selectedWorkspaceId,
+                    selectedWorkItemId: $selectedWorkItemId,
+                    openQueue: openJiraQueue,
+                    openTicket: openJiraTicket,
+                    openChat: {
+                        setRouteImmediately(.chat)
+                    }
+                )
+            )
+    }
+
+    private var rootContent: AnyView {
+        AnyView(ZStack {
             PKTheme.surface.ignoresSafeArea()
             PikiclawGridBackground().ignoresSafeArea()
 
-            HStack(spacing: 0) {
-                AgentDock(
-                    snapshot: model.snapshot,
-                    selectedWorkspaceId: $selectedWorkspaceId,
-                    selectedAgentKind: $model.selectedAgentKind,
-                    statusLine: model.statusLine,
-                    isRunning: model.isRunning,
-                    jiraSyncIsRunning: model.jiraSyncIsRunning,
-                    isVoiceSelected: voiceOverlayOpen || route == .voice,
-                    isProjectSelected: route == .projects,
-                    isJiraSelected: route == .workItems,
-                    highlightsSelectedAgent: route == .chat,
-                    openProjects: { navigate(.projects) },
-                    openJira: openJiraQueue,
-                    addProject: chooseWorkspace,
-                    selectAgent: { kind in
-                        closeVoiceOverlay()
-                        agentChatHistoryMode = true
-                        jiraQueueFocused = false
-                        model.selectedAgentKind = kind
-                        route = .chat
-                        model.prepareNewChat()
-                        Task { await model.refreshBranches(for: selectedWorkspace) }
-                        commandFocused = true
-                    },
-                    newChat: openNewChat,
-                    openVoice: { openVoiceAssistant(autoStart: true) },
-                    openTerminal: openContextTerminal,
-                    openAgentStudio: { navigate(.agents) },
-                    openMissionControl: { navigate(.missionControl) }
-                )
-
-                Divider().overlay(PKTheme.edge)
-
-                ZStack {
-                    pageContent
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            mainLayout
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .overlay(alignment: .bottomTrailing) {
                 if !voiceOverlayOpen {
                     VoiceLensLauncher(
@@ -241,56 +328,74 @@ struct RootView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 .zIndex(5)
             }
-        }
-        .preferredColorScheme(themePreference.colorScheme)
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawNewChat)) { _ in
-            openNewChat()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawNewWorkItem)) { _ in
-            Task<Void, Never> {
-                await model.createWorkItem(workspaceId: selectedWorkspaceId)
-                selectedWorkItemId = model.snapshot.workItems.first?.id
-                route = .workItems
-                jiraQueueFocused = false
+        })
+    }
+
+    private var mainLayout: some View {
+        GeometryReader { proxy in
+            let dockWidth: CGFloat = 82
+            let dividerWidth: CGFloat = 1
+            let pageWidth = max(0, proxy.size.width - dockWidth - dividerWidth)
+
+            HStack(spacing: 0) {
+                agentDockView()
+                    .frame(width: dockWidth, height: proxy.size.height)
+
+                Divider()
+                    .overlay(PKTheme.edge)
+                    .frame(width: dividerWidth)
+
+                pageHost(width: pageWidth, height: proxy.size.height)
             }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawAddWorkspace)) { _ in
-            chooseWorkspace()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawRunSelectedWork)) { _ in
-            Task<Void, Never> { await model.run(workItemId: selectedWorkItemId) }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawRestartApplication)) { _ in
-            model.restartApplication()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawFocusCommandCenter)) { _ in
-            route = .chat
-            jiraQueueFocused = false
-            commandFocused = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawToggleVoiceAssistant)) { _ in
-            openVoiceAssistant()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawOpenContextTerminal)) { _ in
-            openContextTerminal()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pikiclawNavigate)) { note in
-            if let raw = note.object as? String, let destination = NativeRoute(rawValue: raw) {
-                navigate(destination)
-            }
-        }
-        .background(
-            JiraCommandBridge(
-                model: model,
-                selectedWorkspaceId: $selectedWorkspaceId,
-                selectedWorkItemId: $selectedWorkItemId,
-                openQueue: openJiraQueue,
-                openTicket: openJiraTicket,
-                openChat: {
-                    route = .chat
-                }
-            )
+    }
+
+    private func agentDockView() -> some View {
+        AgentDock(
+            snapshot: model.snapshot,
+            selectedWorkspaceId: $selectedWorkspaceId,
+            selectedAgentKind: $model.selectedAgentKind,
+            statusLine: model.statusLine,
+            isRunning: model.isRunning,
+            jiraSyncIsRunning: model.jiraSyncIsRunning,
+            isVoiceSelected: voiceOverlayOpen || dockRoute == .voice,
+            isProjectSelected: dockRoute == .projects,
+            isJiraSelected: dockRoute == .workItems,
+            highlightsSelectedAgent: dockRoute == .chat,
+            openProjects: { navigate(.projects) },
+            openJira: openJiraQueue,
+            addProject: chooseWorkspace,
+            selectAgent: selectDockAgent,
+            newChat: openNewChat,
+            openVoice: { openVoiceAssistant(autoStart: true) },
+            openTerminal: openContextTerminal,
+            openAgentStudio: { navigate(.agents) },
+            openMissionControl: { navigate(.missionControl) }
         )
+    }
+
+    private func pageHost(width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            pageContent
+        }
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+        .frame(width: width, height: height, alignment: .topLeading)
+        .clipped()
+    }
+
+    private func selectDockAgent(_ kind: NativeAgentKind) {
+        closeVoiceOverlay()
+        agentChatHistoryMode = true
+        jiraQueueFocused = false
+        focusedGeneratedUIAction = nil
+        model.selectedAgentKind = kind
+        setRouteResponsively(.chat)
+        model.prepareNewChat()
+        Task { await model.refreshBranches(for: selectedWorkspace) }
+        commandFocused = true
     }
 
     @ViewBuilder
@@ -306,6 +411,7 @@ struct RootView: View {
                 assistantDockOpen: $assistantDockOpen,
                 model: model,
                 showsAgentHistory: agentChatHistoryMode,
+                focusedGeneratedUIAction: $focusedGeneratedUIAction,
                 navigate: navigate
             )
         case .voice:
@@ -314,7 +420,8 @@ struct RootView: View {
                 selectedWorkspaceId: $selectedWorkspaceId,
                 selectedWorkItemId: $selectedWorkItemId,
                 model: model,
-                navigate: navigate
+                navigate: navigate,
+                openDeepLink: openDeepLink
             )
         case .terminal:
             ContextTerminalPage(
@@ -326,11 +433,11 @@ struct RootView: View {
                 activeRun: activeRun,
                 model: model,
                 openChat: {
-                    route = .chat
+                    setRouteImmediately(.chat)
                     commandFocused = true
                 },
                 openWorkItem: {
-                    route = .workItems
+                    setRouteImmediately(.workItems)
                 },
                 refreshBranches: {
                     Task { await model.refreshBranches(for: selectedWorkspace) }
@@ -356,7 +463,7 @@ struct RootView: View {
             )
         case .workPlan:
             WorkPlanPage(snapshot: model.snapshot, promote: {
-                route = .workItems
+                setRouteResponsively(.workItems)
                 Task { await model.createWorkItem(workspaceId: selectedWorkspaceId) }
             })
         case .notes:
@@ -369,13 +476,17 @@ struct RootView: View {
                 selectedWorkspaceId: $selectedWorkspaceId,
                 selectedWorkItemId: $selectedWorkItemId,
                 model: model,
-                navigate: navigate
+                navigate: navigate,
+                openDeepLink: openDeepLink
             )
         case .missionControl:
             MissionControlPage(
                 snapshot: model.snapshot,
                 selectedWorkspaceId: $selectedWorkspaceId,
                 selectedWorkItemId: $selectedWorkItemId,
+                detailTab: $detailTab,
+                focusedFollowUpLaneLabel: $focusedMissionLaneLabel,
+                focusedGeneratedUIAction: $focusedGeneratedUIAction,
                 model: model,
                 navigate: navigate,
                 refresh: {
@@ -403,6 +514,8 @@ struct RootView: View {
             SystemSurfacePage(
                 route: route,
                 snapshot: model.snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                model: model,
                 statusLine: model.statusLine,
                 restartBlocked: model.restartBlockedByActiveRun,
                 restart: { model.restartApplication() },
@@ -420,14 +533,150 @@ struct RootView: View {
         }
         closeVoiceOverlay()
         jiraQueueFocused = false
-        route = next
+        setRouteResponsively(next)
+    }
+
+    private func openDeepLink(_ url: URL) {
+        guard let destination = nativeDeepLinkDestination(for: url) else {
+            model.statusLine = "Unsupported Pikiclaw link: \(url.absoluteString)"
+            return
+        }
+        openDeepLinkDestination(destination)
+    }
+
+    private func openDeepLinkDestination(_ destination: NativeDeepLinkDestination) {
+        switch destination {
+        case .route(let destinationRoute):
+            navigate(destinationRoute)
+            model.statusLine = "Opened \(destinationRoute.title)"
+        case .missionOutputReview:
+            if let target = artifactReviewMissionTarget(snapshot: model.snapshot) {
+                openOutputReviewDestination(target)
+            } else {
+                navigate(.missionControl)
+                model.statusLine = "Opened Mission Control output review"
+            }
+        case .missionLatestEvidence(let workItemId):
+            guard let item = missionAgentHandoffLatestEvidenceItem(workItemId: workItemId) else {
+                navigate(.missionControl)
+                model.statusLine = workItemId.map { "No handoff evidence found for \($0.rawValue)" }
+                    ?? "No handoff evidence found"
+                return
+            }
+            openMissionAgentHandoffLatestEvidence(item)
+        case .run(let runId, let focus):
+            guard let run = model.snapshot.runs.first(where: { $0.id == runId }) else {
+                navigate(.chat)
+                model.statusLine = "Run not found: \(runId.rawValue)"
+                return
+            }
+            selectedWorkspaceId = run.workspaceId
+            selectedWorkItemId = run.workItemId
+            model.activeRunId = run.id
+            model.draftPrompt = ""
+            model.statusLine = focus == .evidence
+                ? "Opened run evidence: \(run.promptSnapshot.firstLineFallback("Chat"))"
+                : "Opened run: \(run.promptSnapshot.firstLineFallback("Chat"))"
+            navigate(.chat)
+        case .workItem(let itemId):
+            guard let item = model.snapshot.workItems.first(where: { $0.id == itemId }) else {
+                navigate(.workItems)
+                model.statusLine = "Work item not found: \(itemId.rawValue)"
+                return
+            }
+            openWorkItemDestination(item, detailTab: .activity)
+        case .artifact(let artifactId):
+            guard let artifact = model.snapshot.artifacts.first(where: { $0.id == artifactId }) else {
+                navigate(.missionControl)
+                model.statusLine = "Output not found: \(artifactId.rawValue)"
+                return
+            }
+            openArtifactDestination(artifact)
+        case .jiraWriteBack(let issueKey):
+            guard let item = model.snapshot.workItems.first(where: {
+                $0.jira?.key.caseInsensitiveCompare(issueKey) == .orderedSame
+            }) else {
+                openJiraQueue()
+                model.statusLine = "Jira \(issueKey) is not synced yet"
+                return
+            }
+            openWorkItemDestination(item, detailTab: .outputs)
+            jiraQueueFocused = true
+            model.statusLine = "Opened Jira write-back: \(issueKey)"
+        }
+    }
+
+    private func openOutputReviewDestination(_ target: ArtifactReviewMissionTarget) {
+        selectedWorkspaceId = target.workspaceId
+        selectedWorkItemId = target.workItemId
+        detailTab = .outputs
+        model.statusLine = "Opened Mission Control output review: \(target.title)"
+        navigate(.workItems)
+    }
+
+    private func openWorkItemDestination(_ item: WorkItem, detailTab nextDetailTab: DetailTab) {
+        selectedWorkspaceId = item.workspaceId
+        selectedWorkItemId = item.id
+        detailTab = nextDetailTab
+        model.statusLine = "Opened work item: \(item.title)"
+        navigate(.workItems)
+        jiraQueueFocused = item.sourceType == .jira
+    }
+
+    private func openArtifactDestination(_ artifact: Artifact) {
+        selectedWorkspaceId = artifact.workspaceId
+        selectedWorkItemId = artifact.workItemId
+        detailTab = .outputs
+        if let runId = artifact.runId {
+            model.activeRunId = runId
+        }
+        model.statusLine = "Opened output: \(artifact.title)"
+        navigate(.workItems)
+    }
+
+    private func missionAgentHandoffLatestEvidenceItem(workItemId: EntityID?) -> MissionAgentHandoffTrailItem? {
+        let items = missionAgentHandoffTrailItems(snapshot: model.snapshot)
+        if let workItemId {
+            return items.first(where: { $0.workItemId == workItemId })
+        }
+        return items.first
+    }
+
+    private func openMissionAgentHandoffLatestEvidence(_ item: MissionAgentHandoffTrailItem) {
+        switch missionAgentHandoffLatestEvidenceDestination(item) {
+        case .chat(let runId):
+            selectedWorkspaceId = item.workspaceId
+            selectedWorkItemId = item.workItemId
+            model.activeRunId = runId
+            model.draftPrompt = ""
+            model.statusLine = "Opened latest handoff chat: \(item.title)"
+            navigate(.chat)
+        case .outputs(let artifactId):
+            if let artifact = model.snapshot.artifacts.first(where: { $0.id == artifactId }) {
+                openArtifactDestination(artifact)
+                model.statusLine = "Opened latest handoff output: \(artifact.title.firstLineFallback("output"))"
+            } else {
+                selectedWorkspaceId = item.workspaceId
+                selectedWorkItemId = item.workItemId
+                detailTab = .outputs
+                model.statusLine = "Latest handoff output not found: \(artifactId.rawValue)"
+                navigate(.workItems)
+            }
+        case .workItem:
+            selectedWorkspaceId = item.workspaceId
+            selectedWorkItemId = item.workItemId
+            detailTab = .outputs
+            model.statusLine = "Opened cross-agent handoff: \(item.title)"
+            navigate(.workItems)
+        }
     }
 
     private func openNewChat() {
         closeVoiceOverlay()
-        route = .chat
+        setRouteImmediately(.chat)
         jiraQueueFocused = false
         agentChatHistoryMode = false
+        focusedGeneratedUIAction = nil
         model.prepareNewChat()
         Task<Void, Never> { await model.refreshBranches(for: selectedWorkspace) }
         commandFocused = true
@@ -448,7 +697,7 @@ struct RootView: View {
 
     private func openContextTerminal() {
         closeVoiceOverlay()
-        route = .terminal
+        setRouteResponsively(.terminal)
         jiraQueueFocused = false
         assistantDockOpen = false
         commandFocused = false
@@ -457,7 +706,7 @@ struct RootView: View {
 
     private func openJiraQueue() {
         closeVoiceOverlay()
-        route = .workItems
+        setRouteResponsively(.workItems)
         jiraQueueFocused = true
         if let firstJira = jiraTicketCardCandidates(from: model.snapshot.workItems, selectedWorkItemId: selectedWorkItemId, limit: 1).first {
             selectedWorkItemId = firstJira.id
@@ -473,7 +722,7 @@ struct RootView: View {
         if let item = model.snapshot.workItems.first(where: { $0.id == itemId }) {
             selectedWorkspaceId = item.workspaceId
         }
-        route = .workItems
+        setRouteResponsively(.workItems)
     }
 
     private func chooseWorkspace() {
@@ -487,7 +736,7 @@ struct RootView: View {
             Task<Void, Never> {
                 await model.addWorkspace(path: url.path)
                 selectedWorkspaceId = model.snapshot.workspaces.first(where: { $0.pathDisplay == url.path })?.id
-                route = .projects
+                setRouteResponsively(.projects)
                 jiraQueueFocused = false
             }
         }
@@ -511,6 +760,15 @@ struct RootView: View {
             }
         }
         voiceOverlayAutoStart = false
+    }
+
+    private func setRouteImmediately(_ next: NativeRoute) {
+        dockRoute = next
+        route = next
+    }
+
+    private func setRouteResponsively(_ next: NativeRoute) {
+        setRouteImmediately(next)
     }
 }
 
@@ -635,6 +893,10 @@ private struct AgentDock: View {
         snapshot.runs.filter { $0.state == .waitingForUser || $0.state == .failed }.count
     }
 
+    private var attentionBadgeColor: Color {
+        agentTint(selectedAgentKind)
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             BrandMark(size: 46)
@@ -655,12 +917,14 @@ private struct AgentDock: View {
                 .clipShape(RoundedRectangle(cornerRadius: 11))
             }
             .buttonStyle(.plain)
+            .dockHoverLift(accent: PKTheme.primary, cornerRadius: 11)
             .help("New \(agentShortLabel(selectedAgentKind)) chat in \(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))")
 
             Button(action: openVoice) {
                 VoiceDockButton(isLive: isRunning, isSelected: isVoiceSelected)
             }
             .buttonStyle(.plain)
+            .dockHoverLift(accent: isRunning ? PKTheme.ok : PKTheme.primary, cornerRadius: 11, isActive: isVoiceSelected || isRunning)
             .help("Voice Lens")
 
             ProjectDockTile(
@@ -682,37 +946,18 @@ private struct AgentDock: View {
                 ForEach(enabledAgentProfiles(in: snapshot)) { profile in
                     let kind = profile.kind
                     let profileRuns = snapshot.runs.filter { $0.agentProfileId == profile.id }
-                    let profileAttentionCount = profileRuns.filter { $0.state == .waitingForUser || $0.state == .failed }.count
-                    let profileHasActiveRun = profileRuns.contains { isLiveRunState($0.state) }
-                    let health = agentCapability(for: profile, snapshot: snapshot)?.healthState
+                    let profileActivityCount = nativeAgentDockActivityCount(for: profileRuns)
+                    let isSelected = highlightsSelectedAgent && selectedAgentKind == kind
                     Button {
                         selectAgent(kind)
                     } label: {
-                        let isSelected = highlightsSelectedAgent && selectedAgentKind == kind
-                        ZStack(alignment: .topTrailing) {
-                            VStack(spacing: 4) {
-                                Image(systemName: agentSymbol(kind))
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text(agentShortLabel(kind))
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.7)
-                            }
-                            .frame(width: 54, height: 52)
-
-                            if profileAttentionCount > 0 {
-                                DockBadge(text: profileAttentionCount > 9 ? "9+" : "\(profileAttentionCount)", color: PKTheme.warn)
-                                    .padding(.top, 4)
-                                    .padding(.trailing, 4)
-                            } else if profileHasActiveRun {
-                                DockStatusDot(color: PKTheme.ok)
-                                    .padding(.top, 7)
-                                    .padding(.trailing, 7)
-                            } else if health != .healthy {
-                                DockStatusDot(color: agentHealthColor(health))
-                                    .padding(.top, 7)
-                                    .padding(.trailing, 7)
-                            }
+                        VStack(spacing: 4) {
+                            Image(systemName: agentSymbol(kind))
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(agentShortLabel(kind))
+                                .font(.system(size: 9, weight: .semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                         }
                         .frame(width: 54, height: 52)
                         .foregroundStyle(isSelected ? PKTheme.primaryText : PKTheme.text3)
@@ -722,9 +967,20 @@ private struct AgentDock: View {
                                 .stroke(isSelected ? agentTint(kind).opacity(0.95) : PKTheme.edge, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 11))
+                        .overlay(alignment: .topTrailing) {
+                            if profileActivityCount > 0 {
+                                DockBadge(text: profileActivityCount > 9 ? "9+" : "\(profileActivityCount)", color: agentTint(kind))
+                                    .offset(x: 7, y: -6)
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
-                    .help(agentDockHelp(profile: profile, active: profileHasActiveRun, attentionCount: profileAttentionCount, snapshot: snapshot))
+                    .dockHoverLift(
+                        accent: agentTint(kind),
+                        cornerRadius: 11,
+                        isActive: (highlightsSelectedAgent && selectedAgentKind == kind) || profileActivityCount > 0
+                    )
+                    .help(agentDockHelp(profile: profile, activityCount: profileActivityCount, snapshot: snapshot))
                 }
             }
 
@@ -740,6 +996,7 @@ private struct AgentDock: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain)
+            .dockHoverLift(accent: PKTheme.primary, cornerRadius: 10)
             .help("Context Terminal")
 
             Button(action: openAgentStudio) {
@@ -752,6 +1009,7 @@ private struct AgentDock: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain)
+            .dockHoverLift(accent: PKTheme.primary, cornerRadius: 10)
             .help("Agent Studio")
 
             Button(action: openMissionControl) {
@@ -765,17 +1023,52 @@ private struct AgentDock: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     if attentionRunCount > 0 {
-                        DockBadge(text: attentionRunCount > 9 ? "9+" : "\(attentionRunCount)", color: PKTheme.warn)
+                        DockBadge(text: attentionRunCount > 9 ? "9+" : "\(attentionRunCount)", color: attentionBadgeColor)
                             .offset(x: 7, y: -6)
                     }
                 }
             }
             .buttonStyle(.plain)
+            .dockHoverLift(accent: isRunning ? PKTheme.ok : attentionBadgeColor, cornerRadius: 10, isActive: isRunning || attentionRunCount > 0)
             .help(attentionRunCount > 0 ? "\(attentionRunCount) run(s) need attention" : statusLine)
             .padding(.bottom, 12)
         }
         .frame(width: 82)
         .background(PKTheme.sidebar)
+    }
+}
+
+private struct DockHoverLiftModifier: ViewModifier {
+    let accent: Color
+    let cornerRadius: CGFloat
+    let isActive: Bool
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering ? 1.055 : 1)
+            .offset(y: hovering ? -2 : 0)
+            .brightness(hovering ? 0.035 : 0)
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(accent.opacity(hovering ? 0.36 : 0), lineWidth: 1.2)
+                    .allowsHitTesting(false)
+            )
+            .shadow(
+                color: accent.opacity(hovering ? 0.24 : isActive ? 0.10 : 0),
+                radius: hovering ? 15 : isActive ? 9 : 0,
+                y: hovering ? 8 : 4
+            )
+            .animation(.spring(response: 0.22, dampingFraction: 0.74), value: hovering)
+            .onHover { inside in
+                hovering = inside
+            }
+    }
+}
+
+private extension View {
+    func dockHoverLift(accent: Color, cornerRadius: CGFloat, isActive: Bool = false) -> some View {
+        modifier(DockHoverLiftModifier(accent: accent, cornerRadius: cornerRadius, isActive: isActive))
     }
 }
 
@@ -790,18 +1083,8 @@ private struct DockBadge: View {
             .frame(minWidth: 16, minHeight: 16)
             .background(color)
             .clipShape(Capsule())
-    }
-}
-
-private struct DockStatusDot: View {
-    let color: Color
-
-    var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 8, height: 8)
-            .overlay(Circle().stroke(PKTheme.sidebar, lineWidth: 2))
-            .shadow(color: color.opacity(0.36), radius: 5)
+            .overlay(Capsule().stroke(PKTheme.sidebar, lineWidth: 2))
+            .shadow(color: Color.black.opacity(0.28), radius: 4, x: 0, y: 1)
     }
 }
 
@@ -831,13 +1114,9 @@ private struct ProjectDockTile: View {
         VStack(spacing: 7) {
             Button(action: openProjects) {
                 VStack(spacing: 4) {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "folder")
-                            .font(.system(size: 15, weight: .semibold))
-                            .frame(width: 28, height: 24)
-                        Dot(color: hasSelection ? PKTheme.primary : PKTheme.warn)
-                            .offset(x: 6, y: -2)
-                    }
+                    Image(systemName: "folder")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 28, height: 24)
 
                     Text("Project")
                         .font(.system(size: 9, weight: .semibold))
@@ -859,31 +1138,16 @@ private struct ProjectDockTile: View {
                 Button("Open Jira", systemImage: "checklist", action: openJira)
                 Button("Add Project...", systemImage: "plus", action: addProject)
             }
+            .dockHoverLift(accent: PKTheme.primary, cornerRadius: 11, isActive: isProjectSelected || hasSelection)
             .help("Project: \(selectedTitle)")
 
             Button(action: openJira) {
-                ZStack(alignment: .topTrailing) {
-                    VStack(spacing: 4) {
-                        Image(systemName: isSyncingJira ? "arrow.triangle.2.circlepath" : "checklist")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("Jira")
-                            .font(.system(size: 9, weight: .semibold))
-                            .lineLimit(1)
-                    }
-                    .frame(width: 54, height: 52)
-
-                    if jiraCount > 0 {
-                        Text(jiraCount > 9 ? "9+" : "\(jiraCount)")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(PKTheme.primaryText)
-                            .frame(minWidth: 15, minHeight: 15)
-                            .background(PKTheme.primary)
-                            .clipShape(Circle())
-                            .offset(x: 6, y: -6)
-                    } else if isSyncingJira {
-                        Dot(color: PKTheme.ok)
-                            .offset(x: 6, y: -6)
-                    }
+                VStack(spacing: 4) {
+                    Image(systemName: isSyncingJira ? "arrow.triangle.2.circlepath" : "checklist")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Jira")
+                        .font(.system(size: 9, weight: .semibold))
+                        .lineLimit(1)
                 }
                 .frame(width: 54, height: 52)
                 .foregroundStyle(isJiraSelected ? PKTheme.primaryText : isSyncingJira ? PKTheme.ok : jiraCount > 0 ? PKTheme.primary : PKTheme.text3)
@@ -893,6 +1157,12 @@ private struct ProjectDockTile: View {
                         .stroke(isJiraSelected ? PKTheme.primary.opacity(0.95) : isSyncingJira ? PKTheme.ok.opacity(0.42) : jiraCount > 0 ? PKTheme.primary.opacity(0.34) : PKTheme.edge, lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 11))
+                .overlay(alignment: .topTrailing) {
+                    if jiraCount > 0 {
+                        DockBadge(text: jiraCount > 9 ? "9+" : "\(jiraCount)", color: PKTheme.primary)
+                            .offset(x: 7, y: -6)
+                    }
+                }
             }
             .buttonStyle(.plain)
             .contextMenu {
@@ -901,6 +1171,7 @@ private struct ProjectDockTile: View {
                     NotificationCenter.default.post(name: .pikiclawSyncJiraCurrentSprint, object: nil)
                 }
             }
+            .dockHoverLift(accent: isSyncingJira ? PKTheme.ok : PKTheme.primary, cornerRadius: 11, isActive: isJiraSelected || isSyncingJira || jiraCount > 0)
             .help(isSyncingJira ? "Syncing Jira current sprint" : jiraCount > 0 ? "\(jiraCount) Jira ticket(s)" : "Open Jira")
         }
     }
@@ -1256,10 +1527,14 @@ private struct ChatHomeView: View {
     @Binding var assistantDockOpen: Bool
     @ObservedObject var model: NativeAppModel
     let showsAgentHistory: Bool
+    @Binding var focusedGeneratedUIAction: GeneratedUIActionFocus?
     let navigate: (NativeRoute) -> Void
     @AppStorage("PikiclawMac.chatHistoryVisible") private var chatHistoryVisible = true
     @State private var focusedSideRunId: EntityID?
     @State private var hiddenSideRunIds: Set<EntityID> = []
+    @State private var temporaryPaneRunIds: [EntityID] = []
+    @State private var focusedTemporaryPaneRunId: EntityID?
+    @State private var temporaryPaneDropTargeted = false
 
     private var selectedWorkspace: Workspace? {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
@@ -1276,175 +1551,263 @@ private struct ChatHomeView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            if showsAgentHistory && chatHistoryVisible {
-                ChatHistoryPane(
-                    snapshot: snapshot,
-                    selectedAgentKind: model.selectedAgentKind,
-                    activeRunId: model.activeRunId,
-                    focusedSideRunId: focusedSideRunId,
-                    hiddenSideRunIds: hiddenSideRunIds,
-                    selectRun: { run in
-                        model.activeRunId = run.id
-                        focusedSideRunId = nil
-                        selectedWorkspaceId = run.workspaceId
-                        selectedWorkItemId = run.workItemId
-                        Task { await model.markChatRead(runId: run.id) }
-                    },
-                    selectSideRun: { parent, child in
-                        model.activeRunId = parent.id
-                        focusedSideRunId = child.id
-                        hiddenSideRunIds.remove(child.id)
-                        trimVisibleSideRuns(parentId: parent.id, keeping: child.id)
-                        selectedWorkspaceId = child.workspaceId
-                        selectedWorkItemId = child.workItemId
-                        Task { await model.markChatRead(runId: child.id) }
-                    },
-                    newChat: {
-                        model.prepareNewChat()
-                        focusedSideRunId = nil
-                        Task { await model.refreshBranches(for: selectedWorkspace) }
-                        commandFocused.wrappedValue = true
-                    },
-                    hideHistory: {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            chatHistoryVisible = false
-                        }
-                    },
-                    openRunInNewWindow: { run in
-                        Task { await model.markChatRead(runId: run.id) }
-                        DetachedChatWindowRegistry.shared.open(run: run, snapshot: snapshot)
-                    },
-                    attachSideChat: { parent, child in
-                        Task {
-                            await model.attachSideChat(parentRunId: parent.id, childRunId: child.id)
-                            focusedSideRunId = child.id
-                            hiddenSideRunIds.remove(child.id)
-                            trimVisibleSideRuns(parentId: parent.id, keeping: child.id)
-                            selectedWorkspaceId = child.workspaceId
-                            selectedWorkItemId = child.workItemId
-                        }
-                    },
-                    detachSideChat: { run, focus in
-                        Task {
-                            await model.detachSideChat(runId: run.id, focus: focus)
-                            hiddenSideRunIds.remove(run.id)
-                            if focus {
-                                focusedSideRunId = nil
-                                selectedWorkspaceId = run.workspaceId
-                                selectedWorkItemId = run.workItemId
-                            }
-                        }
-                    },
-                    deleteRun: { run in
-                        hiddenSideRunIds.remove(run.id)
-                        Task { await model.deleteChat(runId: run.id) }
-                    }
-                )
-                .frame(width: 312)
-
-                Divider().overlay(PKTheme.edge)
-            }
-
-            ZStack {
-                if model.activeRunId != nil {
-                    NativeMultiChatWorkspace(
-                        activeRun: activeRun,
-                        snapshot: snapshot,
-                        selectedWorkspace: selectedWorkspace,
-                        selectedWorkspaceId: $selectedWorkspaceId,
-                        selectedWorkItemId: $selectedWorkItemId,
-                        model: model,
-                        focusedSideRunId: $focusedSideRunId,
-                        hiddenSideRunIds: $hiddenSideRunIds,
-                        newChat: {
-                            model.prepareNewChat()
-                            focusedSideRunId = nil
-                            Task { await model.refreshBranches(for: selectedWorkspace) }
-                            commandFocused.wrappedValue = true
-                        },
-                        addInlineSideChat: { parent in
-                            Task {
-                                if let childId = await model.createInlineSideChat(parentRunId: parent.id) {
-                                    focusedSideRunId = childId
-                                    hiddenSideRunIds.remove(childId)
-                                    trimVisibleSideRuns(parentId: parent.id, keeping: childId)
-                                }
-                            }
-                        },
-                        detachSideChat: { run in
-                            Task {
-                                await model.detachSideChat(runId: run.id, focus: true)
-                                hiddenSideRunIds.remove(run.id)
-                                focusedSideRunId = nil
-                                selectedWorkspaceId = run.workspaceId
-                                selectedWorkItemId = run.workItemId
-                            }
-                        },
-                        openWorkItem: {
-                            if let itemId = activeRun?.workItemId {
-                                selectedWorkItemId = itemId
-                            }
-                            navigate(.workItems)
-                        }
-                    )
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-                    .padding(.bottom, 24)
-                } else {
-                    NewChatLauncher(
-                        snapshot: snapshot,
-                        selectedWorkspaceId: $selectedWorkspaceId,
-                        selectedWorkItemId: $selectedWorkItemId,
-                        commandFocused: commandFocused,
-                        model: model,
-                        openTerminal: {
-                            navigate(.terminal)
-                        },
-                        send: {
-                            Task {
-                                if let runId = await model.startChat(
-                                    workspaceId: selectedWorkspaceId,
-                                    targetWorkItemId: selectedWorkItemId
-                                ),
-                                   let run = model.snapshot.runs.first(where: { $0.id == runId }) {
-                                    selectedWorkItemId = run.workItemId
-                                }
-                            }
-                        }
-                    )
-                    .padding(24)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topLeading) {
-                if showsAgentHistory && !chatHistoryVisible {
-                    ChatHistoryRevealButton {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            chatHistoryVisible = true
-                        }
-                    }
-                    .padding(.leading, 10)
-                    .padding(.top, 10)
-                }
-            }
-
-            if assistantDockOpen {
-                Divider().overlay(PKTheme.edge)
-                AssistantInspector(
-                    snapshot: snapshot,
-                    selectedWorkspace: selectedWorkspace,
-                    selectedWorkspaceId: $selectedWorkspaceId,
-                    selectedWorkItemId: $selectedWorkItemId,
-                    selectedWorkItem: selectedWorkItem,
-                    model: model,
-                    activeRun: activeRun,
-                    close: { assistantDockOpen = false },
-                    navigate: navigate
-                )
-                .frame(width: 388)
-                .padding(18)
+            historySection
+            workspaceSection
+            assistantInspectorSection
+        }
+        .onChange(of: model.activeRunId) { _, activeRunId in
+            guard let focus = focusedGeneratedUIAction else { return }
+            guard let activeRunId, focus.runId == activeRunId else {
+                focusedGeneratedUIAction = nil
+                return
             }
         }
+    }
+
+    @ViewBuilder
+    private var historySection: some View {
+        if showsAgentHistory && chatHistoryVisible {
+            ChatHistoryPane(
+                snapshot: snapshot,
+                selectedAgentKind: model.selectedAgentKind,
+                activeRunId: model.activeRunId,
+                focusedSideRunId: focusedSideRunId,
+                hiddenSideRunIds: hiddenSideRunIds,
+                selectRun: selectHistoryRun,
+                selectSideRun: selectHistorySideRun,
+                newChat: startNewChatFromChatHome,
+                hideHistory: hideChatHistory,
+                openRunInNewWindow: openHistoryRunInNewWindow,
+                attachSideChat: attachHistorySideChat,
+                detachSideChat: detachHistorySideChat,
+                deleteRun: deleteHistoryRun
+            )
+            .frame(width: 312)
+
+            Divider().overlay(PKTheme.edge)
+        }
+    }
+
+    private var workspaceSection: some View {
+        ZStack {
+            workspaceContent
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onDrop(of: [UTType.plainText], isTargeted: $temporaryPaneDropTargeted, perform: handleTemporaryPaneDrop)
+        .overlay(alignment: .topLeading) {
+            if showsAgentHistory && !chatHistoryVisible {
+                ChatHistoryRevealButton(action: showChatHistory)
+                    .padding(.leading, 10)
+                    .padding(.top, 10)
+            }
+        }
+        .overlay {
+            if temporaryPaneDropTargeted {
+                NativeTemporaryPaneDropHint()
+                    .padding(28)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceContent: some View {
+        if model.activeRunId != nil {
+            NativeMultiChatWorkspace(
+                activeRun: activeRun,
+                snapshot: snapshot,
+                selectedWorkspace: selectedWorkspace,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                selectedWorkItemId: $selectedWorkItemId,
+                model: model,
+                focusedSideRunId: $focusedSideRunId,
+                hiddenSideRunIds: $hiddenSideRunIds,
+                temporaryPaneRunIds: temporaryPaneRunIds,
+                focusedTemporaryPaneRunId: $focusedTemporaryPaneRunId,
+                focusedGeneratedUIAction: $focusedGeneratedUIAction,
+                newChat: startNewChatFromChatHome,
+                addInlineSideChat: addInlineSideChat,
+                detachSideChat: detachInlineSideChat,
+                focusTemporaryPane: focusTemporaryPaneRun,
+                closeTemporaryPane: closeTemporaryPaneRun,
+                openWorkItem: openActiveRunWorkItem
+            )
+        } else {
+            NewChatLauncher(
+                snapshot: snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                selectedWorkItemId: $selectedWorkItemId,
+                commandFocused: commandFocused,
+                model: model,
+                openTerminal: openTerminal,
+                send: startLauncherChat
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var assistantInspectorSection: some View {
+        if assistantDockOpen {
+            Divider().overlay(PKTheme.edge)
+            AssistantInspector(
+                snapshot: snapshot,
+                selectedWorkspace: selectedWorkspace,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                selectedWorkItemId: $selectedWorkItemId,
+                selectedWorkItem: selectedWorkItem,
+                model: model,
+                activeRun: activeRun,
+                close: closeAssistantDock,
+                navigate: navigate
+            )
+            .frame(width: 388)
+            .padding(18)
+        }
+    }
+
+    private func selectHistoryRun(_ run: AgentRun) {
+        resetTemporaryPanes()
+        model.activeRunId = run.id
+        focusedGeneratedUIAction = nil
+        focusedSideRunId = nil
+        selectedWorkspaceId = run.workspaceId
+        selectedWorkItemId = run.workItemId
+        Task { await model.markChatRead(runId: run.id) }
+    }
+
+    private func selectHistorySideRun(_ parent: AgentRun, _ child: AgentRun) {
+        resetTemporaryPanes()
+        model.activeRunId = parent.id
+        focusedGeneratedUIAction = nil
+        focusedSideRunId = child.id
+        hiddenSideRunIds.remove(child.id)
+        trimVisibleSideRuns(parentId: parent.id, keeping: child.id)
+        selectedWorkspaceId = child.workspaceId
+        selectedWorkItemId = child.workItemId
+        Task { await model.markChatRead(runId: child.id) }
+    }
+
+    private func startNewChatFromChatHome() {
+        resetTemporaryPanes()
+        model.prepareNewChat()
+        focusedGeneratedUIAction = nil
+        focusedSideRunId = nil
+        Task { await model.refreshBranches(for: selectedWorkspace) }
+        commandFocused.wrappedValue = true
+    }
+
+    private func hideChatHistory() {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            chatHistoryVisible = false
+        }
+    }
+
+    private func showChatHistory() {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            chatHistoryVisible = true
+        }
+    }
+
+    private func openHistoryRunInNewWindow(_ run: AgentRun) {
+        Task { await model.markChatRead(runId: run.id) }
+        DetachedChatWindowRegistry.shared.open(run: run, snapshot: snapshot)
+    }
+
+    private func attachHistorySideChat(_ parent: AgentRun, _ child: AgentRun) {
+        Task {
+            await model.attachSideChat(parentRunId: parent.id, childRunId: child.id)
+            closeTemporaryPane(child.id)
+            focusedSideRunId = child.id
+            hiddenSideRunIds.remove(child.id)
+            trimVisibleSideRuns(parentId: parent.id, keeping: child.id)
+            selectedWorkspaceId = child.workspaceId
+            selectedWorkItemId = child.workItemId
+        }
+    }
+
+    private func detachHistorySideChat(_ run: AgentRun, _ focus: Bool) {
+        Task {
+            await model.detachSideChat(runId: run.id, focus: focus)
+            hiddenSideRunIds.remove(run.id)
+            if focus {
+                focusedSideRunId = nil
+                selectedWorkspaceId = run.workspaceId
+                selectedWorkItemId = run.workItemId
+            }
+        }
+    }
+
+    private func deleteHistoryRun(_ run: AgentRun) {
+        hiddenSideRunIds.remove(run.id)
+        closeTemporaryPane(run.id)
+        Task { await model.deleteChat(runId: run.id) }
+    }
+
+    private func addInlineSideChat(_ parent: AgentRun) {
+        Task {
+            if let childId = await model.createInlineSideChat(parentRunId: parent.id) {
+                focusedSideRunId = childId
+                hiddenSideRunIds.remove(childId)
+                trimVisibleSideRuns(parentId: parent.id, keeping: childId)
+            }
+        }
+    }
+
+    private func detachInlineSideChat(_ run: AgentRun) {
+        Task {
+            await model.detachSideChat(runId: run.id, focus: true)
+            hiddenSideRunIds.remove(run.id)
+            focusedSideRunId = nil
+            selectedWorkspaceId = run.workspaceId
+            selectedWorkItemId = run.workItemId
+        }
+    }
+
+    private func focusTemporaryPaneRun(_ run: AgentRun) {
+        focusedSideRunId = nil
+        focusedTemporaryPaneRunId = run.id
+        selectedWorkspaceId = run.workspaceId
+        selectedWorkItemId = run.workItemId
+        Task { await model.markChatRead(runId: run.id) }
+    }
+
+    private func closeTemporaryPaneRun(_ run: AgentRun) {
+        closeTemporaryPane(run.id)
+    }
+
+    private func openActiveRunWorkItem() {
+        if let itemId = activeRun?.workItemId {
+            selectedWorkItemId = itemId
+        }
+        navigate(.workItems)
+    }
+
+    private func openTerminal() {
+        navigate(.terminal)
+    }
+
+    private func startLauncherChat() {
+        Task {
+            if let runId = await model.startChat(
+                workspaceId: selectedWorkspaceId,
+                targetWorkItemId: selectedWorkItemId
+            ),
+               let run = model.snapshot.runs.first(where: { $0.id == runId }) {
+                selectedWorkItemId = run.workItemId
+            }
+        }
+    }
+
+    private func handleTemporaryPaneDrop(_ providers: [NSItemProvider]) -> Bool {
+        loadNativeRunId(from: providers) { runId in
+            guard let run = snapshot.runs.first(where: { $0.id == runId }) else { return }
+            openTemporaryPane(run)
+        }
+        return true
+    }
+
+    private func closeAssistantDock() {
+        assistantDockOpen = false
     }
 
     private var greetingTitle: String {
@@ -1482,6 +1845,74 @@ private struct ChatHomeView: View {
             visibleCount -= 1
         }
     }
+
+    private func resetTemporaryPanes() {
+        temporaryPaneRunIds.removeAll()
+        focusedTemporaryPaneRunId = nil
+    }
+
+    private func openTemporaryPane(_ run: AgentRun) {
+        focusedGeneratedUIAction = nil
+        guard let activeRun = activeRun else {
+            model.activeRunId = run.id
+            selectedWorkspaceId = run.workspaceId
+            selectedWorkItemId = run.workItemId
+            Task { await model.markChatRead(runId: run.id) }
+            return
+        }
+
+        if run.id == activeRun.id {
+            focusedSideRunId = nil
+            focusedTemporaryPaneRunId = nil
+            selectedWorkspaceId = run.workspaceId
+            selectedWorkItemId = run.workItemId
+            Task { await model.markChatRead(runId: run.id) }
+            return
+        }
+
+        if let parentId = run.sideChatOfRunId,
+           parentId == (activeRun.sideChatOfRunId ?? activeRun.id) {
+            focusedTemporaryPaneRunId = nil
+            focusedSideRunId = run.id
+            hiddenSideRunIds.remove(run.id)
+            trimVisibleSideRuns(parentId: parentId, keeping: run.id)
+            selectedWorkspaceId = run.workspaceId
+            selectedWorkItemId = run.workItemId
+            Task { await model.markChatRead(runId: run.id) }
+            return
+        }
+
+        temporaryPaneRunIds = nativeTemporaryPaneRunIdsAfterOpening(
+            existing: temporaryPaneRunIds,
+            opening: run.id,
+            activeRunId: activeRun.id
+        )
+        focusedSideRunId = nil
+        focusedTemporaryPaneRunId = run.id
+        selectedWorkspaceId = run.workspaceId
+        selectedWorkItemId = run.workItemId
+        Task { await model.markChatRead(runId: run.id) }
+    }
+
+    private func closeTemporaryPane(_ runId: EntityID) {
+        let closingFocusedPane = focusedTemporaryPaneRunId == runId
+        let nextState = nativeTemporaryPaneStateAfterClosing(
+            existing: temporaryPaneRunIds,
+            closing: runId,
+            focusedRunId: focusedTemporaryPaneRunId
+        )
+        temporaryPaneRunIds = nextState.runIds
+        focusedTemporaryPaneRunId = nextState.focusedRunId
+        guard closingFocusedPane else { return }
+        if let focusedRunId = nextState.focusedRunId,
+           let focusedRun = snapshot.runs.first(where: { $0.id == focusedRunId }) {
+            selectedWorkspaceId = focusedRun.workspaceId
+            selectedWorkItemId = focusedRun.workItemId
+        } else if let activeRun {
+            selectedWorkspaceId = activeRun.workspaceId
+            selectedWorkItemId = activeRun.workItemId
+        }
+    }
 }
 
 private struct NativeMultiChatWorkspace: View {
@@ -1493,9 +1924,14 @@ private struct NativeMultiChatWorkspace: View {
     @ObservedObject var model: NativeAppModel
     @Binding var focusedSideRunId: EntityID?
     @Binding var hiddenSideRunIds: Set<EntityID>
+    let temporaryPaneRunIds: [EntityID]
+    @Binding var focusedTemporaryPaneRunId: EntityID?
+    @Binding var focusedGeneratedUIAction: GeneratedUIActionFocus?
     let newChat: () -> Void
     let addInlineSideChat: (AgentRun) -> Void
     let detachSideChat: (AgentRun) -> Void
+    let focusTemporaryPane: (AgentRun) -> Void
+    let closeTemporaryPane: (AgentRun) -> Void
     let openWorkItem: () -> Void
 
     private var parentRun: AgentRun? {
@@ -1512,13 +1948,24 @@ private struct NativeMultiChatWorkspace: View {
         return nativeChatRunGroups(from: snapshot.runs).first(where: { $0.parent.id == parentRun.id })?.children ?? []
     }
 
-    private var paneRuns: [AgentRun] {
+    private var temporaryRuns: [AgentRun] {
+        temporaryPaneRunIds.compactMap { runId in
+            snapshot.runs.first(where: { $0.id == runId })
+        }
+    }
+
+    private var panes: [NativeMultiChatPane] {
         guard let parentRun else { return [] }
-        return nativeVisibleMultiChatRuns(
+        return nativeVisibleTemporaryMultiChatPanes(
             parent: parentRun,
             sideRuns: sideRuns,
             hiddenSideRunIds: hiddenSideRunIds,
-            focusedSideRunId: focusedSideRunId
+            focusedSideRunId: nativeEffectiveFocusedSideRunId(
+                activeRun: activeRun,
+                focusedSideRunId: focusedSideRunId
+            ),
+            temporaryRuns: temporaryRuns,
+            focusedTemporaryRunId: focusedTemporaryPaneRunId
         )
     }
 
@@ -1527,13 +1974,12 @@ private struct NativeMultiChatWorkspace: View {
         return snapshot.workspaces.first(where: { $0.id == parentRun.workspaceId }) ?? selectedWorkspace
     }
 
-    private var columns: [GridItem] {
-        let columnCount = paneRuns.count <= 1 ? 1 : 2
-        return Array(repeating: GridItem(.flexible(minimum: 320), spacing: 12), count: columnCount)
+    private var showsAddSideChatTile: Bool {
+        !panes.contains { $0.role == .temporary } && panes.count < nativeMaxVisibleChatPanes
     }
 
     var body: some View {
-        if paneRuns.count <= 1 {
+        if panes.count <= 1 {
             singlePaneWorkspace
         } else {
             multiPaneWorkspace
@@ -1548,7 +1994,9 @@ private struct NativeMultiChatWorkspace: View {
             selectedWorkspaceId: $selectedWorkspaceId,
             selectedWorkItemId: $selectedWorkItemId,
             model: model,
+            focusedGeneratedUIAction: $focusedGeneratedUIAction,
             immersive: true,
+            fullBleed: true,
             newChat: newChat,
             newSideChat: parentRun.map { parent in { addInlineSideChat(parent) } },
             startFollowUpSideChat: { parent, action in
@@ -1559,26 +2007,47 @@ private struct NativeMultiChatWorkspace: View {
     }
 
     private var multiPaneWorkspace: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                ForEach(Array(paneRuns.enumerated()), id: \.element.id) { index, run in
-                    paneWorkspace(run: run, isParent: index == 0)
+        GeometryReader { proxy in
+            let spacing = nativeMultiChatGridSpacing
+            let layoutItemCount = panes.count + (showsAddSideChatTile ? 1 : 0)
+            let paneHeight = nativeMultiChatPaneHeight(
+                containerHeight: proxy.size.height,
+                paneCount: layoutItemCount,
+                spacing: spacing
+            )
+            let grid = LazyVGrid(
+                columns: nativeMultiChatGridColumns(for: layoutItemCount, spacing: spacing),
+                alignment: .leading,
+                spacing: spacing
+            ) {
+                ForEach(panes) { pane in
+                    paneWorkspace(pane: pane)
+                        .frame(height: paneHeight)
                 }
-                if let parentRun, paneRuns.count < nativeMaxVisibleChatPanes {
+                if let parentRun, showsAddSideChatTile {
                     AddSideChatTile(
                         accent: agentTint(agentKind(for: parentRun, snapshot: snapshot)),
                         action: { addInlineSideChat(parentRun) }
                     )
-                    .frame(minHeight: 520)
+                    .frame(height: paneHeight)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+
+            if layoutItemCount <= nativeMaxMultiChatPanesPerScreen {
+                grid
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+            } else {
+                ScrollView {
+                    grid
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+            }
         }
     }
 
-    private func paneWorkspace(run: AgentRun, isParent: Bool) -> some View {
-        let isFocused = (isParent && focusedSideRunId == nil) || focusedSideRunId == run.id
+    private func paneWorkspace(pane: NativeMultiChatPane) -> some View {
+        let run = pane.run
+        let isFocused = isFocusedPane(pane)
         return ConversationWorkspace(
             run: run,
             snapshot: snapshot,
@@ -1586,28 +2055,77 @@ private struct NativeMultiChatWorkspace: View {
             selectedWorkspaceId: $selectedWorkspaceId,
             selectedWorkItemId: $selectedWorkItemId,
             model: model,
+            focusedGeneratedUIAction: $focusedGeneratedUIAction,
             immersive: true,
-            paneLabel: isParent ? "Parent" : sideChatPaneLabel(for: run),
+            paneLabel: paneLabel(for: pane),
             newChat: newChat,
             newSideChat: nil,
             startFollowUpSideChat: { parent, action in
                 startFollowUpSideChat(parent: parent, action: action)
             },
-            closeChat: isParent ? nil : { closeSideRun(run) },
-            detachChat: isParent ? nil : { detachSideChat(run) },
+            closeChat: closeAction(for: pane),
+            detachChat: pane.role == .side ? { detachSideChat(run) } : nil,
             openWorkItem: openWorkItem
         )
-        .frame(minHeight: 520)
         .overlay(
             RoundedRectangle(cornerRadius: 18)
                 .stroke(isFocused ? PKTheme.primary.opacity(0.55) : Color.clear, lineWidth: 1.5)
         )
         .simultaneousGesture(TapGesture().onEnded {
-            focusedSideRunId = isParent ? nil : run.id
+            focusPane(pane)
             selectedWorkspaceId = run.workspaceId
             selectedWorkItemId = run.workItemId
             Task { await model.markChatRead(runId: run.id) }
         })
+    }
+
+    private func paneLabel(for pane: NativeMultiChatPane) -> String {
+        switch pane.role {
+        case .primary:
+            return panes.contains(where: { $0.role == .temporary }) ? "Main" : "Parent"
+        case .side:
+            return sideChatPaneLabel(for: pane.run)
+        case .temporary:
+            return "Pane"
+        }
+    }
+
+    private func closeAction(for pane: NativeMultiChatPane) -> (() -> Void)? {
+        switch pane.role {
+        case .primary:
+            return nil
+        case .side:
+            return { closeSideRun(pane.run) }
+        case .temporary:
+            return { closeTemporaryPane(pane.run) }
+        }
+    }
+
+    private func isFocusedPane(_ pane: NativeMultiChatPane) -> Bool {
+        switch pane.role {
+        case .primary:
+            return focusedTemporaryPaneRunId == nil
+                && nativeEffectiveFocusedSideRunId(activeRun: activeRun, focusedSideRunId: focusedSideRunId) == nil
+        case .side:
+            return focusedTemporaryPaneRunId == nil
+                && nativeEffectiveFocusedSideRunId(activeRun: activeRun, focusedSideRunId: focusedSideRunId) == pane.run.id
+        case .temporary:
+            return focusedTemporaryPaneRunId == pane.run.id
+        }
+    }
+
+    private func focusPane(_ pane: NativeMultiChatPane) {
+        switch pane.role {
+        case .primary:
+            focusedSideRunId = nil
+            focusedTemporaryPaneRunId = nil
+        case .side:
+            focusedTemporaryPaneRunId = nil
+            focusedSideRunId = pane.run.id
+        case .temporary:
+            focusedSideRunId = nil
+            focusTemporaryPane(pane.run)
+        }
     }
 
     private func closeSideRun(_ run: AgentRun) {
@@ -1647,6 +2165,9 @@ private struct NativeMultiChatWorkspace: View {
                 permissionMode: action.permissionMode,
                 followUpLabel: runFollowUpStagedLabel(action)
             ) {
+                if generatedUIActionFocusMatches(focusedGeneratedUIAction, runId: parent.id, actionId: action.id) {
+                    focusedGeneratedUIAction = nil
+                }
                 focusedSideRunId = childId
                 hiddenSideRunIds.remove(childId)
                 trimVisibleFollowUpSideRuns(parentId: parent.id, keeping: childId)
@@ -1662,6 +2183,52 @@ private struct NativeMultiChatWorkspace: View {
 
 private let nativeMaxVisibleChatPanes = 4
 private let nativeMaxVisibleSidePanes = nativeMaxVisibleChatPanes - 1
+private let nativeMaxMultiChatPanesPerScreen = 4
+private let nativeMultiChatGridSpacing: CGFloat = 12
+
+enum NativeMultiChatPaneRole: Equatable {
+    case primary
+    case side
+    case temporary
+}
+
+struct NativeMultiChatPane: Identifiable {
+    let run: AgentRun
+    let role: NativeMultiChatPaneRole
+
+    var id: EntityID { run.id }
+}
+
+func nativeMultiChatGridColumnCount(for paneCount: Int) -> Int {
+    paneCount <= 1 ? 1 : 2
+}
+
+func nativeMultiChatGridRowsPerScreen(for paneCount: Int) -> Int {
+    paneCount <= 2 ? 1 : 2
+}
+
+func nativeMultiChatPaneHeight(containerHeight: CGFloat, paneCount: Int, spacing: CGFloat = nativeMultiChatGridSpacing) -> CGFloat {
+    let rows = nativeMultiChatGridRowsPerScreen(for: paneCount)
+    let availableHeight = max(0, containerHeight - CGFloat(rows - 1) * spacing)
+    return max(220, availableHeight / CGFloat(rows))
+}
+
+private func nativeMultiChatGridColumns(for paneCount: Int, spacing: CGFloat) -> [GridItem] {
+    Array(
+        repeating: GridItem(.flexible(minimum: 320), spacing: spacing),
+        count: nativeMultiChatGridColumnCount(for: paneCount)
+    )
+}
+
+func nativeEffectiveFocusedSideRunId(activeRun: AgentRun?, focusedSideRunId: EntityID?) -> EntityID? {
+    if let focusedSideRunId {
+        return focusedSideRunId
+    }
+    guard activeRun?.sideChatOfRunId != nil else {
+        return nil
+    }
+    return activeRun?.id
+}
 
 func nativeVisibleMultiChatRuns(
     parent: AgentRun,
@@ -1682,6 +2249,152 @@ func nativeVisibleMultiChatRuns(
         selectedSides.append(focused)
     }
     return [parent] + selectedSides
+}
+
+func nativeTemporaryPaneRunIdsAfterOpening(
+    existing: [EntityID],
+    opening runId: EntityID,
+    activeRunId: EntityID?,
+    maxPanes: Int? = nil
+) -> [EntityID] {
+    guard runId != activeRunId else {
+        return existing.filter { $0 != runId }
+    }
+
+    var next = existing.filter { $0 != runId && $0 != activeRunId }
+    next.append(runId)
+
+    guard let maxPanes else { return next }
+    let maxTemporaryPanes = max(0, maxPanes - 1)
+    if maxTemporaryPanes == 0 {
+        return []
+    }
+    if next.count > maxTemporaryPanes {
+        next = Array(next.suffix(maxTemporaryPanes))
+    }
+    return next
+}
+
+func nativeTemporaryPaneStateAfterClosing(
+    existing: [EntityID],
+    closing runId: EntityID,
+    focusedRunId: EntityID?
+) -> (runIds: [EntityID], focusedRunId: EntityID?) {
+    let remaining = existing.filter { $0 != runId }
+    let nextFocused: EntityID?
+    if focusedRunId == runId {
+        nextFocused = remaining.last
+    } else if let focusedRunId, remaining.contains(focusedRunId) {
+        nextFocused = focusedRunId
+    } else {
+        nextFocused = nil
+    }
+    return (remaining, nextFocused)
+}
+
+func nativeVisibleTemporaryMultiChatPanes(
+    parent: AgentRun,
+    sideRuns: [AgentRun],
+    hiddenSideRunIds: Set<EntityID>,
+    focusedSideRunId: EntityID?,
+    temporaryRuns: [AgentRun],
+    focusedTemporaryRunId: EntityID?
+) -> [NativeMultiChatPane] {
+    let visibleSides = sideRuns.filter { !hiddenSideRunIds.contains($0.id) }
+    let uniqueTemporaryRuns = uniqueRunsPreservingOrder(temporaryRuns)
+        .filter { run in
+            run.id != parent.id && !visibleSides.contains(where: { $0.id == run.id })
+        }
+
+    if uniqueTemporaryRuns.isEmpty {
+        return nativeVisibleMultiChatRuns(
+            parent: parent,
+            sideRuns: sideRuns,
+            hiddenSideRunIds: hiddenSideRunIds,
+            focusedSideRunId: focusedSideRunId
+        )
+        .map { run in
+            NativeMultiChatPane(
+                run: run,
+                role: run.id == parent.id ? .primary : .side
+            )
+        }
+    }
+
+    var panes = [NativeMultiChatPane(run: parent, role: .primary)]
+    var usedRunIds: Set<EntityID> = [parent.id]
+
+    func appendSide(_ run: AgentRun) {
+        guard !usedRunIds.contains(run.id) else { return }
+        panes.append(NativeMultiChatPane(run: run, role: .side))
+        usedRunIds.insert(run.id)
+    }
+
+    func appendTemporary(_ run: AgentRun) {
+        guard !usedRunIds.contains(run.id) else { return }
+        panes.append(NativeMultiChatPane(run: run, role: .temporary))
+        usedRunIds.insert(run.id)
+    }
+
+    if let focusedSideRunId,
+       let focusedSide = visibleSides.first(where: { $0.id == focusedSideRunId }) {
+        appendSide(focusedSide)
+    }
+
+    for run in nativeOrderedTemporaryRuns(
+        uniqueTemporaryRuns,
+        focusedRunId: focusedTemporaryRunId
+    ) {
+        appendTemporary(run)
+    }
+
+    for run in visibleSides {
+        appendSide(run)
+    }
+
+    return panes
+}
+
+private func uniqueRunsPreservingOrder(_ runs: [AgentRun]) -> [AgentRun] {
+    var seen = Set<EntityID>()
+    var unique: [AgentRun] = []
+    for run in runs where !seen.contains(run.id) {
+        seen.insert(run.id)
+        unique.append(run)
+    }
+    return unique
+}
+
+private func nativeOrderedTemporaryRuns(
+    _ runs: [AgentRun],
+    focusedRunId: EntityID?
+) -> [AgentRun] {
+    guard let focusedRunId,
+          let focusedIndex = runs.firstIndex(where: { $0.id == focusedRunId }) else {
+        return runs
+    }
+    var ordered = runs
+    let focused = ordered.remove(at: focusedIndex)
+    ordered.append(focused)
+    return ordered
+}
+
+private func nativeLimitedTemporaryRuns(
+    _ runs: [AgentRun],
+    capacity: Int,
+    focusedRunId: EntityID?
+) -> [AgentRun] {
+    guard capacity > 0 else { return [] }
+    guard runs.count > capacity else { return nativeOrderedTemporaryRuns(runs, focusedRunId: focusedRunId) }
+
+    var selected = Array(nativeOrderedTemporaryRuns(runs, focusedRunId: focusedRunId).suffix(capacity))
+    if let focusedRunId,
+       !selected.contains(where: { $0.id == focusedRunId }),
+       let focusedRun = runs.first(where: { $0.id == focusedRunId }) {
+        selected.removeFirst()
+        selected.append(focusedRun)
+    }
+    return selected
 }
 
 private struct AddSideChatTile: View {
@@ -1937,6 +2650,27 @@ private func loadNativeRunId(from providers: [NSItemProvider], onLoad: @escaping
         Task { @MainActor in
             onLoad(EntityID(raw))
         }
+    }
+}
+
+private struct NativeTemporaryPaneDropHint: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.split.2x1")
+                .font(.system(size: 16, weight: .semibold))
+            Text("Open beside")
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .foregroundStyle(PKTheme.primary)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
+        .background(PKTheme.panel.opacity(0.94))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(PKTheme.primary.opacity(0.48), style: StrokeStyle(lineWidth: 1.2, dash: [6, 5]))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: PKTheme.primary.opacity(0.16), radius: 18, y: 10)
     }
 }
 
@@ -2283,28 +3017,16 @@ private struct DetachedChatWindowView: View {
                     .frame(height: 1)
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+                    LazyVStack(alignment: .leading, spacing: 18) {
                         ForEach(run.messages) { message in
-                            if message.role == .user {
-                                ConversationMessageBubble(
-                                    title: "You",
-                                    subtitle: workspace?.name ?? "Project",
-                                    text: message.content,
-                                    createdAt: message.createdAt,
-                                    symbol: "person.crop.circle",
-                                    accent: accent,
-                                    trailing: true
-                                )
-                            } else if message.role == .assistant {
-                                AssistantResponseCard(
-                                    title: agentName,
-                                    text: message.content,
-                                    createdAt: message.createdAt,
-                                    state: .completed,
-                                    isRunning: false,
-                                    accent: accent
-                                )
-                            }
+                            ConversationHistoryMessageRow(
+                                message: message,
+                                userSubtitle: workspace?.name ?? "Project",
+                                assistantTitle: agentName,
+                                trailing: true,
+                                accent: accent
+                            )
+                            .equatable()
                         }
 
                         ConversationMessageBubble(
@@ -2321,6 +3043,8 @@ private struct DetachedChatWindowView: View {
                             title: agentName,
                             text: run.transcript.isEmpty ? "No assistant output yet." : run.transcript,
                             createdAt: run.endedAt ?? run.startedAt,
+                            startedAt: run.startedAt,
+                            endedAt: run.endedAt,
                             state: run.state,
                             isRunning: run.state == .running,
                             accent: accent
@@ -2354,64 +3078,76 @@ private struct NewChatLauncher: View {
     var body: some View {
         GeometryReader { proxy in
             let stageInset: CGFloat = proxy.size.width < 700 ? 12 : 22
-            let stageHeight = max(0, proxy.size.height - 36)
-            let contentWidth = min(max(proxy.size.width - stageInset * 2 - 72, 320), 820)
+            let contentWidth = min(max(proxy.size.width - stageInset * 2 - 48, 360), 1180)
+            let needsCompactScroll = proxy.size.height < 720
             ZStack {
                 NewChatStageBackdrop(accent: agentTint(model.selectedAgentKind))
 
-                ScrollView {
-                    VStack(spacing: 44) {
-                        Spacer(minLength: 0)
-
-                        NewChatHero(
-                            snapshot: snapshot,
-                            selectedWorkspaceId: selectedWorkspaceId,
-                            selectedAgentKind: model.selectedAgentKind,
-                            isRunning: model.isRunning
-                        )
-
-                        MinimalChatComposer(
-                            snapshot: snapshot,
-                            selectedWorkspaceId: $selectedWorkspaceId,
-                            selectedPermissionMode: $model.selectedPermissionMode,
-                            text: $model.draftPrompt,
-                            placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
-                            focused: commandFocused,
-                            selectedAgentKind: model.selectedAgentKind,
-                            isRunning: model.isRunning,
-                            showsSkillCards: false,
-                            branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
-                            branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
-                            openTerminal: openTerminal,
-                            captureWorkItem: {
-                                Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
-                            },
-                            switchBranch: { branch in
-                                Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
-                            },
-                            send: send
-                        )
-                        .frame(width: contentWidth)
-
-                        Spacer(minLength: 0)
+                if needsCompactScroll {
+                    ScrollView(showsIndicators: false) {
+                        launcherStageContent()
+                            .frame(width: contentWidth)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
                     }
-                    .frame(width: contentWidth)
-                    .frame(maxWidth: .infinity)
-                    .frame(minHeight: stageHeight)
-                    .padding(.top, max(34, stageHeight * 0.12))
-                    .padding(.bottom, max(42, stageHeight * 0.10))
+                } else {
+                    launcherStageContent()
+                        .frame(width: contentWidth)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .padding(.horizontal, stageInset)
+                        .padding(.vertical, 28)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(PKTheme.edgeStrong.opacity(0.62), lineWidth: 1))
-            .shadow(color: Color.black.opacity(0.20), radius: 26, x: 0, y: 18)
-            .padding(.horizontal, stageInset)
-            .padding(.vertical, 18)
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: selectedWorkspace?.id) {
             await model.refreshBranches(for: selectedWorkspace)
         }
+    }
+
+    private func launcherStageContent() -> some View {
+        VStack(spacing: 24) {
+            NewChatHero(
+                snapshot: snapshot,
+                selectedWorkspaceId: selectedWorkspaceId,
+                selectedAgentKind: model.selectedAgentKind,
+                isRunning: model.isRunning
+            )
+
+            NewChatCategoryStrip(mode: .engineering) { action in
+                applyPrompt(action.prompt)
+            }
+
+            MinimalChatComposer(
+                snapshot: snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                selectedPermissionMode: $model.selectedPermissionMode,
+                text: $model.draftPrompt,
+                placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
+                focused: commandFocused,
+                selectedAgentKind: model.selectedAgentKind,
+                isRunning: model.isRunning,
+                branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
+                branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
+                openTerminal: openTerminal,
+                captureWorkItem: {
+                    Task { _ = await model.createWorkItem(workspaceId: selectedWorkspaceId) }
+                },
+                switchBranch: { branch in
+                    Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
+                },
+                send: send
+            )
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func applyPrompt(_ prompt: String) {
+        model.draftPrompt = prompt
+            .replacingOccurrences(of: "{project}", with: selectedWorkspace?.name ?? "this workspace")
+            .replacingOccurrences(of: "{agent}", with: agentShortLabel(model.selectedAgentKind))
+        commandFocused.wrappedValue = true
     }
 }
 
@@ -2485,6 +3221,59 @@ private struct NewChatStageBackdrop: View {
     }
 }
 
+private struct NewChatSuggestedAssistantCard: View {
+    let template: AssistantLaunchTemplate
+    let recommendation: AssistantLaunchRecommendation
+    let currentPermissionMode: PermissionMode
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: template.symbol)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(PKTheme.ok)
+                    .frame(width: 34, height: 34)
+                    .background(PKTheme.ok.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        CountBadge(text: "Suggested")
+                        Text(template.title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PKTheme.text)
+                            .lineLimit(1)
+                    }
+                    Text(recommendation.reason)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 6) {
+                    CountBadge(text: agentShortLabel(template.agentKind))
+                    CountBadge(text: permissionTitle(assistantTemplatePermissionMode(template, current: currentPermissionMode)))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(PKTheme.ok)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 58)
+            .background(PKTheme.panelAlt.opacity(hovering ? 0.92 : 0.78))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.ok.opacity(hovering ? 0.62 : 0.42), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .help("\(template.title) - \(recommendation.reason)")
+        .onHover { hovering = $0 }
+    }
+}
+
 private struct NewChatSectionHeader: View {
     let title: String
     let subtitle: String
@@ -2531,7 +3320,7 @@ private struct NewChatHero: View {
                 .shadow(color: accent.opacity(0.26), radius: 18, x: 0, y: 8)
 
             VStack(spacing: 6) {
-                Text("Welcome to Pikiclaw")
+                Text(timeGreetingTitle)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(accent)
                     .lineLimit(1)
@@ -2557,6 +3346,32 @@ private struct NewChatHero: View {
 
     private var accent: Color {
         agentTint(selectedAgentKind)
+    }
+
+    private var timeGreetingTitle: String {
+        let hour = Calendar.autoupdatingCurrent.component(.hour, from: Date())
+        let greeting: String
+        switch hour {
+        case 5..<11:
+            greeting = "早上好"
+        case 11..<14:
+            greeting = "中午好"
+        case 14..<18:
+            greeting = "下午好"
+        case 18..<23:
+            greeting = "晚上好"
+        default:
+            greeting = "夜深了"
+        }
+        return "\(greeting)，\(userFirstName)"
+    }
+
+    private var userFirstName: String {
+        let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+        let preferred = fullName.split(separator: " ").first.map(String.init)
+        let login = NSUserName().split(separator: ".").first.map(String.init)
+        let name = (preferred?.isEmpty == false ? preferred : login) ?? "Michael"
+        return name.prefix(1).uppercased() + name.dropFirst()
     }
 
     private var subtitle: String {
@@ -2619,30 +3434,51 @@ private struct NewChatCategoryStrip: View {
     let apply: (NewChatQuickAction) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 ForEach(quickActions(for: mode)) { action in
-                    Button {
-                        apply(action)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: action.symbol)
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(action.title)
-                                .font(.system(size: 12, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(PKTheme.text2)
-                        .padding(.horizontal, 13)
-                        .frame(height: 34)
-                        .background(PKTheme.surfaceRaised.opacity(0.82))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
+                    NewChatCategoryButton(action: action, apply: apply)
                 }
             }
+            .fixedSize(horizontal: true, vertical: false)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(quickActions(for: mode)) { action in
+                        NewChatCategoryButton(action: action, apply: apply)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 1)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
+private struct NewChatCategoryButton: View {
+    let action: NewChatQuickAction
+    let apply: (NewChatQuickAction) -> Void
+
+    var body: some View {
+        Button {
+            apply(action)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: action.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(action.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(PKTheme.text2)
+            .padding(.horizontal, 13)
+            .frame(height: 34)
+            .background(PKTheme.surfaceRaised.opacity(0.82))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -2669,7 +3505,6 @@ private struct NewChatAssistantStrip: View {
                     .help(recommendation?.templateId == template.id ? "\(template.title) - \(recommendation?.reason ?? "")" : template.title)
                 }
             }
-            .padding(.vertical, 1)
         }
     }
 }
@@ -2733,7 +3568,7 @@ private struct NewChatAssistantCard: View {
 
                 HStack(spacing: 6) {
                     if isRecommended {
-                        CountBadge(text: "Suggested")
+                        CountBadge(text: "Best")
                     }
                     CountBadge(text: agentShortLabel(template.agentKind))
                     CountBadge(text: permissionTitle(assistantTemplatePermissionMode(template, current: currentPermissionMode)))
@@ -3030,6 +3865,9 @@ private struct JiraTicketRowEvidenceStrip: View {
             "Validation signals: \(summary.validationSignals.count)",
             "Pending commands: \(summary.pendingCommands.count)"
         ]
+        if let writeBackHelp = summary.writeBackHelp {
+            parts.append(writeBackHelp)
+        }
         if let actionSignalsHelp = summary.actionSignalsHelp {
             parts.append(actionSignalsHelp)
         }
@@ -3049,6 +3887,9 @@ private struct JiraTicketRowEvidenceStrip: View {
             JiraTicketRowEvidenceChip(symbol: "exclamationmark.triangle", value: summary.actionSignalCount, title: "Action signals")
             JiraTicketRowEvidenceChip(symbol: "checkmark.circle", value: summary.validationSignals.count, title: "Validation signals")
             JiraTicketRowEvidenceChip(symbol: "terminal", value: summary.pendingCommands.count, title: "Pending commands")
+            if summary.hasWriteBackResult {
+                JiraTicketRowWriteBackChip(summary: summary)
+            }
         }
         .help(helpText)
     }
@@ -3079,6 +3920,40 @@ private struct JiraTicketRowEvidenceChip: View {
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(value > 0 ? 0.86 : 0.50), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .help("\(title): \(value)")
+    }
+}
+
+private struct JiraTicketRowWriteBackChip: View {
+    let summary: JiraTicketEvidenceSummary
+
+    private var tone: Color {
+        switch summary.writeBackState {
+        case "posted": return PKTheme.ok
+        case "failed": return PKTheme.err
+        default: return PKTheme.warn
+        }
+    }
+
+    private var symbol: String {
+        summary.writeBackState == "failed" ? "exclamationmark.triangle" : "paperplane"
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(tone)
+            Text(summary.writeBackLabel)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(PKTheme.text2)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 22)
+        .background(tone.opacity(0.12))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(tone.opacity(0.62), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .help(summary.writeBackHelp ?? "Jira write-back: \(summary.writeBackLabel)")
     }
 }
 
@@ -3304,7 +4179,7 @@ private struct ComposerSkillCardRow: View {
     let select: (ComposerSkillCardModel) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 ForEach(skills) { skill in
                     ComposerSkillCard(skill: skill) {
@@ -3312,9 +4187,21 @@ private struct ComposerSkillCardRow: View {
                     }
                 }
             }
-            .padding(.horizontal, 2)
-            .padding(.vertical, 1)
+            .fixedSize(horizontal: true, vertical: false)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(skills) { skill in
+                        ComposerSkillCard(skill: skill) {
+                            select(skill)
+                        }
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 1)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
@@ -3375,6 +4262,9 @@ private func composerSkillSubtitle(for capability: Capability) -> String {
     if isLogTraceSkillName(lower) {
         return "Trace logs by conversationId"
     }
+    if isReviewSkillName(lower) {
+        return "Review code or MR changes"
+    }
     if lower.contains("clickhouse") || lower.contains("ch sql") {
         return "Query project data"
     }
@@ -3392,6 +4282,9 @@ private func composerSkillSymbol(for capability: Capability) -> String {
     if isLogTraceSkillName(lower) {
         return "waveform.path.ecg"
     }
+    if isReviewSkillName(lower) {
+        return "doc.text.magnifyingglass"
+    }
     if lower.contains("clickhouse") || lower.contains("ch sql") {
         return "tablecells"
     }
@@ -3405,6 +4298,9 @@ private func composerSkillTint(for capability: Capability, index: Int) -> Color 
     let lower = capability.name.lowercased()
     if isLogTraceSkillName(lower) {
         return PKTheme.primary
+    }
+    if isReviewSkillName(lower) {
+        return Color(red: 0.78, green: 0.88, blue: 1.00)
     }
     if lower.contains("clickhouse") || lower.contains("ch sql") {
         return Color(red: 0.62, green: 0.86, blue: 0.58)
@@ -4493,17 +5389,20 @@ private func composerSkillPriority(for capability: Capability) -> Int {
     if isLogTraceSkillName(lower) {
         return 0
     }
-    if lower.contains("clickhouse") {
+    if isReviewSkillName(lower) {
         return 1
     }
-    if lower.contains("ch sql") {
+    if lower.contains("clickhouse") {
         return 2
     }
-    if lower.contains("superpower") {
+    if lower.contains("ch sql") {
         return 3
     }
-    if lower.contains("draw") || lower.contains("diagram") {
+    if lower.contains("superpower") {
         return 4
+    }
+    if lower.contains("draw") || lower.contains("diagram") {
+        return 5
     }
     if capability.configState == "ready" {
         return 10
@@ -4520,6 +5419,14 @@ private func isLogTraceSkillName(_ lowercasedName: String) -> Bool {
         || lowercasedName.contains("log tracer")
         || lowercasedName.contains("trace")
         || lowercasedName.contains("iva")
+}
+
+private func isReviewSkillName(_ lowercasedName: String) -> Bool {
+    lowercasedName.contains("code review")
+        || lowercasedName.contains("review")
+        || lowercasedName.contains("mycr")
+        || lowercasedName.contains("merge request")
+        || lowercasedName.contains("air-review")
 }
 
 private func composerSkillSlug(_ value: String) -> String {
@@ -4556,11 +5463,52 @@ private struct MinimalChatComposer: View {
     let send: () -> Void
     @State private var isHovering = false
     @State private var editorFocused = false
+    @State private var draftText: String
     @State private var imageAttachments: [ComposerImageAttachment] = []
+    @State private var referenceAttachments: [ComposerReferenceAttachment] = []
     @State private var attachmentError: String?
 
+    init(
+        snapshot: NativeStoreSnapshot,
+        selectedWorkspaceId: Binding<EntityID?>,
+        selectedPermissionMode: Binding<PermissionMode>,
+        text: Binding<String>,
+        placeholder: String,
+        focused: FocusState<Bool>.Binding,
+        selectedAgentKind: NativeAgentKind,
+        isRunning: Bool,
+        showsSkillCards: Bool = true,
+        branchOptions: [String] = [],
+        branchStatus: String? = nil,
+        openTerminal: @escaping () -> Void = {},
+        captureWorkItem: @escaping () -> Void,
+        switchBranch: @escaping (String) -> Void = { _ in },
+        send: @escaping () -> Void
+    ) {
+        self.snapshot = snapshot
+        self._selectedWorkspaceId = selectedWorkspaceId
+        self._selectedPermissionMode = selectedPermissionMode
+        self._text = text
+        self._draftText = State(initialValue: text.wrappedValue)
+        self.placeholder = placeholder
+        self.focused = focused
+        self.selectedAgentKind = selectedAgentKind
+        self.isRunning = isRunning
+        self.showsSkillCards = showsSkillCards
+        self.branchOptions = branchOptions
+        self.branchStatus = branchStatus
+        self.openTerminal = openTerminal
+        self.captureWorkItem = captureWorkItem
+        self.switchBranch = switchBranch
+        self.send = send
+    }
+
     private var canSend: Bool {
-        !isRunning && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imageAttachments.isEmpty)
+        !isRunning && (
+            !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !imageAttachments.isEmpty
+                || !referenceAttachments.isEmpty
+        )
     }
 
     private var accent: Color {
@@ -4572,23 +5520,25 @@ private struct MinimalChatComposer: View {
     }
 
     private var draftWordCount: Int {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftText.trimmingCharacters(in: .whitespacesAndNewlines)
             .split { $0.isWhitespace || $0.isNewline }
             .count
     }
 
     private var sendHelpText: String {
         if isRunning { return "Agent is running" }
-        if !canSend { return "Add a prompt or image before sending" }
-        if imageAttachments.isEmpty { return "Send prompt" }
-        return "Send with \(imageAttachments.count) image\(imageAttachments.count == 1 ? "" : "s")"
+        if !canSend { return "Add a prompt, reference, or image before sending" }
+        if imageAttachments.isEmpty && referenceAttachments.isEmpty { return "Send prompt" }
+        let referenceText = referenceAttachments.isEmpty ? nil : "\(referenceAttachments.count) reference\(referenceAttachments.count == 1 ? "" : "s")"
+        let imageText = imageAttachments.isEmpty ? nil : "\(imageAttachments.count) image\(imageAttachments.count == 1 ? "" : "s")"
+        return "Send with \([referenceText, imageText].compactMap { $0 }.joined(separator: " and "))"
     }
 
     private var skillCards: [ComposerSkillCardModel] {
         guard showsSkillCards else {
             return []
         }
-        guard composerShouldShowSkillCards(for: text) else {
+        guard composerShouldShowSkillCards(for: draftText) else {
             return []
         }
 
@@ -4609,7 +5559,7 @@ private struct MinimalChatComposer: View {
             let command = composerSkillCommand(for: capability)
             guard seenCommands.insert(command).inserted else { continue }
             cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: ""))
-            if cards.count == 3 { break }
+            if cards.count == 4 { break }
         }
         return cards
     }
@@ -4624,7 +5574,7 @@ private struct MinimalChatComposer: View {
 
             VStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
-                    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
+                    if draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(placeholder)
                                 .font(.system(size: 16, weight: .medium))
@@ -4639,19 +5589,31 @@ private struct MinimalChatComposer: View {
                     }
 
                     NativeSendingTextEditor(
-                        text: $text,
+                        text: $draftText,
                         focused: focused,
                         fontSize: 16,
                         lineSpacing: 3,
                         textContainerInset: NSSize(width: 0, height: 6),
                         onSend: sendWithAttachments,
                         onPasteImages: pasteImagesFromClipboard,
+                        onPasteReferences: pasteReferencesFromClipboard,
                         onFocusChange: { editorFocused = $0 }
                     )
                     .frame(minHeight: 126, maxHeight: 176)
                     .padding(.top, 20)
                     .padding(.horizontal, 18)
                     .padding(.bottom, 4)
+                }
+
+                if !referenceAttachments.isEmpty {
+                    ComposerReferenceAttachmentStrip(
+                        references: referenceAttachments,
+                        remove: { reference in
+                            referenceAttachments.removeAll { $0.id == reference.id }
+                        }
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 9)
                 }
 
                 if !imageAttachments.isEmpty || attachmentError != nil {
@@ -4702,6 +5664,10 @@ private struct MinimalChatComposer: View {
                         StatusPill(text: "\(imageAttachments.count) IMAGE\(imageAttachments.count == 1 ? "" : "S")", color: accent)
                     }
 
+                    if !referenceAttachments.isEmpty {
+                        StatusPill(text: "\(referenceAttachments.count) REF\(referenceAttachments.count == 1 ? "" : "S")", color: accent)
+                    }
+
                     Spacer(minLength: 0)
 
                     ComposerIconButton(symbol: "paperclip", title: "Attach Images") {
@@ -4747,8 +5713,10 @@ private struct MinimalChatComposer: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.22 : 0.12), radius: focused.wrappedValue ? 24 : 16, x: 0, y: 14)
             .onHover { isHovering = $0 }
-            .onPasteCommand(of: [.image, .fileURL]) { _ in
-                addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+            .onPasteCommand(of: composerPasteCommandTypes) { _ in
+                if !pasteImagesFromClipboard() {
+                    _ = pasteReferencesFromClipboard()
+                }
                 refocusComposer()
             }
             .onChange(of: isRunning) { _, running in
@@ -4756,7 +5724,18 @@ private struct MinimalChatComposer: View {
                     refocusComposer()
                 }
             }
+            .onChange(of: text) { _, newValue in
+                guard newValue != draftText else { return }
+                draftText = newValue
+            }
         }
+    }
+
+    private func addReferences(_ references: [ComposerReferenceAttachment]) {
+        referenceAttachments = composerMergedReferenceAttachments(
+            existing: referenceAttachments,
+            newReferences: references
+        )
     }
 
     private func addAttachments(_ result: ComposerImageAttachmentImportResult) {
@@ -4770,7 +5749,7 @@ private struct MinimalChatComposer: View {
     }
 
     private func insertSkillCommand(_ command: String) {
-        text = command
+        draftText = command
         focused.wrappedValue = true
     }
 
@@ -4781,13 +5760,40 @@ private struct MinimalChatComposer: View {
         return true
     }
 
+    private func pasteReferencesFromClipboard() -> Bool {
+        let extraction = ComposerReferenceAttachmentStore.importReferencesFromPasteboard()
+        guard !extraction.references.isEmpty else { return false }
+        addReferences(extraction.references)
+        appendRemainingReferenceText(extraction.text)
+        refocusComposer()
+        return true
+    }
+
+    private func appendRemainingReferenceText(_ remaining: String) {
+        guard !remaining.isEmpty else { return }
+        let current = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftText = current.isEmpty ? remaining : "\(current) \(remaining)"
+    }
+
     private func sendWithAttachments() {
         guard canSend else { return }
-        text = ComposerAttachmentPrompt.appendImageRefs(
-            to: text,
+        let extraction = composerExtractReferenceAttachments(from: draftText)
+        let references = composerMergedReferenceAttachments(
+            existing: referenceAttachments,
+            newReferences: extraction.references
+        )
+        var outgoing = ComposerAttachmentPrompt.appendReferenceRefs(
+            to: extraction.text,
+            references: references.map(\.promptRef)
+        )
+        outgoing = ComposerAttachmentPrompt.appendImageRefs(
+            to: outgoing,
             images: imageAttachments.map { ComposerImageAttachmentRef(name: $0.name, path: $0.url.path) }
         )
+        text = outgoing
+        draftText = ""
         imageAttachments = []
+        referenceAttachments = []
         attachmentError = nil
         send()
         refocusComposer()
@@ -5136,6 +6142,8 @@ private struct BranchPickerPopover: View {
     let branchStatus: String?
     let close: () -> Void
     let switchBranch: (String) -> Void
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
 
     private var branches: [String] {
         var seen = Set<String>()
@@ -5144,13 +6152,43 @@ private struct BranchPickerPopover: View {
             .filter { seen.insert($0).inserted }
     }
 
+    private var showsSearch: Bool {
+        branches.count > 8
+    }
+
+    private var filteredBranches: [String] {
+        let tokens = query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+
+        guard !tokens.isEmpty else { return branches }
+        return branches.filter { branch in
+            let lowercased = branch.lowercased()
+            return tokens.allSatisfy { lowercased.contains($0) }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Branch")
-                .font(.system(size: 9.5, weight: .semibold))
-                .foregroundStyle(PKTheme.text4)
-                .padding(.horizontal, 7)
-                .padding(.top, 3)
+            HStack(spacing: 6) {
+                Text("Branch")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(PKTheme.text4)
+                if showsSearch, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("\(filteredBranches.count)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(PKTheme.text4)
+                        .padding(.horizontal, 6)
+                        .frame(height: 18)
+                        .background(PKTheme.control.opacity(0.72))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .padding(.top, 3)
 
             if let branchStatus, !branchStatus.isEmpty {
                 Text(branchStatus)
@@ -5161,17 +6199,32 @@ private struct BranchPickerPopover: View {
                     .padding(.bottom, 2)
             }
 
+            if showsSearch {
+                BranchSearchField(
+                    query: $query,
+                    focused: $searchFocused,
+                    submit: selectFirstFilteredBranch
+                )
+                .padding(.horizontal, 3)
+                .padding(.bottom, 2)
+            }
+
             ScrollView {
                 VStack(spacing: 2) {
-                    ForEach(branches, id: \.self) { branch in
+                    if filteredBranches.isEmpty {
+                        Text("No matching branches")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(PKTheme.text4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 7)
+                    }
+                    ForEach(filteredBranches, id: \.self) { branch in
                         BranchPickerRow(
                             branch: branch,
                             selected: branch == currentBranch
                         ) {
-                            if branch != currentBranch {
-                                switchBranch(branch)
-                            }
-                            close()
+                            select(branch)
                         }
                     }
                 }
@@ -5179,9 +6232,65 @@ private struct BranchPickerPopover: View {
             }
             .frame(maxHeight: 150)
         }
-        .frame(width: 218)
+        .frame(width: showsSearch ? 286 : 218)
         .padding(4)
         .background(PKTheme.panel.opacity(0.98))
+        .onAppear {
+            if showsSearch {
+                DispatchQueue.main.async {
+                    searchFocused = true
+                }
+            }
+        }
+    }
+
+    private func selectFirstFilteredBranch() {
+        guard let branch = filteredBranches.first else { return }
+        select(branch)
+    }
+
+    private func select(_ branch: String) {
+        if branch != currentBranch {
+            switchBranch(branch)
+        }
+        close()
+    }
+}
+
+private struct BranchSearchField: View {
+    @Binding var query: String
+    var focused: FocusState<Bool>.Binding
+    let submit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(PKTheme.text4)
+                .frame(width: 12)
+            TextField("Search branches", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(PKTheme.text)
+                .focused(focused)
+                .onSubmit(submit)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(PKTheme.text4)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 7)
+        .frame(height: 27)
+        .background(PKTheme.control.opacity(0.68))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edgeStrong.opacity(0.48), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -5220,6 +6329,7 @@ private struct BranchPickerRow: View {
 private struct ComposerIconButton: View {
     let symbol: String
     let title: String
+    var help: String? = nil
     let action: () -> Void
 
     var body: some View {
@@ -5233,7 +6343,8 @@ private struct ComposerIconButton: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .help(title)
+        .help(help ?? title)
+        .accessibilityLabel(Text(title))
     }
 }
 
@@ -5245,6 +6356,7 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
     var textContainerInset: NSSize = NSSize(width: 0, height: 0)
     let onSend: () -> Void
     var onPasteImages: (() -> Bool)? = nil
+    var onPasteReferences: (() -> Bool)? = nil
     var onFocusChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -5263,6 +6375,7 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.onSend = onSend
         textView.onPasteImages = onPasteImages
+        textView.onPasteReferences = onPasteReferences
         textView.onFocusChange = { [weak coordinator = context.coordinator] isFocused in
             coordinator?.setFocused(isFocused)
         }
@@ -5298,6 +6411,7 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         textView.onSend = onSend
         textView.onPasteImages = onPasteImages
+        textView.onPasteReferences = onPasteReferences
         textView.onFocusChange = { [weak coordinator = context.coordinator] isFocused in
             coordinator?.setFocused(isFocused)
         }
@@ -5366,6 +6480,7 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
     final class SendingNSTextView: NSTextView {
         var onSend: (() -> Void)?
         var onPasteImages: (() -> Bool)?
+        var onPasteReferences: (() -> Bool)?
         var onFocusChange: ((Bool) -> Void)?
 
         override func becomeFirstResponder() -> Bool {
@@ -5411,7 +6526,20 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
             if onPasteImages?() == true {
                 return
             }
+            if onPasteReferences?() == true {
+                return
+            }
             super.paste(sender)
+        }
+
+        override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+            if onPasteImages?() == true {
+                return true
+            }
+            if onPasteReferences?() == true {
+                return true
+            }
+            return super.readSelection(from: pboard, type: type)
         }
     }
 }
@@ -5423,18 +6551,31 @@ private struct ConversationWorkspace: View {
     @Binding var selectedWorkspaceId: EntityID?
     @Binding var selectedWorkItemId: EntityID?
     @ObservedObject var model: NativeAppModel
+    @Binding var focusedGeneratedUIAction: GeneratedUIActionFocus?
     var immersive = false
+    var fullBleed = false
     var paneLabel: String?
+    var locksComposerWorkspaceToRun = true
     let newChat: () -> Void
     var newSideChat: (() -> Void)?
     var startFollowUpSideChat: ((AgentRun, RunFollowUpAction) -> Void)?
     var closeChat: (() -> Void)?
     var detachChat: (() -> Void)?
     let openWorkItem: () -> Void
+    var preComposerContent: AnyView? = nil
+    var startConversation: ((String) async -> EntityID?)? = nil
     @State private var replyDraft = ""
     @State private var stagedFollowUpPermissionMode: PermissionMode?
     @State private var stagedFollowUpLabel: String?
     @State private var terminalOpen = false
+    @State private var codeReviewOpen = false
+    @State private var codeChangesSnapshot: NativeCodeChangesSnapshot?
+    @State private var codeChangesLoading = false
+    @State private var codeChangesError: String?
+    @State private var selectedCodeChangePath: String?
+    @State private var selectedCodeReviewScope: NativeCodeReviewScope = .branch
+    @State private var codeReviewComments: [NativeCodeReviewComment] = []
+    @State private var selectedOutputArtifactId: EntityID?
 
     private var conversationAgentKind: NativeAgentKind {
         guard let run else { return model.selectedAgentKind }
@@ -5446,7 +6587,8 @@ private struct ConversationWorkspace: View {
     }
 
     private var cornerRadius: CGFloat {
-        immersive ? 18 : 8
+        if fullBleed { return 0 }
+        return immersive ? 18 : 8
     }
 
     private var currentRunBlocksReply: Bool {
@@ -5462,7 +6604,44 @@ private struct ConversationWorkspace: View {
         stagedFollowUpPermissionMode ?? run?.permissionMode ?? model.selectedPermissionMode
     }
 
+    private var composerContextWorkspaceId: EntityID? {
+        locksComposerWorkspaceToRun ? run?.workspaceId : nil
+    }
+
+    private var composerWorkspaceId: EntityID? {
+        composerContextWorkspaceId ?? selectedWorkspaceId
+    }
+
+    private var composerWorkspace: Workspace? {
+        guard let composerWorkspaceId else {
+            return selectedWorkspace
+        }
+        return snapshot.workspaces.first { $0.id == composerWorkspaceId } ?? selectedWorkspace
+    }
+
+    private var conversationWorkspace: Workspace? {
+        if let workspaceId = run?.workspaceId ?? selectedWorkspaceId {
+            return snapshot.workspaces.first { $0.id == workspaceId } ?? selectedWorkspace
+        }
+        return selectedWorkspace
+    }
+
+    private var workspaceMemoryCards: [KnowledgeCard] {
+        nativeWorkspaceMemoryCards(snapshot: snapshot, workspace: conversationWorkspace)
+    }
+
+    private var shouldStartNewConversationForSelectedWorkspace: Bool {
+        guard !locksComposerWorkspaceToRun,
+              startConversation != nil,
+              let run,
+              let selectedWorkspaceId else {
+            return false
+        }
+        return run.workspaceId != selectedWorkspaceId
+    }
+
     var body: some View {
+        HStack(spacing: 0) {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 if immersive {
@@ -5489,10 +6668,30 @@ private struct ConversationWorkspace: View {
                 .layoutPriority(1)
                 Spacer(minLength: 8)
                 HStack(spacing: 7) {
+                    if let conversationWorkspace, conversationWorkItem == nil {
+                        WorkspaceMemoryTitleButton(
+                            workspace: conversationWorkspace,
+                            cards: workspaceMemoryCards,
+                            accent: accent
+                        )
+                    }
                     if let paneLabel {
                         StatusPill(text: paneLabel, color: accent)
                     }
-                    StatusPill(text: run?.state.rawValue ?? "starting", color: runStateColor(run?.state))
+                    if shouldShowCodeChangesEntry {
+                        CodeChangesTitleButton(
+                            snapshot: codeChangesSnapshot,
+                            isOpen: codeReviewOpen,
+                            accent: accent,
+                            pendingComments: codeReviewComments.count
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                codeReviewOpen.toggle()
+                            }
+                            refreshCodeChanges(force: true)
+                        }
+                    }
+                    StatusPill(text: run?.state.rawValue ?? "draft", color: runStateColor(run?.state))
                     if let newSideChat {
                         ComposerIconButton(symbol: "rectangle.split.2x1", title: "Add Inline Chat", action: newSideChat)
                     }
@@ -5525,22 +6724,37 @@ private struct ConversationWorkspace: View {
             .padding(.top, immersive ? 18 : 14)
             .padding(.bottom, 10)
 
-            ConversationContextRibbon(
-                workspace: selectedWorkspace,
-                workItem: conversationWorkItem,
-                run: run,
-                agentKind: conversationAgentKind,
-                agentName: agentLabel,
-                terminalDirectory: selectedWorkspace.flatMap { model.terminalCurrentDirectory(for: $0) },
-                permissionMode: effectiveReplyPermissionMode,
-                stagedFollowUp: stagedFollowUpLabel
-            )
-            .padding(.horizontal, immersive ? 22 : 18)
-            .padding(.bottom, immersive ? 16 : 12)
-
             Rectangle()
                 .fill(PKTheme.edge.opacity(0.72))
                 .frame(height: 1)
+
+            if codeReviewOpen {
+                NativeCodeReviewModePane(
+                    snapshot: codeChangesSnapshot,
+                    isLoading: codeChangesLoading,
+                    error: codeChangesError,
+                    selectedScope: $selectedCodeReviewScope,
+                    selectedPath: $selectedCodeChangePath,
+                    comments: $codeReviewComments,
+                    accent: accent,
+                    refresh: {
+                        refreshCodeChanges(force: true)
+                    },
+                    close: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            codeReviewOpen = false
+                        }
+                    },
+                    send: sendCodeReviewComments
+                )
+                .padding(.horizontal, immersive ? 22 : 18)
+                .padding(.vertical, 12)
+                .transition(.move(edge: .top).combined(with: .opacity))
+
+                Rectangle()
+                    .fill(PKTheme.edge.opacity(0.62))
+                    .frame(height: 1)
+            }
 
             if terminalOpen {
                 ContextTerminalPane(
@@ -5564,90 +6778,103 @@ private struct ConversationWorkspace: View {
 
             ScrollViewReader { reader in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(run?.messages ?? []) { message in
-                            if message.role == .user {
-                                ConversationMessageBubble(
-                                    title: "You",
-                                    subtitle: selectedWorkspace?.name ?? "Project",
-                                    text: message.content,
-                                    createdAt: message.createdAt,
-                                    symbol: "person.crop.circle",
+                    LazyVStack(alignment: .leading, spacing: 18) {
+                        if let run {
+                            ForEach(run.messages) { message in
+                                ConversationHistoryMessageRow(
+                                    message: message,
+                                    userSubtitle: selectedWorkspace?.name ?? "Project",
+                                    assistantTitle: agentLabel,
+                                    trailing: true,
                                     accent: accent,
-                                    trailing: true
+                                    onSendReviewComments: sendReviewComments(_:)
                                 )
-                            } else if message.role == .assistant {
-                                AssistantResponseCard(
-                                    title: agentLabel,
-                                    text: message.content,
-                                    createdAt: message.createdAt,
-                                    state: .completed,
-                                    isRunning: false,
-                                    accent: accent
-                                )
+                                .equatable()
                             }
+
+                            ConversationMessageBubble(
+                                title: "You",
+                                subtitle: selectedWorkspace?.name ?? "Project",
+                                text: run.promptSnapshot,
+                                createdAt: run.startedAt,
+                                symbol: "person.crop.circle",
+                                accent: accent,
+                                trailing: true,
+                                onRerun: { Task { await model.rerunChat(runId: run.id) } }
+                            )
+
+                            AssistantResponseCard(
+                                title: agentLabel,
+                                text: assistantText,
+                                createdAt: run.endedAt ?? run.startedAt,
+                                startedAt: run.startedAt,
+                                endedAt: run.endedAt,
+                                state: run.state,
+                                isRunning: currentRunBlocksReply,
+                                accent: accent,
+                                runId: run.id,
+                                focusedGeneratedUIAction: focusedGeneratedUIAction,
+                                followUpActions: activeRunFollowUpActions,
+                                onRerun: { Task { await model.rerunChat(runId: run.id) } },
+                                onFollowUp: stageFollowUp(_:),
+                                onFollowUpSideChat: startFollowUpSideChat.map { starter in
+                                    { action in starter(run, action) }
+                                },
+                                onSaveEvidence: saveEvidenceAction,
+                                outputs: conversationOutputs,
+                                selectedOutputArtifactId: selectedOutputArtifactId,
+                                onSendReviewComments: sendReviewComments(_:),
+                                onOpenOutput: openOutputPane(_:)
+                            )
+                            .id("assistant-output")
+                        } else if !model.draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ConversationMessageBubble(
+                                title: "You",
+                                subtitle: selectedWorkspace?.name ?? "Project",
+                                text: model.draftPrompt,
+                                createdAt: nil,
+                                symbol: "person.crop.circle",
+                                accent: accent,
+                                trailing: true,
+                                onRerun: nil
+                            )
+                            .id("assistant-output")
+                        } else {
+                            Color.clear
+                                .frame(height: 1)
+                                .id("assistant-output")
                         }
-
-                        ConversationMessageBubble(
-                            title: "You",
-                            subtitle: selectedWorkspace?.name ?? "Project",
-                            text: run?.promptSnapshot ?? model.draftPrompt,
-                            createdAt: run?.startedAt,
-                            symbol: "person.crop.circle",
-                            accent: accent,
-                            trailing: true,
-                            onRerun: run.map { currentRun in
-                                { Task { await model.rerunChat(runId: currentRun.id) } }
-                            }
-                        )
-
-                        AssistantResponseCard(
-                            title: agentLabel,
-                            text: assistantText,
-                            createdAt: run?.endedAt ?? run?.startedAt,
-                            state: run?.state,
-                            isRunning: currentRunBlocksReply,
-                            accent: accent,
-                            followUpActions: chatRunFollowUpActions(
-                                run: run,
-                                workItem: conversationWorkItem,
-                                assistantText: assistantText
-                            ),
-                            onRerun: run.map { currentRun in
-                                { Task { await model.rerunChat(runId: currentRun.id) } }
-                            },
-                            onFollowUp: stageFollowUp(_:),
-                            onFollowUpSideChat: run.flatMap { currentRun in
-                                startFollowUpSideChat.map { starter in
-                                    { action in starter(currentRun, action) }
-                                }
-                            },
-                            onSaveEvidence: saveEvidenceAction
-                        )
-                        .id("assistant-output")
                     }
                     .padding(immersive ? 24 : 20)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onChange(of: run?.transcript ?? "") { _, _ in
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        reader.scrollTo("assistant-output", anchor: .bottom)
-                    }
+                .onAppear {
+                    reader.scrollTo("assistant-output", anchor: .bottom)
+                    scrollToFocusedGeneratedUIAction(reader)
                 }
+                .onChange(of: focusedGeneratedUIAction) { _, _ in
+                    scrollToFocusedGeneratedUIAction(reader)
+                }
+            }
+
+            if let preComposerContent {
+                preComposerContent
+                    .padding(.horizontal, immersive ? 18 : 16)
+                    .padding(.top, immersive ? 14 : 12)
             }
 
             ConversationReplyComposer(
                 snapshot: snapshot,
                 selectedWorkspaceId: $selectedWorkspaceId,
-                contextWorkspaceId: run?.workspaceId,
+                contextWorkspaceId: composerContextWorkspaceId,
                 text: $replyDraft,
                 statusLine: model.statusLine,
                 isRunning: currentRunBlocksReply,
                 accent: accent,
-                branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
-                branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
+                branchOptions: composerWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
+                branchStatus: composerWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
                 switchBranch: { branch in
-                    Task { await model.switchBranch(branch, workspace: selectedWorkspace) }
+                    Task { await model.switchBranch(branch, workspace: composerWorkspace) }
                 }
             ) {
                 let next = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5658,12 +6885,14 @@ private struct ConversationWorkspace: View {
                 stagedFollowUpLabel = nil
                 Task {
                     let sentRunId: EntityID?
-                    if let run {
+                    if let run, !shouldStartNewConversationForSelectedWorkspace {
                         sentRunId = await model.sendMessage(
                             in: run.id,
                             message: next,
                             permissionMode: followUpPermissionMode
                         )
+                    } else if let startConversation {
+                        sentRunId = await startConversation(next)
                     } else {
                         model.draftPrompt = next
                         sentRunId = await model.startChat(
@@ -5674,16 +6903,63 @@ private struct ConversationWorkspace: View {
                     if let sentRunId,
                        let sentRun = model.snapshot.runs.first(where: { $0.id == sentRunId }) {
                         selectedWorkItemId = sentRun.workItemId
+                        selectedWorkspaceId = sentRun.workspaceId
                     }
                 }
             }
             .padding(immersive ? 18 : 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        if let selectedOutputArtifact {
+            Divider()
+                .overlay(PKTheme.edge)
+            ConversationOutputReviewPane(
+                artifact: selectedOutputArtifact,
+                sourceRun: artifactSourceRun(selectedOutputArtifact, snapshot: snapshot),
+                workItem: artifactWorkItem(selectedOutputArtifact, snapshot: snapshot) ?? conversationWorkItem,
+                accent: accent,
+                close: {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        selectedOutputArtifactId = nil
+                    }
+                },
+                copySummary: {
+                    copyTextToPasteboard(artifactClipboardSummary(
+                        artifact: selectedOutputArtifact,
+                        run: artifactSourceRun(selectedOutputArtifact, snapshot: snapshot),
+                        workItem: artifactWorkItem(selectedOutputArtifact, snapshot: snapshot) ?? conversationWorkItem
+                    ))
+                },
+                saveKnowledge: {
+                    saveOutputKnowledge(selectedOutputArtifact)
+                }
+            )
+            .frame(width: immersive ? 336 : 360)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
         }
         .onChange(of: replyDraft) { _, newValue in
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 stagedFollowUpPermissionMode = nil
                 stagedFollowUpLabel = nil
             }
+        }
+        .onAppear {
+            refreshComposerBranchesIfNeeded()
+            refreshCodeChanges()
+        }
+        .onChange(of: composerWorkspaceId) { _, _ in
+            refreshComposerBranchesIfNeeded(force: true)
+        }
+        .onChange(of: conversationWorkspace?.id) { _, _ in
+            selectedCodeChangePath = nil
+            selectedCodeReviewScope = .branch
+            codeReviewComments.removeAll()
+            refreshCodeChanges(force: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pikiclawStageFocusedGeneratedUIAction)) { _ in
+            stageFocusedGeneratedUIAction()
         }
         .background {
             if immersive {
@@ -5693,21 +6969,36 @@ private struct ConversationWorkspace: View {
                     .fill(PKTheme.panel.opacity(0.46))
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(accent.opacity(immersive ? 0.32 : 0.22), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(fullBleed ? Color.clear : accent.opacity(immersive ? 0.32 : 0.22), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .shadow(color: immersive ? accent.opacity(0.10) : .clear, radius: 22, y: 14)
+        .shadow(color: immersive && !fullBleed ? accent.opacity(0.10) : .clear, radius: fullBleed ? 0 : 22, y: fullBleed ? 0 : 14)
+    }
+
+    private func refreshComposerBranchesIfNeeded(force: Bool = false) {
+        guard let composerWorkspace else { return }
+        if !force, model.branchOptionsByWorkspace[composerWorkspace.id] != nil {
+            return
+        }
+        Task { await model.refreshBranches(for: composerWorkspace) }
     }
 
     private var runTitle: String {
-        run?.promptSnapshot.firstLineFallback("Conversation") ?? "Starting conversation"
+        if let run {
+            return run.promptSnapshot.firstLineFallback("Conversation")
+        }
+        if let conversationWorkItem {
+            return conversationWorkItem.title
+        }
+        return "Starting conversation"
     }
 
     private var immersiveSubtitle: String {
         let workspace = selectedWorkspace?.name ?? "Project"
+        let state = run?.state.rawValue ?? "draft"
         if let branch = selectedWorkspace?.currentBranch, !branch.isEmpty {
-            return "\(workspace) · \(branch) · \(run?.state.rawValue ?? "starting")"
+            return "\(workspace) · \(branch) · \(state)"
         }
-        return "\(workspace) · \(run?.state.rawValue ?? "starting")"
+        return "\(workspace) · \(state)"
     }
 
     private var agentLabel: String {
@@ -5722,7 +7013,7 @@ private struct ConversationWorkspace: View {
         if let transcript = run?.transcript, !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return transcript
         }
-        return model.isRunning ? "Starting the native runner..." : "No assistant output yet."
+        return model.isRunning ? "" : "No assistant output yet."
     }
 
     private var conversationWorkItem: WorkItem? {
@@ -5730,6 +7021,38 @@ private struct ConversationWorkspace: View {
             return snapshot.workItems.first(where: { $0.id == itemId })
         }
         return nil
+    }
+
+    private var usesTaskMessageFlow: Bool {
+        conversationWorkItem != nil
+    }
+
+    private var conversationOutputs: [Artifact] {
+        guard let run else { return [] }
+        return nativeRunOutputArtifacts(run: run, snapshot: snapshot)
+    }
+
+    private var activeRunFollowUpActions: [RunFollowUpAction] {
+        guard let run,
+              conversationShouldPrepareFollowUpActions(state: run.state, isRunning: currentRunBlocksReply) else {
+            return []
+        }
+        return chatRunFollowUpActions(
+            run: run,
+            workItem: conversationWorkItem,
+            workspace: conversationWorkspace,
+            assistantText: assistantText
+        )
+    }
+
+    private var shouldShowCodeChangesEntry: Bool {
+        if codeChangesSnapshot?.hasChanges == true { return true }
+        return activeRunFollowUpActions.contains { $0.id == runFollowUpTaskReviewActionID }
+    }
+
+    private var selectedOutputArtifact: Artifact? {
+        guard let selectedOutputArtifactId else { return nil }
+        return snapshot.artifacts.first { $0.id == selectedOutputArtifactId }
     }
 
     private var saveEvidenceAction: (() -> Void)? {
@@ -5742,11 +7065,1454 @@ private struct ConversationWorkspace: View {
         }
     }
 
+    private func saveOutputKnowledge(_ artifact: Artifact) {
+        Task { await model.saveArtifactKnowledgeNote(artifactId: artifact.id) }
+    }
+
+    private func openOutputPane(_ artifact: Artifact) {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            selectedOutputArtifactId = artifact.id
+        }
+    }
+
+    private func sendReviewComments(_ prompt: String) {
+        guard let run else { return }
+        Task {
+            _ = await model.sendMessage(
+                in: run.id,
+                message: prompt,
+                permissionMode: effectiveReplyPermissionMode
+            )
+        }
+    }
+
+    private func sendCodeReviewComments() {
+        guard let run,
+              !codeReviewComments.isEmpty else { return }
+        let prompt = nativeCodeReviewPrompt(
+            title: runTitle,
+            snapshot: codeChangesSnapshot,
+            comments: codeReviewComments
+        )
+        codeReviewComments.removeAll()
+        Task {
+            _ = await model.sendMessage(
+                in: run.id,
+                message: prompt,
+                permissionMode: .readOnly
+            )
+        }
+    }
+
+    private func refreshCodeChanges(force: Bool = false) {
+        guard let workspace = conversationWorkspace else { return }
+        if !force, codeChangesSnapshot != nil || codeChangesLoading {
+            return
+        }
+        codeChangesLoading = true
+        codeChangesError = nil
+        let lastTurnRefs = nativeCodeReviewLastTurnFileRefs(run: run, fallbackOutput: assistantText)
+        Task {
+            do {
+                let snapshot = try await NativeCodeChangesSnapshot.load(
+                    from: workspace.pathDisplay,
+                    lastTurnFileRefs: lastTurnRefs
+                )
+                await MainActor.run {
+                    codeChangesSnapshot = snapshot
+                    let visibleChanges = snapshot.changes(in: selectedCodeReviewScope)
+                    if selectedCodeChangePath == nil || !visibleChanges.contains(where: { $0.path == selectedCodeChangePath }) {
+                        selectedCodeChangePath = visibleChanges.first?.path
+                    }
+                    codeChangesLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    codeChangesError = error.localizedDescription
+                    codeChangesLoading = false
+                }
+            }
+        }
+    }
+
     private func stageFollowUp(_ action: RunFollowUpAction) {
+        if generatedUIActionFocusMatches(focusedGeneratedUIAction, runId: run?.id, actionId: action.id) {
+            focusedGeneratedUIAction = nil
+        }
+        if action.id == runFollowUpTaskReviewActionID {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                codeReviewOpen = true
+            }
+            refreshCodeChanges(force: true)
+            model.statusLine = "Code review mode opened - add line comments or send review"
+            return
+        }
+        if runFollowUpActionStartsImmediately(action), let run {
+            replyDraft = ""
+            stagedFollowUpPermissionMode = nil
+            stagedFollowUpLabel = nil
+            model.statusLine = "\(action.title) action started"
+            Task {
+                _ = await model.sendMessage(
+                    in: run.id,
+                    message: action.prompt,
+                    permissionMode: action.permissionMode
+                )
+            }
+            return
+        }
         stagedFollowUpPermissionMode = action.permissionMode
         stagedFollowUpLabel = runFollowUpStagedLabel(action)
         replyDraft = action.prompt
         model.statusLine = runFollowUpStagedStatus(action)
+    }
+
+    private func stageFocusedGeneratedUIAction() {
+        if let focus = focusedGeneratedUIAction, focus.runId != run?.id {
+            return
+        }
+        guard let action = focusedGeneratedUIFollowUpAction(
+            focus: focusedGeneratedUIAction,
+            run: run,
+            workItem: conversationWorkItem,
+            assistantText: assistantText
+        ) else {
+            model.statusLine = generatedUIStageFocusedActionUnavailableStatus
+            return
+        }
+        stageFollowUp(action)
+    }
+
+    private func scrollToFocusedGeneratedUIAction(_ reader: ScrollViewProxy) {
+        guard let focus = focusedGeneratedUIAction,
+              focus.runId == run?.id else {
+            return
+        }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.18)) {
+                reader.scrollTo(generatedUIActionFocusAnchorID(focus), anchor: .center)
+            }
+        }
+    }
+}
+
+private struct NativeCodeChange: Identifiable, Hashable, Sendable {
+    var id: String { path }
+    let path: String
+    let status: String
+    let additions: Int
+    let deletions: Int
+    let diff: String
+    let scopes: Set<NativeCodeReviewScope>
+
+    var badge: String {
+        let trimmed = status.gitTrimmed
+        return trimmed.isEmpty ? "M" : String(trimmed.prefix(2)).gitTrimmed
+    }
+
+    var statusLabel: String {
+        switch badge {
+        case "A", "??": return "Added"
+        case "D": return "Deleted"
+        case "R": return "Renamed"
+        case "M": return "Modified"
+        default: return "Changed"
+        }
+    }
+}
+
+private enum NativeCodeReviewScope: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case branch
+    case workingTree
+    case lastTurn
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .branch: return "Branch"
+        case .workingTree: return "Working tree"
+        case .lastTurn: return "Last turn"
+        }
+    }
+}
+
+private struct NativeCodeChangesSnapshot: Equatable, Sendable {
+    let rootPath: String
+    let branch: String?
+    let baseRef: String?
+    let shortstat: String?
+    let changes: [NativeCodeChange]
+    let lastTurnFileRefs: [String]
+
+    var hasChanges: Bool {
+        !changes.isEmpty
+    }
+
+    var fileCount: Int {
+        changes.count
+    }
+
+    var additions: Int {
+        changes.reduce(0) { $0 + $1.additions }
+    }
+
+    var deletions: Int {
+        changes.reduce(0) { $0 + $1.deletions }
+    }
+
+    var compactLabel: String {
+        guard hasChanges else { return "Code changes" }
+        let delta = "+\(additions) -\(deletions)"
+        return "Code changes · \(fileCount) file\(fileCount == 1 ? "" : "s") · \(delta)"
+    }
+
+    func changes(in scope: NativeCodeReviewScope) -> [NativeCodeChange] {
+        changes.filter { $0.scopes.contains(scope) }
+    }
+
+    func count(in scope: NativeCodeReviewScope) -> Int {
+        changes(in: scope).count
+    }
+
+    static func load(
+        from rootPath: String,
+        lastTurnFileRefs: [String]
+    ) async throws -> NativeCodeChangesSnapshot {
+        try await Task.detached(priority: .userInitiated) {
+            let branch = try? nativeGitOutput(["branch", "--show-current"], in: rootPath).gitTrimmed.nilIfEmpty
+            let baseRef = nativeCodeChangeBaseRef(rootPath: rootPath)
+            let status = try nativeGitOutput(["status", "--short"], in: rootPath)
+            let statusEntries = nativeCodeChangeStatusEntries(status)
+            let branchEntries = nativeCodeChangeBranchEntries(rootPath: rootPath, baseRef: baseRef)
+            let normalizedLastTurnRefs = nativeCodeReviewNormalizedLastTurnRefs(lastTurnFileRefs, rootPath: rootPath)
+            let shortstat = nativeCodeChangeCombinedShortstat(rootPath: rootPath)
+            let entries = nativeCodeChangeMergedEntries(branchEntries: branchEntries, statusEntries: statusEntries)
+            let changes = entries.map { entry -> NativeCodeChange in
+                let diff = nativeCodeChangeDiff(path: entry.path, status: entry.status, rootPath: rootPath, baseRef: baseRef)
+                let delta = nativeCodeChangeLineDelta(from: diff)
+                let isWorkingTree = statusEntries.contains { $0.path == entry.path }
+                let isBranch = branchEntries.contains { $0.path == entry.path } || isWorkingTree
+                let isLastTurn = nativeCodeReviewRefs(normalizedLastTurnRefs, include: entry.path)
+                var scopes = Set<NativeCodeReviewScope>()
+                if isBranch { scopes.insert(.branch) }
+                if isWorkingTree { scopes.insert(.workingTree) }
+                if isLastTurn { scopes.insert(.lastTurn) }
+                return NativeCodeChange(
+                    path: entry.path,
+                    status: entry.status,
+                    additions: delta.additions,
+                    deletions: delta.deletions,
+                    diff: diff,
+                    scopes: scopes
+                )
+            }
+            return NativeCodeChangesSnapshot(
+                rootPath: rootPath,
+                branch: branch,
+                baseRef: baseRef,
+                shortstat: shortstat,
+                changes: changes,
+                lastTurnFileRefs: normalizedLastTurnRefs
+            )
+        }.value
+    }
+}
+
+private struct NativeCodeReviewComment: Identifiable, Hashable {
+    let id = UUID()
+    let filePath: String
+    let line: Int?
+    let quote: String
+    var note: String = ""
+}
+
+private struct CodeChangesTitleButton: View {
+    let snapshot: NativeCodeChangesSnapshot?
+    let isOpen: Bool
+    let accent: Color
+    let pendingComments: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .heavy))
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 10.5, weight: .bold))
+                Text(label)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .lineLimit(1)
+                if pendingComments > 0 {
+                    CountBadge(value: pendingComments)
+                }
+            }
+            .foregroundStyle(accent)
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .background(accent.opacity(isOpen ? 0.18 : 0.10))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(isOpen ? 0.38 : 0.24), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help(isOpen ? "Hide code review mode" : "Open code review mode")
+    }
+
+    private var label: String {
+        if let snapshot, snapshot.hasChanges {
+            return snapshot.compactLabel
+        }
+        return "Code changes · Review"
+    }
+}
+
+private struct NativeCodeReviewModePane: View {
+    let snapshot: NativeCodeChangesSnapshot?
+    let isLoading: Bool
+    let error: String?
+    @Binding var selectedScope: NativeCodeReviewScope
+    @Binding var selectedPath: String?
+    @Binding var comments: [NativeCodeReviewComment]
+    let accent: Color
+    let refresh: () -> Void
+    let close: () -> Void
+    let send: () -> Void
+
+    private var selectedChange: NativeCodeChange? {
+        let changes = visibleChanges
+        guard let selectedPath else { return changes.first }
+        return changes.first { $0.path == selectedPath } ?? changes.first
+    }
+
+    private var visibleChanges: [NativeCodeChange] {
+        snapshot?.changes(in: selectedScope) ?? []
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.seal")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 26, height: 26)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Code review")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(headerSubtitle)
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if comments.count > 0 {
+                    StatusPill(text: "\(comments.count) pending", color: accent)
+                }
+                ComposerIconButton(symbol: "arrow.clockwise", title: "Refresh changes", action: refresh)
+                ComposerIconButton(symbol: "xmark", title: "Close review mode", action: close)
+            }
+
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.err)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PKTheme.err.opacity(0.08))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.err.opacity(0.22), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if isLoading && snapshot == nil {
+                NativeCodeReviewEmptyState(title: "Loading changes", subtitle: "Reading git status and diff for this workspace.", accent: accent)
+            } else if snapshot?.hasChanges != true {
+                NativeCodeReviewEmptyState(title: "No code changes", subtitle: "This workspace has no visible git changes yet.", accent: accent)
+            } else if visibleChanges.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    NativeCodeReviewScopePicker(
+                        snapshot: snapshot,
+                        selectedScope: $selectedScope,
+                        selectedPath: $selectedPath,
+                        accent: accent
+                    )
+                    NativeCodeReviewEmptyState(
+                        title: "\(selectedScope.title) has no files",
+                        subtitle: selectedScope == .lastTurn
+                            ? "The latest assistant turn did not name changed files, or those files are not in the current git diff."
+                            : "No files match this change scope.",
+                        accent: accent
+                    )
+                }
+            } else {
+                NativeCodeReviewScopePicker(
+                    snapshot: snapshot,
+                    selectedScope: $selectedScope,
+                    selectedPath: $selectedPath,
+                    accent: accent
+                )
+                HStack(spacing: 10) {
+                    NativeCodeChangeTree(
+                        changes: visibleChanges,
+                        selectedPath: $selectedPath,
+                        accent: accent
+                    )
+                    NativeCodeDiffView(
+                        change: selectedChange,
+                        comments: $comments,
+                        accent: accent
+                    )
+                }
+                .frame(minHeight: 300, maxHeight: 460)
+
+                if !comments.isEmpty {
+                    NativeCodeReviewCommentQueue(
+                        comments: $comments,
+                        accent: accent,
+                        send: send
+                    )
+                }
+            }
+        }
+        .padding(12)
+        .background(PKTheme.panelAlt.opacity(0.60))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var headerSubtitle: String {
+        if let snapshot, snapshot.hasChanges {
+            let branch = snapshot.branch?.gitTrimmed.nilIfEmpty ?? "detached"
+            let base = snapshot.baseRef.map { " vs \($0)" } ?? ""
+            return "\(branch)\(base) · \(snapshot.fileCount) file\(snapshot.fileCount == 1 ? "" : "s") · +\(snapshot.additions) -\(snapshot.deletions)"
+        }
+        if isLoading { return "Loading current workspace changes" }
+        return "Review changed files and queue line comments"
+    }
+}
+
+private struct NativeCodeReviewScopePicker: View {
+    let snapshot: NativeCodeChangesSnapshot?
+    @Binding var selectedScope: NativeCodeReviewScope
+    @Binding var selectedPath: String?
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(NativeCodeReviewScope.allCases) { scope in
+                Button {
+                    selectedScope = scope
+                    selectedPath = snapshot?.changes(in: scope).first?.path
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(scope.title)
+                            .font(.system(size: 10.5, weight: .bold))
+                        CountBadge(value: snapshot?.count(in: scope) ?? 0)
+                    }
+                    .foregroundStyle(selectedScope == scope ? PKTheme.primaryText : accent)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(selectedScope == scope ? accent : accent.opacity(0.08))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(selectedScope == scope ? 0.42 : 0.20), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help(nativeCodeReviewScopeHelp(scope))
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct NativeCodeChangeTree: View {
+    let changes: [NativeCodeChange]
+    @Binding var selectedPath: String?
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("CHANGED FILES")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(PKTheme.text4)
+                CountBadge(value: changes.count)
+                Spacer(minLength: 0)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 5) {
+                    ForEach(changes) { change in
+                        NativeCodeChangeRow(
+                            change: change,
+                            selected: selectedPath == change.path,
+                            accent: accent
+                        ) {
+                            selectedPath = change.path
+                        }
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+        }
+        .padding(10)
+        .frame(width: 240)
+        .frame(maxHeight: .infinity)
+        .background(PKTheme.inset.opacity(0.58))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct NativeCodeChangeRow: View {
+    let change: NativeCodeChange
+    let selected: Bool
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Text(change.badge)
+                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(selected ? PKTheme.primaryText : accent)
+                    .frame(width: 22, height: 18)
+                    .background(selected ? accent : accent.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(change.path)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(selected ? PKTheme.text : PKTheme.text2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("\(change.statusLabel) · +\(change.additions) -\(change.deletions)")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 42)
+            .background(selected ? accent.opacity(0.13) : PKTheme.control.opacity(0.30))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? accent.opacity(0.36) : PKTheme.edge.opacity(0.70), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct NativeCodeDiffView: View {
+    let change: NativeCodeChange?
+    @Binding var comments: [NativeCodeReviewComment]
+    let accent: Color
+
+    private var diffLines: [String] {
+        guard let change else { return [] }
+        return change.diff.components(separatedBy: .newlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Text(change?.path ?? "Diff")
+                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                if let change {
+                    StatusPill(text: "+\(change.additions) -\(change.deletions)", color: accent)
+                }
+            }
+            ScrollView([.vertical, .horizontal]) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if let change, diffLines.isEmpty {
+                        Text(change.badge == "??" ? "Untracked file. Add it to git to show a full diff here." : "No textual diff available for this file.")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(PKTheme.text3)
+                            .padding(12)
+                    } else {
+                        ForEach(Array(diffLines.enumerated()), id: \.offset) { index, line in
+                            NativeCodeDiffLineRow(
+                                line: line,
+                                lineNumber: index + 1,
+                                filePath: change?.path ?? "",
+                                accent: accent,
+                                addComment: addComment(_:lineNumber:filePath:)
+                            )
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(PKTheme.inset.opacity(0.72))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(PKTheme.inset.opacity(0.42))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func addComment(_ quote: String, lineNumber: Int, filePath: String) {
+        guard !filePath.isEmpty else { return }
+        comments.append(NativeCodeReviewComment(
+            filePath: filePath,
+            line: lineNumber,
+            quote: quote.gitTrimmed
+        ))
+    }
+}
+
+private struct NativeCodeDiffLineRow: View {
+    let line: String
+    let lineNumber: Int
+    let filePath: String
+    let accent: Color
+    let addComment: (String, Int, String) -> Void
+
+    private var tone: Color {
+        if line.hasPrefix("+"), !line.hasPrefix("+++") { return PKTheme.ok }
+        if line.hasPrefix("-"), !line.hasPrefix("---") { return PKTheme.err }
+        if line.hasPrefix("@@") { return accent }
+        return PKTheme.text3
+    }
+
+    private var background: Color {
+        if line.hasPrefix("+"), !line.hasPrefix("+++") { return PKTheme.ok.opacity(0.08) }
+        if line.hasPrefix("-"), !line.hasPrefix("---") { return PKTheme.err.opacity(0.08) }
+        if line.hasPrefix("@@") { return accent.opacity(0.10) }
+        return Color.clear
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Button {
+                addComment(line, lineNumber, filePath)
+            } label: {
+                Image(systemName: "plus.bubble")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(accent.opacity(line.gitTrimmed.isEmpty ? 0.28 : 0.82))
+            .disabled(line.gitTrimmed.isEmpty)
+            .help("Add review comment")
+
+            Text("\(lineNumber)")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(PKTheme.text4)
+                .frame(width: 34, alignment: .trailing)
+            Text(line.isEmpty ? " " : line)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(tone)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 6)
+        .background(background)
+    }
+}
+
+private struct NativeCodeReviewCommentQueue: View {
+    @Binding var comments: [NativeCodeReviewComment]
+    let accent: Color
+    let send: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Text("PENDING COMMENTS")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(PKTheme.text4)
+                CountBadge(value: comments.count)
+                Spacer(minLength: 0)
+                Button("Send review", action: send)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(accent)
+                    .disabled(comments.isEmpty)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach($comments) { $comment in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .top, spacing: 6) {
+                                Text("\(comment.filePath):\(comment.line ?? 0)")
+                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(accent)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer(minLength: 0)
+                                Button {
+                                    comments.removeAll { $0.id == comment.id }
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 8, weight: .bold))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(PKTheme.text4)
+                            }
+                            Text(comment.quote.firstLineFallback("Selected diff line"))
+                                .font(.caption2)
+                                .foregroundStyle(PKTheme.text3)
+                                .lineLimit(2)
+                            TextField("Review comment", text: $comment.note)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11))
+                                .padding(7)
+                                .background(PKTheme.inset.opacity(0.62))
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .padding(9)
+                        .frame(width: 260)
+                        .background(PKTheme.surfaceRaised.opacity(0.34))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.80), lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(PKTheme.inset.opacity(0.42))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct NativeCodeReviewEmptyState: View {
+    let title: String
+    let subtitle: String
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(accent)
+                .frame(width: 28, height: 28)
+                .background(accent.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text4)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 86)
+        .background(PKTheme.inset.opacity(0.52))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private func nativeCodeReviewPrompt(
+    title: String,
+    snapshot: NativeCodeChangesSnapshot?,
+    comments: [NativeCodeReviewComment]
+) -> String {
+    let changeSummary: String
+    if let snapshot, snapshot.hasChanges {
+        let files = snapshot.changes
+            .prefix(12)
+            .map { "- \($0.path) [\($0.badge)] +\($0.additions) -\($0.deletions)" }
+            .joined(separator: "\n")
+        changeSummary = """
+        Code changes:
+        Branch: \(snapshot.branch ?? "unknown")
+        Summary: \(snapshot.shortstat ?? snapshot.compactLabel)
+        Files:
+        \(files)
+        """
+    } else {
+        changeSummary = "Code changes: no current git changes snapshot was available."
+    }
+
+    let commentLines = comments.enumerated().map { index, comment in
+        let location = comment.line.map { "\(comment.filePath):\($0)" } ?? comment.filePath
+        let note = comment.note.gitTrimmed.nilIfEmpty ?? "Please review this line."
+        return """
+        \(index + 1). \(location)
+        Quote: \(comment.quote)
+        Comment: \(note)
+        """
+    }.joined(separator: "\n\n")
+
+    return """
+    Review the current code changes for \(title).
+
+    \(changeSummary)
+
+    User inline review comments:
+    \(commentLines)
+
+    Return findings first, ordered by severity, with file/line evidence when available. Then list open questions, verification gaps, and whether the change is ready or needs fixes. Do not edit files in this review turn unless I explicitly ask for fixes.
+    """
+}
+
+private func nativeCodeReviewLastTurnFileRefs(run: AgentRun?, fallbackOutput: String) -> [String] {
+    let assistantMessages = run?.messages
+        .filter { $0.role == .assistant }
+        .sorted { $0.createdAt < $1.createdAt } ?? []
+    let lastTurnText = assistantMessages.last?.content.gitTrimmed.nilIfEmpty
+        ?? fallbackOutput.gitTrimmed.nilIfEmpty
+        ?? run?.transcript.gitTrimmed.nilIfEmpty
+        ?? ""
+    return runFollowUpFileRefs(from: lastTurnText)
+}
+
+private func nativeCodeReviewScopeHelp(_ scope: NativeCodeReviewScope) -> String {
+    switch scope {
+    case .branch:
+        return "Show this branch's committed changes plus current local changes"
+    case .workingTree:
+        return "Show staged, unstaged, and untracked files"
+    case .lastTurn:
+        return "Show files named by the latest assistant turn"
+    }
+}
+
+private func nativeGitOutput(_ arguments: [String], in path: String) throws -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["git", "-C", path] + arguments
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+    process.waitUntilExit()
+
+    let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard process.terminationStatus == 0 else {
+        throw NativeCodeGitError(command: arguments.joined(separator: " "), message: errorOutput.gitTrimmed)
+    }
+    return output
+}
+
+private struct NativeCodeGitError: LocalizedError {
+    let command: String
+    let message: String
+
+    var errorDescription: String? {
+        message.isEmpty ? "git \(command) failed" : message
+    }
+}
+
+private func nativeCodeChangeStatusEntries(_ statusOutput: String) -> [(status: String, path: String)] {
+    statusOutput
+        .split(whereSeparator: \.isNewline)
+        .compactMap { rawLine in
+            let line = String(rawLine)
+            guard line.count >= 4 else { return nil }
+            let status = String(line.prefix(2)).gitTrimmed
+            let pathStart = line.index(line.startIndex, offsetBy: 3)
+            let rawPath = String(line[pathStart...]).gitTrimmed
+            let path = rawPath.components(separatedBy: " -> ").last?.gitTrimmed ?? rawPath
+            guard !path.isEmpty else { return nil }
+            return (status, path)
+        }
+}
+
+private func nativeCodeChangeBranchEntries(rootPath: String, baseRef: String?) -> [(status: String, path: String)] {
+    guard let baseRef,
+          let output = try? nativeGitOutput(["diff", "--name-status", "\(baseRef)...HEAD"], in: rootPath) else {
+        return []
+    }
+    return output
+        .split(whereSeparator: \.isNewline)
+        .compactMap { rawLine in
+            let parts = String(rawLine)
+                .split(separator: "\t")
+                .map(String.init)
+            guard parts.count >= 2 else { return nil }
+            let status = parts[0].gitTrimmed
+            let path = (parts.last ?? "").gitTrimmed
+            guard !path.isEmpty else { return nil }
+            return (status, path)
+        }
+}
+
+private func nativeCodeChangeMergedEntries(
+    branchEntries: [(status: String, path: String)],
+    statusEntries: [(status: String, path: String)]
+) -> [(status: String, path: String)] {
+    var entries: [(status: String, path: String)] = []
+    var seen = Set<String>()
+    for entry in branchEntries + statusEntries {
+        guard !seen.contains(entry.path) else { continue }
+        seen.insert(entry.path)
+        if let working = statusEntries.first(where: { $0.path == entry.path }) {
+            entries.append(working)
+        } else {
+            entries.append(entry)
+        }
+    }
+    return entries
+}
+
+private func nativeCodeChangeCombinedShortstat(rootPath: String) -> String? {
+    let staged = (try? nativeGitOutput(["diff", "--cached", "--shortstat"], in: rootPath))?.gitTrimmed.nilIfEmpty
+    let unstaged = (try? nativeGitOutput(["diff", "--shortstat"], in: rootPath))?.gitTrimmed.nilIfEmpty
+    return [
+        staged.map { "staged \($0)" },
+        unstaged.map { "unstaged \($0)" }
+    ]
+    .compactMap { $0 }
+    .joined(separator: "; ")
+    .nilIfEmpty
+}
+
+private func nativeCodeChangeDiff(path: String, status: String, rootPath: String, baseRef: String?) -> String {
+    var parts: [String] = []
+    if let baseRef,
+       let branch = try? nativeGitOutput(["diff", "\(baseRef)...HEAD", "--", path], in: rootPath).gitTrimmed,
+       !branch.isEmpty {
+        parts.append(branch)
+    }
+    if let staged = try? nativeGitOutput(["diff", "--cached", "--", path], in: rootPath).gitTrimmed,
+       !staged.isEmpty {
+        parts.append(staged)
+    }
+    if let unstaged = try? nativeGitOutput(["diff", "--", path], in: rootPath).gitTrimmed,
+       !unstaged.isEmpty {
+        parts.append(unstaged)
+    }
+    if parts.isEmpty, status == "??" {
+        return nativeCodeChangeUntrackedPreview(path: path, rootPath: rootPath)
+    }
+    return parts.joined(separator: "\n")
+}
+
+private func nativeCodeChangeUntrackedPreview(path: String, rootPath: String) -> String {
+    let fileURL = URL(fileURLWithPath: rootPath, isDirectory: true).appendingPathComponent(path)
+    guard let data = try? Data(contentsOf: fileURL),
+          data.count <= 256_000,
+          let text = String(data: data, encoding: .utf8) else {
+        return "Untracked file preview unavailable. The file may be binary or too large."
+    }
+    let lines = text.components(separatedBy: .newlines)
+    let body = lines.map { "+\($0)" }.joined(separator: "\n")
+    return """
+    diff --git a/\(path) b/\(path)
+    new file mode 100644
+    --- /dev/null
+    +++ b/\(path)
+    @@ -0,0 +1,\(lines.count) @@
+    \(body)
+    """
+}
+
+private func nativeCodeChangeBaseRef(rootPath: String) -> String? {
+    let candidates = [
+        "@{upstream}",
+        "origin/main",
+        "origin/master",
+        "main",
+        "master"
+    ]
+    for candidate in candidates {
+        guard let mergeBase = try? nativeGitOutput(["merge-base", "HEAD", candidate], in: rootPath).gitTrimmed,
+              !mergeBase.isEmpty else {
+            continue
+        }
+        return mergeBase
+    }
+    return nil
+}
+
+private func nativeCodeChangeLineDelta(from diff: String) -> (additions: Int, deletions: Int) {
+    var additions = 0
+    var deletions = 0
+    for line in diff.components(separatedBy: .newlines) {
+        if line.hasPrefix("+"), !line.hasPrefix("+++") {
+            additions += 1
+        } else if line.hasPrefix("-"), !line.hasPrefix("---") {
+            deletions += 1
+        }
+    }
+    return (additions, deletions)
+}
+
+private func nativeCodeReviewNormalizedLastTurnRefs(_ refs: [String], rootPath: String) -> [String] {
+    refs.compactMap { ref in
+        var value = ref.gitTrimmed
+        if value.hasPrefix(rootPath) {
+            value = String(value.dropFirst(rootPath.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        if let colon = value.lastIndex(of: ":") {
+            let suffix = value[value.index(after: colon)...]
+            if !suffix.isEmpty && suffix.allSatisfy(\.isNumber) {
+                value = String(value[..<colon])
+            }
+        }
+        return value.isEmpty ? nil : value
+    }
+}
+
+private func nativeCodeReviewRefs(_ refs: [String], include path: String) -> Bool {
+    refs.contains { ref in
+        ref == path || ref.hasSuffix("/\(path)") || path.hasSuffix("/\(ref)")
+    }
+}
+
+private struct WorkspaceMemoryTitleButton: View {
+    let workspace: Workspace
+    let cards: [KnowledgeCard]
+    let accent: Color
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 10, weight: .bold))
+                Text("Memory")
+                    .font(.system(size: 10, weight: .bold))
+                Text("\(cards.count)")
+                    .font(.system(size: 9, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(minWidth: 18, minHeight: 18)
+                    .background(accent)
+                    .clipShape(Capsule())
+            }
+            .foregroundStyle(cards.isEmpty ? PKTheme.text3 : accent)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(PKTheme.control.opacity(cards.isEmpty ? 0.45 : 0.72))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(cards.isEmpty ? 0.25 : 0.46), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            WorkspaceMemoryPopover(
+                workspace: workspace,
+                cards: cards,
+                accent: accent
+            )
+        }
+        .help(cards.isEmpty ? "No workspace memory yet" : "View workspace memory")
+    }
+}
+
+private struct WorkspaceMemoryPopover: View {
+    let workspace: Workspace
+    let cards: [KnowledgeCard]
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 30, height: 30)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Workspace Memory")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(workspace.name)
+                        .font(.caption)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                CountBadge(text: "\(cards.count)")
+            }
+
+            if cards.isEmpty {
+                EmptyMiniState(
+                    title: "No memory yet",
+                    subtitle: "Reusable notes saved from chat outputs will appear here."
+                )
+                .padding(.vertical, 8)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(cards.prefix(10))) { card in
+                            WorkspaceMemoryPopoverRow(card: card, accent: accent)
+                        }
+                        if cards.count > 10 {
+                            Text("+\(cards.count - 10) more")
+                                .font(.caption2)
+                                .foregroundStyle(PKTheme.text3)
+                                .padding(.top, 2)
+                        }
+                    }
+                }
+                .frame(maxHeight: 360)
+            }
+        }
+        .padding(14)
+        .frame(width: 380)
+        .background(PKTheme.panel)
+    }
+}
+
+private struct WorkspaceMemoryPopoverRow: View {
+    let card: KnowledgeCard
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(card.title.firstLineFallback("Workspace memory"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+                StatusPill(text: card.scope.rawValue, color: accent)
+            }
+            Text(card.body.firstLineFallback("Saved reusable workspace note."))
+                .font(.caption)
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(3)
+            HStack(spacing: 6) {
+                if !card.tags.isEmpty {
+                    Label(card.tags.prefix(3).joined(separator: ", "), systemImage: "tag")
+                }
+                if !card.artifactRefs.isEmpty {
+                    Label("\(card.artifactRefs.count) output\(card.artifactRefs.count == 1 ? "" : "s")", systemImage: "shippingbox")
+                }
+                if !card.sourceRefs.isEmpty {
+                    Label("\(card.sourceRefs.count) refs", systemImage: "link")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(PKTheme.text4)
+            .lineLimit(1)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PKTheme.surfaceRaised.opacity(0.42))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct ConversationOutputSection: View {
+    let artifacts: [Artifact]
+    let snapshot: NativeStoreSnapshot
+    let workItem: WorkItem?
+    let saveKnowledge: (Artifact) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 20, height: 20)
+                    .background(PKTheme.primary.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                Text("Outputs")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text3)
+                Spacer(minLength: 0)
+                CountBadge(value: artifacts.count)
+            }
+
+            ArtifactOutputList(
+                artifacts: artifacts,
+                snapshot: snapshot,
+                workItem: workItem,
+                limit: 4,
+                saveKnowledge: saveKnowledge
+            )
+        }
+        .padding(10)
+        .frame(maxWidth: 760, alignment: .leading)
+        .background(PKTheme.control.opacity(0.18))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.65), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct ConversationOutputCardStack: View {
+    let artifacts: [Artifact]
+    let selectedArtifactId: EntityID?
+    let open: (Artifact) -> Void
+
+    private var visibleArtifacts: [Artifact] {
+        Array(artifacts.prefix(3))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(visibleArtifacts) { artifact in
+                ConversationOutputCard(
+                    artifact: artifact,
+                    selected: selectedArtifactId == artifact.id,
+                    open: { open(artifact) }
+                )
+            }
+            if artifacts.count > visibleArtifacts.count {
+                Text("+\(artifacts.count - visibleArtifacts.count) more output\(artifacts.count - visibleArtifacts.count == 1 ? "" : "s")")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(PKTheme.text4)
+                    .padding(.leading, 4)
+            }
+        }
+    }
+}
+
+private struct ConversationOutputCard: View {
+    let artifact: Artifact
+    let selected: Bool
+    let open: () -> Void
+
+    private var statusColor: Color {
+        artifactStatusColor(artifact.status)
+    }
+
+    private var title: String {
+        artifact.title.firstLineFallback("Output")
+    }
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 12) {
+                Image(systemName: artifactOutputSymbol(artifact.kind))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(statusColor)
+                    .frame(width: 40, height: 40)
+                    .background(statusColor.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(artifactKindLabel(artifact.kind).capitalized)
+                        Text("·")
+                        Text(artifactURIKind(artifact))
+                        Text("·")
+                        Text(artifact.status.rawValue)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 6) {
+                    Text("Open")
+                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(selected ? PKTheme.primaryText : statusColor)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(selected ? statusColor : PKTheme.control.opacity(0.62))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(statusColor.opacity(selected ? 0.0 : 0.34), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? statusColor.opacity(0.13) : PKTheme.surfaceRaised.opacity(0.46))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? statusColor.opacity(0.64) : PKTheme.edge.opacity(0.82), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .help("Open \(title) in the output pane")
+    }
+}
+
+private struct ConversationOutputReviewPane: View {
+    let artifact: Artifact
+    let sourceRun: AgentRun?
+    let workItem: WorkItem?
+    let accent: Color
+    let close: () -> Void
+    let copySummary: () -> Void
+    let saveKnowledge: () -> Void
+    @State private var selectedReviewQuote = ""
+    @State private var copied = false
+
+    private var statusColor: Color {
+        artifactStatusColor(artifact.status)
+    }
+
+    private var provenance: String {
+        artifact.provenance.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var refs: [SourceRef] {
+        dedupedSourceRefs(artifact.sourceRefs + (workItem?.sourceRefs ?? []))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: artifactOutputSymbol(artifact.kind))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 34, height: 34)
+                    .background(statusColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(artifact.title.firstLineFallback("Output"))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(2)
+                    HStack(spacing: 6) {
+                        StatusPill(text: artifactKindLabel(artifact.kind), color: statusColor)
+                        StatusPill(text: artifact.status.rawValue, color: statusColor)
+                    }
+                }
+
+                Spacer(minLength: 0)
+                ComposerIconButton(symbol: "xmark", title: "Close Output", action: close)
+            }
+            .padding(14)
+
+            Rectangle()
+                .fill(PKTheme.edge.opacity(0.72))
+                .frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !provenance.isEmpty {
+                        MarkdownOutputReviewTextView(
+                            markdown: provenance,
+                            selectedText: $selectedReviewQuote,
+                            onAddComment: nil
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+                        .background(PKTheme.inset.opacity(0.72))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
+                        EmptyMiniState(title: "No preview text", subtitle: artifact.uri.isEmpty ? "This output has no URI." : artifact.uri)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ConversationOutputPaneMetaRow(label: "URI", value: artifact.uri.isEmpty ? "No URI" : artifact.uri)
+                        ConversationOutputPaneMetaRow(label: "Created", value: artifactCreatedLabel(artifact))
+                        if let sourceRun {
+                            ConversationOutputPaneMetaRow(label: "Source", value: artifactSourceLabel(sourceRun, workItem: workItem))
+                        }
+                    }
+
+                    if !refs.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Refs")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(PKTheme.text4)
+                                .textCase(.uppercase)
+                            ForEach(Array(refs.prefix(6).enumerated()), id: \.offset) { _, ref in
+                                ConversationOutputRefRow(ref: ref)
+                            }
+                        }
+                    }
+                }
+                .padding(14)
+            }
+
+            Rectangle()
+                .fill(PKTheme.edge.opacity(0.72))
+                .frame(height: 1)
+
+            HStack(spacing: 8) {
+                MessageActionButton(
+                    systemImage: copied ? "checkmark" : "doc.on.doc",
+                    help: copied ? "Copied" : "Copy output summary",
+                    action: {
+                        copySummary()
+                        copied = true
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_300_000_000)
+                            copied = false
+                        }
+                    }
+                )
+                MessageActionButton(systemImage: "arrow.up.right.square", help: "Open output URI") {
+                    openArtifactURI(artifact)
+                }
+                MessageActionButton(systemImage: "brain.head.profile", help: "Save knowledge", action: saveKnowledge)
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(PKTheme.panel.opacity(0.58))
+    }
+}
+
+private struct ConversationOutputPaneMetaRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label.uppercased())
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(PKTheme.text4)
+            Text(value)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(2)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(9)
+        .background(PKTheme.control.opacity(0.36))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.66), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct ConversationOutputRefRow: View {
+    let ref: SourceRef
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "link")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(PKTheme.primary)
+                .frame(width: 22, height: 22)
+                .background(PKTheme.primary.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ref.label.firstLineFallback(ref.kind))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                Text(ref.uri?.gitTrimmed.nilIfEmpty ?? ref.kind)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(PKTheme.text4)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(PKTheme.surfaceRaised.opacity(0.34))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.62), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -5815,28 +8581,291 @@ private struct ConversationContextRibbon: View {
     }
 }
 
+enum RunFollowUpGeneratedUIRole: String, Hashable {
+    case continuation
+    case choice
+    case form
+    case confirmationApprove
+    case confirmationDecline
+    case toolCard
+    case artifactCard
+    case fileCard
+    case evidenceCard
+    case handoffDraft
+    case saveEvidence
+    case knowledgeNote
+    case knowledgeCompare
+
+    var isEvidenceCard: Bool {
+        switch self {
+        case .artifactCard, .fileCard, .toolCard, .evidenceCard, .handoffDraft, .saveEvidence, .knowledgeNote, .knowledgeCompare:
+            return true
+        case .continuation, .choice, .form, .confirmationApprove, .confirmationDecline:
+            return false
+        }
+    }
+
+    var railGroupID: String {
+        switch self {
+        case .continuation, .choice:
+            return "choice"
+        case .form:
+            return "form"
+        case .confirmationApprove, .confirmationDecline:
+            return "confirm"
+        case .handoffDraft:
+            return "handoff"
+        case .toolCard, .artifactCard, .fileCard, .evidenceCard, .saveEvidence:
+            return "evidence"
+        case .knowledgeNote, .knowledgeCompare:
+            return "knowledge"
+        }
+    }
+
+    var railGroupTitle: String {
+        switch railGroupID {
+        case "choice":
+            return "Choice"
+        case "form":
+            return "Form"
+        case "confirm":
+            return "Confirm"
+        case "handoff":
+            return "Handoff"
+        case "evidence":
+            return "Evidence"
+        case "knowledge":
+            return "Knowledge"
+        default:
+            return "Generated"
+        }
+    }
+}
+
+struct RunFollowUpGeneratedUIRailActionGroup: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let actions: [RunFollowUpAction]
+}
+
+struct RunFollowUpGeneratedUIShortcut: Hashable {
+    enum Kind: Hashable {
+        case defaultAction
+        case cancelAction
+    }
+
+    let kind: Kind
+    let label: String
+}
+
+struct RunFollowUpGeneratedUIFocusStyle: Equatable {
+    let isFocused: Bool
+    let chipBackgroundOpacity: Double
+    let chipBorderOpacity: Double
+    let chipBorderWidth: Double
+    let keyBackgroundOpacity: Double
+    let keyBorderOpacity: Double
+    let keyTextOpacity: Double
+    let shadowOpacity: Double
+    let shadowRadius: Double
+}
+
+struct GeneratedUIActionFocus: Equatable, Sendable {
+    let runId: EntityID
+    let actionId: String
+}
+
+func generatedUIActionFocusMatches(
+    _ focus: GeneratedUIActionFocus?,
+    runId: EntityID?,
+    actionId: String
+) -> Bool {
+    guard let focus, let runId else { return false }
+    return focus.runId == runId && focus.actionId == actionId
+}
+
+func generatedUIActionFocusForRun(
+    _ focus: GeneratedUIActionFocus?,
+    runId: EntityID?
+) -> GeneratedUIActionFocus? {
+    guard let focus, focus.runId == runId else { return nil }
+    return focus
+}
+
+func generatedUIActionFocusAnchorID(runId: EntityID, actionId: String) -> String {
+    "generated-ui-action-\(runId.rawValue)-\(actionId)"
+}
+
+func generatedUIActionFocusAnchorID(_ focus: GeneratedUIActionFocus) -> String {
+    generatedUIActionFocusAnchorID(runId: focus.runId, actionId: focus.actionId)
+}
+
+func focusedGeneratedUIFollowUpAction(
+    focus: GeneratedUIActionFocus?,
+    run: AgentRun?,
+    workItem: WorkItem?,
+    assistantText: String
+) -> RunFollowUpAction? {
+    guard let focus,
+          let run,
+          focus.runId == run.id else {
+        return nil
+    }
+    return chatRunFollowUpActions(
+        run: run,
+        workItem: workItem,
+        assistantText: assistantText
+    )
+    .first { action in
+        action.id == focus.actionId && action.isGeneratedUI
+    }
+}
+
+struct RunFollowUpGeneratedForm: Hashable {
+    let title: String
+    let intent: String
+    let fields: [RunFollowUpGeneratedFormField]
+
+    var fieldCount: Int {
+        fields.count
+    }
+
+    var requiredFieldCount: Int {
+        fields.filter(\.isRequired).count
+    }
+}
+
+struct RunFollowUpGeneratedFormReadiness: Equatable {
+    let requiredCount: Int
+    let completedRequiredCount: Int
+    let missingRequiredLabels: [String]
+
+    var canSubmit: Bool {
+        missingRequiredLabels.isEmpty
+    }
+
+    var requiredBadgeText: String {
+        guard requiredCount > 0 else { return "Optional" }
+        return "\(completedRequiredCount)/\(requiredCount) ready"
+    }
+
+    var missingSummary: String? {
+        guard !missingRequiredLabels.isEmpty else { return nil }
+        let visible = missingRequiredLabels.prefix(2).joined(separator: ", ")
+        let remaining = missingRequiredLabels.count - min(missingRequiredLabels.count, 2)
+        if remaining > 0 {
+            return "Missing: \(visible) + \(remaining) more"
+        }
+        return "Missing: \(visible)"
+    }
+}
+
+struct RunFollowUpGeneratedFormField: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let label: String
+    let type: String
+    let isRequired: Bool
+    let placeholder: String
+    let value: String
+    let defaultValue: String
+    let options: [String]
+
+    var key: String {
+        name.isEmpty ? id : name
+    }
+
+    var displayLabel: String {
+        label.isEmpty ? key : label
+    }
+
+    var initialValue: String {
+        if !value.isEmpty { return value }
+        return defaultValue
+    }
+
+    var usesOptions: Bool {
+        !options.isEmpty || type == "select" || type == "menu"
+    }
+
+    var isToggle: Bool {
+        type == "boolean" || type == "bool" || type == "checkbox" || type == "toggle"
+    }
+}
+
+func runFollowUpGeneratedFormReadiness(
+    _ form: RunFollowUpGeneratedForm,
+    values: [String: String]
+) -> RunFollowUpGeneratedFormReadiness {
+    let requiredFields = form.fields.filter(\.isRequired)
+    let missingFields = requiredFields.filter { field in
+        runFollowUpGeneratedFormResolvedValue(field, values: values).isEmpty
+    }
+    return RunFollowUpGeneratedFormReadiness(
+        requiredCount: requiredFields.count,
+        completedRequiredCount: requiredFields.count - missingFields.count,
+        missingRequiredLabels: missingFields.map(\.displayLabel)
+    )
+}
+
+private func runFollowUpGeneratedFormResolvedValue(
+    _ field: RunFollowUpGeneratedFormField,
+    values: [String: String]
+) -> String {
+    (values[field.key] ?? field.initialValue).gitTrimmed
+}
+
 struct RunFollowUpAction: Identifiable, Hashable {
     let id: String
     let title: String
     let detail: String
+    let workflowLabel: String
+    let workflowSummary: String
     let symbol: String
     let permissionMode: PermissionMode?
+    let generatedUIRole: RunFollowUpGeneratedUIRole?
+    let generatedForm: RunFollowUpGeneratedForm?
     let prompt: String
+
+    var isGeneratedUI: Bool {
+        generatedUIRole != nil
+    }
 
     init(
         id: String,
         title: String,
         detail: String? = nil,
+        workflowLabel: String? = nil,
+        workflowSummary: String? = nil,
         symbol: String,
         permissionMode: PermissionMode? = nil,
+        generatedUIRole: RunFollowUpGeneratedUIRole? = nil,
+        generatedForm: RunFollowUpGeneratedForm? = nil,
+        wrapsPrompt: Bool = true,
         prompt: String
     ) {
+        let resolvedGeneratedUIRole = generatedUIRole ?? runFollowUpGeneratedUIRole(for: id)
         self.id = id
         self.title = title
         self.detail = detail ?? runFollowUpDetail(id: id, permissionMode: permissionMode)
+        self.workflowLabel = workflowLabel ?? runFollowUpWorkflowLabel(id: id, generatedUIRole: resolvedGeneratedUIRole)
+        self.workflowSummary = workflowSummary ?? runFollowUpWorkflowSummary(
+            id: id,
+            permissionMode: permissionMode,
+            generatedUIRole: resolvedGeneratedUIRole
+        )
         self.symbol = symbol
         self.permissionMode = permissionMode
-        self.prompt = runFollowUpPrompt(prompt, actionId: id, permissionMode: permissionMode)
+        self.generatedUIRole = resolvedGeneratedUIRole
+        self.generatedForm = generatedForm
+        self.prompt = wrapsPrompt
+            ? runFollowUpPrompt(
+                prompt,
+                actionId: id,
+                permissionMode: permissionMode,
+                generatedUIRole: resolvedGeneratedUIRole
+            )
+            : prompt
     }
 }
 
@@ -5845,7 +8874,11 @@ func runFollowUpStagedLabel(_ action: RunFollowUpAction) -> String {
 }
 
 func runFollowUpStagedStatus(_ action: RunFollowUpAction) -> String {
-    "\(action.title) follow-up staged - \(action.detail)"
+    "\(action.title) follow-up staged - \(action.workflowLabel): \(action.workflowSummary)"
+}
+
+func runFollowUpActionHelp(_ action: RunFollowUpAction) -> String {
+    "\(action.workflowLabel): \(action.workflowSummary) - \(action.detail)"
 }
 
 func sideChatPaneLabel(for run: AgentRun) -> String {
@@ -5858,12 +8891,18 @@ func sideChatPaneLabel(for run: AgentRun) -> String {
 
 private func runFollowUpDetail(id: String, permissionMode: PermissionMode?) -> String {
     switch id {
+    case runFollowUpTaskCodingActionID:
+        return "Start coding"
+    case runFollowUpTaskReviewActionID:
+        return "Explain changes"
     case "bug-analysis":
         return "Read-only triage"
     case "log-analysis":
         return "Read-only trace"
     case "skill-hardening":
         return "Ask before edits"
+    case "continue":
+        return "Continue turn"
     case "mr-review":
         return "Read-only review"
     case "validation":
@@ -5886,10 +8925,140 @@ private func runFollowUpDetail(id: String, permissionMode: PermissionMode?) -> S
     }
 }
 
-private func runFollowUpPrompt(_ prompt: String, actionId: String, permissionMode: PermissionMode?) -> String {
+private func runFollowUpWorkflowLabel(
+    id: String,
+    generatedUIRole: RunFollowUpGeneratedUIRole?
+) -> String {
+    switch id {
+    case runFollowUpTaskCodingActionID:
+        return "Coding"
+    case runFollowUpTaskReviewActionID:
+        return "Review"
+    case "bug-analysis":
+        return "Triage"
+    case "log-analysis":
+        return "Trace"
+    case "skill-hardening":
+        return "Hardening"
+    case "continue":
+        return "Continue"
+    case "mr-review":
+        return "MR"
+    case "validation":
+        return "Verify"
+    case "jira-update", "jira-execution":
+        return "Write-back"
+    case "agent-handoff":
+        return "Handoff"
+    case "capture-evidence":
+        return "Evidence"
+    default:
+        switch generatedUIRole {
+        case .continuation:
+            return "Continue"
+        case .choice, .confirmationApprove, .confirmationDecline:
+            return "Decision"
+        case .form:
+            return "Form"
+        case .toolCard:
+            return "Command"
+        case .artifactCard:
+            return "Artifact"
+        case .fileCard:
+            return "File"
+        case .evidenceCard, .saveEvidence:
+            return "Evidence"
+        case .handoffDraft:
+            return "Draft"
+        case .knowledgeNote, .knowledgeCompare:
+            return "Knowledge"
+        case .none:
+            return "Follow-up"
+        }
+    }
+}
+
+private func runFollowUpWorkflowSummary(
+    id: String,
+    permissionMode: PermissionMode?,
+    generatedUIRole: RunFollowUpGeneratedUIRole?
+) -> String {
+    switch id {
+    case runFollowUpTaskCodingActionID:
+        return "Implement from confirmed task output and workspace branch rules"
+    case runFollowUpTaskReviewActionID:
+        return "Explain changed files, rationale, validation, and risks"
+    case "bug-analysis":
+        return "Find cause, seam, smallest fix, and missing input"
+    case "log-analysis":
+        return "Trace IDs, timeline, phases, and next lookup"
+    case "skill-hardening":
+        return "Improve invocation, recovery, guardrails, and validation"
+    case "continue":
+        return "Continue from current state without restarting"
+    case "mr-review":
+        return "Review findings, merge readiness, and residual risk"
+    case "validation":
+        return "Run the narrowest useful check and report evidence"
+    case "jira-update", "jira-execution":
+        return "Prepare status, evidence, validation, blockers, and next action"
+    case "agent-handoff":
+        return "Move context to the next agent with latest evidence"
+    case "capture-evidence":
+        return "Extract durable source-grounded evidence"
+    default:
+        switch generatedUIRole {
+        case .continuation:
+            return "Continue the selected generated UI path"
+        case .choice:
+            return "Pick one generated next step"
+        case .confirmationApprove:
+            return "Approve the generated action boundary"
+        case .confirmationDecline:
+            return "Decline the generated action boundary"
+        case .form:
+            return "Fill missing fields for a scoped next step"
+        case .toolCard:
+            return "Run or inspect the generated command"
+        case .artifactCard:
+            return "Review the selected generated artifact"
+        case .fileCard:
+            return "Review the selected generated file"
+        case .evidenceCard:
+            return "Inspect generated evidence"
+        case .handoffDraft:
+            return "Refine copy-ready handoff text"
+        case .saveEvidence:
+            return "Save evidence without changing external systems"
+        case .knowledgeNote:
+            return "Inspect saved reusable knowledge"
+        case .knowledgeCompare:
+            return "Compare saved knowledge with new evidence"
+        case .none:
+            switch permissionMode {
+            case .readOnly:
+                return "Inspect and report without edits"
+            case .askBeforeEdit:
+                return "Inspect first and ask before edits"
+            case .autopilot:
+                return "Continue with full workspace permissions"
+            case nil:
+                return "Continue the current workflow"
+            }
+        }
+    }
+}
+
+private func runFollowUpPrompt(
+    _ prompt: String,
+    actionId: String,
+    permissionMode: PermissionMode?,
+    generatedUIRole: RunFollowUpGeneratedUIRole?
+) -> String {
     let sections = [
         runFollowUpNonEmpty(prompt),
-        runFollowUpNonEmpty(runFollowUpOutputContract(for: actionId)),
+        runFollowUpNonEmpty(runFollowUpOutputContract(for: actionId, generatedUIRole: generatedUIRole)),
+        runFollowUpNonEmpty(runFollowUpGeneratedUIOutputContract()),
         runFollowUpPermissionGuard(for: permissionMode)
     ].compactMap { $0 }
     return sections
@@ -5901,8 +9070,148 @@ private func runFollowUpNonEmpty(_ value: String) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
-private func runFollowUpOutputContract(for actionId: String) -> String {
+private func runFollowUpGeneratedUIOutputContract() -> String {
+    """
+    Generated UI contract:
+    - When the next step needs the user to continue, confirm, choose, or provide a few parameters, emit a fenced `pikiclaw-ui` JSON block instead of asking for a typed reply.
+    - Use `choices` for mutually exclusive next actions, `confirm` for approve/decline, and `form` or `forms` for missing fields or small parameter collection.
+    - Keep generated UI prompts short and action-scoped; preserve work item, artifact refs, pending commands, validation status, and write boundaries.
+    - Example:
+    ```pikiclaw-ui
+    {
+      "choices": [
+        {
+          "title": "Continue",
+          "prompt": "Continue with the next scoped step.",
+          "permissionMode": "askBeforeEdit"
+        }
+      ]
+    }
+    ```
+    """
+}
+
+private func runFollowUpOutputContract(for actionId: String, generatedUIRole: RunFollowUpGeneratedUIRole?) -> String {
+    switch generatedUIRole {
+    case .choice:
+        return """
+        Output contract:
+        - Continue from the previous output by taking only the selected UI choice.
+        - Return what changed, which selected choice was handled, and what remains.
+        - If more input is needed, return the next clickable choice instead of asking the user to type a free-form reply.
+        - Preserve the current work item, artifact refs, pending commands, and validation status.
+        """
+    case .form:
+        return """
+        Output contract:
+        - Treat the clicked form UI as the user's selected structured input path.
+        - Preserve field names, labels, required flags, defaults, options, and current values exactly.
+        - If required fields are missing, ask only for those fields and return an updated form-style prompt.
+        - If fields are complete, summarize the collected parameters, planned action, write boundary, and next clickable confirmation.
+        - Do not write files, update configs, run destructive commands, post externally, commit, or push until the user confirms the completed form action.
+        """
+    case .artifactCard:
+        return """
+        Output contract:
+        - Explain what the selected artifact card represents and why it matters.
+        - Preserve artifact refs exactly, including Pikiclaw, Obsidian, and local file URIs.
+        - Return recommended next action, reuse value, and verification status.
+        - If the artifact needs a write-back, save, or external post, describe it and ask before doing it.
+        """
+    case .fileCard:
+        return """
+        Output contract:
+        - Explain what the selected file card changed or points to.
+        - Keep file paths and line hints exact when available.
+        - Return likely purpose, review focus, and narrow validation candidate.
+        - Do not edit files in this follow-up unless the user explicitly approves an edit path.
+        """
+    case .toolCard:
+        return """
+        Output contract:
+        - Explain what the selected tool-result card means and whether it succeeded, failed, or needs rerun.
+        - Preserve the command or tool label exactly when available.
+        - Return useful output summary, verification impact, and the next narrow action.
+        - Do not rerun commands, edit files, or write external systems unless the user approves that path.
+        """
+    case .confirmationApprove, .confirmationDecline:
+        return """
+        Output contract:
+        - Treat the clicked confirmation UI as the user's selected response to the agent's question.
+        - Do not ask the user to type yes, no, approve, skip, or continue.
+        - Return what was selected, what changed, and the next clickable choice if more input is needed.
+        - Preserve the current work item, artifact refs, pending commands, and validation status.
+        """
+    case .handoffDraft:
+        return """
+        Output contract:
+        - Prepare the selected handoff draft as final copy-ready text.
+        - Preserve Jira keys, MR/PR refs, artifact refs, validation evidence, blockers, and source refs exactly.
+        - Return sections: destination, copy-ready draft, evidence preserved, posting boundary, and gaps.
+        - Do not post to Jira, GitLab, GitHub, MR/PR, commit, push, or write external systems unless the user explicitly confirms that write.
+        """
+    case .evidenceCard:
+        return """
+        Output contract:
+        - Prepare a source-grounded evidence or knowledge card from the selected generated output cards.
+        - Preserve Tool result, Artifact, and File refs exactly.
+        - Return proposed card content, source refs, artifact refs, save target, confidence, and gaps.
+        - Do not write artifacts, Obsidian notes, Jira comments, commits, or external systems unless the user explicitly approves the save path.
+        """
+    case .saveEvidence:
+        return """
+        Output contract:
+        - Return sections: save target, evidence summary, source refs, artifact refs, knowledge-card draft, approval needed, and gaps.
+        - Preserve Tool result, Artifact, and File refs exactly.
+        - Choose the existing Pikiclaw save path: Save Evidence for chat-run evidence, Save Knowledge note for reusable output artifacts, or no save when the evidence is too weak.
+        - Do not write artifacts, Obsidian notes, Jira comments, commits, or external systems until the user explicitly approves the save target and content.
+        """
+    case .knowledgeNote:
+        return """
+        Output contract:
+        - Review the saved Obsidian knowledge note without rewriting it.
+        - Preserve note, source, artifact, and Obsidian refs exactly.
+        - Return sections: note target, reusable claim, source grounding, gaps, and next use.
+        - Do not edit files, write Obsidian notes, post to Jira, commit, or change external systems unless the user explicitly asks for that follow-up.
+        """
+    case .knowledgeCompare:
+        return """
+        Output contract:
+        - Compare the saved knowledge note against the new generated evidence.
+        - Preserve note, Tool result, Artifact, File, and Obsidian refs exactly.
+        - Return sections: matched claims, contradicted claims, stale assumptions, update recommendation, and next injection point.
+        - Do not edit files, write Obsidian notes, post to Jira, commit, or change external systems unless the user explicitly asks for that follow-up.
+        """
+    case .continuation:
+        return """
+        Output contract:
+        - Continue from the previous output without asking the user to type "continue".
+        - Do not ask another meta-confirmation before making read-only progress or drafting the ask-before-edit plan.
+        - Start from the highest-signal pending item: blocking/failure signal, selected Next command, validation gap, then open question.
+        - Return what changed, what remains, and the next clickable choice if more input is needed.
+        - Preserve the current work item, artifact refs, pending commands, and validation status.
+        """
+    case nil:
+        break
+    }
+
     switch actionId {
+    case runFollowUpTaskCodingActionID:
+        return """
+        Output contract:
+        - Return a final implementation summary outside the thinking/tool details.
+        - Include changed files, what changed, why it satisfies the confirmed task output, and validation evidence.
+        - If branch creation or base-branch choice is not clear, ask for that choice before editing.
+        - Keep the next action explicit: Review when code changed, or the single blocker when coding cannot proceed.
+        """
+    case runFollowUpTaskReviewActionID:
+        return """
+        Output contract:
+        - Return file-by-file change explanation first: changed file, what changed, why, and risk.
+        - Then list validation run, validation gaps, and review findings ordered by severity.
+        - Do not include raw thinking/tool logs unless they directly support a finding.
+        - End with the next action: ready, needs fix, or needs validation.
+        """
     case "bug-analysis":
         return """
         Output contract:
@@ -5950,6 +9259,14 @@ private func runFollowUpOutputContract(for actionId: String) -> String {
         - Keep confirmed facts separate from guesses.
         - Do not claim posting happened unless an external write actually succeeded.
         """
+    case "agent-handoff":
+        return """
+        Output contract:
+        - Return sections: previous agent evidence, next agent plan, risks, validation, and handoff-ready action.
+        - Keep Codex, Claude, and Gemini responsibilities distinct instead of blending their conclusions.
+        - Preserve run IDs, work item IDs, artifact refs, blockers, and validation status exactly when present.
+        - Do not edit files, commit, push, post externally, change credentials, or run destructive commands until the user confirms the staged handoff.
+        """
     case "capture-evidence":
         return """
         Output contract:
@@ -5988,7 +9305,269 @@ private func runFollowUpPermissionGuard(for mode: PermissionMode?) -> String? {
     }
 }
 
-func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: String) -> [RunFollowUpAction] {
+private let runFollowUpTaskCodingActionID = "task-coding"
+private let runFollowUpTaskReviewActionID = "task-review"
+
+func runFollowUpActionIsPrimaryStage(_ action: RunFollowUpAction) -> Bool {
+    action.id == runFollowUpTaskCodingActionID || action.id == runFollowUpTaskReviewActionID
+}
+
+func runFollowUpActionStartsImmediately(_ action: RunFollowUpAction) -> Bool {
+    runFollowUpActionIsPrimaryStage(action)
+}
+
+private func taskStageFollowUpActions(
+    run: AgentRun,
+    workItem: WorkItem?,
+    workspace: Workspace?,
+    output: String,
+    context: String
+) -> [RunFollowUpAction] {
+    guard let workspace,
+          let workItem,
+          taskStageSupportsCoding(workItem: workItem) else {
+        return []
+    }
+    if taskStageOutputLooksReadyForReview(output) {
+        return [
+            taskReviewFollowUpAction(
+                run: run,
+                workItem: workItem,
+                workspace: workspace,
+                output: output,
+                context: context
+            )
+        ]
+    }
+    if taskStageOutputLooksReadyForCoding(run: run, workItem: workItem, output: output) {
+        return [
+            taskCodingFollowUpAction(
+                run: run,
+                workItem: workItem,
+                workspace: workspace,
+                output: output,
+                context: context
+            )
+        ]
+    }
+    return []
+}
+
+private func taskStageSupportsCoding(workItem: WorkItem) -> Bool {
+    workItem.sourceType == .jira || workItem.jira != nil
+}
+
+private func taskStageOutputLooksReadyForCoding(
+    run: AgentRun,
+    workItem: WorkItem,
+    output: String
+) -> Bool {
+    let text = output.gitTrimmed
+    guard text.count > 80 else { return false }
+    if taskStageOutputLooksReadyForReview(text) { return false }
+    if !runFollowUpMissingInputRequests(from: text).isEmpty { return false }
+    let lower = text.lowercased()
+    let hasPlanningSignal = [
+        "implementation plan",
+        "proposed fix",
+        "recommended fix",
+        "approach",
+        "scope:",
+        "goal:",
+        "next action",
+        "next step",
+        "方案",
+        "计划",
+        "实现方案",
+        "修复方案",
+        "下一步",
+        "可以开始"
+    ].contains { lower.contains($0) }
+    if hasPlanningSignal { return true }
+    return workItem.sourceType == .jira
+        && (run.state == .completed || run.state == .waitingForUser)
+        && !runFollowUpActionableNotes(from: text).isEmpty
+}
+
+private func taskStageOutputLooksReadyForReview(_ output: String) -> Bool {
+    let text = output.gitTrimmed
+    guard text.count > 40 else { return false }
+    let lower = text.lowercased()
+    let hasChangeSignal = [
+        "edited a file",
+        "edited files",
+        "created file",
+        "modified file",
+        "modified files",
+        "changed file",
+        "changed files",
+        "files changed",
+        "implementation complete",
+        "implemented ",
+        "i implemented",
+        "已实现",
+        "完成编码",
+        "代码改动",
+        "修改了",
+        "新增了"
+    ].contains { lower.contains($0) }
+    if hasChangeSignal { return true }
+    return !runFollowUpValidationEvidence(from: text).isEmpty
+        && !runFollowUpFileRefs(from: text).isEmpty
+}
+
+private func taskCodingFollowUpAction(
+    run: AgentRun,
+    workItem: WorkItem,
+    workspace: Workspace,
+    output: String,
+    context: String
+) -> RunFollowUpAction {
+    let prompt = taskStageRenderedPrompt(
+        template: taskStageWorkflowConfig(workspace).codingPromptTemplate,
+        run: run,
+        workItem: workItem,
+        workspace: workspace,
+        output: output,
+        context: context
+    )
+    return RunFollowUpAction(
+        id: runFollowUpTaskCodingActionID,
+        title: "Coding",
+        symbol: "hammer",
+        permissionMode: nil,
+        prompt: prompt
+    )
+}
+
+private func taskReviewFollowUpAction(
+    run: AgentRun,
+    workItem: WorkItem,
+    workspace: Workspace,
+    output: String,
+    context: String
+) -> RunFollowUpAction {
+    let prompt = taskStageRenderedPrompt(
+        template: taskStageWorkflowConfig(workspace).reviewPromptTemplate,
+        run: run,
+        workItem: workItem,
+        workspace: workspace,
+        output: output,
+        context: context
+    )
+    return RunFollowUpAction(
+        id: runFollowUpTaskReviewActionID,
+        title: "Review",
+        symbol: "checkmark.seal",
+        permissionMode: .readOnly,
+        prompt: prompt
+    )
+}
+
+private func taskStageWorkflowConfig(_ workspace: Workspace) -> WorkspaceWorkflowConfig {
+    workspace.workflowConfig ?? WorkspaceWorkflowConfig()
+}
+
+private func taskStageRenderedPrompt(
+    template: String,
+    run: AgentRun,
+    workItem: WorkItem,
+    workspace: Workspace,
+    output: String,
+    context: String
+) -> String {
+    let config = taskStageWorkflowConfig(workspace)
+    let ticketKey = taskStageTicketKey(run: run, workItem: workItem)
+    let currentBranch = taskStageNonEmpty(workspace.currentBranch) ?? "unknown"
+    let baseBranch = taskStageNonEmpty(config.baseBranchName) ?? currentBranch
+    let suggestedBranch = taskStageSuggestedBranch(
+        pattern: config.branchNamePattern,
+        ticketKey: ticketKey,
+        title: workItem.title
+    )
+    return template
+        .replacingOccurrences(of: "{ticket}", with: ticketKey)
+        .replacingOccurrences(of: "{ticketKey}", with: ticketKey)
+        .replacingOccurrences(of: "{title}", with: workItem.title)
+        .replacingOccurrences(of: "{workspace}", with: workspace.name)
+        .replacingOccurrences(of: "{workspacePath}", with: workspace.pathDisplay)
+        .replacingOccurrences(of: "{currentBranch}", with: currentBranch)
+        .replacingOccurrences(of: "{baseBranch}", with: baseBranch)
+        .replacingOccurrences(of: "{suggestedBranch}", with: suggestedBranch)
+        .replacingOccurrences(of: "{output}", with: output)
+        .replacingOccurrences(of: "{context}", with: context)
+        .gitTrimmed
+}
+
+private func taskStageSuggestedBranch(pattern: String, ticketKey: String, title: String) -> String {
+    let resolvedPattern = taskStageNonEmpty(pattern) ?? WorkspaceWorkflowConfig.defaultBranchNamePattern
+    let slug = taskStageBranchSlug(title)
+    let rendered = resolvedPattern
+        .replacingOccurrences(of: "{ticket}", with: ticketKey)
+        .replacingOccurrences(of: "{ticketKey}", with: ticketKey)
+        .replacingOccurrences(of: "{slug}", with: slug)
+    return taskStageSanitizedBranchName(taskStageNonEmpty(rendered) ?? ticketKey)
+}
+
+private func taskStageTicketKey(run: AgentRun, workItem: WorkItem) -> String {
+    if let key = taskStageNonEmpty(workItem.jira?.key) {
+        return key
+    }
+    for value in [workItem.title, run.promptSnapshot] {
+        if let key = taskStageFirstTicketKey(in: value) {
+            return key
+        }
+    }
+    return workItem.id.rawValue
+}
+
+private func taskStageFirstTicketKey(in value: String) -> String? {
+    guard let range = value.range(of: #"\b[A-Z][A-Z0-9]+-\d+\b"#, options: .regularExpression) else {
+        return nil
+    }
+    return String(value[range])
+}
+
+private func taskStageBranchSlug(_ title: String) -> String {
+    let withoutTicket = title
+        .replacingOccurrences(of: #"\b[A-Z][A-Z0-9]+-\d+\b"#, with: "", options: .regularExpression)
+    let scalars = withoutTicket
+        .lowercased()
+        .unicodeScalars
+        .map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) {
+                return Character(scalar)
+            }
+            return "-"
+        }
+    let slug = String(scalars)
+        .split(separator: "-")
+        .prefix(8)
+        .joined(separator: "-")
+    return slug.isEmpty ? "task" : slug
+}
+
+private func taskStageSanitizedBranchName(_ value: String) -> String {
+    let invalid = CharacterSet(charactersIn: " ~^:?*[]\\")
+    let scalars = value.unicodeScalars.map { scalar in
+        invalid.contains(scalar) ? UnicodeScalar("-") : scalar
+    }
+    return String(String.UnicodeScalarView(scalars))
+        .replacingOccurrences(of: #"[-/]{2,}"#, with: "-", options: .regularExpression)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "-/"))
+}
+
+private func taskStageNonEmpty(_ value: String?) -> String? {
+    let trimmed = value?.gitTrimmed ?? ""
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+func chatRunFollowUpActions(
+    run: AgentRun?,
+    workItem: WorkItem?,
+    workspace: Workspace? = nil,
+    assistantText: String
+) -> [RunFollowUpAction] {
     guard let run else { return [] }
     switch run.state {
     case .queued, .starting, .running, .cancelling, .draft:
@@ -5997,31 +9576,125 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
         break
     }
 
-    let output = friendlyAgentOutput(assistantText).trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !output.isEmpty, output != "No assistant output yet." else { return [] }
+    let hasStructuredUIPayload = !runFollowUpStructuredUIJSONPayloads(from: assistantText).isEmpty
+    let friendlyOutput = friendlyAgentOutput(assistantText).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard (!friendlyOutput.isEmpty && friendlyOutput != "No assistant output yet.") || hasStructuredUIPayload else { return [] }
+    let output = runFollowUpRemovingStructuredUIBlocks(from: friendlyOutput).trimmingCharacters(in: .whitespacesAndNewlines)
 
     let workItemTitle = workItem?.title.gitTrimmed ?? ""
     let target = workItemTitle.isEmpty ? run.promptSnapshot.firstLineFallback("this chat") : workItemTitle
-    let context = runFollowUpContext(run: run, workItem: workItem, output: output)
+    let contextOutput = output.isEmpty ? "Structured UI payload emitted by the agent." : output
+    let context = runFollowUpContext(run: run, workItem: workItem, output: contextOutput)
+    let prioritizeJiraUpdateFollowUp = followUpShouldPrioritizeJiraUpdate(run: run, output: output)
+    let prioritizeValidationFollowUp = followUpShouldPrioritizeValidation(run: run, output: output)
+    let prioritizeSkillHardeningFollowUp = followUpShouldPrioritizeSkillHardening(run: run, output: output)
+    let missingInputRequests = runFollowUpMissingInputRequests(from: output)
+    let generatedConfirmationQuestion = runFollowUpResolvedConfirmationQuestion(
+        output: output,
+        missingInputRequests: missingInputRequests
+    )
+    let containsContinuePrompt = followUpContainsContinuePrompt(output) && generatedConfirmationQuestion == nil
+    let structuredUIActions = runFollowUpStructuredUIActions(
+        output: assistantText,
+        target: target,
+        context: context
+    )
+    let structuredHasDecisionActions = structuredUIActions.contains { action in
+        switch action.generatedUIRole {
+        case .continuation, .choice, .form, .confirmationApprove, .confirmationDecline:
+            return true
+        case .toolCard, .artifactCard, .fileCard, .evidenceCard, .handoffDraft, .saveEvidence, .knowledgeNote, .knowledgeCompare, .none:
+            return false
+        }
+    }
     var actions: [RunFollowUpAction] = []
+
+    actions.append(contentsOf: structuredUIActions)
+    actions.append(contentsOf: taskStageFollowUpActions(
+        run: run,
+        workItem: workItem,
+        workspace: workspace,
+        output: output,
+        context: context
+    ))
+
+    if containsContinuePrompt && !structuredHasDecisionActions {
+        actions.append(RunFollowUpAction(
+            id: "continue",
+            title: "Continue",
+            symbol: "play.circle",
+            permissionMode: .askBeforeEdit,
+            prompt: """
+            Continue the previous agent output for \(target).
+
+            The assistant asked whether to continue. Treat this click as approval to continue the same work from the current state. Do not restart from scratch. Use the follow-up context as a continuation packet: preserve status, failure and decision signals, ticket refs, skill refs, artifact refs, validation evidence, and pending commands. If multiple next commands exist, choose the narrowest useful one and say why. If the next step requires an external write, destructive command, credential change, commit, or push, stop and ask before doing it.
+
+            \(context)
+            """
+        ))
+    }
+
+    if !structuredHasDecisionActions {
+        actions.append(contentsOf: runFollowUpGeneratedChoiceActions(
+            output: output,
+            target: target,
+            context: context
+        ))
+    }
+    if !containsContinuePrompt && !structuredHasDecisionActions {
+        actions.append(contentsOf: runFollowUpGeneratedConfirmationActions(
+            output: output,
+            target: target,
+            context: context,
+            question: generatedConfirmationQuestion
+        ))
+    }
+    if !containsContinuePrompt && generatedConfirmationQuestion == nil && !structuredHasDecisionActions {
+        actions.append(contentsOf: runFollowUpGeneratedClarifyActions(
+            output: output,
+            target: target,
+            context: context,
+            requests: missingInputRequests
+        ))
+    }
+    actions.append(contentsOf: runFollowUpGeneratedCardActions(
+        output: output,
+        target: target,
+        context: context
+    ))
+    if !containsContinuePrompt && generatedConfirmationQuestion == nil && !structuredHasDecisionActions {
+        actions.append(contentsOf: runFollowUpGeneratedHandoffDraftActions(
+            output: output,
+            target: target,
+            context: context
+        ))
+    }
 
     guard runFollowUpShouldOfferWorkflowActions(
         run: run,
         workItem: workItem,
-        output: output
-    ) else { return [] }
+        output: output,
+        hasGeneratedActions: !actions.isEmpty,
+        containsContinuePrompt: containsContinuePrompt,
+        generatedConfirmationQuestion: generatedConfirmationQuestion,
+        missingInputRequests: missingInputRequests
+    ) else {
+        return visibleRunFollowUpActions(actions)
+    }
 
-    if run.state == .failed
+    if (run.state == .failed && !prioritizeJiraUpdateFollowUp)
         || run.state == .stale
-        || outputContainsFailureSignal(output)
-        || followUpContainsBlockingDecisionSignal(output) {
+        || followUpContainsBugAnalysisSignal(output)
+        || followUpContainsActionableFailureSignal(output)
+        || followUpContainsBlockingDecisionSignal(output)
+        || followUpContainsBlockingReviewFinding(output) {
         actions.append(RunFollowUpAction(
             id: "bug-analysis",
             title: "Bug",
             symbol: "ladybug",
             permissionMode: .readOnly,
             prompt: """
-            Analyze this run as a bug in \(target). If the trigger is a blocking review decision, treat that decision as the failure signal to triage.
+            Analyze this run as a bug in \(target). If the trigger is a blocking review decision or high-severity review finding, treat that signal as the failure to triage.
 
             Start from the previous prompt and assistant output already in this chat. Separate confirmed facts from guesses, identify the likely seam, propose the smallest safe fix, and name the focused validation that should close the loop. If evidence is missing, ask for the single most useful missing input.
 
@@ -6062,7 +9735,18 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
         ))
     }
 
-    actions.append(RunFollowUpAction(
+    actions.append(contentsOf: runFollowUpGeneratedSkillCommandActions(
+        output: output,
+        target: target,
+        context: context
+    ))
+    actions.append(contentsOf: runFollowUpGeneratedCommandActions(
+        output: output,
+        target: target,
+        context: context
+    ))
+
+    let reviewAction = RunFollowUpAction(
         id: "mr-review",
         title: "Review",
         symbol: "checkmark.seal",
@@ -6074,9 +9758,9 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
 
         \(context)
         """
-    ))
+    )
 
-    actions.append(RunFollowUpAction(
+    let validationAction = RunFollowUpAction(
         id: "validation",
         title: "Validate",
         symbol: "testtube.2",
@@ -6088,7 +9772,15 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
 
         \(context)
         """
-    ))
+    )
+
+    if prioritizeValidationFollowUp {
+        actions.append(validationAction)
+        actions.append(reviewAction)
+    } else {
+        actions.append(reviewAction)
+        actions.append(validationAction)
+    }
 
     if workItem?.sourceType == .jira || workItem?.jira != nil || followUpContainsJiraSignal(run: run, output: output) {
         actions.append(RunFollowUpAction(
@@ -6099,7 +9791,7 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
         prompt: """
         Prepare a Jira-ready update for \(target).
 
-        Use the previous assistant output, ticket key, and ticket context already in this chat. Summarize current status, decision signals, confirmed evidence, blockers, validation results, and the next concrete action in a concise comment-ready format. Preserve artifact refs in Evidence and use Next commands as candidate Next action text when they are still pending. If no ticket is bound to this chat yet, identify the ticket key or say what needs to be synced before posting.
+        Use the previous assistant output, ticket key, and ticket context already in this chat. Summarize current status, decision signals, confirmed evidence, blockers, validation results, and the next concrete action in a concise comment-ready format. Preserve artifact refs in Evidence and use Next commands as candidate Next action text when they are still pending. If Jira write-back failed or is still pending, preserve that state, do not claim the update was posted, and propose retry or manual paste as the next action. If no ticket is bound to this chat yet, identify the ticket key or say what needs to be synced before posting.
 
         \(context)
         """
@@ -6120,14 +9812,35 @@ func chatRunFollowUpActions(run: AgentRun?, workItem: WorkItem?, assistantText: 
         ))
     }
 
-    return visibleRunFollowUpActions(actions)
+    var orderedActions = actions
+    if prioritizeSkillHardeningFollowUp {
+        orderedActions = runFollowUpActionsPrioritizingSkillHardening(orderedActions)
+    }
+    if prioritizeJiraUpdateFollowUp {
+        orderedActions = runFollowUpActionsPrioritizing(orderedActions, actionID: "jira-update")
+    }
+    let visibleActions = prioritizeJiraUpdateFollowUp
+        ? orderedActions.filter { !runFollowUpActionIsGeneratedEvidenceCard($0) }
+        : orderedActions
+    return visibleRunFollowUpActions(visibleActions)
 }
 
 private func runFollowUpShouldOfferWorkflowActions(
     run: AgentRun,
     workItem: WorkItem?,
-    output: String
+    output: String,
+    hasGeneratedActions: Bool,
+    containsContinuePrompt: Bool,
+    generatedConfirmationQuestion: String?,
+    missingInputRequests: [String]
 ) -> Bool {
+    if hasGeneratedActions
+        || containsContinuePrompt
+        || generatedConfirmationQuestion != nil
+        || !missingInputRequests.isEmpty {
+        return true
+    }
+
     switch run.state {
     case .failed, .cancelled, .stale, .waitingForUser:
         return true
@@ -6144,23 +9857,27 @@ private func runFollowUpShouldOfferWorkflowActions(
         }
     }
 
-    if outputContainsFailureSignal(output)
-        || followUpContainsBlockingDecisionSignal(output)
-        || followUpContainsLogSignal(run: run, output: output)
+    if followUpContainsLogSignal(run: run, output: output)
         || followUpContainsJiraSignal(run: run, output: output)
-        || followUpContainsSkillSignal(run: run, output: output) {
+        || followUpContainsSkillSignal(run: run, output: output)
+        || followUpContainsBugAnalysisSignal(output)
+        || followUpContainsActionableFailureSignal(output)
+        || followUpContainsBlockingDecisionSignal(output)
+        || followUpContainsBlockingReviewFinding(output) {
         return true
     }
 
     if !runFollowUpDecisionSignals(from: output).isEmpty
         || !runFollowUpReproductionNotes(from: output).isEmpty
         || !runFollowUpDiagnosisNotes(from: output).isEmpty
+        || !runFollowUpReviewFindings(from: output).isEmpty
         || !runFollowUpHandoffDrafts(from: output).isEmpty
         || !runFollowUpExternalLinks(from: output).isEmpty
         || !runFollowUpArtifactRefs(from: output).isEmpty
         || !runFollowUpGitRefs(run: run, output: output).isEmpty
         || !runFollowUpEnvironmentRefs(run: run, output: output).isEmpty
         || !runFollowUpTicketRefs(run: run, workItem: workItem, output: output).isEmpty
+        || !runFollowUpJiraWriteBackSignals(from: output).isEmpty
         || !runFollowUpSkillRefs(run: run, output: output).isEmpty
         || !runFollowUpFailureSignals(from: output).isEmpty
         || !runFollowUpFileRefs(from: output).isEmpty
@@ -6190,23 +9907,1852 @@ private func runFollowUpOutputLooksDurableEvidence(_ output: String) -> Bool {
         }
 }
 
+private let runFollowUpGeneratedChoicePrefix = "choice-"
+private let runFollowUpGeneratedFormPrefix = "form-"
+private let runFollowUpGeneratedArtifactCardPrefix = "artifact-card-"
+private let runFollowUpGeneratedFileCardPrefix = "file-card-"
+private let runFollowUpGeneratedToolCardPrefix = "tool-card-"
+private let runFollowUpGeneratedSkillCommandPrefix = "skill-command-"
+private let runFollowUpGeneratedCommandPrefix = "command-"
+private let runFollowUpGeneratedEvidenceCardPrefix = "evidence-card-"
+private let runFollowUpGeneratedHandoffDraftPrefix = "handoff-draft-"
+private let runFollowUpGeneratedSaveEvidencePrefix = "save-evidence-"
+private let runFollowUpGeneratedKnowledgeNotePrefix = "knowledge-note-"
+private let runFollowUpGeneratedKnowledgeComparePrefix = "knowledge-compare-"
+private let runFollowUpGeneratedConfirmationApprovePrefix = "confirm-approve-"
+private let runFollowUpGeneratedConfirmationDeclinePrefix = "confirm-decline-"
+
+private enum RunFollowUpStructuredUIKind {
+    case choice
+    case form
+    case confirm
+    case card
+}
+
+private struct RunFollowUpStructuredUIEnvelope: Decodable {
+    let blocks: [RunFollowUpStructuredUIBlock]?
+    let actions: [RunFollowUpStructuredUIBlock]?
+    let choices: [RunFollowUpStructuredUIBlock]?
+    let form: RunFollowUpStructuredUIBlock?
+    let forms: [RunFollowUpStructuredUIBlock]?
+    let cards: [RunFollowUpStructuredUIBlock]?
+    let confirm: RunFollowUpStructuredUIBlock?
+    let confirmations: [RunFollowUpStructuredUIBlock]?
+
+    var candidates: [RunFollowUpStructuredUICandidate] {
+        var result: [RunFollowUpStructuredUICandidate] = []
+        result.append(contentsOf: (blocks ?? []).map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "choice", block: $0) })
+        result.append(contentsOf: (actions ?? []).map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "choice", block: $0) })
+        result.append(contentsOf: (choices ?? []).map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "choice", block: $0) })
+        if let form {
+            result.append(RunFollowUpStructuredUICandidate(kind: form.declaredKind ?? "form", block: form))
+        }
+        result.append(contentsOf: (forms ?? []).map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "form", block: $0) })
+        result.append(contentsOf: (cards ?? []).map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "card", block: $0) })
+        if let confirm {
+            result.append(RunFollowUpStructuredUICandidate(kind: confirm.declaredKind ?? "confirm", block: confirm))
+        }
+        result.append(contentsOf: (confirmations ?? []).map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "confirm", block: $0) })
+        return result
+    }
+}
+
+private struct RunFollowUpStructuredUICandidate {
+    let kind: String
+    let block: RunFollowUpStructuredUIBlock
+}
+
+private struct RunFollowUpStructuredUIBlock: Decodable {
+    let type: String?
+    let kind: String?
+    let role: String?
+    let id: String?
+    let title: String?
+    let detail: String?
+    let symbol: String?
+    let prompt: String?
+    let question: String?
+    let permissionMode: String?
+    let approveTitle: String?
+    let approvePrompt: String?
+    let declineTitle: String?
+    let declinePrompt: String?
+    let fields: [RunFollowUpStructuredUIField]?
+
+    var declaredKind: String? {
+        [kind, type, role]
+            .compactMap { $0?.gitTrimmed }
+            .first { !$0.isEmpty }
+    }
+}
+
+private struct RunFollowUpStructuredUIField: Decodable {
+    let name: String?
+    let label: String?
+    let type: String?
+    let required: Bool?
+    let placeholder: String?
+    let value: String?
+    let defaultValue: String?
+    let options: [String]?
+}
+
+private func runFollowUpGeneratedUIRole(for actionId: String) -> RunFollowUpGeneratedUIRole? {
+    if actionId == "continue" {
+        return .continuation
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedChoicePrefix) {
+        return .choice
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedFormPrefix) {
+        return .form
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedArtifactCardPrefix) {
+        return .artifactCard
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedFileCardPrefix) {
+        return .fileCard
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedToolCardPrefix) {
+        return .toolCard
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedSkillCommandPrefix) {
+        return .toolCard
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedCommandPrefix) {
+        return .toolCard
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedEvidenceCardPrefix) {
+        return .evidenceCard
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedHandoffDraftPrefix) {
+        return .handoffDraft
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedSaveEvidencePrefix) {
+        return .saveEvidence
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedKnowledgeNotePrefix) {
+        return .knowledgeNote
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedKnowledgeComparePrefix) {
+        return .knowledgeCompare
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedConfirmationApprovePrefix) {
+        return .confirmationApprove
+    }
+    if actionId.hasPrefix(runFollowUpGeneratedConfirmationDeclinePrefix) {
+        return .confirmationDecline
+    }
+    return nil
+}
+
+private func runFollowUpActionIsGeneratedUI(_ action: RunFollowUpAction) -> Bool {
+    action.generatedUIRole != nil
+}
+
+private func runFollowUpActionIsGeneratedEvidenceCard(_ action: RunFollowUpAction) -> Bool {
+    action.generatedUIRole?.isEvidenceCard ?? false
+}
+
+func runFollowUpGeneratedUIRailActionGroups(_ actions: [RunFollowUpAction]) -> [RunFollowUpGeneratedUIRailActionGroup] {
+    let buckets = Dictionary(grouping: actions) { action in
+        action.generatedUIRole?.railGroupID ?? "generated"
+    }
+    var titles: [String: String] = [:]
+    for action in actions {
+        guard let role = action.generatedUIRole,
+              titles[role.railGroupID] == nil else { continue }
+        titles[role.railGroupID] = role.railGroupTitle
+    }
+    return ["choice", "form", "confirm", "handoff", "evidence", "knowledge", "generated"].compactMap { id in
+        guard let groupedActions = buckets[id], !groupedActions.isEmpty else { return nil }
+        return RunFollowUpGeneratedUIRailActionGroup(
+            id: id,
+            title: titles[id] ?? "Generated",
+            actions: groupedActions
+        )
+    }
+}
+
+func runFollowUpGeneratedUIRailShouldGroup(_ actions: [RunFollowUpAction]) -> Bool {
+    let groups = runFollowUpGeneratedUIRailActionGroups(actions)
+    return actions.count >= 3 || groups.count > 1
+}
+
+func runFollowUpGeneratedUIShortcut(
+    for action: RunFollowUpAction,
+    in actions: [RunFollowUpAction],
+    formValues: [String: String]? = nil
+) -> RunFollowUpGeneratedUIShortcut? {
+    switch action.generatedUIRole {
+    case .continuation, .choice:
+        let defaultAction = actions.first { candidate in
+            candidate.generatedUIRole == .continuation
+                || candidate.generatedUIRole == .choice
+                || candidate.generatedUIRole == .form
+        }
+        guard defaultAction?.id == action.id else { return nil }
+        return RunFollowUpGeneratedUIShortcut(kind: .defaultAction, label: "Return")
+    case .form:
+        if let form = action.generatedForm,
+           let formValues,
+           !runFollowUpGeneratedFormReadiness(form, values: formValues).canSubmit {
+            return nil
+        }
+        let defaultAction = actions.first { candidate in
+            candidate.generatedUIRole == .continuation
+                || candidate.generatedUIRole == .choice
+                || candidate.generatedUIRole == .form
+        }
+        guard defaultAction?.id == action.id else { return nil }
+        return RunFollowUpGeneratedUIShortcut(kind: .defaultAction, label: "Return")
+    case .confirmationApprove:
+        return RunFollowUpGeneratedUIShortcut(kind: .defaultAction, label: "Return")
+    case .confirmationDecline:
+        return RunFollowUpGeneratedUIShortcut(kind: .cancelAction, label: "Esc")
+    case .toolCard, .artifactCard, .fileCard, .evidenceCard, .handoffDraft, .saveEvidence, .knowledgeNote, .knowledgeCompare, .none:
+        return nil
+    }
+}
+
+func runFollowUpGeneratedUIFocusStyle(
+    for shortcut: RunFollowUpGeneratedUIShortcut?,
+    isMissionFocused: Bool = false
+) -> RunFollowUpGeneratedUIFocusStyle {
+    if isMissionFocused {
+        return RunFollowUpGeneratedUIFocusStyle(
+            isFocused: true,
+            chipBackgroundOpacity: 0.24,
+            chipBorderOpacity: 0.72,
+            chipBorderWidth: 1.45,
+            keyBackgroundOpacity: 0.28,
+            keyBorderOpacity: 0.52,
+            keyTextOpacity: 1,
+            shadowOpacity: 0.24,
+            shadowRadius: 7
+        )
+    }
+    switch shortcut?.kind {
+    case .defaultAction:
+        return RunFollowUpGeneratedUIFocusStyle(
+            isFocused: true,
+            chipBackgroundOpacity: 0.18,
+            chipBorderOpacity: 0.52,
+            chipBorderWidth: 1.2,
+            keyBackgroundOpacity: 0.24,
+            keyBorderOpacity: 0.46,
+            keyTextOpacity: 0.96,
+            shadowOpacity: 0.16,
+            shadowRadius: 4
+        )
+    case .cancelAction:
+        return RunFollowUpGeneratedUIFocusStyle(
+            isFocused: false,
+            chipBackgroundOpacity: 0.11,
+            chipBorderOpacity: 0.28,
+            chipBorderWidth: 1,
+            keyBackgroundOpacity: 0.12,
+            keyBorderOpacity: 0.24,
+            keyTextOpacity: 0.80,
+            shadowOpacity: 0,
+            shadowRadius: 0
+        )
+    case nil:
+        return RunFollowUpGeneratedUIFocusStyle(
+            isFocused: false,
+            chipBackgroundOpacity: 0.11,
+            chipBorderOpacity: 0.24,
+            chipBorderWidth: 1,
+            keyBackgroundOpacity: 0.10,
+            keyBorderOpacity: 0.18,
+            keyTextOpacity: 0.76,
+            shadowOpacity: 0,
+            shadowRadius: 0
+        )
+    }
+}
+
+private func runFollowUpStructuredUIActions(
+    output: String,
+    target: String,
+    context: String
+) -> [RunFollowUpAction] {
+    let candidates = runFollowUpStructuredUICandidates(from: output)
+    guard !candidates.isEmpty else { return [] }
+
+    var actions: [RunFollowUpAction] = []
+    var choiceIndex = 0
+    var formIndex = 0
+    var confirmIndex = 0
+    var cardIndex = 0
+
+    for candidate in candidates.prefix(8) {
+        guard let kind = runFollowUpStructuredUIKind(for: candidate.kind) else { continue }
+        let block = candidate.block
+        switch kind {
+        case .choice:
+            guard let action = runFollowUpStructuredUIChoiceAction(
+                block: block,
+                index: choiceIndex + 1,
+                target: target,
+                context: context
+            ) else { continue }
+            choiceIndex += 1
+            actions.append(action)
+        case .form:
+            guard let action = runFollowUpStructuredUIFormAction(
+                block: block,
+                index: formIndex + 1,
+                target: target,
+                context: context
+            ) else { continue }
+            formIndex += 1
+            actions.append(action)
+        case .confirm:
+            guard let pair = runFollowUpStructuredUIConfirmationActions(
+                block: block,
+                index: confirmIndex + 1,
+                target: target,
+                context: context
+            ) else { continue }
+            confirmIndex += 1
+            actions.append(contentsOf: pair)
+        case .card:
+            guard let action = runFollowUpStructuredUICardAction(
+                block: block,
+                index: cardIndex + 1,
+                target: target,
+                context: context
+            ) else { continue }
+            cardIndex += 1
+            actions.append(action)
+        }
+    }
+
+    return actions
+}
+
+private func runFollowUpStructuredUIChoiceAction(
+    block: RunFollowUpStructuredUIBlock,
+    index: Int,
+    target: String,
+    context: String
+) -> RunFollowUpAction? {
+    let body = runFollowUpStructuredUIBody(block)
+    let title = runFollowUpStructuredUILabel(block.title, fallback: runFollowUpGeneratedChoiceTitle(for: body, index: index - 1))
+    guard !title.isEmpty, !body.isEmpty else { return nil }
+    let permissionMode = runFollowUpStructuredUIPermissionMode(
+        block.permissionMode,
+        fallbackText: "\(title) \(body)",
+        defaultMode: runFollowUpGeneratedChoicePermissionMode(for: "\(title) \(body)")
+    )
+
+    return RunFollowUpAction(
+        id: "\(runFollowUpGeneratedChoicePrefix)structured-\(index)",
+        title: title,
+        detail: runFollowUpStructuredUILabel(block.detail, fallback: "Structured choice", maxLength: 30),
+        symbol: runFollowUpStructuredUISymbol(block.symbol, fallback: runFollowUpGeneratedChoiceSymbol(for: "\(title) \(body)")),
+        permissionMode: permissionMode,
+        prompt: """
+        Continue \(target) from this structured generated UI choice:
+
+        Selected choice: \(title)
+        Structured UI payload: \(body)
+
+        Treat this click as the user's explicit selection of the structured UI block. Do not take unselected structured choices unless they are strict prerequisites. Use the previous output, current work item, artifact refs, and pending commands as context. If the selected path requires an external write, destructive command, credential change, commit, or push, stop and ask before doing it.
+
+        \(context)
+        """
+    )
+}
+
+private func runFollowUpStructuredUIFormAction(
+    block: RunFollowUpStructuredUIBlock,
+    index: Int,
+    target: String,
+    context: String
+) -> RunFollowUpAction? {
+    let fields = runFollowUpStructuredUIFieldSummaries(block.fields ?? [])
+    let body = runFollowUpStructuredUIBody(block)
+    guard !fields.isEmpty || !body.isEmpty else { return nil }
+    let title = runFollowUpStructuredUILabel(block.title, fallback: "Form \(index)", maxLength: 24)
+    let detail = runFollowUpStructuredUILabel(block.detail, fallback: "\(max(fields.count, 1)) fields", maxLength: 30)
+    let promptBody = body.isEmpty ? "Collect structured parameters for \(title)." : body
+    let fieldSummary = fields.isEmpty ? "- No fields supplied; ask for the minimum required inputs." : fields.joined(separator: "\n")
+    let generatedForm = runFollowUpGeneratedForm(
+        title: title,
+        intent: promptBody,
+        fields: block.fields ?? []
+    )
+    let permissionMode = runFollowUpStructuredUIPermissionMode(
+        block.permissionMode,
+        fallbackText: "\(title) \(promptBody) \(fieldSummary)",
+        defaultMode: .askBeforeEdit
+    )
+
+    return RunFollowUpAction(
+        id: "\(runFollowUpGeneratedFormPrefix)structured-\(index)",
+        title: title,
+        detail: detail,
+        symbol: runFollowUpStructuredUISymbol(block.symbol, fallback: "list.bullet.rectangle"),
+        permissionMode: permissionMode,
+        generatedForm: generatedForm,
+        prompt: """
+        Continue \(target) by filling this structured generated UI form:
+
+        Form: \(title)
+        Form intent: \(promptBody)
+        Fields:
+        \(fieldSummary)
+
+        Treat this click as the user's selection of the structured form. Preserve field names, labels, types, required flags, defaults, current values, and option lists exactly. If required fields are missing, ask only for those missing fields and return the next form-style prompt. If fields are complete, summarize the collected parameters and propose the narrow next action. Do not edit files, update configuration, run commands, post externally, commit, or push until the completed form action is explicitly confirmed.
+
+        \(context)
+        """
+    )
+}
+
+func runFollowUpActionSubmittingGeneratedForm(
+    _ action: RunFollowUpAction,
+    values: [String: String]
+) -> RunFollowUpAction {
+    guard let form = action.generatedForm else { return action }
+    let submittedValues = runFollowUpGeneratedFormSubmittedValues(form, values: values)
+    let submittedBlock = submittedValues.isEmpty
+        ? "- No fields changed; continue with the structured form defaults."
+        : submittedValues.map { "- \($0.label): \($0.value)" }.joined(separator: "\n")
+    let rawValuesBlock = submittedValues.isEmpty
+        ? "- No field values supplied."
+        : submittedValues.map { "- \($0.key) = \($0.value)" }.joined(separator: "\n")
+    let prompt = """
+    \(action.prompt)
+
+    Inline form values submitted from generated UI:
+    \(submittedBlock)
+
+    Raw field values:
+    \(rawValuesBlock)
+
+    Use these submitted values as the user's form input for \(form.title). If a required field is still empty, ask only for the missing field in the next generated form.
+    """
+
+    return RunFollowUpAction(
+        id: action.id,
+        title: action.title,
+        detail: action.detail,
+        symbol: action.symbol,
+        permissionMode: action.permissionMode,
+        generatedUIRole: action.generatedUIRole,
+        generatedForm: form,
+        wrapsPrompt: false,
+        prompt: prompt
+    )
+}
+
+private func runFollowUpStructuredUIConfirmationActions(
+    block: RunFollowUpStructuredUIBlock,
+    index: Int,
+    target: String,
+    context: String
+) -> [RunFollowUpAction]? {
+    let question = runFollowUpStructuredUIBody(block)
+    guard !question.isEmpty else { return nil }
+    let approveTitle = runFollowUpStructuredUILabel(
+        block.approveTitle ?? block.title,
+        fallback: runFollowUpGeneratedConfirmationApproveTitle(for: question),
+        maxLength: 24
+    )
+    let declineTitle = runFollowUpStructuredUILabel(block.declineTitle, fallback: "Not now", maxLength: 24)
+    let approvePayload = runFollowUpCompactedEvidenceLine(block.approvePrompt ?? block.prompt ?? question)
+    let approvePermission = runFollowUpStructuredUIPermissionMode(
+        block.permissionMode,
+        fallbackText: "\(approveTitle) \(question)",
+        defaultMode: runFollowUpGeneratedConfirmationApprovePermissionMode(for: question)
+    )
+
+    return [
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedConfirmationApprovePrefix)structured-\(index)",
+            title: approveTitle,
+            detail: "Structured confirm",
+            symbol: runFollowUpStructuredUISymbol(block.symbol, fallback: runFollowUpGeneratedConfirmationApproveSymbol(for: question)),
+            permissionMode: approvePermission,
+            prompt: """
+            Continue \(target) by approving this structured generated UI confirmation:
+
+            Confirmation question:
+            - \(question)
+            Approval payload:
+            - \(approvePayload)
+
+            Treat this click as the user's explicit approval for the structured UI block. Take only that path, preserve the previous output and artifact refs, and keep the action narrow. If the selected path requires a write, command rerun, external post, credential change, commit, or push beyond the explicit confirmation, stop and ask before doing that extra step.
+
+            \(context)
+            """
+        ),
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedConfirmationDeclinePrefix)structured-\(index)",
+            title: declineTitle,
+            detail: "Structured confirm",
+            symbol: "xmark.circle",
+            permissionMode: .readOnly,
+            prompt: """
+            Continue \(target) by declining this structured generated UI confirmation:
+
+            Confirmation question:
+            - \(question)
+            Decline payload:
+            - \(runFollowUpCompactedEvidenceLine(block.declinePrompt ?? "Do not take the structured confirmation path."))
+
+            Treat this click as the user's explicit choice not to take the asked path. Do not perform the requested action. Summarize the current state, preserve the useful evidence, and return the next clickable choice only if another path is clearly useful.
+
+            \(context)
+            """
+        )
+    ]
+}
+
+private func runFollowUpStructuredUICardAction(
+    block: RunFollowUpStructuredUIBlock,
+    index: Int,
+    target: String,
+    context: String
+) -> RunFollowUpAction? {
+    let body = runFollowUpStructuredUIBody(block)
+    let title = runFollowUpStructuredUILabel(block.title, fallback: "Card \(index)", maxLength: 32)
+    guard !title.isEmpty, !body.isEmpty else { return nil }
+
+    return RunFollowUpAction(
+        id: "\(runFollowUpGeneratedEvidenceCardPrefix)structured-\(index)",
+        title: title,
+        detail: runFollowUpStructuredUILabel(block.detail, fallback: "Structured card", maxLength: 30),
+        symbol: runFollowUpStructuredUISymbol(block.symbol, fallback: "rectangle.stack"),
+        permissionMode: .readOnly,
+        prompt: """
+        Inspect this structured generated UI card for \(target):
+
+        Card: \(title)
+        Structured UI payload: \(body)
+
+        Explain what the selected card represents, why it matters, and the most useful next action. Preserve source refs, artifact refs, file refs, and validation evidence exactly when present. Do not edit files or write to external systems from this card inspection.
+
+        \(context)
+        """
+    )
+}
+
+private func runFollowUpStructuredUICandidates(from output: String) -> [RunFollowUpStructuredUICandidate] {
+    let decoder = JSONDecoder()
+    return runFollowUpStructuredUIJSONPayloads(from: output).flatMap { payload -> [RunFollowUpStructuredUICandidate] in
+        guard let data = payload.data(using: .utf8) else { return [] }
+        if let envelope = try? decoder.decode(RunFollowUpStructuredUIEnvelope.self, from: data),
+           !envelope.candidates.isEmpty {
+            return envelope.candidates
+        }
+        if let blocks = try? decoder.decode([RunFollowUpStructuredUIBlock].self, from: data) {
+            return blocks.map { RunFollowUpStructuredUICandidate(kind: $0.declaredKind ?? "choice", block: $0) }
+        }
+        if let block = try? decoder.decode(RunFollowUpStructuredUIBlock.self, from: data),
+           let kind = block.declaredKind {
+            return [RunFollowUpStructuredUICandidate(kind: kind, block: block)]
+        }
+        return []
+    }
+}
+
+private func runFollowUpStructuredUIJSONPayloads(from output: String) -> [String] {
+    var payloads: [String] = []
+    var activeLines: [String] = []
+    var isCollecting = false
+
+    for line in output.components(separatedBy: .newlines) {
+        if isCollecting {
+            if runFollowUpStructuredUIFenceEnd(line) {
+                let payload = activeLines.joined(separator: "\n").gitTrimmed
+                if !payload.isEmpty {
+                    payloads.append(payload)
+                }
+                activeLines = []
+                isCollecting = false
+            } else {
+                activeLines.append(line)
+            }
+            continue
+        }
+
+        if runFollowUpStructuredUIFenceStart(line) {
+            isCollecting = true
+            activeLines = []
+        }
+    }
+
+    return payloads
+}
+
+private func runFollowUpRemovingStructuredUIBlocks(from output: String) -> String {
+    var lines: [String] = []
+    var isSkipping = false
+
+    for line in output.components(separatedBy: .newlines) {
+        if isSkipping {
+            if runFollowUpStructuredUIFenceEnd(line) {
+                isSkipping = false
+            }
+            continue
+        }
+        if runFollowUpStructuredUIFenceStart(line) {
+            isSkipping = true
+            continue
+        }
+        lines.append(line)
+    }
+
+    return lines.joined(separator: "\n")
+}
+
+private func runFollowUpStructuredUIFenceStart(_ line: String) -> Bool {
+    let stripped = line.gitTrimmed.lowercased()
+    guard stripped.hasPrefix("```") else { return false }
+    let info = String(stripped.dropFirst(3))
+    return info.contains("pikiclaw-ui")
+        || info.contains("pikiclaw_ui")
+        || info.contains("pikiclaw ui")
+}
+
+private func runFollowUpStructuredUIFenceEnd(_ line: String) -> Bool {
+    line.gitTrimmed.hasPrefix("```")
+}
+
+private func runFollowUpStructuredUIKind(for rawValue: String) -> RunFollowUpStructuredUIKind? {
+    let normalized = rawValue
+        .gitTrimmed
+        .lowercased()
+        .replacingOccurrences(of: "_", with: "-")
+        .replacingOccurrences(of: " ", with: "-")
+    switch normalized {
+    case "choice", "option", "action":
+        return .choice
+    case "form", "fields", "input", "inputs", "parameter", "parameters":
+        return .form
+    case "confirm", "confirmation", "approval", "approve":
+        return .confirm
+    case "card", "evidence", "artifact", "file", "tool":
+        return .card
+    default:
+        return nil
+    }
+}
+
+private func runFollowUpStructuredUIFieldSummaries(_ fields: [RunFollowUpStructuredUIField]) -> [String] {
+    fields.enumerated().compactMap { index, field in
+        runFollowUpStructuredUIFieldSummary(field, index: index + 1)
+    }
+}
+
+private func runFollowUpGeneratedForm(
+    title: String,
+    intent: String,
+    fields: [RunFollowUpStructuredUIField]
+) -> RunFollowUpGeneratedForm? {
+    let formFields = fields.enumerated().compactMap { index, field in
+        runFollowUpGeneratedFormField(field, index: index + 1)
+    }
+    guard !formFields.isEmpty else { return nil }
+    return RunFollowUpGeneratedForm(
+        title: title,
+        intent: intent,
+        fields: formFields
+    )
+}
+
+private func runFollowUpGeneratedFormField(
+    _ field: RunFollowUpStructuredUIField,
+    index: Int
+) -> RunFollowUpGeneratedFormField? {
+    let name = runFollowUpStructuredUIFieldValue(field.name) ?? ""
+    let label = runFollowUpStructuredUIFieldValue(field.label) ?? ""
+    let key = !name.isEmpty ? name : (!label.isEmpty ? label : "field-\(index)")
+    let type = (runFollowUpStructuredUIFieldValue(field.type) ?? "text").lowercased()
+    let options = (field.options ?? [])
+        .map { runFollowUpCompactedEvidenceLine($0) }
+        .filter { !$0.isEmpty }
+    let displayLabel = !label.isEmpty ? label : key
+    guard !displayLabel.isEmpty else { return nil }
+    return RunFollowUpGeneratedFormField(
+        id: "\(key)-\(index)",
+        name: name,
+        label: label,
+        type: type,
+        isRequired: field.required == true,
+        placeholder: runFollowUpStructuredUIFieldValue(field.placeholder) ?? "",
+        value: runFollowUpStructuredUIFieldValue(field.value) ?? "",
+        defaultValue: runFollowUpStructuredUIFieldValue(field.defaultValue) ?? "",
+        options: options
+    )
+}
+
+private func runFollowUpGeneratedFormSubmittedValues(
+    _ form: RunFollowUpGeneratedForm,
+    values: [String: String]
+) -> [(key: String, label: String, value: String)] {
+    form.fields.compactMap { field in
+        let value = runFollowUpCompactedEvidenceLine(values[field.key] ?? field.initialValue)
+        guard !value.isEmpty || field.isRequired else { return nil }
+        return (key: field.key, label: field.displayLabel, value: value.isEmpty ? "<missing>" : value)
+    }
+}
+
+private func runFollowUpStructuredUIFieldSummary(_ field: RunFollowUpStructuredUIField, index: Int) -> String? {
+    let name = field.name?.gitTrimmed ?? ""
+    let label = field.label?.gitTrimmed ?? ""
+    let fieldTitle = !label.isEmpty ? label : (!name.isEmpty ? name : "Field \(index)")
+    let type = runFollowUpStructuredUIFieldValue(field.type) ?? "text"
+    let required = field.required == true ? "required" : "optional"
+    var parts = ["- \(fieldTitle) [\(type), \(required)]"]
+    if !name.isEmpty, name != fieldTitle {
+        parts.append("name=\(name)")
+    }
+    if let value = runFollowUpStructuredUIFieldValue(field.value) {
+        parts.append("value=\(runFollowUpCompactedEvidenceLine(value))")
+    }
+    if let defaultValue = runFollowUpStructuredUIFieldValue(field.defaultValue) {
+        parts.append("default=\(runFollowUpCompactedEvidenceLine(defaultValue))")
+    }
+    if let placeholder = runFollowUpStructuredUIFieldValue(field.placeholder) {
+        parts.append("placeholder=\(runFollowUpCompactedEvidenceLine(placeholder))")
+    }
+    let options = (field.options ?? [])
+        .map { $0.gitTrimmed }
+        .filter { !$0.isEmpty }
+    if !options.isEmpty {
+        parts.append("options=\(options.map(runFollowUpCompactedEvidenceLine(_:)).joined(separator: " | "))")
+    }
+    return parts.joined(separator: "; ")
+}
+
+private func runFollowUpStructuredUIFieldValue(_ value: String?) -> String? {
+    let trimmed = value?.gitTrimmed ?? ""
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+private func runFollowUpStructuredUIBody(_ block: RunFollowUpStructuredUIBlock) -> String {
+    [block.prompt, block.detail, block.question, block.title]
+        .compactMap { $0 }
+        .map(runFollowUpCompactedEvidenceLine(_:))
+        .first { !$0.isEmpty } ?? ""
+}
+
+private func runFollowUpStructuredUILabel(_ value: String?, fallback: String, maxLength: Int = 28) -> String {
+    let cleaned = runFollowUpCompactedEvidenceLine(value ?? fallback)
+    guard !cleaned.isEmpty else { return fallback }
+    guard cleaned.count > maxLength else { return cleaned }
+    return "\(String(cleaned.prefix(maxLength)))..."
+}
+
+private func runFollowUpStructuredUISymbol(_ value: String?, fallback: String) -> String {
+    let cleaned = value?.gitTrimmed ?? ""
+    return cleaned.isEmpty ? fallback : cleaned
+}
+
+private func runFollowUpStructuredUIPermissionMode(
+    _ rawValue: String?,
+    fallbackText: String,
+    defaultMode: PermissionMode
+) -> PermissionMode {
+    let normalized = (rawValue ?? "")
+        .gitTrimmed
+        .lowercased()
+        .replacingOccurrences(of: "_", with: "-")
+        .replacingOccurrences(of: " ", with: "-")
+    switch normalized {
+    case "read-only", "readonly", "read":
+        return .readOnly
+    case "ask-before-edit", "askbeforeedit", "approval", "approve", "confirm":
+        return .askBeforeEdit
+    case "autopilot", "auto", "yolo":
+        return .autopilot
+    default:
+        return rawValue == nil || normalized.isEmpty ? defaultMode : runFollowUpGeneratedChoicePermissionMode(for: fallbackText)
+    }
+}
+
+private func runFollowUpGeneratedChoiceActions(output: String, target: String, context: String) -> [RunFollowUpAction] {
+    let choices = runFollowUpGeneratedChoices(from: output)
+    guard choices.count >= 2 else { return [] }
+
+    return choices.prefix(3).enumerated().map { index, choice in
+        let title = runFollowUpGeneratedChoiceTitle(for: choice, index: index)
+        let permissionMode = runFollowUpGeneratedChoicePermissionMode(for: choice)
+        return RunFollowUpAction(
+            id: "\(runFollowUpGeneratedChoicePrefix)\(index + 1)",
+            title: title,
+            detail: "Generated choice",
+            symbol: runFollowUpGeneratedChoiceSymbol(for: choice),
+            permissionMode: permissionMode,
+            prompt: """
+            Continue \(target) from the previous agent output by taking this selected UI choice:
+
+            Selected choice: \(choice)
+
+            Treat this click as the user's explicit selection of that path. Do not take the unselected choices unless they are a strict prerequisite. Use the previous output, current work item, artifact refs, and pending commands as context. If the selected path requires an external write, destructive command, credential change, commit, or push, stop and ask before doing it.
+
+            \(context)
+            """
+        )
+    }
+}
+
+private func runFollowUpGeneratedConfirmationActions(
+    output: String,
+    target: String,
+    context: String,
+    question: String? = nil
+) -> [RunFollowUpAction] {
+    guard let question = question ?? runFollowUpGeneratedConfirmationQuestion(from: output) else { return [] }
+    let approveTitle = runFollowUpGeneratedConfirmationApproveTitle(for: question)
+    let approvePermission = runFollowUpGeneratedConfirmationApprovePermissionMode(for: question)
+
+    return [
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedConfirmationApprovePrefix)1",
+            title: approveTitle,
+            detail: "Generated confirm",
+            symbol: runFollowUpGeneratedConfirmationApproveSymbol(for: question),
+            permissionMode: approvePermission,
+            prompt: """
+            Continue \(target) by approving this generated confirmation:
+
+            Confirmation question:
+            - \(question)
+
+            Treat this click as the user's explicit approval for the asked path. Take only that path, preserve the previous output and artifact refs, and keep the action narrow. If the selected path requires a write, command rerun, external post, credential change, commit, or push beyond the explicit confirmation, stop and ask before doing that extra step.
+
+            \(context)
+            """
+        ),
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedConfirmationDeclinePrefix)1",
+            title: "Not now",
+            detail: "Generated confirm",
+            symbol: "xmark.circle",
+            permissionMode: .readOnly,
+            prompt: """
+            Continue \(target) by declining this generated confirmation:
+
+            Confirmation question:
+            - \(question)
+
+            Treat this click as the user's explicit choice not to take the asked path. Do not perform the requested action. Summarize the current state, preserve the useful evidence, and return the next clickable choice only if another path is clearly useful.
+
+            \(context)
+            """
+        )
+    ]
+}
+
+private func runFollowUpGeneratedSkillCommandActions(output: String, target: String, context: String) -> [RunFollowUpAction] {
+    let commands = runFollowUpGeneratedSkillCommands(from: output)
+    guard let command = commands.first else { return [] }
+
+    return [
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedSkillCommandPrefix)1",
+            title: runFollowUpGeneratedSkillCommandTitle(for: command),
+            detail: "Generated command",
+            symbol: runFollowUpGeneratedSkillCommandSymbol(for: command),
+            permissionMode: .askBeforeEdit,
+            prompt: """
+            Continue \(target) by preparing this generated skill command:
+
+            Generated skill command:
+            - \(command)
+
+            Treat this click as the user's selection of that generated skill command. Preserve the current context, keep env/account/session IDs distinct, and run or stage only this command. If the command is missing required environment, credentials, IDs, or scope, stop with the exact missing input instead of guessing. Do not edit skill files, post to Jira, commit, push, or change external systems unless the selected command explicitly requires it and you have confirmed the write boundary.
+
+            \(context)
+            """
+        )
+    ]
+}
+
+private func runFollowUpGeneratedCommandActions(output: String, target: String, context: String) -> [RunFollowUpAction] {
+    let commands = runFollowUpGeneratedRunnableCommands(from: output)
+    guard let command = commands.first else { return [] }
+
+    return [
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedCommandPrefix)1",
+            title: runFollowUpGeneratedCommandTitle(for: command),
+            detail: "Generated command",
+            symbol: runFollowUpGeneratedCommandSymbol(for: command),
+            permissionMode: .askBeforeEdit,
+            prompt: """
+            Continue \(target) by preparing this generated command:
+
+            Generated command:
+            - \(command)
+
+            Treat this click as the user's selection of that exact pending command. Run or stage only this command, preserve the previous output as context, and report the command result as new evidence. If the command would write external systems, install tools, change credentials, commit, push, or run a destructive operation, stop and ask before crossing that boundary.
+
+            \(context)
+            """
+        )
+    ]
+}
+
+private func runFollowUpGeneratedClarifyActions(
+    output: String,
+    target: String,
+    context: String,
+    requests: [String]? = nil
+) -> [RunFollowUpAction] {
+    let requests = requests ?? runFollowUpMissingInputRequests(from: output)
+    guard !requests.isEmpty else { return [] }
+    let fields = requests.prefix(3).enumerated().map { index, request in
+        "- Missing input \(index + 1) [text, required]; placeholder=\(runFollowUpCompactedEvidenceLine(request))"
+    }.joined(separator: "\n")
+    let clarifyContext = runFollowUpClarifyContext(from: context)
+    let contextSection = clarifyContext.isEmpty ? "" : "\n\n\(clarifyContext)"
+
+    return [
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedFormPrefix)clarify-1",
+            title: "Clarify",
+            detail: "Missing input",
+            symbol: "questionmark.bubble",
+            permissionMode: .readOnly,
+            prompt: """
+            Clarify the missing input for \(target).
+
+            Missing input fields:
+            \(fields)
+
+            Treat this click as selecting the missing-input form from the previous output. Ask the user only for these missing fields, preserve field names and current context exactly, and do not answer the missing input yourself. If the missing input blocks Jira, MR review, validation, or a skill rerun, say which downstream action it unblocks. Do not edit files, run commands, post externally, commit, push, or change external systems in this clarification pass.
+            \(contextSection)
+            """
+        )
+    ]
+}
+
+private func runFollowUpClarifyContext(from context: String) -> String {
+    let allowedPrefixes = [
+        "Run context:",
+        "- State:",
+        "- Original prompt:",
+        "- Work item:",
+        "- Work item state:",
+        "- Acceptance:",
+        "- Jira:",
+        "- Source refs:",
+        "- External refs:",
+        "- Ticket refs:"
+    ]
+    return context
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .map(String.init)
+        .filter { line in
+            allowedPrefixes.contains { line.hasPrefix($0) }
+                || line.hasPrefix("- Missing input:")
+        }
+        .joined(separator: "\n")
+        .gitTrimmed
+}
+
+private func runFollowUpGeneratedHandoffDraftActions(output: String, target: String, context: String) -> [RunFollowUpAction] {
+    let drafts = runFollowUpHandoffDrafts(from: output)
+    guard !drafts.isEmpty else { return [] }
+
+    return drafts.prefix(3).enumerated().map { index, draft in
+        RunFollowUpAction(
+            id: "\(runFollowUpGeneratedHandoffDraftPrefix)\(index + 1)",
+            title: runFollowUpGeneratedHandoffDraftTitle(for: draft),
+            detail: "Generated draft",
+            symbol: runFollowUpGeneratedHandoffDraftSymbol(for: draft),
+            permissionMode: .readOnly,
+            prompt: """
+            Prepare this generated handoff draft for \(target).
+
+            Selected handoff draft:
+            - \(draft)
+
+            Treat this click as selecting the paste-ready draft from the previous output. Verify the destination, preserve ticket keys, MR/PR refs, artifact refs, validation evidence, blockers, and source refs exactly, then return final copy-ready text plus the posting boundary. Do not post to Jira, GitLab, GitHub, MR/PR, commit, push, or write external systems unless the user explicitly confirms that write.
+
+            \(context)
+            """
+        )
+    }
+}
+
+private func runFollowUpGeneratedCardActions(output: String, target: String, context: String) -> [RunFollowUpAction] {
+    var actions: [RunFollowUpAction] = []
+    let toolRefs = runFollowUpGeneratedToolCardRefs(from: output)
+    if let toolRef = toolRefs.first {
+        let isValidation = runFollowUpValidationCommandValue(toolRef) != nil
+        actions.append(RunFollowUpAction(
+            id: "\(runFollowUpGeneratedToolCardPrefix)1",
+            title: isValidation ? "Validate" : "Tool",
+            detail: "Generated action",
+            symbol: isValidation ? "testtube.2" : "terminal",
+            permissionMode: isValidation ? .askBeforeEdit : .readOnly,
+            prompt: """
+            Inspect the generated tool-result card for \(target).
+
+            Selected tool result:
+            - \(toolRef)
+
+            Treat this click as the user's selection of the tool-result card from the agent output. Explain what the command or tool result means, whether it changes readiness, and what the next narrow action should be. If rerunning a command, changing files, or writing external systems is needed, ask before doing it.
+
+            \(context)
+            """
+        ))
+    }
+
+    let artifactRefs = runFollowUpGeneratedArtifactCardRefs(from: output)
+    if !artifactRefs.isEmpty {
+        let refs = runFollowUpGeneratedCardRefList(artifactRefs)
+        actions.append(RunFollowUpAction(
+            id: "\(runFollowUpGeneratedArtifactCardPrefix)1",
+            title: "Artifact",
+            detail: "Generated action",
+            symbol: "shippingbox",
+            permissionMode: .readOnly,
+            prompt: """
+            Inspect the generated artifact card for \(target).
+
+            Selected artifact refs:
+            \(refs)
+
+            Treat this click as the user's selection of the artifact card from the agent output. Explain what the artifact represents, whether it is reusable as evidence or knowledge, what remains unverified, and the next narrow action. Do not claim any write-back, save, or external post happened unless it is already in the evidence.
+
+            \(context)
+            """
+        ))
+    }
+
+    let fileRefs = runFollowUpGeneratedFileCardRefs(from: output)
+    if !fileRefs.isEmpty {
+        let refs = runFollowUpGeneratedCardRefList(fileRefs)
+        actions.append(RunFollowUpAction(
+            id: "\(runFollowUpGeneratedFileCardPrefix)1",
+            title: "File",
+            detail: "Generated action",
+            symbol: "doc.text.magnifyingglass",
+            permissionMode: .readOnly,
+            prompt: """
+            Inspect the generated file card for \(target).
+
+            Selected file refs:
+            \(refs)
+
+            Treat this click as the user's selection of the file card from the agent output. Explain what changed or should be reviewed, preserve exact file paths and line hints, and recommend the narrowest review or validation step. Do not edit files in this follow-up; describe the edit path if one is needed.
+
+            \(context)
+            """
+        ))
+    }
+
+    let evidenceRefs = runFollowUpGeneratedEvidenceCardRefs(
+        toolRefs: toolRefs,
+        artifactRefs: artifactRefs,
+        fileRefs: fileRefs
+    )
+    let knowledgeNoteRefs = runFollowUpGeneratedKnowledgeNoteRefs(from: output)
+    let knowledgeCompareRefs = runFollowUpGeneratedKnowledgeCompareRefs(
+        knowledgeNoteRefs: knowledgeNoteRefs,
+        evidenceRefs: evidenceRefs
+    )
+    if !knowledgeCompareRefs.isEmpty, actions.count < 4 {
+        let refs = runFollowUpGeneratedCardRefList(knowledgeCompareRefs)
+        actions.append(RunFollowUpAction(
+            id: "\(runFollowUpGeneratedKnowledgeComparePrefix)1",
+            title: "Compare",
+            detail: "Generated review",
+            symbol: "arrow.left.arrow.right",
+            permissionMode: .readOnly,
+            prompt: """
+            Compare the saved knowledge note against the new generated evidence for \(target).
+
+            Selected comparison refs:
+            \(refs)
+
+            Treat this click as the user's request to check whether the saved knowledge still matches the latest generated evidence. Preserve exact note, Tool result, Artifact, File, and Obsidian refs; identify matched claims, contradicted claims, stale assumptions, update recommendation, and the next useful place to inject the knowledge. Do not edit the note, write Obsidian files, post to Jira, commit, or change external systems in this follow-up.
+
+            \(context)
+            """
+        ))
+    }
+
+    if knowledgeCompareRefs.isEmpty, !knowledgeNoteRefs.isEmpty, actions.count < 4 {
+        let refs = runFollowUpGeneratedCardRefList(knowledgeNoteRefs)
+        actions.append(RunFollowUpAction(
+            id: "\(runFollowUpGeneratedKnowledgeNotePrefix)1",
+            title: "Knowledge",
+            detail: "Generated note",
+            symbol: "book.closed",
+            permissionMode: .readOnly,
+            prompt: """
+            Review the saved Obsidian knowledge note for \(target).
+
+            Selected knowledge note refs:
+            \(refs)
+
+            Treat this click as the user's selection of the saved knowledge note from the agent output. Preserve exact note, source, artifact, and Obsidian refs; identify the reusable claim, whether it is source-grounded, what gaps remain, and the next useful place to inject it. Do not edit the note, write Obsidian files, post to Jira, commit, or change external systems in this follow-up.
+
+            \(context)
+            """
+        ))
+    }
+
+    if !evidenceRefs.isEmpty, actions.count < 4 {
+        let refs = runFollowUpGeneratedCardRefList(evidenceRefs)
+        actions.append(RunFollowUpAction(
+            id: "\(runFollowUpGeneratedSaveEvidencePrefix)1",
+            title: "Save",
+            detail: "Generated save",
+            symbol: "archivebox.fill",
+            permissionMode: .askBeforeEdit,
+            prompt: """
+            Prepare to save the selected generated output cards as durable Pikiclaw evidence for \(target).
+
+            Selected generated output refs:
+            \(refs)
+
+            Treat this click as the user's request to prepare a save plan from the selected tool, artifact, or file cards. Preserve exact refs, separate confirmed facts from proposed memory, and choose the existing Pikiclaw path: Save Evidence for chat-run evidence, Save Knowledge note for reusable output artifacts, or no save if the evidence is too weak. Return the save target, source refs, artifact refs, knowledge-card draft when useful, approval needed, and gaps. Do not write artifacts, Obsidian notes, Jira comments, commits, or external systems until the user explicitly approves the save target and content.
+
+            \(context)
+            """
+        ))
+    }
+
+    return actions.prefix(4).map { $0 }
+}
+
+private func runFollowUpGeneratedConfirmationQuestion(from output: String) -> String? {
+    let openQuestions = runFollowUpOpenQuestionBodies(from: output)
+    let lines = output
+        .split(whereSeparator: \.isNewline)
+        .map { runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(String($0))).gitTrimmed }
+        .filter { !$0.isEmpty }
+
+    for line in lines.reversed().prefix(6) {
+        guard let question = runFollowUpSanitizedGeneratedConfirmationQuestion(line) else { continue }
+        guard !openQuestions.contains(runFollowUpCompactedEvidenceLine(question)) else { continue }
+        return question
+    }
+    return nil
+}
+
+private func runFollowUpResolvedConfirmationQuestion(
+    output: String,
+    missingInputRequests: [String]
+) -> String? {
+    guard let question = runFollowUpGeneratedConfirmationQuestion(from: output) else { return nil }
+    guard !missingInputRequests.isEmpty else { return question }
+    return followUpContainsContinuePrompt(question) ? question : nil
+}
+
+private func runFollowUpOpenQuestionBodies(from output: String) -> Set<String> {
+    Set(runFollowUpActionableNotes(from: output).compactMap { note in
+        guard note.hasPrefix("Open question:") else { return nil }
+        let body = runFollowUpCompactedEvidenceLine(String(note.dropFirst("Open question:".count)))
+        return body.isEmpty ? nil : body
+    })
+}
+
+private func runFollowUpSanitizedGeneratedConfirmationQuestion(_ value: String) -> String? {
+    let cleaned = runFollowUpCompactedEvidenceLine(value)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+        .gitTrimmed
+    guard cleaned.count >= 12,
+          cleaned.count <= 220,
+          !friendlyOutputLooksSensitive(cleaned),
+          runFollowUpLooksLikeConfirmationQuestion(cleaned) else {
+        return nil
+    }
+    let lower = cleaned.lowercased()
+    if (lower.contains("continue") || cleaned.contains("继续")),
+       !runFollowUpConfirmationQuestionContainsExplicitAction(cleaned) {
+        return nil
+    }
+    return cleaned
+}
+
+private func runFollowUpConfirmationQuestionContainsExplicitAction(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    let signals = [
+        "post", "publish", "write-back", "writeback", "write back", "submit",
+        "create", "open merge request", "open pull request", "merge request", "pull request",
+        "save", "evidence", "knowledge", "obsidian", "note",
+        "run", "test", "build", "validate", "verification",
+        "commit", "push"
+    ]
+    let chineseSignals = ["发布", "写回", "创建", "新建", "保存", "证据", "知识", "笔记", "运行", "执行", "验证", "提交"]
+    return signals.contains { lower.contains($0) }
+        || chineseSignals.contains { value.contains($0) }
+        || runFollowUpConfirmationQuestionContainsExternalCommentAction(value)
+        || runFollowUpConfirmationQuestionContainsExternalReviewFeedbackAction(value)
+        || runFollowUpConfirmationQuestionContainsJiraUpdateWriteAction(value)
+}
+
+private func runFollowUpLooksLikeConfirmationQuestion(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    let hasQuestionMark = value.contains("?") || value.contains("？")
+    let englishTriggers = [
+        "would you like me to",
+        "do you want me to",
+        "want me to",
+        "should i",
+        "shall i",
+        "can i",
+        "may i"
+    ]
+    let chineseTriggers = [
+        "是否",
+        "要不要",
+        "需要我",
+        "要我",
+        "我可以",
+        "我是否"
+    ]
+    return englishTriggers.contains(where: { lower.contains($0) })
+        || chineseTriggers.contains(where: { value.contains($0) })
+        || (hasQuestionMark && lower.hasPrefix("approve "))
+}
+
+private func runFollowUpGeneratedConfirmationApproveTitle(for question: String) -> String {
+    let lower = question.lowercased()
+    if runFollowUpConfirmationQuestionContainsExternalPostAction(question) {
+        return "Post"
+    }
+    if lower.contains("create")
+        || lower.contains("creating")
+        || lower.contains("open merge request")
+        || lower.contains("open pull request")
+        || question.contains("创建")
+        || question.contains("新建") {
+        if lower.contains("merge request")
+            || lower.contains("pull request")
+            || lower.contains(" mr")
+            || lower.hasPrefix("mr ")
+            || lower.contains(" pr")
+            || lower.hasPrefix("pr ") {
+            return "Create"
+        }
+    }
+    if lower.contains("save") || lower.contains("evidence") || lower.contains("knowledge") || lower.contains("note") || lower.contains("obsidian") || question.contains("保存") || question.contains("沉淀") || question.contains("证据") || question.contains("知识") || question.contains("笔记") {
+        return "Save"
+    }
+    if lower.contains("run") || lower.contains("test") || lower.contains("build") || lower.contains("validate") || question.contains("运行") || question.contains("执行") || question.contains("验证") {
+        return "Run"
+    }
+    if lower.contains("edit") || lower.contains("apply") || lower.contains("implement") || lower.contains("fix") || lower.contains("change") || question.contains("修改") || question.contains("实现") || question.contains("修复") {
+        return "Apply"
+    }
+    if lower.contains("review") || lower.contains("audit") || question.contains("检查") || question.contains("审查") {
+        return "Review"
+    }
+    return "Approve"
+}
+
+private func runFollowUpConfirmationQuestionContainsExternalPostAction(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    return lower.contains("post")
+        || lower.contains("publish")
+        || lower.contains("write-back")
+        || lower.contains("writeback")
+        || lower.contains("write back")
+        || lower.contains("submit")
+        || runFollowUpConfirmationQuestionContainsExternalCommentAction(value)
+        || runFollowUpConfirmationQuestionContainsExternalReviewFeedbackAction(value)
+        || runFollowUpConfirmationQuestionContainsJiraUpdateWriteAction(value)
+        || value.contains("发布")
+        || value.contains("写回")
+        || value.contains("提交")
+}
+
+private func runFollowUpConfirmationQuestionContainsJiraUpdateWriteAction(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    let jiraUpdatePhrases = [
+        "jira update",
+        "update jira with",
+        "update jira to",
+        "update jira for",
+        "update jira status",
+        "update jira ticket",
+        "update the jira ticket",
+        "update this jira ticket",
+        "updating jira with",
+        "updating jira to",
+        "updating jira status",
+        "updating jira ticket",
+        "updating the jira ticket",
+        "updating this jira ticket"
+    ]
+    if jiraUpdatePhrases.contains(where: { lower.contains($0) }) {
+        return true
+    }
+
+    let jiraTransitionPhrases = [
+        "mark jira as",
+        "marking jira as",
+        "transition jira to",
+        "transitioning jira to",
+        "move jira to",
+        "moving jira to",
+        "set jira status",
+        "resolve jira",
+        "resolving jira",
+        "close jira",
+        "closing jira"
+    ]
+    if jiraTransitionPhrases.contains(where: { lower.contains($0) }) {
+        return true
+    }
+
+    return value.contains("更新 Jira")
+        || value.contains("更新Jira")
+        || value.contains("更新工单")
+        || value.contains("工单更新")
+        || value.contains("写 Jira")
+        || value.contains("写Jira")
+        || value.contains("标记工单")
+        || value.contains("流转工单")
+        || value.contains("关闭工单")
+}
+
+private func runFollowUpConfirmationQuestionContainsExternalCommentAction(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    guard lower.contains("comment") || value.contains("评论") else {
+        return false
+    }
+    return lower.contains("jira")
+        || lower.contains("atlassian")
+        || lower.contains("merge request")
+        || lower.contains("pull request")
+        || lower.contains(" mr")
+        || lower.hasPrefix("mr ")
+        || lower.contains(" pr")
+        || lower.hasPrefix("pr ")
+        || value.contains("工单")
+        || value.contains("合并请求")
+        || value.contains("拉取请求")
+}
+
+private func runFollowUpConfirmationQuestionContainsExternalReviewFeedbackAction(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    let targetSignals = [
+        "merge request", "pull request", "gitlab", "github",
+        " mr", " pr"
+    ]
+    let actionSignals = [
+        "add ", "adding", "leave ", "leaving", "post ", "posting",
+        "submit ", "submitting", "publish ", "publishing"
+    ]
+    let feedbackSignals = [
+        "feedback", "review note", "review notes", "approval note", "approval notes"
+    ]
+    let chineseTargetSignals = [
+        "合并请求", "拉取请求", "评审"
+    ]
+    let chineseActionSignals = [
+        "添加", "留下", "发布", "提交", "粘贴", "写入", "写到", "贴到"
+    ]
+    let chineseFeedbackSignals = [
+        "评审意见", "评审评论", "审查意见", "审批意见", "评论", "意见"
+    ]
+    let hasTarget = targetSignals.contains(where: { lower.contains($0) })
+        || lower.hasPrefix("mr ")
+        || lower.hasPrefix("pr ")
+        || chineseTargetSignals.contains(where: { value.contains($0) })
+    let hasAction = actionSignals.contains(where: { lower.contains($0) })
+        || chineseActionSignals.contains(where: { value.contains($0) })
+    let hasFeedback = feedbackSignals.contains(where: { lower.contains($0) })
+        || chineseFeedbackSignals.contains(where: { value.contains($0) })
+    return hasTarget && hasAction && hasFeedback
+}
+
+private func runFollowUpGeneratedConfirmationApproveSymbol(for question: String) -> String {
+    switch runFollowUpGeneratedConfirmationApproveTitle(for: question) {
+    case "Post":
+        return "paperplane"
+    case "Create":
+        return "plus.app"
+    case "Save":
+        return "archivebox"
+    case "Run":
+        return "play.circle"
+    case "Apply":
+        return "hammer"
+    case "Review":
+        return "checkmark.seal"
+    default:
+        return "checkmark.circle"
+    }
+}
+
+private func runFollowUpGeneratedConfirmationApprovePermissionMode(for question: String) -> PermissionMode {
+    if runFollowUpConfirmationQuestionContainsExternalPostAction(question) {
+        return .askBeforeEdit
+    }
+    let lower = question.lowercased()
+    let readOnlySignals = ["summarize", "summary", "explain", "review", "audit", "inspect", "analyze"]
+    let writeSignals = ["save", "post", "publish", "write", "run", "test", "build", "edit", "apply", "implement", "fix", "change", "update", "updating", "create", "commit", "push"]
+    let hasReadOnlySignal = readOnlySignals.contains(where: { lower.contains($0) })
+        || ["总结", "解释", "检查", "审查", "分析"].contains(where: { question.contains($0) })
+    let hasWriteSignal = writeSignals.contains(where: { lower.contains($0) })
+        || ["保存", "发布", "写回", "运行", "执行", "验证", "修改", "实现", "修复", "提交"].contains(where: { question.contains($0) })
+    return hasReadOnlySignal && !hasWriteSignal ? .readOnly : .askBeforeEdit
+}
+
+private func runFollowUpGeneratedToolCardRefs(from output: String) -> [String] {
+    let refs = output
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).gitTrimmed }
+        .compactMap(runFollowUpGeneratedToolCardRef(from:))
+    return dedupedFollowUpCommands(refs).prefix(3).map { $0 }
+}
+
+private func runFollowUpGeneratedToolCardRef(from line: String) -> String? {
+    guard line.hasPrefix("Tool result:") else { return nil }
+    let value = line.replacingOccurrences(of: "Tool result:", with: "").gitTrimmed
+    guard !value.isEmpty,
+          !friendlyOutputLooksSensitive(line) else {
+        return nil
+    }
+    return runFollowUpCompactedEvidenceLine(value)
+}
+
+private func runFollowUpGeneratedSkillCommands(from output: String) -> [String] {
+    let commands = output
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).gitTrimmed }
+        .compactMap(runFollowUpGeneratedSkillCommand(from:))
+    return dedupedFollowUpCommands(commands).prefix(3).map { $0 }
+}
+
+private func runFollowUpGeneratedSkillCommand(from line: String) -> String? {
+    let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
+    guard !stripped.isEmpty,
+          !friendlyOutputLooksSensitive(stripped) else {
+        return nil
+    }
+
+    var labeledCandidates: [String] = []
+    var freeCandidates: [String] = []
+    if let body = runFollowUpNextCommandBody(from: stripped) {
+        labeledCandidates.append(contentsOf: runFollowUpBacktickValues(in: body))
+        labeledCandidates.append(body)
+    }
+    if let body = runFollowUpGeneratedSkillCommandBody(from: stripped) {
+        labeledCandidates.append(contentsOf: runFollowUpBacktickValues(in: body))
+        labeledCandidates.append(body)
+    }
+    if stripped.hasPrefix("$ ") || stripped.hasPrefix("❯ ") {
+        labeledCandidates.append(String(stripped.dropFirst(2)))
+    }
+    if stripped.hasPrefix("/") {
+        freeCandidates.append(stripped)
+    } else if stripped.hasPrefix("`/") {
+        freeCandidates.append(contentsOf: runFollowUpBacktickValues(in: stripped))
+    }
+
+    for candidate in labeledCandidates {
+        if let command = runFollowUpGeneratedSkillCommandValue(candidate, allowBare: true) {
+            return command
+        }
+    }
+    for candidate in freeCandidates {
+        if let command = runFollowUpGeneratedSkillCommandValue(candidate, allowBare: false) {
+            return command
+        }
+    }
+    return nil
+}
+
+private func runFollowUpGeneratedSkillCommandBody(from line: String) -> String? {
+    for separator in [":", "："] {
+        guard let range = line.range(of: separator) else { continue }
+        let field = String(line[..<range.lowerBound])
+        guard runFollowUpGeneratedSkillCommandLabel(for: field) != nil else { continue }
+        let body = String(line[range.upperBound...]).gitTrimmed
+        return body.isEmpty ? nil : body
+    }
+    return nil
+}
+
+private func runFollowUpGeneratedSkillCommandLabel(for value: String) -> String? {
+    let normalized = value
+        .gitTrimmed
+        .lowercased()
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: "  ", with: " ")
+    switch normalized {
+    case "skill command", "suggested skill command", "recommended skill command",
+         "generated skill command", "skill run", "skill rerun", "skill retry",
+         "logtrace command", "clickhouse command",
+         "技能命令", "建议技能命令", "推荐技能命令", "生成技能命令",
+         "技能运行", "技能重跑", "技能重试",
+         "日志命令", "日志查询命令", "logtrace 命令", "clickhouse 命令":
+        return "Skill command"
+    default:
+        return nil
+    }
+}
+
+private func runFollowUpGeneratedSkillCommandValue(_ value: String, allowBare: Bool) -> String? {
+    var command = value
+        .gitTrimmed
+        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+    while let scalar = command.unicodeScalars.last,
+          runFollowUpNextCommandTrailingCharacters.contains(scalar) {
+        command = String(command.dropLast()).gitTrimmed
+    }
+    guard command.count <= 220,
+          !command.isEmpty,
+          !friendlyOutputLooksSensitive(command),
+          let firstToken = command.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).first,
+          let slashCommand = runFollowUpSkillSlashCommand(from: String(firstToken)) else {
+        return nil
+    }
+    let lower = slashCommand.lowercased()
+    guard lower == "/logtrace"
+        || lower == "/clickhouse"
+        || lower.hasPrefix("/sk_") else {
+        return nil
+    }
+    if !allowBare,
+       command.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count < 2 {
+        return nil
+    }
+    return command
+}
+
+private func runFollowUpGeneratedSkillCommandTitle(for command: String) -> String {
+    let lower = command.lowercased()
+    if lower.hasPrefix("/logtrace") { return "Trace" }
+    if lower.hasPrefix("/clickhouse") { return "Query" }
+    return "Skill"
+}
+
+private func runFollowUpGeneratedSkillCommandSymbol(for command: String) -> String {
+    let lower = command.lowercased()
+    if lower.hasPrefix("/logtrace") { return "waveform.path.ecg" }
+    if lower.hasPrefix("/clickhouse") { return "tablecells" }
+    return "puzzlepiece.extension"
+}
+
+private func runFollowUpGeneratedRunnableCommands(from output: String) -> [String] {
+    let commands = output
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).gitTrimmed }
+        .compactMap(runFollowUpGeneratedRunnableCommand(from:))
+        .filter { command in
+            runFollowUpGeneratedSkillCommandValue(command, allowBare: true) == nil
+        }
+    return dedupedFollowUpCommands(commands).prefix(3).map { $0 }
+}
+
+private func runFollowUpGeneratedRunnableCommand(from line: String) -> String? {
+    let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
+    if runFollowUpValidationCommand(from: stripped) != nil,
+       runFollowUpValidationResult(from: stripped) != nil {
+        return nil
+    }
+    guard !stripped.isEmpty,
+          !friendlyOutputLooksSensitive(stripped),
+          let command = runFollowUpNextCommand(from: stripped),
+          !friendlyOutputLooksSensitive(command) else {
+        return nil
+    }
+    return command
+}
+
+private func runFollowUpGeneratedCommandTitle(for command: String) -> String {
+    runFollowUpValidationCommandValue(command) == nil ? "Run" : "Validate"
+}
+
+private func runFollowUpGeneratedCommandSymbol(for command: String) -> String {
+    runFollowUpValidationCommandValue(command) == nil ? "play.circle" : "testtube.2"
+}
+
+private func runFollowUpGeneratedHandoffDraftTitle(for draft: String) -> String {
+    let lower = draft.lowercased()
+    if lower.hasPrefix("jira draft:") { return "Jira" }
+    if lower.hasPrefix("mr draft:") || lower.hasPrefix("review draft:") { return "Draft" }
+    if lower.hasPrefix("bug handoff:") { return "Bug" }
+    return "Draft"
+}
+
+private func runFollowUpGeneratedHandoffDraftSymbol(for draft: String) -> String {
+    let lower = draft.lowercased()
+    if lower.hasPrefix("jira draft:") { return "checklist" }
+    if lower.hasPrefix("mr draft:") || lower.hasPrefix("review draft:") { return "text.bubble" }
+    if lower.hasPrefix("bug handoff:") { return "ladybug" }
+    return "doc.text"
+}
+
+private func runFollowUpGeneratedArtifactCardRefs(from output: String) -> [String] {
+    let refs = output
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).gitTrimmed }
+        .filter { $0.hasPrefix("Artifact:") }
+        .flatMap(runFollowUpArtifactRefs(from:))
+    return dedupedFollowUpCommands(refs).prefix(3).map { $0 }
+}
+
+private func runFollowUpGeneratedFileCardRefs(from output: String) -> [String] {
+    let refs = output
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).gitTrimmed }
+        .filter { $0.hasPrefix("File:") || $0.hasPrefix("Files:") }
+        .flatMap(runFollowUpFileRefs(from:))
+    return dedupedFollowUpCommands(refs).prefix(3).map { $0 }
+}
+
+private func runFollowUpGeneratedKnowledgeNoteRefs(from output: String) -> [String] {
+    let refs = output
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).gitTrimmed }
+        .filter(runFollowUpLineIsGeneratedKnowledgeNote(_:))
+        .flatMap(runFollowUpArtifactRefs(from:))
+    return dedupedFollowUpCommands(refs).prefix(3).map { $0 }
+}
+
+private func runFollowUpGeneratedKnowledgeCompareRefs(knowledgeNoteRefs: [String], evidenceRefs: [String]) -> [String] {
+    guard !knowledgeNoteRefs.isEmpty, !evidenceRefs.isEmpty else { return [] }
+    let refs = knowledgeNoteRefs.map { "Knowledge note: \($0)" }
+        + evidenceRefs.map { "New evidence: \($0)" }
+    return dedupedFollowUpCommands(refs).prefix(4).map { $0 }
+}
+
+private func runFollowUpLineIsGeneratedKnowledgeNote(_ line: String) -> Bool {
+    let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
+        .gitTrimmed
+        .lowercased()
+    return stripped.hasPrefix("knowledge note:")
+        || stripped.hasPrefix("saved knowledge note:")
+        || stripped.hasPrefix("obsidian knowledge note:")
+}
+
+private func runFollowUpGeneratedEvidenceCardRefs(
+    toolRefs: [String],
+    artifactRefs: [String],
+    fileRefs: [String]
+) -> [String] {
+    let refs = toolRefs.map { "Tool result: \($0)" }
+        + artifactRefs.map { "Artifact: \($0)" }
+        + fileRefs.map { "File: \($0)" }
+    return dedupedFollowUpCommands(refs).prefix(4).map { $0 }
+}
+
+private func runFollowUpGeneratedCardRefList(_ refs: [String]) -> String {
+    refs
+        .prefix(4)
+        .map { "- \($0)" }
+        .joined(separator: "\n")
+}
+
+private func runFollowUpGeneratedChoices(from output: String) -> [String] {
+    var choices: [String] = []
+    var activeChoiceSection = false
+
+    for rawLine in output.split(whereSeparator: \.isNewline).map(String.init) {
+        if let body = runFollowUpGeneratedChoiceSectionBody(from: rawLine) {
+            activeChoiceSection = true
+            if !body.isEmpty {
+                choices.append(body)
+            }
+            continue
+        }
+
+        guard activeChoiceSection else { continue }
+        let choice = runFollowUpGeneratedChoiceListItem(from: rawLine)
+        if let choice {
+            choices.append(choice)
+            continue
+        }
+
+        let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(rawLine))
+        if !stripped.isEmpty,
+           runFollowUpLooksLikeSectionBoundary(stripped) {
+            activeChoiceSection = false
+        }
+    }
+
+    return dedupedFollowUpCommands(choices.compactMap(runFollowUpSanitizedGeneratedChoice(_:)))
+}
+
+private func runFollowUpGeneratedChoiceSectionBody(from line: String) -> String? {
+    let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
+    guard !stripped.isEmpty else { return nil }
+
+    for separator in [":", "："] {
+        guard let range = stripped.range(of: separator) else { continue }
+        let field = String(stripped[..<range.lowerBound])
+        guard runFollowUpGeneratedChoiceSectionLabel(for: field) != nil else { continue }
+        return runFollowUpCompactedEvidenceLine(String(stripped[range.upperBound...]))
+    }
+
+    return runFollowUpGeneratedChoiceSectionLabel(for: stripped) == nil ? nil : ""
+}
+
+private func runFollowUpGeneratedChoiceSectionLabel(for value: String) -> String? {
+    let normalized = value
+        .gitTrimmed
+        .lowercased()
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+    switch normalized {
+    case "option", "options", "choice", "choices", "choose", "pick one",
+         "next option", "next options", "suggested options", "available options",
+         "next step", "next steps", "next step options", "possible next steps", "recommended next steps",
+         "下一步", "下一步选项", "选项", "选择", "可选项", "建议下一步":
+        return "Choice"
+    default:
+        return nil
+    }
+}
+
+private func runFollowUpGeneratedChoiceListItem(from line: String) -> String? {
+    if runFollowUpLooksLikeListItem(line) {
+        return runFollowUpSanitizedGeneratedChoice(runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line)))
+    }
+
+    let stripped = runFollowUpStrippedHeadingPrefix(line)
+    guard let regex = try? NSRegularExpression(pattern: #"^\s*(?:[A-Z]|[a-z]|\d+)[\)\]]\s+(.+)$"#) else {
+        return nil
+    }
+    let range = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
+    guard let match = regex.firstMatch(in: stripped, range: range),
+          let bodyRange = Range(match.range(at: 1), in: stripped) else {
+        return nil
+    }
+    return runFollowUpSanitizedGeneratedChoice(String(stripped[bodyRange]))
+}
+
+private func runFollowUpSanitizedGeneratedChoice(_ value: String) -> String? {
+    let cleaned = runFollowUpCompactedEvidenceLine(value)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+        .gitTrimmed
+    guard cleaned.count >= 8 else { return nil }
+    let lower = cleaned.lowercased()
+    if lower == "yes" || lower == "no" || lower == "continue" || lower == "继续" {
+        return nil
+    }
+    return cleaned
+}
+
+private func runFollowUpLooksLikeSectionBoundary(_ value: String) -> Bool {
+    let lower = value.lowercased()
+    return lower.hasSuffix(":")
+        || lower.hasSuffix("：")
+        || runFollowUpActionableField(from: value) != nil
+        || runFollowUpStatusLabel(for: value) != nil
+}
+
+private func runFollowUpGeneratedChoiceTitle(for choice: String, index: Int) -> String {
+    let lower = choice.lowercased()
+    if lower.contains("jira") { return "Jira" }
+    if lower.contains("validat") || lower.contains("test") || lower.contains("build") || lower.contains("验证") { return "Validate" }
+    if lower.contains("review") || lower.contains("audit") || lower.contains("检查") { return "Review" }
+    if lower.contains("log") || lower.contains("trace") || lower.contains("conversationid") || lower.contains("日志") { return "Trace" }
+    if lower.contains("skill") || lower.contains("技能") { return "Skill" }
+    if lower.contains("implement") || lower.contains("fix") || lower.contains("edit") || lower.contains("add") || lower.contains("更新") || lower.contains("实现") || lower.contains("修复") { return "Implement" }
+    if lower.contains("summar") || lower.contains("evidence") || lower.contains("总结") || lower.contains("证据") { return "Summarize" }
+    return "Choice \(index + 1)"
+}
+
+private func runFollowUpGeneratedChoiceSymbol(for choice: String) -> String {
+    let lower = choice.lowercased()
+    if lower.contains("jira") { return "checklist" }
+    if lower.contains("validat") || lower.contains("test") || lower.contains("build") || lower.contains("验证") { return "testtube.2" }
+    if lower.contains("review") || lower.contains("audit") || lower.contains("检查") { return "checkmark.seal" }
+    if lower.contains("log") || lower.contains("trace") || lower.contains("conversationid") || lower.contains("日志") { return "waveform.path.ecg" }
+    if lower.contains("skill") || lower.contains("技能") { return "puzzlepiece.extension" }
+    if lower.contains("implement") || lower.contains("fix") || lower.contains("edit") || lower.contains("add") || lower.contains("更新") || lower.contains("实现") || lower.contains("修复") { return "hammer" }
+    return "sparkles"
+}
+
+private func runFollowUpGeneratedChoicePermissionMode(for choice: String) -> PermissionMode {
+    let lower = choice.lowercased()
+    if lower.contains("implement")
+        || lower.contains("fix")
+        || lower.contains("edit")
+        || lower.contains("change")
+        || lower.contains("add")
+        || lower.contains("update")
+        || lower.contains("run ")
+        || lower.contains("test")
+        || lower.contains("build")
+        || lower.contains("post")
+        || lower.contains("commit")
+        || lower.contains("push")
+        || lower.contains("实现")
+        || lower.contains("修复")
+        || lower.contains("修改")
+        || lower.contains("新增")
+        || lower.contains("更新")
+        || lower.contains("验证") {
+        return .askBeforeEdit
+    }
+    return .readOnly
+}
+
 private func visibleRunFollowUpActions(_ actions: [RunFollowUpAction], limit: Int = 4) -> [RunFollowUpAction] {
     guard actions.count > limit else { return actions }
     var visible = Array(actions.prefix(limit))
     let hidden = actions.dropFirst(limit)
     let mustSurfaceIDs = ["jira-update"]
-    let replaceableIDs = ["capture-evidence", "mr-review", "validation"]
+    let replaceableIDs = ["capture-evidence", "\(runFollowUpGeneratedCommandPrefix)1", "\(runFollowUpGeneratedSkillCommandPrefix)1", "mr-review", "validation", "log-analysis", "skill-hardening"]
 
     for action in hidden where mustSurfaceIDs.contains(action.id) {
         guard !visible.contains(where: { $0.id == action.id }) else { continue }
-        guard let replacementIndex = replaceableIDs.compactMap({ id in
-            visible.firstIndex(where: { $0.id == id })
-        }).first else {
+        guard let replacementIndex = runFollowUpReplacementIndex(
+            in: visible,
+            replaceableIDs: replaceableIDs
+        ) else {
             continue
         }
-        visible[replacementIndex] = action
+        visible.remove(at: replacementIndex)
+        visible.append(action)
     }
+
     return visible
+}
+
+private func runFollowUpReplacementIndex(
+    in visible: [RunFollowUpAction],
+    replaceableIDs: [String]
+) -> Int? {
+    if let generatedEvidenceIndex = visible.firstIndex(where: { runFollowUpActionIsGeneratedEvidenceCard($0) }) {
+        return generatedEvidenceIndex
+    }
+    return replaceableIDs.compactMap { id in
+        visible.firstIndex(where: { $0.id == id })
+    }.first
+}
+
+private func runFollowUpActionsPrioritizingSkillHardening(_ actions: [RunFollowUpAction]) -> [RunFollowUpAction] {
+    guard let index = actions.firstIndex(where: { $0.id == "skill-hardening" }) else {
+        return actions
+    }
+    var ordered = actions
+    let action = ordered.remove(at: index)
+    let generatedPrefixEnd = ordered.prefix(while: { $0.isGeneratedUI }).count
+    ordered.insert(action, at: generatedPrefixEnd)
+    return ordered
+}
+
+private func runFollowUpActionsPrioritizing(_ actions: [RunFollowUpAction], actionID: String) -> [RunFollowUpAction] {
+    guard let index = actions.firstIndex(where: { $0.id == actionID }) else {
+        return actions
+    }
+    var ordered = actions
+    let action = ordered.remove(at: index)
+    let insertionIndex = ordered.prefix(while: { $0.isGeneratedUI }).count
+    ordered.insert(action, at: insertionIndex)
+    return ordered
 }
 
 private func runFollowUpContext(run: AgentRun, workItem: WorkItem?, output: String) -> String {
@@ -6297,6 +11843,10 @@ private func runFollowUpContext(run: AgentRun, workItem: WorkItem?, output: Stri
     let ticketRefs = runFollowUpTicketRefs(run: run, workItem: workItem, output: output)
     if !ticketRefs.isEmpty {
         lines.append("- Ticket refs: \(ticketRefs.joined(separator: ", "))")
+    }
+    let jiraWriteBackSignals = runFollowUpJiraWriteBackSignals(from: output)
+    if !jiraWriteBackSignals.isEmpty {
+        lines.append("- Jira write-back:\n\(jiraWriteBackSignals.map { "- \($0)" }.joined(separator: "\n"))")
     }
     let skillRefs = runFollowUpSkillRefs(run: run, output: output)
     if !skillRefs.isEmpty {
@@ -6405,7 +11955,10 @@ private func runFollowUpInferredStatusLine(run: AgentRun, lines: [String]) -> St
     }
 
     for line in lines {
-        let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
+        var stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
+        if stripped.hasPrefix("Thinking:") {
+            stripped = stripped.replacingOccurrences(of: "Thinking:", with: "", options: .anchored).gitTrimmed
+        }
         let lower = stripped.lowercased()
         if lower == "done" || lower == "done." {
             return "Progress: done"
@@ -6418,7 +11971,7 @@ private func runFollowUpInferredStatusLine(run: AgentRun, lines: [String]) -> St
         }
         if lower.hasPrefix("no findings")
             || lower.hasPrefix("no issues found")
-            || lower.hasPrefix("no blocking findings") {
+            || runFollowUpReviewTextIsClean(stripped) {
             return "Review result: \(runFollowUpCompactedEvidenceLine(stripped))"
         }
     }
@@ -6502,16 +12055,20 @@ private func runFollowUpDecisionLabel(for value: String) -> String? {
         .replacingOccurrences(of: "/", with: " ")
         .replacingOccurrences(of: "  ", with: " ")
     switch normalized {
-    case "decision", "ship decision", "merge decision", "go no go", "go or no go":
+    case "decision", "ship decision", "merge decision", "go no go", "go or no go",
+         "决策", "合并决策", "发布决策", "是否合并":
         return "Decision"
-    case "recommendation", "recommend", "recommended next action":
+    case "recommendation", "recommend", "recommended next action",
+         "建议", "推荐", "推荐下一步":
         return "Recommendation"
     case "readiness", "ready", "not ready", "ready not ready", "ready or not ready",
-         "merge readiness", "mr readiness", "review readiness":
+         "merge readiness", "mr readiness", "review readiness",
+         "就绪", "合并就绪", "mr 就绪", "评审就绪", "是否就绪":
         return "Readiness"
     case "approval", "approval note", "approval status", "review approval":
         return "Approval"
-    case "request changes", "changes requested":
+    case "request changes", "changes requested",
+         "审批", "审批说明", "审批状态", "评审审批", "请求修改":
         return "Approval"
     default:
         return nil
@@ -6528,10 +12085,24 @@ private func runFollowUpInferredDecisionSignal(from line: String) -> String? {
         || lower.hasPrefix("not ready for review") {
         return "Readiness: \(runFollowUpCompactedEvidenceLine(stripped))"
     }
+    if stripped.hasPrefix("可以合并")
+        || stripped.hasPrefix("不能合并")
+        || stripped.hasPrefix("可以进入评审")
+        || stripped.hasPrefix("不能进入评审")
+        || stripped.hasPrefix("已准备好")
+        || stripped.hasPrefix("未准备好") {
+        return "Readiness: \(runFollowUpCompactedEvidenceLine(stripped))"
+    }
     if lower.hasPrefix("approve")
         || lower.hasPrefix("approved")
         || lower.hasPrefix("request changes")
         || lower.hasPrefix("changes requested") {
+        return "Approval: \(runFollowUpCompactedEvidenceLine(stripped))"
+    }
+    if stripped.hasPrefix("批准")
+        || stripped.hasPrefix("同意")
+        || stripped.hasPrefix("请求修改")
+        || stripped.hasPrefix("需要修改") {
         return "Approval: \(runFollowUpCompactedEvidenceLine(stripped))"
     }
     return nil
@@ -6541,9 +12112,150 @@ private func followUpContainsBlockingDecisionSignal(_ output: String) -> Bool {
     runFollowUpDecisionSignals(from: output).contains(where: runFollowUpDecisionSignalIsBlocking(_:))
 }
 
+private func followUpContainsBlockingReviewFinding(_ output: String) -> Bool {
+    runFollowUpReviewFindings(from: output).contains { finding in
+        let lower = finding.lowercased()
+        return lower.contains("[p0]") || lower.contains("[p1]")
+    }
+}
+
+private func followUpShouldPrioritizeJiraUpdate(run: AgentRun, output: String) -> Bool {
+    guard run.state == .completed || run.state == .waitingForUser || run.state == .failed else {
+        return false
+    }
+    guard runFollowUpJiraWriteBackSignalsNeedAction(from: output),
+          !followUpContainsNonJiraWriteBackFailureSignal(output) else {
+        return false
+    }
+    return !followUpContainsBlockingDecisionSignal(output)
+        && !followUpContainsBlockingReviewFinding(output)
+}
+
+private func followUpShouldPrioritizeValidation(run: AgentRun, output: String) -> Bool {
+    guard run.state == .completed || run.state == .waitingForUser else {
+        return false
+    }
+    guard followUpContainsCleanReviewResult(output),
+          !runFollowUpNextCommands(run: run, output: output).isEmpty else {
+        return false
+    }
+    return !outputContainsFailureSignal(output)
+        && !followUpContainsBlockingDecisionSignal(output)
+        && !followUpContainsBlockingReviewFinding(output)
+}
+
+private func followUpShouldPrioritizeSkillHardening(run: AgentRun, output: String) -> Bool {
+    guard followUpContainsSkillSignal(run: run, output: output) else {
+        return false
+    }
+    let combined = "\(run.promptSnapshot)\n\(output)".lowercased()
+    return runtimeTextContainsDirectSkillFailureOrRecoverySignal(combined)
+}
+
+private func followUpContainsCleanReviewResult(_ output: String) -> Bool {
+    runFollowUpReviewFindings(from: output).contains(where: runFollowUpReviewFindingIsClean(_:))
+}
+
+private func runFollowUpReviewFindingIsClean(_ finding: String) -> Bool {
+    runFollowUpReviewTextIsClean(finding)
+}
+
+private func runFollowUpReviewTextIsClean(_ value: String) -> Bool {
+    let stripped = runFollowUpCompactedEvidenceLine(value)
+    let lower = stripped.lowercased()
+    if lower.hasPrefix("no findings")
+        || lower.hasPrefix("no issues found")
+        || lower.hasPrefix("no blocking findings") {
+        return true
+    }
+    let chineseCleanSignals = [
+        "无阻塞问题", "没有阻塞问题", "无阻塞发现", "没有阻塞发现",
+        "无阻塞项", "没有阻塞项", "无发现问题", "没有发现问题",
+        "无问题", "没有问题", "未发现问题", "没有发现阻塞"
+    ]
+    return chineseCleanSignals.contains { stripped.contains($0) }
+}
+
+private func followUpContainsBugAnalysisSignal(_ output: String) -> Bool {
+    if !runFollowUpDiagnosisNotes(from: output).isEmpty {
+        return true
+    }
+    guard !runFollowUpReproductionNotes(from: output).isEmpty else {
+        return false
+    }
+    let lower = output.lowercased()
+    return lower.contains("bug")
+        || lower.contains("issue")
+        || lower.contains("crash")
+        || lower.contains("failure")
+        || lower.contains("failed")
+        || output.contains("问题")
+        || output.contains("故障")
+        || output.contains("崩溃")
+        || output.contains("失败")
+        || output.contains("异常")
+        || output.contains("无法")
+        || output.contains("不能")
+}
+
+private func followUpContainsActionableFailureSignal(_ output: String) -> Bool {
+    if runFollowUpFailureSignals(from: output).isEmpty {
+        return outputContainsFailureSignal(output)
+    }
+    return followUpContainsNonJiraWriteBackFailureSignal(output)
+}
+
+private func followUpContainsNonJiraWriteBackFailureSignal(_ output: String) -> Bool {
+    runFollowUpFailureSignals(from: output).contains { signal in
+        !runFollowUpFailureSignalIsJiraWriteBack(signal)
+    }
+}
+
+private func runFollowUpFailureSignalIsJiraWriteBack(_ signal: String) -> Bool {
+    let lower = signal.lowercased()
+    return lower.contains("jira write-back")
+        || lower.contains("jira writeback")
+        || lower.contains("jira write back")
+        || lower.contains("jira 写回")
+        || lower.contains("jira写回")
+        || lower.contains("write-back")
+        || lower.contains("writeback")
+        || lower.contains("write back")
+}
+
+private func runFollowUpJiraWriteBackSignalsNeedAction(from output: String) -> Bool {
+    runFollowUpJiraWriteBackSignals(from: output).contains(where: runFollowUpJiraWriteBackSignalNeedsAction(_:))
+}
+
+private func runFollowUpJiraWriteBackSignalNeedsAction(_ signal: String) -> Bool {
+    let lower = signal.lowercased()
+    if lower.contains("posted") || signal.contains("已发布") || signal.contains("已写回") {
+        return false
+    }
+    return lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("pending")
+        || lower.contains("retry")
+        || lower.contains("manual paste")
+        || lower.contains("paste manually")
+        || lower.contains("before posting")
+        || lower.contains("posting")
+        || signal.contains("失败")
+        || signal.contains("待")
+        || signal.contains("等待")
+        || signal.contains("重试")
+        || signal.contains("手动粘贴")
+        || signal.contains("手动贴")
+        || signal.contains("发布前")
+        || signal.contains("未发布")
+        || signal.contains("未写回")
+        || signal.contains("写回中")
+        || signal.contains("发布中")
+}
+
 private func runFollowUpDecisionSignalIsBlocking(_ signal: String) -> Bool {
     let lower = signal.lowercased()
-    if lower.contains("no blocking findings") || lower.contains("no blockers") {
+    if runFollowUpReviewTextIsClean(signal) || lower.contains("no blockers") {
         return false
     }
     return lower.contains("not ready")
@@ -6557,6 +12269,13 @@ private func runFollowUpDecisionSignalIsBlocking(_ signal: String) -> Bool {
         || lower.contains("must fix")
         || lower.contains("required fix")
         || lower.contains("needs fix")
+        || signal.contains("阻塞")
+        || signal.contains("未准备好")
+        || signal.contains("不能合并")
+        || signal.contains("无法合并")
+        || signal.contains("请求修改")
+        || signal.contains("必须修复")
+        || signal.contains("需要修复")
 }
 
 private func runFollowUpLooksLikeDecisionBoundary(_ line: String) -> Bool {
@@ -6589,7 +12308,18 @@ private let runFollowUpKnownSectionHeadings: Set<String> = [
     "observed", "decision", "recommendation", "readiness", "merge readiness",
     "mr readiness", "ready/not ready", "ready not ready", "ready or not ready",
     "approval", "approval note", "request changes", "changes requested",
-    "go/no-go", "go no go", "go or no go"
+    "go/no-go", "go no go", "go or no go",
+    "状态", "结果", "总结", "验证", "测试", "变更文件", "文件引用",
+    "来源引用", "外部引用", "命令", "备注", "阻塞", "阻塞项",
+    "下一步", "开放问题", "待确认问题", "风险", "发现", "评审发现",
+    "代码引用", "jira 更新", "jira 评论", "mr 评审意见", "评审意见",
+    "评审评论", "预期", "预期结果", "实际", "实际结果", "观察结果",
+    "决策", "建议", "推荐", "就绪", "合并就绪", "评审就绪",
+    "审批", "审批说明", "请求修改", "分支决策", "缺少输入",
+    "缺失输入", "验证缺口", "测试缺口", "复现", "复现步骤",
+    "重现", "重现步骤", "诊断", "问题分析", "根因", "根本原因",
+    "原因", "可能原因", "影响", "用户影响", "修复", "修复方案",
+    "修复路径", "修复计划"
 ]
 
 private func runFollowUpReproductionNotes(from output: String) -> [String] {
@@ -6663,13 +12393,17 @@ private func runFollowUpReproductionLabel(for value: String) -> String? {
         .replacingOccurrences(of: "_", with: " ")
         .replacingOccurrences(of: "-", with: " ")
     switch normalized {
-    case "repro", "reproduction", "steps", "steps to reproduce", "reproduction steps", "str":
+    case "repro", "reproduction", "steps", "steps to reproduce", "reproduction steps", "str",
+         "复现", "复现步骤", "重现", "重现步骤", "步骤", "操作步骤":
         return "Steps"
-    case "observed", "observed behavior", "observed result":
+    case "observed", "observed behavior", "observed result",
+         "观察结果", "观察到", "现象", "异常表现":
         return "Observed"
-    case "actual", "actual behavior", "actual result", "actual outcome":
+    case "actual", "actual behavior", "actual result", "actual outcome",
+         "实际", "实际结果", "实际行为":
         return "Actual"
-    case "expected", "expected behavior", "expected result", "expected outcome":
+    case "expected", "expected behavior", "expected result", "expected outcome",
+         "预期", "预期结果", "预期行为", "期望结果":
         return "Expected"
     default:
         return nil
@@ -6766,19 +12500,23 @@ private func runFollowUpDiagnosisLabel(for value: String) -> String? {
         .replacingOccurrences(of: "_", with: " ")
         .replacingOccurrences(of: "-", with: " ")
     switch normalized {
-    case "diagnosis":
+    case "diagnosis", "问题分析", "分析结论", "诊断":
         return "Diagnosis"
-    case "root cause":
+    case "root cause", "根因", "根本原因":
         return "Root cause"
-    case "cause", "likely cause", "suspected cause":
+    case "cause", "likely cause", "suspected cause",
+         "原因", "可能原因", "疑似原因", "直接原因":
         return "Likely cause"
-    case "seam", "likely seam", "implementation seam", "affected seam", "suspect seam":
+    case "seam", "likely seam", "implementation seam", "affected seam", "suspect seam",
+         "相关模块", "受影响模块", "实现边界", "问题位置", "代码位置", "可疑位置":
         return "Likely seam"
-    case "hypothesis", "working hypothesis":
+    case "hypothesis", "working hypothesis", "假设", "工作假设":
         return "Hypothesis"
-    case "impact", "customer impact", "user impact", "blast radius":
+    case "impact", "customer impact", "user impact", "blast radius",
+         "影响", "用户影响", "客户影响", "影响范围", "风险范围":
         return "Impact"
-    case "fix", "fix path", "fix plan", "proposed fix", "smallest fix", "smallest safe fix", "remediation":
+    case "fix", "fix path", "fix plan", "proposed fix", "smallest fix", "smallest safe fix", "remediation",
+         "修复", "修复方案", "修复路径", "修复计划", "最小修复", "建议修复", "处理方案":
         return "Fix path"
     default:
         return nil
@@ -6814,17 +12552,16 @@ private func runFollowUpReviewFindings(from output: String) -> [String] {
 private func runFollowUpReviewFinding(from line: String) -> String? {
     let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
     guard !stripped.isEmpty else { return nil }
-    let lower = stripped.lowercased()
 
-    if lower.hasPrefix("no findings")
-        || lower.hasPrefix("no issues found")
-        || lower.hasPrefix("no blocking findings") {
-        return runFollowUpCompactedEvidenceLine(stripped)
-    }
     if let severityFinding = runFollowUpSeverityFinding(from: stripped) {
         return severityFinding
     }
-    return runFollowUpLabeledReviewFinding(from: stripped)
+    if let labeledFinding = runFollowUpLabeledReviewFinding(from: stripped) {
+        return labeledFinding
+    }
+    return runFollowUpReviewTextIsClean(stripped)
+        ? runFollowUpCompactedEvidenceLine(stripped)
+        : nil
 }
 
 private func runFollowUpSeverityFinding(from value: String) -> String? {
@@ -6847,8 +12584,15 @@ private func runFollowUpLabeledReviewFinding(from value: String) -> String? {
             .replacingOccurrences(of: "-", with: " ")
         let body = runFollowUpCompactedEvidenceLine(String(value[range.upperBound...]))
         guard !body.isEmpty,
-              ["finding", "review finding", "mr finding", "review comment"].contains(field) else {
+              [
+                "finding", "review finding", "mr finding",
+                "review comment", "mr review comment", "mr review feedback",
+                "评审意见", "评审评论", "mr 评审意见", "mr 评审评论"
+              ].contains(field) else {
             continue
+        }
+        if runFollowUpReviewTextIsClean(body) {
+            return body
         }
         return "Finding: \(body)"
     }
@@ -6914,8 +12658,38 @@ private func runFollowUpHandoffHeading(from line: String) -> (label: String, bod
           !stripped.contains("：") else {
         return nil
     }
-    guard let label = runFollowUpHandoffLabel(for: stripped) else { return nil }
+    guard let label = runFollowUpStandaloneHandoffLabel(for: stripped) else { return nil }
     return (label, nil)
+}
+
+private func runFollowUpStandaloneHandoffLabel(for value: String) -> String? {
+    let normalized = value
+        .gitTrimmed
+        .lowercased()
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+    switch normalized {
+    case "jira draft", "jira update draft", "jira comment draft",
+        "jira 草稿", "jira 更新", "jira 更新草稿", "jira 评论", "jira 评论草稿":
+        return "Jira draft"
+    case "mr draft", "mr review draft", "mr review comment",
+         "merge request draft", "merge request review draft",
+         "pull request draft", "pull request review draft",
+         "mr 草稿", "mr 评审草稿", "mr 评审意见", "mr 评论", "mr 评论草稿",
+         "merge request 草稿", "merge request 评审草稿",
+         "pull request 草稿", "pull request 评审草稿":
+        return "MR draft"
+    case "review draft", "review comment", "approval note",
+        "评审草稿", "评审意见", "评审评论", "审批说明":
+        return "Review draft"
+    case "bug handoff", "bug report", "bug 交接", "bug 报告", "问题交接":
+        return "Bug handoff"
+    case "paste ready", "paste ready draft", "handoff", "handoff draft",
+        "可粘贴草稿", "交接", "交接草稿":
+        return "Handoff draft"
+    default:
+        return nil
+    }
 }
 
 private func runFollowUpHandoffLabel(for value: String) -> String? {
@@ -6927,23 +12701,23 @@ private func runFollowUpHandoffLabel(for value: String) -> String? {
     let compact = normalized.replacingOccurrences(of: " ", with: "")
 
     if normalized.contains("jira"),
-       normalized.contains("update") || normalized.contains("comment") {
+       normalized.contains("update") || normalized.contains("comment") || normalized.contains("更新") || normalized.contains("评论") || normalized.contains("草稿") {
         return "Jira draft"
     }
     if normalized.contains("merge request")
         || normalized.contains("pull request")
         || normalized.contains("mr ") {
-        if normalized.contains("review") || normalized.contains("comment") || normalized.contains("approval") {
+        if normalized.contains("review") || normalized.contains("comment") || normalized.contains("approval") || normalized.contains("评审") || normalized.contains("评论") || normalized.contains("草稿") {
             return "MR draft"
         }
     }
-    if normalized.contains("review comment") || normalized.contains("approval note") {
+    if normalized.contains("review comment") || normalized.contains("approval note") || normalized.contains("评审意见") || normalized.contains("评审评论") || normalized.contains("审批说明") {
         return "Review draft"
     }
-    if normalized.contains("bug handoff") || normalized.contains("bug report") {
+    if normalized.contains("bug handoff") || normalized.contains("bug report") || normalized.contains("bug 交接") || normalized.contains("bug 报告") || normalized.contains("问题交接") {
         return "Bug handoff"
     }
-    if normalized.contains("paste ready") || normalized == "handoff" || compact == "handoffdraft" {
+    if normalized.contains("paste ready") || normalized == "handoff" || compact == "handoffdraft" || normalized.contains("可粘贴") || normalized == "交接" || compact == "交接草稿" {
         return "Handoff draft"
     }
     return nil
@@ -7375,6 +13149,61 @@ private func runFollowUpTicketRefs(in value: String) -> [String] {
     }
 }
 
+private func runFollowUpJiraWriteBackSignals(from output: String) -> [String] {
+    let signals = output
+        .split(whereSeparator: \.isNewline)
+        .map { runFollowUpStrippedListPrefix(String($0)).gitTrimmed }
+        .compactMap(runFollowUpJiraWriteBackSignal(from:))
+    return dedupedFollowUpCommands(signals).prefix(3).map { $0 }
+}
+
+private func runFollowUpJiraWriteBackSignal(from line: String) -> String? {
+    let lower = line.lowercased()
+    if lower.hasPrefix("jira write-back")
+        || lower.hasPrefix("jira writeback")
+        || lower.hasPrefix("jira write back") {
+        return runFollowUpCompactedEvidenceLine(line)
+    }
+    if lower.hasPrefix("jira 写回") || lower.hasPrefix("jira写回") {
+        return "Jira write-back: \(runFollowUpCompactedEvidenceLine(line))"
+    }
+    guard runFollowUpLineMentionsWriteBack(lower),
+          runFollowUpLineMentionsWriteBackState(lower) else { return nil }
+    return "Jira write-back: \(runFollowUpCompactedEvidenceLine(line))"
+}
+
+private func runFollowUpLineMentionsWriteBack(_ lowercasedLine: String) -> Bool {
+    lowercasedLine.contains("write-back")
+        || lowercasedLine.contains("writeback")
+        || lowercasedLine.contains("write back")
+        || lowercasedLine.contains("写回")
+}
+
+private func runFollowUpLineMentionsWriteBackState(_ lowercasedLine: String) -> Bool {
+    lowercasedLine.contains("failed")
+        || lowercasedLine.contains("failure")
+        || lowercasedLine.contains("pending")
+        || lowercasedLine.contains("posted")
+        || lowercasedLine.contains("posting")
+        || lowercasedLine.contains("retry")
+        || lowercasedLine.contains("manual paste")
+        || lowercasedLine.contains("paste manually")
+        || lowercasedLine.contains("before posting")
+        || lowercasedLine.contains("失败")
+        || lowercasedLine.contains("待")
+        || lowercasedLine.contains("等待")
+        || lowercasedLine.contains("重试")
+        || lowercasedLine.contains("手动粘贴")
+        || lowercasedLine.contains("手动贴")
+        || lowercasedLine.contains("发布前")
+        || lowercasedLine.contains("未发布")
+        || lowercasedLine.contains("未写回")
+        || lowercasedLine.contains("已发布")
+        || lowercasedLine.contains("已写回")
+        || lowercasedLine.contains("写回中")
+        || lowercasedLine.contains("发布中")
+}
+
 private func runFollowUpSkillRefs(run: AgentRun, output: String) -> [String] {
     let values = [
         run.promptSnapshot,
@@ -7398,6 +13227,9 @@ private func runFollowUpSkillRefs(in value: String) -> [String] {
         for candidate in candidates {
             if let command = runFollowUpSkillSlashCommand(from: candidate) {
                 refs.append(command)
+            }
+            if let alias = runFollowUpSkillAliasRef(from: candidate) {
+                refs.append(alias)
             }
             if let path = runFollowUpSkillPath(from: candidate) {
                 refs.append(path)
@@ -7425,6 +13257,21 @@ private func runFollowUpSkillSlashCommand(from candidate: String) -> String? {
     }
     let range = NSRange(command.startIndex..<command.endIndex, in: command)
     return regex.firstMatch(in: command, range: range) == nil ? nil : command
+}
+
+private func runFollowUpSkillAliasRef(from candidate: String) -> String? {
+    let cleaned = candidate
+        .gitTrimmed
+        .trimmingCharacters(in: runFollowUpSkillRefTrimCharacters)
+        .lowercased()
+    switch cleaned {
+    case "iva-logtracer", "iva_logtracer":
+        return "iva-logtracer"
+    case "chsql":
+        return "chsql"
+    default:
+        return nil
+    }
 }
 
 private func runFollowUpSkillPath(from candidate: String) -> String? {
@@ -7488,7 +13335,7 @@ private func runFollowUpFailureSignal(from line: String) -> String? {
     guard hasFailureSignal else { return nil }
     if lower.contains("0 failed")
         || lower.contains("failed 0")
-        || lower.contains("no blocking findings") {
+        || runFollowUpReviewTextIsClean(stripped) {
         return nil
     }
     return runFollowUpCompactedEvidenceLine(stripped)
@@ -7530,6 +13377,15 @@ private func runFollowUpActionableNotes(from output: String) -> [String] {
     return dedupedFollowUpCommands(notes).prefix(5).map { $0 }
 }
 
+private func runFollowUpMissingInputRequests(from output: String) -> [String] {
+    runFollowUpActionableNotes(from: output)
+        .compactMap { note in
+            guard note.hasPrefix("Missing input:") else { return nil }
+            let body = String(note.dropFirst("Missing input:".count)).gitTrimmed
+            return body.isEmpty ? nil : body
+        }
+}
+
 private func runFollowUpActionableField(from line: String) -> (label: String, body: String)? {
     let stripped = runFollowUpStrippedHeadingPrefix(runFollowUpStrippedListPrefix(line))
     guard !stripped.isEmpty else { return nil }
@@ -7553,13 +13409,26 @@ private func runFollowUpActionableLeadPhrase(from line: String) -> String? {
         guard stripped.range(of: prefix, options: [.caseInsensitive, .anchored]) != nil else {
             continue
         }
-        let body = runFollowUpCompactedEvidenceLine(String(stripped.dropFirst(prefix.count)))
+        let body = runFollowUpCompactedEvidenceLine(
+            runFollowUpTrimmedLeadPhraseBody(String(stripped.dropFirst(prefix.count)))
+        )
         guard !body.isEmpty else { continue }
         return "\(label): \(body)"
     }
 
     return nil
 }
+
+private func runFollowUpTrimmedLeadPhraseBody(_ value: String) -> String {
+    var body = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    while let first = body.unicodeScalars.first,
+          runFollowUpActionableLeadPhraseBodyLeadingTrimCharacters.contains(first) {
+        body = String(body.unicodeScalars.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return body
+}
+
+private let runFollowUpActionableLeadPhraseBodyLeadingTrimCharacters = CharacterSet(charactersIn: ":：-—–,，;；")
 
 private func runFollowUpStrippedHeadingPrefix(_ value: String) -> String {
     var text = value.gitTrimmed
@@ -7576,17 +13445,26 @@ private func runFollowUpActionableLabel(for value: String) -> String? {
         .replacingOccurrences(of: "_", with: " ")
         .replacingOccurrences(of: "-", with: " ")
     switch normalized {
-    case "blocker", "blockers", "blocked", "blocking", "blocked by":
+    case "blocker", "blockers", "blocked", "blocking", "blocked by",
+        "阻塞", "阻塞项", "被阻塞":
         return "Blocker"
-    case "risk", "risks", "residual risk", "remaining risk":
+    case "risk", "risks", "residual risk", "remaining risk",
+        "风险", "剩余风险":
         return "Risk"
-    case "open question", "open questions", "question", "questions":
+    case "open question", "open questions", "question", "questions",
+        "开放问题", "待确认问题":
         return "Open question"
-    case "missing input", "missing inputs", "missing info", "missing information":
+    case "missing input", "missing inputs", "missing info", "missing information",
+        "input needed", "inputs needed", "needed input", "needed inputs",
+        "required input", "required inputs",
+        "缺少输入", "缺失输入", "缺少信息", "缺失信息",
+        "需要补充", "待补充", "补充信息", "输入缺失":
         return "Missing input"
-    case "next", "next action", "next actions", "next step", "next steps", "next concrete action", "follow up", "followup", "todo", "to do":
+    case "next", "next action", "next actions", "next step", "next steps", "next concrete action", "follow up", "followup", "todo", "to do",
+        "下一步", "后续动作", "后续步骤", "待办":
         return "Next action"
-    case "validation gap", "verification gap", "test gap":
+    case "validation gap", "verification gap", "test gap",
+        "验证缺口", "测试缺口":
         return "Validation gap"
     default:
         return nil
@@ -7594,6 +13472,14 @@ private func runFollowUpActionableLabel(for value: String) -> String? {
 }
 
 private let runFollowUpActionableLeadPhrases: [(prefix: String, label: String)] = [
+    ("还缺", "Missing input"),
+    ("仍缺", "Missing input"),
+    ("缺少", "Missing input"),
+    ("缺失", "Missing input"),
+    ("需要补充", "Missing input"),
+    ("请补充", "Missing input"),
+    ("等待补充", "Missing input"),
+    ("等待", "Blocker"),
     ("Blocked by ", "Blocker"),
     ("Waiting on ", "Blocker"),
     ("Need ", "Next action"),
@@ -7911,7 +13797,10 @@ private func runFollowUpNextCommandLabel(for value: String) -> String? {
     switch normalized {
     case "command", "cmd", "next command", "next cmd", "suggested command", "suggested cmd",
          "run", "try", "retry", "rerun", "re run", "fallback command", "lookup command",
-         "repro command", "reproduce command", "smoke command", "manual command":
+         "repro command", "reproduce command", "smoke command", "manual command",
+         "validation command", "verification command", "test command", "build command",
+         "命令", "下一步命令", "建议命令", "推荐命令", "重试命令", "回退命令",
+         "查询命令", "日志命令", "验证命令", "测试命令", "构建命令", "手动命令":
         return "Command"
     default:
         return nil
@@ -8092,7 +13981,11 @@ func chatCanCaptureEvidence(run: AgentRun?, assistantText: String) -> Bool {
         return runFollowUpShouldOfferWorkflowActions(
             run: run,
             workItem: nil,
-            output: output
+            output: output,
+            hasGeneratedActions: false,
+            containsContinuePrompt: false,
+            generatedConfirmationQuestion: nil,
+            missingInputRequests: []
         )
     }
 }
@@ -8107,61 +14000,213 @@ private func outputContainsFailureSignal(_ output: String) -> Bool {
         || lower.contains("timeout")
 }
 
-private func followUpContainsLogSignal(run: AgentRun, output: String) -> Bool {
-    let combined = "\(run.promptSnapshot)\n\(output)"
-    let lower = combined.lowercased()
-    let markers = [
-        "/logtrace", "logtrace", "/clickhouse", "clickhouse",
-        "conversationid", "conversation id",
-        "sessionid", "session id",
-        "traceid", "trace id",
-        "traceparent", "trace parent",
-        "requestid", "request id",
-        "taskid", "task id",
-        "p-v-"
-    ]
-    if markers.contains(where: { lower.contains($0) }) {
+private let runtimeLogLookupSignalMarkers = [
+    "/logtrace", "logtrace", "/clickhouse", "clickhouse",
+    "conversationid", "conversation id", "conversation_id", "conversation-id",
+    "sessionid", "session id", "session_id", "session-id",
+    "traceid", "trace id", "trace_id", "trace-id",
+    "traceparent", "trace parent",
+    "requestid", "request id", "request_id", "request-id",
+    "taskid", "task id", "task_id", "task-id",
+    "turnid", "turn id", "turn_id", "turn-id",
+    "p-v-",
+    "会话id", "会话 id",
+    "请求id", "请求 id",
+    "任务id", "任务 id"
+]
+
+private let runtimeSkillPathSignalMarkers = [
+    ".pikiclaw/skills",
+    "skill.md",
+    "/sk_",
+    "/logtrace",
+    "logtrace",
+    "iva-logtracer",
+    "iva_logtracer",
+    "/clickhouse",
+    "clickhouse",
+    "chsql",
+    "skill failed",
+    "skill failure",
+    "skill error",
+    "skill invocation",
+    "skill command",
+    "skill hardening",
+    "技能命令",
+    "技能路径",
+    "技能执行失败",
+    "技能失败"
+]
+
+private let runtimeSkillContextSignalMarkers = runtimeSkillPathSignalMarkers + [
+    "skill",
+    "技能"
+]
+
+private let runtimeSkillFailureSignalMarkers = [
+    "failed",
+    "failure",
+    "missing",
+    "not found",
+    "cannot",
+    "unable",
+    "失败",
+    "缺少",
+    "缺失",
+    "找不到",
+    "无法",
+    "不能"
+]
+
+private let runtimeSkillRecoverySignalMarkers = [
+    "recover",
+    "recovery",
+    "修复"
+]
+
+private func runtimeTextContainsLogLookupSignal(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    if runtimeLogLookupSignalMarkers.contains(where: { lower.contains($0) }) {
         return true
     }
-    return combined
+    return text
         .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
         .map { composerSanitizedSkillValue(String($0)) }
         .contains { token in
-            composerLooksLikeTraceId(token)
-                || composerTraceIdFromTraceParentToken(token) != nil
+            composerTraceIdFromTraceParentToken(token) != nil
         }
 }
 
-private func followUpContainsSkillSignal(run: AgentRun, output: String) -> Bool {
-    let combined = "\(run.promptSnapshot)\n\(output)".lowercased()
-    let markers = [
-        ".pikiclaw/skills",
-        "skill.md",
-        "/sk_",
-        "/logtrace",
-        "iva-logtracer",
-        "/clickhouse",
-        "chsql",
-        "skill failed",
-        "skill failure",
-        "skill error",
-        "skill invocation",
-        "skill command",
-        "skill hardening"
+private func runtimeTextContainsSkillPathSignal(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    return runtimeSkillPathSignalMarkers.contains { lower.contains($0) }
+}
+
+private func runtimeTextContainsSkillContextSignal(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    return runtimeSkillContextSignalMarkers.contains { lower.contains($0) }
+}
+
+private func runtimeTextContainsSkillFailureSignal(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    return runtimeTextContainsSkillContextSignal(text)
+        && runtimeSkillFailureSignalMarkers.contains { lower.contains($0) }
+}
+
+private func runtimeTextContainsSkillFailureOrRecoverySignal(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    return runtimeTextContainsSkillContextSignal(text)
+        && (
+            runtimeSkillFailureSignalMarkers.contains { lower.contains($0) }
+                || runtimeSkillRecoverySignalMarkers.contains { lower.contains($0) }
+        )
+}
+
+private func runtimeTextContainsDirectSkillFailureOrRecoverySignal(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    guard runtimeTextContainsSkillContextSignal(text) else {
+        return false
+    }
+    if lower.contains("failed to load skill")
+        || lower.contains("skill failed")
+        || lower.contains("skill failure")
+        || lower.contains("skill error")
+        || lower.contains("skill invocation")
+        || lower.contains("skill recovery")
+        || lower.contains("recover /") {
+        return true
+    }
+    let patterns = [
+        #"skill[^\n.。]{0,80}\b(failed|failure|error|missing|not found|cannot|unable)\b"#,
+        #"(?:/logtrace|logtrace|iva-logtracer|iva_logtracer|/clickhouse|clickhouse|chsql)[^\n.。]{0,80}\b(failed|failure|error|missing|not found|cannot|unable)\b"#,
+        #"(?:技能|/logtrace|logtrace|iva-logtracer|iva_logtracer|/clickhouse|clickhouse|chsql)[^\n.。]{0,80}(?:失败|缺少|缺失|找不到|无法|不能|修复)"#
     ]
-    return markers.contains { combined.contains($0) }
+    return patterns.contains { pattern in
+        lower.range(of: pattern, options: .regularExpression) != nil
+    }
+}
+
+private func followUpContainsLogSignal(run: AgentRun, output: String) -> Bool {
+    let combined = "\(run.promptSnapshot)\n\(output)"
+    return runtimeTextContainsLogLookupSignal(combined)
+}
+
+private func followUpContainsSkillSignal(run: AgentRun, output: String) -> Bool {
+    let combined = "\(run.promptSnapshot)\n\(output)"
+    return runtimeTextContainsSkillPathSignal(combined)
 }
 
 private func followUpContainsJiraSignal(run: AgentRun, output: String) -> Bool {
     let combined = "\(run.promptSnapshot)\n\(output)"
     let lower = combined.lowercased()
-    if lower.contains("jira") || lower.contains("atlassian") {
-        return true
-    }
-    return combined.range(
+    if combined.range(
         of: #"\b[A-Z][A-Z0-9]+-\d{2,}\b"#,
         options: .regularExpression
-    ) != nil
+    ) != nil {
+        return true
+    }
+    let explicitMarkers = [
+        "jira:",
+        "jira update",
+        "jira-ready",
+        "jira ready",
+        "jira comment",
+        "jira write",
+        "jira write-back",
+        "jira writeback",
+        "post to jira",
+        "posting this jira",
+        "posted to jira",
+        "updating jira",
+        "atlassian"
+    ]
+    return explicitMarkers.contains { lower.contains($0) }
+}
+
+private func followUpContainsContinuePrompt(_ output: String) -> Bool {
+    let lower = output.lowercased()
+    let prompts = [
+        "should i continue",
+        "shall i continue",
+        "would you like me to continue",
+        "do you want me to continue",
+        "want me to continue",
+        "should i proceed",
+        "shall i proceed",
+        "would you like me to proceed",
+        "do you want me to proceed",
+        "want me to proceed",
+        "i can proceed",
+        "proceed?",
+        "should i keep going",
+        "would you like me to keep going",
+        "do you want me to keep going",
+        "want me to keep going",
+        "keep going?",
+        "go on?",
+        "i can continue",
+        "continue?",
+        "继续吗",
+        "要不要继续",
+        "要继续吗",
+        "是否继续",
+        "是否要继续",
+        "需要我继续",
+        "要我继续",
+        "我可以继续",
+        "继续推进吗",
+        "继续处理吗",
+        "要我继续处理",
+        "可以继续推进",
+        "进入下一步吗",
+        "是否进入下一步",
+        "是否继续推进",
+        "是否继续处理",
+        "要继续下一步",
+        "继续下一步",
+        "继续往下"
+    ]
+    return prompts.contains { lower.contains($0) }
 }
 
 private struct ConversationMessageBubble: View {
@@ -8198,7 +14243,7 @@ private struct ConversationMessageBubble: View {
                     .lineSpacing(3)
                     .foregroundStyle(PKTheme.text2)
                     .textSelection(.enabled)
-                    .multilineTextAlignment(trailing ? .trailing : .leading)
+                    .multilineTextAlignment(.leading)
                     .padding(13)
                     .background(trailing ? accent.opacity(0.14) : PKTheme.panelAlt.opacity(0.52))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(trailing ? accent.opacity(0.28) : PKTheme.edge, lineWidth: 1))
@@ -8240,6 +14285,7 @@ private struct MessageActionRow: View {
     let copied: Bool
     let alignTrailing: Bool
     let canRerun: Bool
+    var rerunAccent: Color? = nil
     let onCopy: () -> Void
     let onRerun: (() -> Void)?
     var onSaveEvidence: (() -> Void)? = nil
@@ -8272,6 +14318,7 @@ private struct MessageActionRow: View {
                 MessageActionButton(
                     systemImage: "arrow.clockwise",
                     help: "Re-run",
+                    accent: rerunAccent,
                     action: { onRerun?() }
                 )
             }
@@ -8285,16 +14332,29 @@ private struct MessageActionRow: View {
 private struct MessageActionButton: View {
     let systemImage: String
     let help: String
+    var accent: Color? = nil
     let action: () -> Void
+
+    private var foreground: Color {
+        accent ?? PKTheme.text3
+    }
+
+    private var fill: Color {
+        accent?.opacity(0.16) ?? PKTheme.control.opacity(0.52)
+    }
+
+    private var stroke: Color {
+        accent?.opacity(0.62) ?? PKTheme.controlBorder.opacity(0.75)
+    }
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(PKTheme.text3)
+                .foregroundStyle(foreground)
                 .frame(width: 24, height: 22)
-                .background(PKTheme.control.opacity(0.52))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.controlBorder.opacity(0.75), lineWidth: 1))
+                .background(fill)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(stroke, lineWidth: 1))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
@@ -8419,20 +14479,91 @@ func agentOutputReviewSignalSummary(_ text: String) -> AgentOutputReviewSignalSu
     )
 }
 
+private struct ConversationHistoryMessageRow: View, Equatable {
+    let message: AgentRunMessage
+    let userSubtitle: String
+    let assistantTitle: String
+    let trailing: Bool
+    let accent: Color
+    var onSendReviewComments: ((String) -> Void)?
+
+    nonisolated static func == (lhs: ConversationHistoryMessageRow, rhs: ConversationHistoryMessageRow) -> Bool {
+        lhs.message == rhs.message
+            && lhs.userSubtitle == rhs.userSubtitle
+            && lhs.assistantTitle == rhs.assistantTitle
+            && lhs.trailing == rhs.trailing
+    }
+
+    var body: some View {
+        switch message.role {
+        case .user:
+            ConversationMessageBubble(
+                title: "You",
+                subtitle: userSubtitle,
+                text: message.content,
+                createdAt: message.createdAt,
+                symbol: "person.crop.circle",
+                accent: accent,
+                trailing: trailing
+            )
+        case .assistant:
+            AssistantResponseCard(
+                title: assistantTitle,
+                text: message.content,
+                createdAt: message.createdAt,
+                state: .completed,
+                isRunning: false,
+                accent: accent,
+                onSendReviewComments: onSendReviewComments
+            )
+        case .system:
+            ConversationMessageBubble(
+                title: "System",
+                subtitle: userSubtitle,
+                text: message.content,
+                createdAt: message.createdAt,
+                symbol: "gearshape",
+                accent: accent,
+                trailing: false
+            )
+        case .tool:
+            ConversationMessageBubble(
+                title: "Tool",
+                subtitle: userSubtitle,
+                text: message.content,
+                createdAt: message.createdAt,
+                symbol: "terminal",
+                accent: accent,
+                trailing: false
+            )
+        }
+    }
+}
+
 private struct AssistantResponseCard: View {
     let title: String
     let text: String
     let createdAt: Date?
+    var startedAt: Date? = nil
+    var endedAt: Date? = nil
     let state: RunState?
     let isRunning: Bool
     let accent: Color
+    var runId: EntityID? = nil
+    var focusedGeneratedUIAction: GeneratedUIActionFocus? = nil
     var followUpActions: [RunFollowUpAction] = []
     var onRerun: (() -> Void)?
     var onFollowUp: ((RunFollowUpAction) -> Void)?
     var onFollowUpSideChat: ((RunFollowUpAction) -> Void)?
     var onSaveEvidence: (() -> Void)?
+    var outputs: [Artifact] = []
+    var selectedOutputArtifactId: EntityID?
+    var onSendReviewComments: ((String) -> Void)?
+    var onOpenOutput: ((Artifact) -> Void)?
 
     @State private var copied = false
+    @State private var selectedReviewQuote = ""
+    @State private var reviewComments: [ChatOutputReviewComment] = []
 
     private var cleanedText: String {
         friendlyAgentOutput(text)
@@ -8443,9 +14574,31 @@ private struct AssistantResponseCard: View {
     }
 
     private var showsOutputReview: Bool {
-        !presentation.isActive
-            && presentation.showsFinalResponse
-            && (onSaveEvidence != nil || !followUpActions.isEmpty)
+        false
+    }
+
+    private var generatedFollowUpActions: [RunFollowUpAction] {
+        followUpActions.filter(\.isGeneratedUI)
+    }
+
+    private var visibleGenerativeItems: [GenerativeUIItem] {
+        presentation.isActive ? presentation.generativeItems : []
+    }
+
+    private var standardFollowUpActions: [RunFollowUpAction] {
+        followUpActions.filter(runFollowUpActionIsPrimaryStage(_:))
+    }
+
+    private var showsGenerativeUIRail: Bool {
+        !presentation.showsThinkingTimeline
+            && (!visibleGenerativeItems.isEmpty || !generatedFollowUpActions.isEmpty)
+    }
+
+    private var reviewCommentHandler: ((String) -> Void)? {
+        guard onSendReviewComments != nil else { return nil }
+        return { quote in
+            addReviewComment(quote)
+        }
     }
 
     var body: some View {
@@ -8462,34 +14615,86 @@ private struct AssistantResponseCard: View {
                         Text(title)
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(PKTheme.text)
-                        Text(agentOutputSubtitle(state: state, isRunning: isRunning))
+                        if isRunning, startedAt != nil {
+                            TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+                                Text(agentOutputSubtitle(
+                                    state: state,
+                                    isRunning: isRunning,
+                                    durationText: agentRunDurationText(
+                                        startedAt: startedAt,
+                                        endedAt: endedAt,
+                                        now: timeline.date
+                                    )
+                                ))
+                                    .font(.caption2)
+                                    .foregroundStyle(PKTheme.text3)
+                            }
+                        } else {
+                            Text(agentOutputSubtitle(
+                                state: state,
+                                isRunning: isRunning,
+                                durationText: agentRunDurationText(
+                                    startedAt: startedAt,
+                                    endedAt: endedAt
+                                )
+                            ))
                             .font(.caption2)
                             .foregroundStyle(PKTheme.text3)
+                        }
                     }
                     Spacer()
-                    StatusPill(text: state?.rawValue ?? "starting", color: runStateColor(state))
+                    StatusPill(text: runStateDisplayLabel(state), color: runStateColor(state))
                 }
 
                 if presentation.showsFinalResponse {
-                    Text(presentation.finalText)
-                        .font(.system(size: 13))
-                        .lineSpacing(4)
-                        .foregroundStyle(PKTheme.text2)
-                        .textSelection(.enabled)
+                    MarkdownOutputReviewTextView(
+                        markdown: presentation.finalText,
+                        selectedText: $selectedReviewQuote,
+                        onAddComment: reviewCommentHandler
+                    )
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(14)
                         .background(PKTheme.inset.opacity(0.78))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
 
-                if !presentation.activityItems.isEmpty {
-                    AgentActivityTimeline(
-                        items: presentation.activityItems,
+                if onSendReviewComments != nil,
+                   presentation.showsFinalResponse,
+                   (!selectedReviewQuote.isEmpty || !reviewComments.isEmpty) {
+                    ChatOutputReviewCommentPanel(
+                        selectedQuote: selectedReviewQuote,
+                        comments: $reviewComments,
                         accent: accent,
-                        startsExpanded: !presentation.showsFinalResponse
+                        addSelection: {
+                            addReviewComment(selectedReviewQuote)
+                        },
+                        send: sendReviewComments
                     )
-                } else if !presentation.showsFinalResponse {
+                }
+
+                if !outputs.isEmpty {
+                    ConversationOutputCardStack(
+                        artifacts: outputs,
+                        selectedArtifactId: selectedOutputArtifactId,
+                        open: { artifact in
+                            onOpenOutput?(artifact)
+                        }
+                    )
+                }
+
+                if presentation.showsThinkingTimeline {
+                    AgentActivityTimeline(
+                        title: "Thinking",
+                        items: presentation.visibleThinkingItems,
+                        accent: accent,
+                        startsExpanded: presentation.startsThinkingTimelineExpanded,
+                        collapsedSummary: presentation.activitySummary
+                    )
+                }
+
+                if !presentation.showsThinkingTimeline && !presentation.showsFinalResponse {
                     AgentExecutionProgressCard(
                         presentation: presentation,
                         accent: accent
@@ -8505,13 +14710,21 @@ private struct AssistantResponseCard: View {
                     )
                 }
 
-                if presentation.activityItems.isEmpty && !presentation.generativeItems.isEmpty {
-                    GenerativeUIRail(items: presentation.generativeItems, accent: accent)
+                if showsGenerativeUIRail {
+                    GenerativeUIRail(
+                        items: visibleGenerativeItems,
+                        actions: generatedFollowUpActions,
+                        accent: accent,
+                        runId: runId,
+                        focusedGeneratedUIAction: focusedGeneratedUIAction,
+                        select: onFollowUp,
+                        startSideChat: onFollowUpSideChat
+                    )
                 }
 
-                if !followUpActions.isEmpty, let onFollowUp {
+                if !standardFollowUpActions.isEmpty, let onFollowUp {
                     RunFollowUpActionRow(
-                        actions: followUpActions,
+                        actions: standardFollowUpActions,
                         accent: accent,
                         select: onFollowUp,
                         startSideChat: onFollowUpSideChat
@@ -8523,6 +14736,7 @@ private struct AssistantResponseCard: View {
                     copied: copied,
                     alignTrailing: false,
                     canRerun: onRerun != nil,
+                    rerunAccent: runRetryActionColor(state),
                     onCopy: {
                         copyTextToPasteboard(cleanedText.isEmpty ? text : cleanedText)
                         copied = true
@@ -8532,17 +14746,129 @@ private struct AssistantResponseCard: View {
                         }
                     },
                     onRerun: onRerun,
-                    onSaveEvidence: onSaveEvidence
+                    onSaveEvidence: nil
                 )
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(14)
-            .background(PKTheme.panelAlt.opacity(0.42))
+            .background {
+                PKTheme.panelAlt
+                    .opacity(0.42)
+            }
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
             Spacer(minLength: 72)
         }
+    }
+
+    private func addReviewComment(_ quote: String) {
+        let trimmed = quote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if !reviewComments.contains(where: { $0.quote == trimmed && $0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            reviewComments.append(ChatOutputReviewComment(quote: trimmed))
+        }
+        selectedReviewQuote = ""
+    }
+
+    private func sendReviewComments() {
+        guard !reviewComments.isEmpty else { return }
+        let prompt = chatOutputReviewPrompt(outputTitle: title, comments: reviewComments)
+        onSendReviewComments?(prompt)
+        reviewComments.removeAll()
+        selectedReviewQuote = ""
+    }
+}
+
+private struct ChatOutputReviewCommentPanel: View {
+    let selectedQuote: String
+    @Binding var comments: [ChatOutputReviewComment]
+    let accent: Color
+    let addSelection: () -> Void
+    let send: () -> Void
+
+    private var hasSelectedQuote: Bool {
+        !selectedQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "text.badge.plus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 24, height: 24)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                Text("Review comments")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                CountBadge(value: comments.count)
+                Spacer(minLength: 0)
+                if hasSelectedQuote {
+                    Button("Comment selection", action: addSelection)
+                        .font(.system(size: 11, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(accent)
+                }
+                Button("Send comments", action: send)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(comments.isEmpty ? PKTheme.text4 : accent)
+                    .disabled(comments.isEmpty)
+            }
+
+            if hasSelectedQuote {
+                Text(selectedQuote.firstLineFallback("Selected text"))
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(2)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(accent.opacity(0.08))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.22), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+
+            ForEach($comments) { $comment in
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(comment.quote.firstLineFallback("Comment target"))
+                            .font(.caption)
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            comments.removeAll { $0.id == comment.id }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(PKTheme.text4)
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove comment")
+                    }
+
+                    TextEditor(text: $comment.note)
+                        .font(.system(size: 12))
+                        .foregroundStyle(PKTheme.text2)
+                        .frame(height: 54)
+                        .scrollContentBackground(.hidden)
+                        .background(PKTheme.inset.opacity(0.54))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .padding(9)
+                .background(PKTheme.surfaceRaised.opacity(0.36))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(10)
+        .background(PKTheme.inset.opacity(0.46))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -8564,57 +14890,120 @@ private struct RunFollowUpActionRow: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(actions) { action in
-                        HStack(spacing: 0) {
-                            Button {
-                                select(action)
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: action.symbol)
-                                        .font(.system(size: 11, weight: .bold))
-                                        .frame(width: 14)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(action.title)
-                                            .font(.system(size: 11.5, weight: .semibold))
-                                            .foregroundStyle(accent)
-                                            .lineLimit(1)
-                                        Text(action.detail)
-                                            .font(.system(size: 8.5, weight: .bold))
-                                            .foregroundStyle(accent.opacity(0.68))
-                                            .lineLimit(1)
-                                            .minimumScaleFactor(0.78)
-                                    }
-                                }
-                                .padding(.leading, 10)
-                                .padding(.trailing, startSideChat == nil ? 10 : 8)
-                                .frame(height: 38)
-                            }
-                            .buttonStyle(.plain)
-                            .help("\(action.title): \(action.detail)")
-
-                            if let startSideChat {
-                                Rectangle()
-                                    .fill(accent.opacity(0.20))
-                                    .frame(width: 1, height: 22)
-                                Button {
-                                    startSideChat(action)
-                                } label: {
-                                    Image(systemName: "rectangle.split.2x1")
-                                        .font(.system(size: 10.5, weight: .bold))
-                                        .frame(width: 30, height: 38)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Start \(action.title) as side chat")
-                            }
-                        }
-                        .foregroundStyle(accent)
-                        .background(accent.opacity(0.11))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.24), lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                        ForEach(actions) { action in
+                            RunFollowUpActionChip(
+                                action: action,
+                                accent: accent,
+                                shortcut: runFollowUpGeneratedUIShortcut(for: action, in: actions),
+                                select: select,
+                                startSideChat: startSideChat
+                            )
                     }
                 }
                 .padding(.vertical, 1)
             }
+        }
+    }
+}
+
+private struct RunFollowUpActionChip: View {
+    let action: RunFollowUpAction
+    let accent: Color
+    var shortcut: RunFollowUpGeneratedUIShortcut? = nil
+    var actionAnchorID: String? = nil
+    var isMissionFocused = false
+    let select: (RunFollowUpAction) -> Void
+    var startSideChat: ((RunFollowUpAction) -> Void)?
+
+    private var focusStyle: RunFollowUpGeneratedUIFocusStyle {
+        runFollowUpGeneratedUIFocusStyle(for: shortcut, isMissionFocused: isMissionFocused)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button {
+                select(action)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: action.symbol)
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 14)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 5) {
+                            Text(action.title)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(accent)
+                                .lineLimit(1)
+                            if action.workflowLabel != action.title {
+                                Text(action.workflowLabel)
+                                    .font(.system(size: 7.5, weight: .heavy))
+                                    .foregroundStyle(accent.opacity(0.78))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 4)
+                                    .frame(height: 14)
+                                    .background(accent.opacity(0.08))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                        Text(action.detail)
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(accent.opacity(0.68))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.78)
+                    }
+                    if let shortcut {
+                        Text(shortcut.label)
+                            .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                            .foregroundStyle(accent.opacity(focusStyle.keyTextOpacity))
+                            .padding(.horizontal, 4)
+                            .frame(height: 16)
+                            .background(accent.opacity(focusStyle.keyBackgroundOpacity))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(accent.opacity(focusStyle.keyBorderOpacity), lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, startSideChat == nil ? 10 : 8)
+                .frame(height: 38)
+            }
+            .buttonStyle(.plain)
+            .generatedUIKeyboardShortcut(shortcut)
+            .help(runFollowUpActionHelp(action))
+
+            if let startSideChat {
+                Rectangle()
+                    .fill(accent.opacity(0.20))
+                    .frame(width: 1, height: 22)
+                Button {
+                    startSideChat(action)
+                } label: {
+                    Image(systemName: "rectangle.split.2x1")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .frame(width: 30, height: 38)
+                }
+                .buttonStyle(.plain)
+                .help("Start \(action.title) side chat - \(action.workflowSummary)")
+            }
+        }
+        .foregroundStyle(accent)
+        .background(accent.opacity(focusStyle.chipBackgroundOpacity))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(focusStyle.chipBorderOpacity), lineWidth: focusStyle.chipBorderWidth))
+        .shadow(color: accent.opacity(focusStyle.shadowOpacity), radius: focusStyle.shadowRadius, x: 0, y: 0)
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .id(actionAnchorID ?? action.id)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func generatedUIKeyboardShortcut(_ shortcut: RunFollowUpGeneratedUIShortcut?) -> some View {
+        switch shortcut?.kind {
+        case .defaultAction:
+            keyboardShortcut(.defaultAction)
+        case .cancelAction:
+            keyboardShortcut(.cancelAction)
+        case nil:
+            self
         }
     }
 }
@@ -8625,7 +15014,7 @@ private struct AgentResponsePresentation {
     let isRunning: Bool
 
     private var lines: [String] {
-        text
+        runFollowUpRemovingStructuredUIBlocks(from: text)
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -8651,9 +15040,12 @@ private struct AgentResponsePresentation {
                 !line.hasPrefix("Thinking:")
                     && !line.hasPrefix("Tool:")
                     && !line.hasPrefix("Tool result:")
+                    && !line.hasPrefix("Tool output:")
                     && !line.hasPrefix("Artifact:")
                     && !line.hasPrefix("File:")
                     && !line.hasPrefix("Files:")
+                    && !runFollowUpLineIsGeneratedKnowledgeNote(line)
+                    && runFollowUpSanitizedGeneratedConfirmationQuestion(line) == nil
                     && !line.hasPrefix("Completed exit code")
             }
             .joined(separator: "\n")
@@ -8670,7 +15062,7 @@ private struct AgentResponsePresentation {
     }
 
     var generativeItems: [GenerativeUIItem] {
-        lines.compactMap { line in
+        var items = lines.compactMap { line in
             if line.hasPrefix("Tool result:") {
                 return GenerativeUIItem(symbol: "checkmark.circle", title: "Tool result", detail: line.replacingOccurrences(of: "Tool result:", with: "").trimmingCharacters(in: .whitespacesAndNewlines))
             }
@@ -8684,32 +15076,97 @@ private struct AgentResponsePresentation {
                 let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
                 return GenerativeUIItem(symbol: "doc.text", title: parts.first ?? "File", detail: parts.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? line)
             }
+            if runFollowUpLineIsGeneratedKnowledgeNote(line) {
+                let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
+                return GenerativeUIItem(symbol: "note.text", title: "Knowledge note", detail: parts.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? line)
+            }
+            if let question = runFollowUpSanitizedGeneratedConfirmationQuestion(line) {
+                let approval = runFollowUpGeneratedConfirmationApproveTitle(for: question)
+                return GenerativeUIItem(symbol: "hand.tap", title: "Confirmation", detail: "\(approval) or Not now")
+            }
             return nil
         }
-        .suffix(4)
+        let knowledgeNoteRefs = runFollowUpGeneratedKnowledgeNoteRefs(from: text)
+        let evidenceRefs = runFollowUpGeneratedEvidenceCardRefs(
+            toolRefs: runFollowUpGeneratedToolCardRefs(from: text),
+            artifactRefs: runFollowUpGeneratedArtifactCardRefs(from: text),
+            fileRefs: runFollowUpGeneratedFileCardRefs(from: text)
+        )
+        items.append(contentsOf: runFollowUpStructuredUICardItems(from: text))
+        if !runFollowUpGeneratedKnowledgeCompareRefs(knowledgeNoteRefs: knowledgeNoteRefs, evidenceRefs: evidenceRefs).isEmpty {
+            items.append(GenerativeUIItem(
+                symbol: "arrow.left.arrow.right",
+                title: "Knowledge compare",
+                detail: "\(knowledgeNoteRefs.count) note / \(evidenceRefs.count) evidence"
+            ))
+        }
+        return items.suffix(4)
+    }
+
+    var thinkingItems: [AgentActivityItem] {
+        activityItems.filter { $0.kind == .thinking }
+    }
+
+    var toolActivityItems: [AgentActivityItem] {
+        activityItems.filter { $0.kind != .thinking }
+    }
+
+    var visibleThinkingItems: [AgentActivityItem] {
+        guard isActive else { return [] }
+        var items = activityItems
+        if let readableItem = runningReadableThinkingItem,
+           !items.contains(where: { $0.kind == .thinking && $0.detail == readableItem.detail }) {
+            items.append(readableItem)
+        }
+        return items
+    }
+
+    var showsThinkingTimeline: Bool {
+        !visibleThinkingItems.isEmpty
+    }
+
+    var startsThinkingTimelineExpanded: Bool {
+        visibleThinkingItems.contains { $0.kind == .thinking }
+    }
+
+    var hasActivity: Bool {
+        !activityItems.isEmpty
+    }
+
+    var toolActivitySummary: String {
+        AgentActivitySummary(items: toolActivityItems).text
+    }
+
+    var activitySummary: String {
+        AgentActivitySummary(items: visibleThinkingItems).text
     }
 
     var activityItems: [AgentActivityItem] {
         lines.compactMap { line in
             if line.hasPrefix("Thinking:") {
                 let detail = line.replacingOccurrences(of: "Thinking:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return detail.isEmpty ? nil : AgentActivityItem(symbol: "brain.head.profile", title: "Thinking", detail: detail)
+                return detail.isEmpty ? nil : AgentActivityItem(kind: .thinking, symbol: "brain.head.profile", title: "Thinking", detail: detail)
             }
             if line.hasPrefix("Tool result:") {
                 let detail = line.replacingOccurrences(of: "Tool result:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return AgentActivityItem(symbol: "checkmark.circle", title: "Ran a command", detail: detail)
+                return AgentActivityItem(kind: .toolResult, symbol: "checkmark.circle", title: "Ran a command", detail: detail)
+            }
+            if line.hasPrefix("Tool output:") {
+                let detail = line.replacingOccurrences(of: "Tool output:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                return detail.isEmpty ? nil : AgentActivityItem(kind: .toolOutput, symbol: "text.alignleft", title: "Tool output", detail: detail)
             }
             if line.hasPrefix("Tool:") {
                 let detail = line.replacingOccurrences(of: "Tool:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return AgentActivityItem(symbol: "terminal", title: "Running tool", detail: detail)
+                return AgentActivityItem(kind: .toolCall, symbol: "terminal", title: "Running tool", detail: detail)
             }
             if line.hasPrefix("Artifact:") {
                 let detail = line.replacingOccurrences(of: "Artifact:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return AgentActivityItem(symbol: "shippingbox", title: "Created artifact", detail: detail)
+                return AgentActivityItem(kind: .artifact, symbol: "shippingbox", title: "Created artifact", detail: detail)
             }
             if line.hasPrefix("File:") || line.hasPrefix("Files:") {
                 let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
                 return AgentActivityItem(
+                    kind: .file,
                     symbol: "square.and.pencil",
                     title: parts.first == "Files" ? "Edited files" : "Edited a file",
                     detail: parts.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? line
@@ -8717,6 +15174,27 @@ private struct AgentResponsePresentation {
             }
             return nil
         }
+    }
+
+    private var runningReadableThinkingItem: AgentActivityItem? {
+        let detail = runningReadableThinkingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !detail.isEmpty, detail != "No assistant output yet." else { return nil }
+        return AgentActivityItem(
+            kind: .thinking,
+            symbol: "brain.head.profile",
+            title: "Thinking",
+            detail: detail
+        )
+    }
+
+    private var runningReadableThinkingText: String {
+        lines
+            .filter { line in
+                !friendlyAgentOutputLineIsActivity(line)
+                    && !runFollowUpLineIsGeneratedKnowledgeNote(line)
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var progress: Double {
@@ -8754,13 +15232,59 @@ private struct AgentResponsePresentation {
         switch state {
         case .queued: return "Waiting for the runner to accept the request."
         case .starting: return "Preparing workspace, model, tools, and execution context."
-        case .running: return "The agent is working. The final answer will appear as one complete message."
+        case .running: return "Waiting for the agent to emit text, tool events, or a final answer."
         case .waitingForUser: return "The agent needs your input before it can continue."
         case .cancelling: return "Stopping the active run."
         case .failed: return finalText.isEmpty ? "The run ended before producing a final response." : "Review the final response and run details."
         default: return text.isEmpty ? "No response text has been emitted yet." : "Preparing the response."
         }
     }
+}
+
+struct AgentResponsePresentationPreviewItem: Equatable {
+    let title: String
+    let detail: String
+}
+
+struct AgentResponsePresentationPreview: Equatable {
+    let finalText: String
+    let generativeItems: [AgentResponsePresentationPreviewItem]
+    let thinkingItems: [AgentResponsePresentationPreviewItem]
+    let toolItems: [AgentResponsePresentationPreviewItem]
+    let visibleThinkingItems: [AgentResponsePresentationPreviewItem]
+    let showsThinkingTimeline: Bool
+    let showsFinalResponse: Bool
+    let startsThinkingTimelineExpanded: Bool
+    let toolSummary: String
+    let activitySummary: String
+}
+
+func agentResponsePresentationPreview(
+    text: String,
+    state: RunState? = .completed,
+    isRunning: Bool = false
+) -> AgentResponsePresentationPreview {
+    let presentation = AgentResponsePresentation(text: text, state: state, isRunning: isRunning)
+    return AgentResponsePresentationPreview(
+        finalText: presentation.finalText,
+        generativeItems: presentation.generativeItems.map {
+            AgentResponsePresentationPreviewItem(title: $0.title, detail: $0.detail)
+        },
+        thinkingItems: presentation.thinkingItems.map {
+            AgentResponsePresentationPreviewItem(title: $0.title, detail: $0.detail)
+        },
+        toolItems: presentation.toolActivityItems.map {
+            AgentResponsePresentationPreviewItem(title: $0.title, detail: $0.detail)
+        },
+        visibleThinkingItems: presentation.visibleThinkingItems.map {
+            AgentResponsePresentationPreviewItem(title: $0.title, detail: $0.detail)
+        },
+        showsThinkingTimeline: presentation.showsThinkingTimeline,
+        showsFinalResponse: presentation.showsFinalResponse,
+        startsThinkingTimelineExpanded: presentation.startsThinkingTimelineExpanded,
+        toolSummary: presentation.toolActivitySummary,
+        activitySummary: presentation.activitySummary
+    )
 }
 
 private struct AgentExecutionProgressCard: View {
@@ -8804,20 +15328,55 @@ private struct AgentExecutionProgressCard: View {
     }
 }
 
+private enum AgentActivityKind: Hashable {
+    case thinking
+    case toolCall
+    case toolResult
+    case toolOutput
+    case artifact
+    case file
+}
+
 private struct AgentActivityItem: Hashable {
+    let kind: AgentActivityKind
     let symbol: String
     let title: String
     let detail: String
 }
 
+private struct AgentActivitySummary {
+    let items: [AgentActivityItem]
+
+    var text: String {
+        var parts: [String] = []
+        let calls = items.filter { $0.kind == .toolCall }.count
+        let results = items.filter { $0.kind == .toolResult }.count
+        let outputs = items.filter { $0.kind == .toolOutput }.count
+        let files = items.filter { $0.kind == .file }.count
+        let artifacts = items.filter { $0.kind == .artifact }.count
+
+        if calls > 0 { parts.append("\(calls) call\(calls == 1 ? "" : "s")") }
+        if results > 0 { parts.append("\(results) completed") }
+        if outputs > 0 { parts.append("\(outputs) output\(outputs == 1 ? "" : "s")") }
+        if files > 0 { parts.append("\(files) file\(files == 1 ? "" : "s")") }
+        if artifacts > 0 { parts.append("\(artifacts) artifact\(artifacts == 1 ? "" : "s")") }
+
+        return parts.isEmpty ? "\(items.count) item\(items.count == 1 ? "" : "s")" : parts.joined(separator: " · ")
+    }
+}
+
 private struct AgentActivityTimeline: View {
+    let title: String
     let items: [AgentActivityItem]
     let accent: Color
+    var collapsedSummary: String?
     @State private var isExpanded: Bool
 
-    init(items: [AgentActivityItem], accent: Color, startsExpanded: Bool = true) {
+    init(title: String, items: [AgentActivityItem], accent: Color, startsExpanded: Bool = true, collapsedSummary: String? = nil) {
+        self.title = title
         self.items = items
         self.accent = accent
+        self.collapsedSummary = collapsedSummary
         _isExpanded = State(initialValue: startsExpanded)
     }
 
@@ -8833,15 +15392,21 @@ private struct AgentActivityTimeline: View {
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(accent)
                         .frame(width: 14)
-                    Text("Thinking & tools")
+                    Text(title)
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(PKTheme.text3)
                     CountBadge(value: items.count)
+                    if !isExpanded, let collapsedSummary, !collapsedSummary.isEmpty {
+                        Text(collapsedSummary)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(PKTheme.text4)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 0)
                 }
             }
             .buttonStyle(.plain)
-            .help(isExpanded ? "Hide thinking and tool activity" : "Show thinking and tool activity")
+            .help(isExpanded ? "Hide \(title.lowercased())" : "Show \(title.lowercased())")
 
             if isExpanded {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -8881,36 +15446,370 @@ private struct GenerativeUIItem: Hashable {
     let detail: String
 }
 
+private func runFollowUpStructuredUICardItems(from output: String) -> [GenerativeUIItem] {
+    runFollowUpStructuredUICandidates(from: output).compactMap { candidate in
+        guard runFollowUpStructuredUIKind(for: candidate.kind) == .card else { return nil }
+        let block = candidate.block
+        let title = runFollowUpStructuredUILabel(block.title, fallback: "Generated card", maxLength: 36)
+        let detail = runFollowUpStructuredUIBody(block)
+        guard !title.isEmpty, !detail.isEmpty else { return nil }
+        return GenerativeUIItem(
+            symbol: runFollowUpStructuredUISymbol(block.symbol, fallback: "rectangle.stack"),
+            title: title,
+            detail: detail
+        )
+    }
+}
+
 private struct GenerativeUIRail: View {
     let items: [GenerativeUIItem]
+    let actions: [RunFollowUpAction]
     let accent: Color
+    var runId: EntityID?
+    var focusedGeneratedUIAction: GeneratedUIActionFocus?
+    var select: ((RunFollowUpAction) -> Void)?
+    var startSideChat: ((RunFollowUpAction) -> Void)?
+
+    private var inlineFormActions: [RunFollowUpAction] {
+        actions.filter { $0.generatedForm != nil }
+    }
+
+    private var chipActions: [RunFollowUpAction] {
+        actions.filter { $0.generatedForm == nil }
+    }
+
+    private var actionGroups: [RunFollowUpGeneratedUIRailActionGroup] {
+        runFollowUpGeneratedUIRailActionGroups(chipActions)
+    }
+
+    private var shouldGroupActions: Bool {
+        runFollowUpGeneratedUIRailShouldGroup(chipActions)
+    }
+
+    private func isMissionFocused(_ action: RunFollowUpAction) -> Bool {
+        generatedUIActionFocusMatches(focusedGeneratedUIAction, runId: runId, actionId: action.id)
+    }
+
+    private func actionAnchorID(_ action: RunFollowUpAction) -> String {
+        guard let runId else { return "generated-ui-action-\(action.id)" }
+        return generatedUIActionFocusAnchorID(runId: runId, actionId: action.id)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+            if !items.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        HStack(spacing: 9) {
+                            Image(systemName: item.symbol)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(accent)
+                                .frame(width: 22, height: 22)
+                                .background(accent.opacity(0.10))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(PKTheme.text2)
+                                    .lineLimit(1)
+                                Text(item.detail.isEmpty ? "Updated" : item.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(PKTheme.text3)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                        }
+                        .padding(9)
+                        .background(PKTheme.control.opacity(0.36))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                }
+            }
+
+            if !inlineFormActions.isEmpty, let select {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(inlineFormActions) { action in
+                        GeneratedUIInlineFormCard(
+                            action: action,
+                            accent: accent,
+                            isMissionFocused: isMissionFocused(action),
+                            select: select
+                        )
+                        .id(actionAnchorID(action))
+                    }
+                }
+            }
+
+            if !chipActions.isEmpty, let select {
+                if shouldGroupActions {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(actionGroups) { group in
+                            GenerativeUIActionGroupRow(
+                                group: group,
+                                accent: accent,
+                                runId: runId,
+                                focusedGeneratedUIAction: focusedGeneratedUIAction,
+                                select: select,
+                                startSideChat: startSideChat
+                            )
+                        }
+                    }
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(chipActions) { action in
+                                RunFollowUpActionChip(
+                                    action: action,
+                                    accent: accent,
+                                    actionAnchorID: actionAnchorID(action),
+                                    isMissionFocused: isMissionFocused(action),
+                                    select: select,
+                                    startSideChat: startSideChat
+                                )
+                            }
+                        }
+                        .padding(.vertical, 1)
+                    }
+                }
+            } else if !actions.isEmpty {
+                HStack(spacing: 7) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("Generated choices are waiting for the chat controls.")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .foregroundStyle(accent)
+            }
+        }
+        .padding(10)
+        .background(PKTheme.inset.opacity(0.54))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct GeneratedUIInlineFormCard: View {
+    let action: RunFollowUpAction
+    let accent: Color
+    var isMissionFocused = false
+    let select: (RunFollowUpAction) -> Void
+    @State private var values: [String: String] = [:]
+
+    private var focusStyle: RunFollowUpGeneratedUIFocusStyle {
+        runFollowUpGeneratedUIFocusStyle(for: nil, isMissionFocused: isMissionFocused)
+    }
+
+    private var form: RunFollowUpGeneratedForm? {
+        action.generatedForm
+    }
+
+    private var readiness: RunFollowUpGeneratedFormReadiness? {
+        form.map { runFollowUpGeneratedFormReadiness($0, values: values) }
+    }
+
+    var body: some View {
+        if let form {
+            let readiness = readiness ?? runFollowUpGeneratedFormReadiness(form, values: values)
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 9) {
-                    Image(systemName: item.symbol)
-                        .font(.system(size: 11, weight: .semibold))
+                    Image(systemName: action.symbol)
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(accent)
-                        .frame(width: 22, height: 22)
-                        .background(accent.opacity(0.10))
+                        .frame(width: 24, height: 24)
+                        .background(accent.opacity(0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.title)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(PKTheme.text2)
-                            .lineLimit(1)
-                        Text(item.detail.isEmpty ? "Updated" : item.detail)
+                        HStack(spacing: 6) {
+                            Text(form.title)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(PKTheme.text2)
+                                .lineLimit(1)
+                            CountBadge(text: "\(form.fieldCount) fields")
+                            if form.requiredFieldCount > 0 {
+                                CountBadge(text: readiness.requiredBadgeText)
+                            }
+                        }
+                        Text(form.intent)
                             .font(.caption2)
                             .foregroundStyle(PKTheme.text3)
                             .lineLimit(1)
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
+                    Button {
+                        select(runFollowUpActionSubmittingGeneratedForm(action, values: values))
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.turn.down.right")
+                            Text(readiness.canSubmit ? "Submit" : "Fill")
+                        }
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.primaryText)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(readiness.canSubmit ? accent : PKTheme.text4)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!readiness.canSubmit)
+                    .opacity(readiness.canSubmit ? 1 : 0.62)
+                    .generatedUIKeyboardShortcut(readiness.canSubmit
+                        ? RunFollowUpGeneratedUIShortcut(kind: .defaultAction, label: "Return")
+                        : nil
+                    )
+                    .help(readiness.canSubmit ? "Submit \(form.title) with inline form values" : (readiness.missingSummary ?? "Fill required fields first"))
                 }
-                .padding(9)
-                .background(PKTheme.control.opacity(0.36))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
+
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(form.fields.prefix(5)) { field in
+                        GeneratedUIInlineFormFieldRow(
+                            field: field,
+                            accent: accent,
+                            value: binding(for: field)
+                        )
+                    }
+                    if form.fields.count > 5 {
+                        Text("+ \(form.fields.count - 5) more field(s)")
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(PKTheme.text4)
+                    }
+                    if let missingSummary = readiness.missingSummary {
+                        Text(missingSummary)
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(accent)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(10)
+            .background(PKTheme.control.opacity(isMissionFocused ? 0.50 : 0.38))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(focusStyle.chipBorderOpacity), lineWidth: focusStyle.chipBorderWidth))
+            .shadow(color: accent.opacity(focusStyle.shadowOpacity), radius: focusStyle.shadowRadius, x: 0, y: 0)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func binding(for field: RunFollowUpGeneratedFormField) -> Binding<String> {
+        Binding(
+            get: { values[field.key] ?? field.initialValue },
+            set: { values[field.key] = $0 }
+        )
+    }
+}
+
+private struct GeneratedUIInlineFormFieldRow: View {
+    let field: RunFollowUpGeneratedFormField
+    let accent: Color
+    @Binding var value: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(field.displayLabel)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(PKTheme.text2)
+                        .lineLimit(1)
+                    if field.isRequired {
+                        Text("Required")
+                            .font(.system(size: 8, weight: .heavy))
+                            .foregroundStyle(accent)
+                    }
+                }
+                Text(field.type)
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(PKTheme.text4)
+                    .lineLimit(1)
+            }
+            .frame(width: 132, alignment: .leading)
+
+            fieldInput
+        }
+    }
+
+    @ViewBuilder
+    private var fieldInput: some View {
+        if field.isToggle {
+            Toggle("", isOn: Binding(
+                get: { ["1", "true", "yes", "on"].contains(value.lowercased()) },
+                set: { value = $0 ? "true" : "false" }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+        } else if field.usesOptions {
+            Picker("", selection: $value) {
+                if value.isEmpty {
+                    Text(field.placeholder.isEmpty ? "Select" : field.placeholder).tag("")
+                } else if !field.options.contains(value) {
+                    Text(value).tag(value)
+                }
+                ForEach(field.options, id: \.self) { option in
+                    Text(option).tag(option)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 220)
+        } else {
+            TextField(field.placeholder.isEmpty ? "Enter value" : field.placeholder, text: $value)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(PKTheme.text)
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(PKTheme.inset.opacity(0.72))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
                 .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+    }
+}
+
+private struct GenerativeUIActionGroupRow: View {
+    let group: RunFollowUpGeneratedUIRailActionGroup
+    let accent: Color
+    var runId: EntityID?
+    var focusedGeneratedUIAction: GeneratedUIActionFocus?
+    let select: (RunFollowUpAction) -> Void
+    var startSideChat: ((RunFollowUpAction) -> Void)?
+
+    private func isMissionFocused(_ action: RunFollowUpAction) -> Bool {
+        generatedUIActionFocusMatches(focusedGeneratedUIAction, runId: runId, actionId: action.id)
+    }
+
+    private func actionAnchorID(_ action: RunFollowUpAction) -> String {
+        guard let runId else { return "generated-ui-action-\(action.id)" }
+        return generatedUIActionFocusAnchorID(runId: runId, actionId: action.id)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(group.title.uppercased())
+                    .font(.system(size: 8.5, weight: .heavy))
+                    .foregroundStyle(PKTheme.text4)
+                CountBadge(value: group.actions.count)
+                Spacer(minLength: 0)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(group.actions) { action in
+                        RunFollowUpActionChip(
+                            action: action,
+                            accent: accent,
+                            shortcut: runFollowUpGeneratedUIShortcut(for: action, in: group.actions),
+                            actionAnchorID: actionAnchorID(action),
+                            isMissionFocused: isMissionFocused(action),
+                            select: select,
+                            startSideChat: startSideChat
+                        )
+                    }
+                }
+                .padding(.vertical, 1)
             }
         }
     }
@@ -8943,11 +15842,44 @@ private struct ConversationReplyComposer: View {
     let send: () -> Void
     @FocusState private var focused: Bool
     @State private var editorFocused = false
+    @State private var draftText: String
     @State private var imageAttachments: [ComposerImageAttachment] = []
+    @State private var referenceAttachments: [ComposerReferenceAttachment] = []
     @State private var attachmentError: String?
 
+    init(
+        snapshot: NativeStoreSnapshot,
+        selectedWorkspaceId: Binding<EntityID?>,
+        contextWorkspaceId: EntityID?,
+        text: Binding<String>,
+        statusLine: String,
+        isRunning: Bool,
+        accent: Color,
+        branchOptions: [String] = [],
+        branchStatus: String? = nil,
+        switchBranch: @escaping (String) -> Void = { _ in },
+        send: @escaping () -> Void
+    ) {
+        self.snapshot = snapshot
+        self._selectedWorkspaceId = selectedWorkspaceId
+        self.contextWorkspaceId = contextWorkspaceId
+        self._text = text
+        self.statusLine = statusLine
+        self.isRunning = isRunning
+        self.accent = accent
+        self.branchOptions = branchOptions
+        self.branchStatus = branchStatus
+        self.switchBranch = switchBranch
+        self.send = send
+        self._draftText = State(initialValue: text.wrappedValue)
+    }
+
     private var canSend: Bool {
-        !isRunning && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !imageAttachments.isEmpty)
+        !isRunning && (
+            !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !imageAttachments.isEmpty
+                || !referenceAttachments.isEmpty
+        )
     }
 
     private var composerFocused: Bool {
@@ -8968,7 +15900,7 @@ private struct ConversationReplyComposer: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
-                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
+                if draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
                     Text(placeholderText)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(PKTheme.text4.opacity(0.72))
@@ -8977,13 +15909,14 @@ private struct ConversationReplyComposer: View {
                         .allowsHitTesting(false)
                 }
                 NativeSendingTextEditor(
-                    text: $text,
+                    text: $draftText,
                     focused: $focused,
                     fontSize: 13,
                     lineSpacing: 1,
                     textContainerInset: NSSize(width: 0, height: 3),
                     onSend: sendWithAttachments,
                     onPasteImages: pasteImagesFromClipboard,
+                    onPasteReferences: pasteReferencesFromClipboard,
                     onFocusChange: { editorFocused = $0 }
                 )
                     .frame(minHeight: 38, maxHeight: 56)
@@ -8994,6 +15927,18 @@ private struct ConversationReplyComposer: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 focused = true
+            }
+
+            if !referenceAttachments.isEmpty {
+                ComposerReferenceAttachmentStrip(
+                    references: referenceAttachments,
+                    remove: { reference in
+                        referenceAttachments.removeAll { $0.id == reference.id }
+                    },
+                    compact: true
+                )
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
             }
 
             if !imageAttachments.isEmpty || attachmentError != nil {
@@ -9039,8 +15984,10 @@ private struct ConversationReplyComposer: View {
 
                 if isRunning {
                     StatusPill(text: "RUNNING", color: PKTheme.warn)
-                } else if imageAttachments.isEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                } else if referenceAttachments.isEmpty && imageAttachments.isEmpty && draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     StatusPill(text: "READY", color: PKTheme.ok)
+                } else if !referenceAttachments.isEmpty {
+                    StatusPill(text: "\(referenceAttachments.count) REF\(referenceAttachments.count == 1 ? "" : "S")", color: accent)
                 } else if !imageAttachments.isEmpty {
                     StatusPill(text: "\(imageAttachments.count) IMAGE\(imageAttachments.count == 1 ? "" : "S")", color: accent)
                 } else if !statusLine.isEmpty && statusLine != "New chat ready" {
@@ -9084,8 +16031,10 @@ private struct ConversationReplyComposer: View {
         )
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused ? accent.opacity(0.62) : PKTheme.edgeStrong.opacity(0.48), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .onPasteCommand(of: [.image, .fileURL]) { _ in
-            addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+        .onPasteCommand(of: composerPasteCommandTypes) { _ in
+            if !pasteImagesFromClipboard() {
+                _ = pasteReferencesFromClipboard()
+            }
             refocusComposer()
         }
         .onChange(of: isRunning) { _, running in
@@ -9093,6 +16042,17 @@ private struct ConversationReplyComposer: View {
                 refocusComposer()
             }
         }
+        .onChange(of: text) { _, newValue in
+            guard newValue != draftText else { return }
+            draftText = newValue
+        }
+    }
+
+    private func addReferences(_ references: [ComposerReferenceAttachment]) {
+        referenceAttachments = composerMergedReferenceAttachments(
+            existing: referenceAttachments,
+            newReferences: references
+        )
     }
 
     private func addAttachments(_ result: ComposerImageAttachmentImportResult) {
@@ -9112,12 +16072,39 @@ private struct ConversationReplyComposer: View {
         return true
     }
 
+    private func pasteReferencesFromClipboard() -> Bool {
+        let extraction = ComposerReferenceAttachmentStore.importReferencesFromPasteboard()
+        guard !extraction.references.isEmpty else { return false }
+        addReferences(extraction.references)
+        appendRemainingReferenceText(extraction.text)
+        refocusComposer()
+        return true
+    }
+
+    private func appendRemainingReferenceText(_ remaining: String) {
+        guard !remaining.isEmpty else { return }
+        let current = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftText = current.isEmpty ? remaining : "\(current) \(remaining)"
+    }
+
     private func sendWithAttachments() {
         guard canSend else { return }
-        text = ComposerAttachmentPrompt.appendImageRefs(
-            to: text,
+        let extraction = composerExtractReferenceAttachments(from: draftText)
+        let references = composerMergedReferenceAttachments(
+            existing: referenceAttachments,
+            newReferences: extraction.references
+        )
+        var outgoing = ComposerAttachmentPrompt.appendReferenceRefs(
+            to: extraction.text,
+            references: references.map(\.promptRef)
+        )
+        outgoing = ComposerAttachmentPrompt.appendImageRefs(
+            to: outgoing,
             images: imageAttachments.map { ComposerImageAttachmentRef(name: $0.name, path: $0.url.path) }
         )
+        text = outgoing
+        draftText = ""
+        referenceAttachments = []
         imageAttachments = []
         attachmentError = nil
         send()
@@ -9455,6 +16442,14 @@ private enum ComposerImageAttachmentStore {
     private static let imageURLReadingOptions: [NSPasteboard.ReadingOptionKey: Any] = [
         .urlReadingContentsConformToTypes: [UTType.image.identifier]
     ]
+    private static let imagePasteboardTypes: Set<NSPasteboard.PasteboardType> = [
+        .png,
+        .tiff,
+        NSPasteboard.PasteboardType("public.jpeg"),
+        NSPasteboard.PasteboardType("public.jpg"),
+        NSPasteboard.PasteboardType("public.gif"),
+        NSPasteboard.PasteboardType("public.heic"),
+    ]
 
     static func pickImageFiles() -> ComposerImageAttachmentImportResult {
         let panel = NSOpenPanel()
@@ -9480,6 +16475,9 @@ private enum ComposerImageAttachmentStore {
             return true
         }
         if pasteboard.canReadObject(forClasses: [NSImage.self], options: nil) {
+            return true
+        }
+        if imagePasteboardTypes.contains(where: { pasteboard.data(forType: $0) != nil }) {
             return true
         }
         return pasteboard.types?.contains { pasteboardType in
@@ -9512,8 +16510,9 @@ private enum ComposerImageAttachmentStore {
 
     private static func imageFromPasteboardData(_ pasteboard: NSPasteboard) -> NSImage? {
         for pasteboardType in pasteboard.types ?? [] {
-            guard let type = UTType(pasteboardType.rawValue),
-                  type.conforms(to: .image),
+            let isImageType = imagePasteboardTypes.contains(pasteboardType)
+                || UTType(pasteboardType.rawValue)?.conforms(to: .image) == true
+            guard isImageType,
                   let data = pasteboard.data(forType: pasteboardType),
                   let image = NSImage(data: data) else { continue }
             return image
@@ -9753,28 +16752,92 @@ private func runStateColor(_ state: RunState?) -> Color {
     switch state {
     case .running, .completed: PKTheme.ok
     case .waitingForUser, .queued, .starting: PKTheme.warn
+    case .stale: PKTheme.warn
     case .failed, .cancelled: PKTheme.err
     case .draft: PKTheme.primary
     default: PKTheme.text3
     }
 }
 
-private func agentOutputSubtitle(state: RunState?, isRunning: Bool) -> String {
+func runStateDisplayLabel(_ state: RunState?) -> String {
+    switch state {
+    case .stale:
+        return "interrupted"
+    case .none:
+        return "starting"
+    default:
+        return state?.rawValue ?? "starting"
+    }
+}
+
+func runNeedsRetryAttention(_ state: RunState?) -> Bool {
+    switch state {
+    case .stale, .failed, .cancelled:
+        return true
+    default:
+        return false
+    }
+}
+
+private func runRetryActionColor(_ state: RunState?) -> Color? {
+    runNeedsRetryAttention(state) ? runStateColor(state) : nil
+}
+
+func agentRunDurationText(startedAt: Date?, endedAt: Date?, now: Date = Date()) -> String? {
+    guard let startedAt else { return nil }
+    let end = endedAt ?? now
+    let seconds = max(0, Int(end.timeIntervalSince(startedAt).rounded(.down)))
+    if seconds < 60 {
+        return "\(seconds)s"
+    }
+    let minutes = seconds / 60
+    let remainingSeconds = seconds % 60
+    if minutes < 60 {
+        return remainingSeconds == 0 ? "\(minutes)m" : "\(minutes)m \(remainingSeconds)s"
+    }
+    let hours = minutes / 60
+    let remainingMinutes = minutes % 60
+    return remainingMinutes == 0 ? "\(hours)h" : "\(hours)h \(remainingMinutes)m"
+}
+
+private func agentOutputSubtitle(
+    state: RunState?,
+    isRunning: Bool,
+    durationText: String? = nil
+) -> String {
     if isRunning {
-        return "Streaming native runner output"
+        if let durationText {
+            return "Working for \(durationText)"
+        }
+        return "Working"
     }
     switch state {
     case .completed:
+        if let durationText {
+            return "Worked for \(durationText)"
+        }
         return "Completed"
     case .failed:
+        if let durationText {
+            return "Failed after \(durationText)"
+        }
         return "Needs attention"
     case .cancelled:
+        if let durationText {
+            return "Cancelled after \(durationText)"
+        }
         return "Cancelled"
     case .waitingForUser:
+        if let durationText {
+            return "Worked for \(durationText)"
+        }
         return "Waiting for input"
     case .draft:
         return "Conversation open"
     case .queued, .starting, .running:
+        if let durationText {
+            return "Working for \(durationText)"
+        }
         return "Preparing response"
     default:
         return "Agent output"
@@ -9788,7 +16851,7 @@ func friendlyAgentOutput(_ text: String) -> String {
         options: .regularExpression
     )
     var toolNamesByCallId: [String: String] = [:]
-    let lines = withoutAnsi
+    var lines = withoutAnsi
         .components(separatedBy: .newlines)
         .map { line -> String? in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -9820,12 +16883,64 @@ func friendlyAgentOutput(_ text: String) -> String {
         }
         .compactMap { $0 }
 
+    lines = friendlyAgentOutputPromotingIntermediateMessagesToThinking(lines)
     return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func friendlyAgentOutputPromotingIntermediateMessagesToThinking(_ lines: [String]) -> [String] {
+    guard lines.contains(where: friendlyAgentOutputLineIsActivity) else { return lines }
+    let assistantMessageIndexes = lines.indices.filter { index in
+        friendlyAgentOutputLineLooksLikeAssistantMessage(lines[index])
+    }
+    guard !assistantMessageIndexes.isEmpty else { return lines }
+
+    return lines.indices.map { index in
+        guard assistantMessageIndexes.contains(index) else { return lines[index] }
+        let hasLaterActivity = lines[(index + 1)...].contains(where: friendlyAgentOutputLineIsActivity)
+        guard hasLaterActivity else { return lines[index] }
+        return friendlyAgentThinkingText(lines[index])
+    }
+}
+
+private func friendlyAgentOutputLineLooksLikeAssistantMessage(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    return !friendlyAgentOutputLineIsActivity(trimmed)
+        && !runFollowUpLineIsGeneratedKnowledgeNote(trimmed)
+        && runFollowUpSanitizedGeneratedConfirmationQuestion(trimmed) == nil
+        && !trimmed.hasPrefix("[")
+}
+
+private func friendlyAgentOutputLineIsActivity(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.hasPrefix("Thinking:")
+        || trimmed.hasPrefix("Tool:")
+        || trimmed.hasPrefix("Tool result:")
+        || trimmed.hasPrefix("Tool output:")
+        || trimmed.hasPrefix("Artifact:")
+        || trimmed.hasPrefix("File:")
+        || trimmed.hasPrefix("Files:")
+        || trimmed.hasPrefix("Completed exit code")
+        || trimmed.hasPrefix("Failed:")
+        || trimmed.hasPrefix("Runner failed:")
+}
+
+private func friendlyAgentThinkingText(_ text: String) -> String {
+    text.components(separatedBy: .newlines)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .map { line in
+            line.hasPrefix("Thinking:") ? line : "Thinking: \(line)"
+        }
+        .joined(separator: "\n")
 }
 
 private func isHiddenAgentCLIDiagnosticLine(_ trimmed: String) -> Bool {
     let lower = trimmed.lowercased()
     if lower == "reading additional input from stdin..." || lower == "reading prompt from stdin..." {
+        return true
+    }
+    if lower.hasPrefix("[system] marked stale because pikiclaw restarted before this run reported completion") {
         return true
     }
     if lower == "plugin.json" || lower == "sessionstart" { return true }
@@ -9842,7 +16957,7 @@ private func isHiddenAgentCLIDiagnosticLine(_ trimmed: String) -> Bool {
     if pieces.count == 3,
        pieces[0].contains("T"),
        pieces[0].hasSuffix("Z"),
-       ["WARN", "INFO", "DEBUG", "TRACE"].contains(String(pieces[1])),
+       ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"].contains(String(pieces[1])),
        pieces[2].hasPrefix("codex") {
         return true
     }
@@ -9864,15 +16979,71 @@ private func friendlyCodexEventLine(_ line: String, toolNamesByCallId: inout [St
             return ""
         }
         return friendlyCodexResponseItem(payload, payloadType: payloadType, toolNamesByCallId: &toolNamesByCallId)
+    case "item.started", "item.completed":
+        guard let item = object["item"] as? [String: Any] else {
+            return ""
+        }
+        return friendlyCodexItem(item, eventType: type, toolNamesByCallId: &toolNamesByCallId)
     case "error":
         return "Failed: \(codexString(object["message"]) ?? "Codex reported an error")"
-    case "session_meta", "event_msg":
+    case "event_msg":
+        return friendlyCodexEventMessage(object)
+    case "session_meta":
         return ""
     default:
         if type.hasPrefix("thread.") || type.hasPrefix("turn.") {
             return ""
         }
         return nil
+    }
+}
+
+private func friendlyCodexItem(
+    _ item: [String: Any],
+    eventType: String,
+    toolNamesByCallId: inout [String: String]
+) -> String {
+    let itemType = codexString(item["type"]) ?? ""
+    switch itemType {
+    case "agent_message":
+        guard eventType == "item.completed" else { return "" }
+        let text = codexString(item["text"]) ?? codexText(from: item["content"])
+        return text
+    case "reasoning":
+        let text = [codexText(from: item["summary"]), codexText(from: item["content"]), codexString(item["text"]) ?? ""]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return text.isEmpty ? "" : "Thinking: \(text)"
+    case "command_execution":
+        let command = codexString(item["command"]) ?? "command"
+        let name = friendlyCommandName(command)
+        if eventType == "item.started" {
+            return "Tool: \(name)"
+        }
+        if eventType == "item.completed" {
+            let result = friendlyCommandOutputSummary(
+                codexString(item["aggregated_output"])
+                    ?? codexString(item["output"])
+                    ?? codexText(from: item["content"])
+            )
+            return ["Tool result: \(name)", friendlyToolOutputSummaryLines(result)].compactMap { $0 }.joined(separator: "\n")
+        }
+        return ""
+    case "function_call", "custom_tool_call":
+        let name = codexString(item["name"]) ?? codexString(item["tool_name"]) ?? "tool"
+        if let callId = codexString(item["call_id"]), !callId.isEmpty {
+            toolNamesByCallId[callId] = name
+        }
+        return eventType == "item.started" ? "Tool: \(friendlyToolName(name))" : ""
+    case "function_call_output":
+        guard eventType == "item.completed",
+              let callId = codexString(item["call_id"]),
+              let name = toolNamesByCallId[callId] else {
+            return ""
+        }
+        return "Tool result: \(friendlyToolName(name))"
+    default:
+        return ""
     }
 }
 
@@ -9911,6 +17082,14 @@ private func friendlyCodexResponseItem(
     }
 }
 
+private func friendlyCodexEventMessage(_ object: [String: Any]) -> String {
+    let text = codexString(object["message"])
+        ?? codexString(object["msg"])
+        ?? codexString(object["text"])
+    guard let text else { return "" }
+    return "Thinking: \(text)"
+}
+
 private func friendlyCodexFileChange(_ payload: [String: Any]) -> String {
     if let path = codexString(payload["path"]) ?? codexString(payload["file"]) ?? codexString(payload["filename"]),
        !path.isEmpty {
@@ -9928,6 +17107,52 @@ private func friendlyToolName(_ name: String) -> String {
     return trimmed
         .replacingOccurrences(of: "functions.", with: "")
         .replacingOccurrences(of: "mcp__", with: "")
+}
+
+private func friendlyCommandName(_ command: String) -> String {
+    let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "command" }
+    if trimmed.hasPrefix("/bin/zsh -lc ") || trimmed.hasPrefix("zsh -lc ") {
+        let parts = trimmed.split(separator: " ", maxSplits: 2).map(String.init)
+        if let script = parts.last {
+            return script.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+        }
+    }
+    return trimmed
+}
+
+private func friendlyCommandOutputSummary(_ output: String) -> String? {
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    if friendlyOutputLooksSensitive(trimmed) {
+        return "[redacted sensitive output]"
+    }
+    let lines = trimmed
+        .components(separatedBy: .newlines)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    guard !lines.isEmpty else { return nil }
+    if lines.count <= 4 && trimmed.count <= 500 {
+        return lines.joined(separator: "\n")
+    }
+    return lines.count == 1 ? "[1 long line]" : "[\(lines.count) output lines]"
+}
+
+private func friendlyToolOutputSummaryLines(_ summary: String?) -> String? {
+    guard let summary else { return nil }
+    let lines = summary
+        .components(separatedBy: .newlines)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    guard !lines.isEmpty else { return nil }
+    return lines.map { "Tool output: \($0)" }.joined(separator: "\n")
+}
+
+private func friendlyOutputLooksSensitive(_ output: String) -> Bool {
+    let lower = output.lowercased()
+    let markers = ["token", "password", "secret", "api_key", "apikey", "private_key", "credential"]
+    guard markers.contains(where: lower.contains) else { return false }
+    return output.contains("=") || output.contains(":")
 }
 
 private func codexString(_ value: Any?) -> String? {
@@ -10097,6 +17322,48 @@ private struct RuntimeCard: View {
         .background(PKTheme.panelAlt.opacity(0.86))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct RuntimeActionCard: View {
+    let title: String
+    let value: String
+    let subtitle: String
+    let color: Color
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Dot(color: isEnabled ? color : PKTheme.text4)
+                    Text(title)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(PKTheme.text3)
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(isEnabled ? color : PKTheme.text4)
+                }
+                Text(value)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(PKTheme.panelAlt.opacity(isEnabled ? 0.90 : 0.66))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isEnabled ? color.opacity(0.34) : PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(isEnabled ? "Open the most urgent saved output review" : "No saved output is available to open")
     }
 }
 
@@ -11148,6 +18415,7 @@ private struct VoiceAssistantPage: View {
     @Binding var selectedWorkItemId: EntityID?
     @ObservedObject var model: NativeAppModel
     let navigate: (NativeRoute) -> Void
+    let openDeepLink: (URL) -> Void
     @StateObject private var voice = VoiceCaptureController()
     @StateObject private var speaker = VoiceReportSpeaker()
     @State private var delegatedUtterance = ""
@@ -11733,9 +19001,9 @@ private struct VoiceAssistantOverlay: View {
                 voiceImmersivePanel
                     .frame(
                         width: min(540, max(390, proxy.size.width - 96)),
-                        height: min(820, max(620, proxy.size.height - 76))
+                        height: min(760, max(520, proxy.size.height - 24))
                     )
-                    .padding(.vertical, 28)
+                    .padding(.vertical, 8)
             }
         }
         .onChange(of: voice.transcript) { _, next in
@@ -11835,9 +19103,9 @@ private struct VoiceAssistantOverlay: View {
                     }
                 }
                 .padding(.horizontal, 32)
-                .padding(.top, 28)
+                .padding(.top, 18)
 
-                Spacer(minLength: 10)
+                Spacer(minLength: 6)
 
                 VoiceFluidOrb(
                     level: voice.audioLevel,
@@ -11846,8 +19114,8 @@ private struct VoiceAssistantOverlay: View {
                     isSpeaking: speaker.isSpeaking || voice.isVoiceboxSpeaking,
                     color: voiceVisualColor
                 )
-                .frame(width: 154, height: 154)
-                .padding(.bottom, 14)
+                .frame(width: 116, height: 116)
+                .padding(.bottom, 10)
 
                 VoiceSpeakHistoryPanel(
                     entries: speakHistoryEntries,
@@ -11860,7 +19128,7 @@ private struct VoiceAssistantOverlay: View {
                         || !currentTranscript.isEmpty
                 )
                 .frame(maxWidth: 430)
-                .frame(height: inputMode == .text ? 226 : 282)
+                .frame(height: inputMode == .text ? 198 : 244)
                 .padding(.horizontal, 28)
 
                 VoiceInputModeSwitch(
@@ -11869,7 +19137,7 @@ private struct VoiceAssistantOverlay: View {
                     setMode: setInputMode
                 )
                 .frame(maxWidth: 238)
-                .padding(.top, 14)
+                .padding(.top, 10)
 
                 VoiceTaskTrackerCard(
                     runs: Array(trackedVoiceRuns.prefix(2)),
@@ -11879,9 +19147,9 @@ private struct VoiceAssistantOverlay: View {
                 )
                 .frame(maxWidth: 390)
                 .padding(.horizontal, 36)
-                .padding(.top, 16)
+                .padding(.top, 10)
 
-                Spacer(minLength: 14)
+                Spacer(minLength: 8)
 
                 if inputMode == .text {
                     VoiceTextInputCard(
@@ -11903,11 +19171,6 @@ private struct VoiceAssistantOverlay: View {
                         .padding(.bottom, 22)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-
-                Text(bottomVoiceStatus)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.58))
-                    .padding(.bottom, 18)
 
                 HStack(alignment: .center) {
                     VoiceFloatingControlButton(
@@ -11951,7 +19214,7 @@ private struct VoiceAssistantOverlay: View {
                     }
                 }
                 .padding(.horizontal, 54)
-                .padding(.bottom, 30)
+                .padding(.bottom, 18)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 46, style: .continuous))
@@ -12084,7 +19347,7 @@ private struct VoiceAssistantOverlay: View {
                     .foregroundStyle(PKTheme.text)
                     .focused($briefFocused)
                     .onSubmit {
-                        if canDelegate && !plan.needsConfirmation {
+                        if canDelegate {
                             launchDelegation()
                         } else {
                             sendConversationTurn()
@@ -12114,7 +19377,7 @@ private struct VoiceAssistantOverlay: View {
             .buttonStyle(.plain)
 
             Button {
-                if canDelegate && !plan.needsConfirmation {
+                if canDelegate {
                     launchDelegation()
                 } else {
                     sendConversationTurn()
@@ -12679,21 +19942,34 @@ private struct VoiceAssistantOverlay: View {
 
     private var commandActionTitle: String {
         if canDelegate {
-            return voiceAutoDelegate ? "Auto Route" : "Route"
+            switch plan.intent {
+            case .delegate:
+                return voiceAutoDelegate ? "Auto Route" : "Route"
+            case .status:
+                return "Check Status"
+            case .converse:
+                return "Ask Assistant"
+            case .cancel:
+                break
+            }
         }
         return assistantThinking ? "Thinking" : "Send"
     }
 
     private var commandActionSymbol: String {
         if canDelegate {
-            return "arrow.up.forward.circle.fill"
+            switch plan.intent {
+            case .delegate: return "arrow.up.forward.circle.fill"
+            case .status: return "list.bullet.clipboard.fill"
+            case .converse: return "sparkles"
+            case .cancel: break
+            }
         }
         return assistantThinking ? "ellipsis" : "return"
     }
 
     private var shouldAutoDelegateCurrentTurn: Bool {
-        voiceAutoDelegate
-            && canDelegate
+        canDelegate
             && !assistantThinking
             && !speaker.isSpeaking
             && !voice.isVoiceboxSpeaking
@@ -12704,9 +19980,9 @@ private struct VoiceAssistantOverlay: View {
     }
 
     private var delegationButtonTitle: String {
-        if canDelegate && model.isRunning { return voiceAutoDelegate ? "Auto Route New Task" : "Delegate New Task" }
-        if canDelegate && voiceAutoDelegate { return "Auto Route Ready" }
-        if canDelegate { return "Delegate Agent" }
+        if canDelegate && model.isRunning { return voiceAutoDelegate ? "Voice Assistant Handling" : "Submit to Assistant" }
+        if canDelegate && voiceAutoDelegate { return "Auto Submit Ready" }
+        if canDelegate { return "Submit to Assistant" }
         if model.isRunning { return "Supervising Agent" }
         switch plan.intent {
         case .status: return "Status Intent"
@@ -12973,10 +20249,8 @@ private struct VoiceAssistantOverlay: View {
         voice.pauseForAgentRun()
         briefFocused = false
         let preparedPlan = plan
-        let message = autoTriggered
-            ? "好，我交给 \(agentShortLabel(preparedPlan.suggestedAgentKind))。"
-            : "好的，交给 \(agentShortLabel(preparedPlan.suggestedAgentKind))。"
-        appendAssistantTurn(message, caption: autoTriggered ? "Auto Route" : "Delegating")
+        let (message, caption) = assistantSubmissionMessage(for: preparedPlan, autoTriggered: autoTriggered)
+        appendAssistantTurn(message, caption: caption)
         if speakStart {
             speakAssistantText(message)
         }
@@ -13014,6 +20288,23 @@ private struct VoiceAssistantOverlay: View {
                 appendAssistantTurn(message, caption: "Voice")
                 speakAssistantText(message)
             }
+        }
+    }
+
+    private func assistantSubmissionMessage(for plan: VoiceDelegationPlan, autoTriggered: Bool) -> (String, String) {
+        switch plan.intent {
+        case .delegate:
+            let agent = agentShortLabel(plan.suggestedAgentKind)
+            return (
+                autoTriggered ? "好，我交给 \(agent)。" : "好的，交给 \(agent)。",
+                autoTriggered ? "Auto Route" : "Delegating"
+            )
+        case .status:
+            return ("我来查看当前状态。", "Checking Status")
+        case .converse:
+            return ("我来处理这个问题。", "Voice Assistant")
+        case .cancel:
+            return ("好的，先不提交。", "Voice")
         }
     }
 
@@ -13123,6 +20414,9 @@ private struct VoiceAssistantOverlay: View {
         if isVoiceSelectionQuestion(lower) {
             return "可以。点右下角设置，可以切换 Voicebox 或 Apple 语音，也可以选择不同音色。"
         }
+        if isScreenshotCapabilityQuestion(lower) {
+            return "可以。你告诉我要截哪个窗口或区域，我会交给合适的能力去完成，并在完成后告诉你结果。"
+        }
         if isActiveWorkStatusQuestion(lower) {
             return activeWorkStatusReply()
         }
@@ -13138,14 +20432,18 @@ private struct VoiceAssistantOverlay: View {
         if lower.contains("不用") || lower.contains("取消") || lower.contains("stop") || lower.contains("cancel") {
             return "好的，先不提交。"
         }
-        return "我听到了：\(shortUtterance(utterance))。"
+        if model.isRunning || activeVoiceTaskCount > 0 {
+            return "我在。后台任务会继续跟进。你可以继续补充要求，或者问我当前进度。"
+        }
+        return "我在。你可以直接说想完成什么，我会先判断是直接回答、查看状态，还是交给后台 agent。"
     }
 
     private func isActiveWorkStatusQuestion(_ lower: String) -> Bool {
         let signals = [
             "当前还在工作", "还在工作的任务", "正在工作的任务", "当前任务", "还在工作", "运行中的任务",
             "active task", "active tasks", "running task", "running tasks", "current task", "current tasks",
-            "进度", "状态", "status", "progress"
+            "进度", "状态", "后台任务", "任务数量", "当前有几个", "有几个任务", "多少个任务", "几个任务", "多少任务",
+            "status", "progress"
         ]
         return signals.contains(where: lower.contains)
     }
@@ -13217,6 +20515,11 @@ private struct VoiceAssistantOverlay: View {
     private func isVoiceSelectionQuestion(_ lower: String) -> Bool {
         (lower.contains("语音") || lower.contains("声音") || lower.contains("voice"))
             && (lower.contains("选择") || lower.contains("换") || lower.contains("其他") || lower.contains("音色") || lower.contains("select") || lower.contains("change"))
+    }
+
+    private func isScreenshotCapabilityQuestion(_ lower: String) -> Bool {
+        (lower.contains("截图") || lower.contains("截屏") || lower.contains("screenshot"))
+            && (lower.contains("可以") || lower.contains("能") || lower.contains("会") || lower.contains("can you"))
     }
 
     private func shortUtterance(_ utterance: String) -> String {
@@ -14149,7 +21452,10 @@ private struct ProjectsPage: View {
                     refreshBranches: { Task { await model.refreshBranches(for: selectedWorkspace) } },
                     switchBranch: { branch in Task { await model.switchBranch(branch, workspace: selectedWorkspace) } },
                     selectChat: selectRecentChat,
+                    togglePinChat: { run in Task { await model.toggleRunPinned(run.id) } },
                     stageOutput: stageOutputFollowUp,
+                    startSideChat: startOutputSideChat,
+                    resolveBranch: resolveOutputBranch,
                     saveKnowledge: saveOutputKnowledge
                 )
                 .frame(width: 300)
@@ -14206,16 +21512,51 @@ private struct ProjectsPage: View {
     private func stageOutputFollowUp(_ artifact: Artifact) {
         let run = artifactSourceRun(artifact, snapshot: snapshot)
         let item = artifactWorkItem(artifact, snapshot: snapshot)
+        let action = artifactFollowUpAction(artifact: artifact, run: run, workItem: item)
         selectedWorkspaceId = artifact.workspaceId
         selectedWorkItemId = item?.id ?? artifact.workItemId
         _ = model.stageAssistantPrompt(
-            title: "Output follow-up",
-            prompt: artifactFollowUpPrompt(artifact: artifact, run: run, workItem: item),
+            title: runFollowUpStagedLabel(action),
+            prompt: action.prompt,
             agentKind: .codex,
+            permissionMode: action.permissionMode,
             workspaceId: artifact.workspaceId,
             workItemId: item?.id ?? artifact.workItemId
         )
         navigate(.chat)
+    }
+
+    private func startOutputSideChat(parent: AgentRun, action: RunFollowUpAction) {
+        selectedWorkspaceId = parent.workspaceId
+        selectedWorkItemId = parent.workItemId
+        model.activeRunId = parent.id
+        navigate(.chat)
+        Task {
+            if let childId = await model.startFollowUpSideChat(
+                parentRunId: parent.id,
+                prompt: action.prompt,
+                permissionMode: action.permissionMode,
+                followUpLabel: runFollowUpStagedLabel(action)
+            ),
+               let child = model.snapshot.runs.first(where: { $0.id == childId }) {
+                selectedWorkspaceId = child.workspaceId
+                selectedWorkItemId = child.workItemId
+            }
+        }
+    }
+
+    private func resolveOutputBranch(
+        artifact: Artifact,
+        resolution: ArtifactBranchResolution,
+        branchRunId: EntityID?
+    ) {
+        Task {
+            await model.markArtifactBranchResolution(
+                artifactId: artifact.id,
+                resolution: resolution,
+                branchRunId: branchRunId
+            )
+        }
     }
 
     private func saveOutputKnowledge(_ artifact: Artifact) {
@@ -14465,53 +21806,53 @@ private struct ProjectTreeWorkspaceRow: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "folder.badge.gearshape")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(selected || hovering ? PKTheme.primary : PKTheme.text3)
-                    .frame(width: 18)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(workspace.name)
-                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                        .foregroundStyle(selected || hovering ? PKTheme.text : PKTheme.text2)
-                        .lineLimit(1)
-                    Text(workspace.currentBranch ?? workspace.kind)
-                        .font(.caption2)
-                        .foregroundStyle(hovering ? PKTheme.text2 : PKTheme.text3)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(hovering ? PKTheme.text3 : PKTheme.text3.opacity(0.45))
-                if hovering {
-                    Button(role: .destructive, action: delete) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(PKTheme.err)
-                            .frame(width: 16, height: 16)
+        HStack(spacing: 8) {
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.badge.gearshape")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selected || hovering ? PKTheme.primary : PKTheme.text3)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(workspace.name)
+                            .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                            .foregroundStyle(selected || hovering ? PKTheme.text : PKTheme.text2)
+                            .lineLimit(1)
+                        Text(workspace.currentBranch ?? workspace.kind)
+                            .font(.caption2)
+                            .foregroundStyle(hovering ? PKTheme.text2 : PKTheme.text3)
+                            .lineLimit(1)
                     }
-                    .buttonStyle(.plain)
-                    .help("Remove Workspace")
+                    Spacer(minLength: 0)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 9)
-            .frame(height: 42)
-            .background(selected ? PKTheme.selected.opacity(hovering ? 1 : 0.88) : PKTheme.control.opacity(hovering ? 0.58 : 0.36))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected || hovering ? PKTheme.edgeStrong : PKTheme.edge.opacity(0.65), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .shadow(color: PKTheme.primary.opacity(hovering ? 0.08 : 0), radius: hovering ? 9 : 0, y: 5)
+            .buttonStyle(.plain)
+
+            dragHandle
+
+            if hovering {
+                Button(role: .destructive, action: delete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(PKTheme.err)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
+                .help("Remove Workspace")
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .frame(height: 42)
+        .background(selected ? PKTheme.selected.opacity(hovering ? 1 : 0.88) : PKTheme.control.opacity(hovering ? 0.58 : 0.36))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected || hovering ? PKTheme.edgeStrong : PKTheme.edge.opacity(0.65), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .shadow(color: PKTheme.primary.opacity(hovering ? 0.08 : 0), radius: hovering ? 9 : 0, y: 5)
+        .contentShape(RoundedRectangle(cornerRadius: 7))
         .onHover { isHovering in
             withAnimation(.easeInOut(duration: 0.14)) {
                 hovering = isHovering
             }
-        }
-        .onDrag {
-            draggingWorkspaceId = workspace.id
-            return NSItemProvider(object: workspace.id.rawValue as NSString)
         }
         .onDrop(
             of: [.text],
@@ -14524,6 +21865,19 @@ private struct ProjectTreeWorkspaceRow: View {
         .contextMenu {
             Button("Remove Workspace", systemImage: "trash", role: .destructive, action: delete)
         }
+    }
+
+    private var dragHandle: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(hovering ? PKTheme.text3 : PKTheme.text3.opacity(0.45))
+            .frame(width: 18, height: 24)
+            .contentShape(Rectangle())
+            .onDrag {
+                draggingWorkspaceId = workspace.id
+                return NSItemProvider(object: workspace.id.rawValue as NSString)
+            }
+            .help("Drag to reorder")
     }
 }
 
@@ -14588,6 +21942,7 @@ private struct ProjectChatPane: View {
                         selectedWorkspaceId: $selectedWorkspaceId,
                         selectedWorkItemId: $selectedWorkItemId,
                         model: model,
+                        focusedGeneratedUIAction: .constant(nil),
                         immersive: true,
                         newChat: model.prepareNewChat,
                         openWorkItem: { navigate(.workItems) }
@@ -14774,7 +22129,10 @@ private struct ProjectContextSidebar: View {
     let refreshBranches: () -> Void
     let switchBranch: (String) -> Void
     let selectChat: (AgentRun) -> Void
+    let togglePinChat: (AgentRun) -> Void
     let stageOutput: (Artifact) -> Void
+    let startSideChat: (AgentRun, RunFollowUpAction) -> Void
+    let resolveBranch: (Artifact, ArtifactBranchResolution, EntityID?) -> Void
     let saveKnowledge: (Artifact) -> Void
 
     private var workspaceIds: [EntityID] {
@@ -14797,8 +22155,20 @@ private struct ProjectContextSidebar: View {
         nativeChatRunGroups(from: runs)
     }
 
+    private var pinnedChatGroups: [NativeChatRunGroup] {
+        chatGroups
+            .filter { $0.parent.isPinned }
+            .sorted { ($0.parent.pinnedAt ?? .distantPast) > ($1.parent.pinnedAt ?? .distantPast) }
+    }
+
+    private var recentChatGroups: [NativeChatRunGroup] {
+        chatGroups.filter { !$0.parent.isPinned }
+    }
+
     private var artifacts: [Artifact] {
-        snapshot.artifacts.filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
+        snapshot.artifacts
+            .filter { workspaceIds.isEmpty || workspaceIds.contains($0.workspaceId) }
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     private var currentBranch: String? {
@@ -14855,12 +22225,30 @@ private struct ProjectContextSidebar: View {
                 }
 
                 InspectorSection(title: "Recent Chats") {
-                    ForEach(chatGroups.prefix(4)) { group in
-                        ProjectRecentChatGroupRow(
-                            group: group,
-                            selectedRunId: activeRunId,
-                            selectChat: selectChat
-                        )
+                    if !pinnedChatGroups.isEmpty {
+                        ProjectChatGroupShelfLabel(title: "Pinned")
+                        ForEach(pinnedChatGroups.prefix(4)) { group in
+                            ProjectRecentChatGroupRow(
+                                group: group,
+                                selectedRunId: activeRunId,
+                                selectChat: selectChat,
+                                togglePin: togglePinChat
+                            )
+                        }
+                    }
+                    if !recentChatGroups.isEmpty {
+                        if !pinnedChatGroups.isEmpty {
+                            ProjectChatGroupShelfLabel(title: "Recent")
+                                .padding(.top, 4)
+                        }
+                        ForEach(recentChatGroups.prefix(4)) { group in
+                            ProjectRecentChatGroupRow(
+                                group: group,
+                                selectedRunId: activeRunId,
+                                selectChat: selectChat,
+                                togglePin: togglePinChat
+                            )
+                        }
                     }
                     if chatGroups.isEmpty {
                         EmptyMiniState(title: "No project chats", subtitle: "Send a message to start this project chat.")
@@ -14871,31 +22259,16 @@ private struct ProjectContextSidebar: View {
                     if !artifacts.isEmpty {
                         OutputPanelSummary(outputs: artifacts)
                     }
-                    ForEach(Array(artifacts.prefix(4))) { artifact in
-                        let run = artifactSourceRun(artifact, snapshot: snapshot)
-                        let item = artifactWorkItem(artifact, snapshot: snapshot)
-                        ArtifactOutputRow(
-                            artifact: artifact,
-                            sourceRun: run,
-                            workItem: item,
-                            openRun: run.map { sourceRun in
-                                { selectChat(sourceRun) }
-                            },
-                            copySummary: {
-                                copyTextToPasteboard(artifactClipboardSummary(
-                                    artifact: artifact,
-                                    run: run,
-                                    workItem: item
-                                ))
-                            },
-                            stageFollowUp: {
-                                stageOutput(artifact)
-                            },
-                            saveKnowledge: {
-                                saveKnowledge(artifact)
-                            }
-                        )
-                    }
+                    ArtifactOutputList(
+                        artifacts: artifacts,
+                        snapshot: snapshot,
+                        limit: 4,
+                        openRun: selectChat,
+                        stageOutput: stageOutput,
+                        startSideChat: startSideChat,
+                        resolveBranch: resolveBranch,
+                        saveKnowledge: saveKnowledge
+                    )
                     if artifacts.isEmpty {
                         EmptyMiniState(title: "No outputs", subtitle: "Artifacts and notes will appear here.")
                     }
@@ -14907,20 +22280,72 @@ private struct ProjectContextSidebar: View {
     }
 }
 
+private struct ProjectChatGroupShelfLabel: View {
+    let title: String
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(PKTheme.text3)
+            .padding(.horizontal, 2)
+    }
+}
+
 private struct ProjectRecentChatGroupRow: View {
     let group: NativeChatRunGroup
     let selectedRunId: EntityID?
     let selectChat: (AgentRun) -> Void
+    let togglePin: (AgentRun) -> Void
+    @State private var hovering = false
+
+    private var selected: Bool {
+        selectedRunId == group.parent.id || group.children.contains(where: { $0.id == selectedRunId })
+    }
+
+    private var subtitle: String {
+        group.children.isEmpty ? group.parent.state.rawValue : "\(group.children.count + 1) windows · \(group.parent.state.rawValue)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            InspectorActionRow(
-                symbol: group.children.isEmpty ? "text.bubble" : "rectangle.split.2x1",
-                title: group.parent.promptSnapshot.firstLineFallback("Conversation"),
-                subtitle: group.children.isEmpty ? group.parent.state.rawValue : "\(group.children.count + 1) windows · \(group.parent.state.rawValue)",
-                selected: selectedRunId == group.parent.id || group.children.contains(where: { $0.id == selectedRunId }),
-                action: { selectChat(group.parent) }
+            HStack(spacing: 6) {
+                Button {
+                    selectChat(group.parent)
+                } label: {
+                    InspectorRow(
+                        symbol: group.children.isEmpty ? "text.bubble" : "rectangle.split.2x1",
+                        title: group.parent.promptSnapshot.firstLineFallback("Conversation"),
+                        subtitle: subtitle
+                    )
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .help("Open Chat")
+
+                Button {
+                    togglePin(group.parent)
+                } label: {
+                    Image(systemName: group.parent.isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(group.parent.isPinned ? PKTheme.primary : PKTheme.text3)
+                        .frame(width: 28, height: 28)
+                        .background(group.parent.isPinned ? PKTheme.primary.opacity(0.13) : PKTheme.panel.opacity(hovering ? 0.52 : 0.0))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help(group.parent.isPinned ? "Unpin Chat" : "Pin Chat")
+            }
+            .frame(maxWidth: .infinity)
+            .background(selected ? PKTheme.primary.opacity(0.11) : PKTheme.control.opacity(hovering ? 0.42 : 0.0))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(selected ? PKTheme.primary.opacity(0.36) : PKTheme.edge.opacity(hovering ? 0.72 : 0.0), lineWidth: 1)
             )
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .onHover { hovering = $0 }
+
             if !group.children.isEmpty {
                 VStack(spacing: 4) {
                     ForEach(group.children.prefix(3)) { child in
@@ -15155,13 +22580,41 @@ private struct WorkItemsPage: View {
     let navigate: (NativeRoute) -> Void
     @State private var jiraQuery = ""
     @State private var selectedJiraRunId: EntityID?
+    @State private var pendingJiraWriteBackPlan: JiraTicketWriteBackPlan?
+    @State private var showJiraWriteBackApproval = false
+    @State private var jiraEvidenceSummaryCache: [EntityID: JiraTicketEvidenceSummary] = [:]
+    @State private var jiraEvidenceSummaryCacheKey = ""
+    @State private var cachedJiraWriteBackReadiness: JiraWriteBackReadiness?
+    @State private var cachedJiraWriteBackSetupGuide: JiraWriteBackSetupGuide?
+    @State private var jiraWriteBackCacheKey = ""
+    @State private var jiraWorkbenchReady = false
+
+    private var selectedJiraWorkspace: Workspace? {
+        if let selectedWorkspaceId,
+           let workspace = snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) {
+            return workspace
+        }
+        return selectedJiraItem.flatMap { item in
+            snapshot.workspaces.first { $0.id == item.workspaceId }
+        }
+    }
 
     private var jiraItems: [WorkItem] {
         jiraTicketQueueItems(from: snapshot.workItems)
     }
 
     private var filteredJiraItems: [WorkItem] {
-        jiraItems.filter { jiraTicketMatchesQuery($0, query: jiraQuery) }
+        guard !jiraQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return jiraItems
+        }
+        return jiraItems.filter { jiraTicketMatchesQuery($0, query: jiraQuery) }
+    }
+
+    private var selectedWorkItem: WorkItem? {
+        if let selected = snapshot.workItems.first(where: { $0.id == selectedWorkItemId }) {
+            return selected
+        }
+        return snapshot.workItems.first
     }
 
     private var selectedJiraItem: WorkItem? {
@@ -15172,64 +22625,132 @@ private struct WorkItemsPage: View {
     }
 
     var body: some View {
-        PageFrame(route: .workItems, showsHeader: false) {
-            HStack(alignment: .top, spacing: 14) {
-                JiraTicketSidebar(
-                    items: filteredJiraItems,
-                    totalCount: jiraItems.count,
-                    query: $jiraQuery,
-                    selectedWorkItemId: $selectedWorkItemId,
-                    selectedWorkspaceId: $selectedWorkspaceId,
-                    syncSummary: jiraSyncSummary,
-                    isSyncing: model.jiraSyncIsRunning,
-                    sync: syncJira
-                )
-                .frame(width: 340)
+        HStack(spacing: 0) {
+            JiraTicketSidebar(
+                items: filteredJiraItems,
+                totalCount: jiraItems.count,
+                evidenceSummary: jiraEvidenceSummary(for:),
+                query: $jiraQuery,
+                selectedWorkItemId: $selectedWorkItemId,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                syncSummary: jiraSyncSummary,
+                isSyncing: model.jiraSyncIsRunning,
+                sync: syncJira
+            )
+            .frame(width: 312)
 
-                JiraTicketChatWorkbench(
-                    item: selectedJiraItem,
-                    snapshot: snapshot,
-                    selectedRunId: $selectedJiraRunId,
-                    isRunning: model.isRunning,
-                    isSyncing: model.jiraSyncIsRunning,
-                    sync: syncJira,
-                    start: startSelectedTicket,
-                    copyBrief: copySelectedJiraBrief,
-                    copyUpdate: copySelectedJiraUpdate,
-                    openJira: openSelectedJiraTicket,
-                    openChat: {
-                        if let selectedJiraItem {
-                            selectedWorkItemId = selectedJiraItem.id
-                            selectedWorkspaceId = selectedJiraItem.workspaceId
-                            _ = model.stageJiraTicketForChat(workItemId: selectedJiraItem.id)
-                        }
-                        navigate(.chat)
-                    },
-                    openRunInChat: openRunInChat(_:),
-                    copyOutput: copyOutputSummary(_:),
-                    stageOutput: stageOutputFollowUp(_:),
-                    saveKnowledge: saveOutputKnowledge(_:)
-                )
-                .frame(maxWidth: .infinity)
-            }
-        } actions: {
-            SecondaryButton(title: "Sync Jira", systemImage: "arrow.clockwise") {
-                Task {
-                    if let itemId = await model.syncJiraTickets(scope: .currentSprint, workspaceId: selectedWorkspaceId) {
-                        selectedWorkItemId = itemId
-                    }
+            Divider().overlay(PKTheme.edge)
+
+            ZStack(alignment: .topLeading) {
+                if !jiraWorkbenchReady {
+                    JiraWorkbenchDeferredPlaceholder(
+                        item: selectedJiraItem,
+                        syncSummary: jiraSyncSummary,
+                        isSyncing: model.jiraSyncIsRunning
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let selectedWorkItem, selectedWorkItem.sourceType != .jira {
+                    WorkbenchDetail(
+                        item: selectedWorkItem,
+                        snapshot: snapshot,
+                        detailTab: $detailTab,
+                        run: {
+                            Task { await model.run(workItemId: selectedWorkItem.id) }
+                        },
+                        openChat: {
+                            selectedWorkItemId = selectedWorkItem.id
+                            selectedWorkspaceId = selectedWorkItem.workspaceId
+                            navigate(.chat)
+                        },
+                        openRun: openRunInChat(_:),
+                        copyOutput: copyOutputSummary(_:),
+                        stageOutput: stageOutputFollowUp(_:),
+                        startSideChat: startOutputSideChat(parent:action:),
+                        resolveBranch: resolveOutputBranch(artifact:resolution:branchRunId:),
+                        saveKnowledge: saveOutputKnowledge(_:)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    JiraTicketChatWorkbench(
+                        item: selectedJiraItem,
+                        snapshot: snapshot,
+                        selectedWorkItemId: $selectedWorkItemId,
+                        selectedWorkspaceId: $selectedWorkspaceId,
+                        selectedRunId: $selectedJiraRunId,
+                        model: model,
+                        isRunning: model.isRunning,
+                        isSyncing: model.jiraSyncIsRunning,
+                        isPostingUpdate: model.jiraWriteBackIsPosting,
+                        writeBackReadiness: selectedJiraWriteBackReadiness,
+                        writeBackSetupGuide: selectedJiraWriteBackSetupGuide,
+                        sync: syncJira,
+                        start: startSelectedTicket,
+                        copyBrief: copySelectedJiraBrief,
+                        copyUpdate: copySelectedJiraUpdate,
+                        postUpdate: reviewSelectedJiraWriteBack,
+                        copyWriteBackSetup: copySelectedJiraWriteBackSetup,
+                        revealWriteBackSetup: revealSelectedJiraWriteBackSetup,
+                        openJira: openSelectedJiraTicket,
+                        openChat: {
+                            if let selectedJiraItem {
+                                selectedWorkItemId = selectedJiraItem.id
+                                if selectedWorkspaceId == nil {
+                                    selectedWorkspaceId = selectedJiraItem.workspaceId
+                                }
+                                _ = model.stageJiraTicketForChat(
+                                    workItemId: selectedJiraItem.id,
+                                    workspaceId: selectedWorkspaceId
+                                )
+                            }
+                            navigate(.chat)
+                        },
+                        openRunInChat: openRunInChat(_:),
+                        copyOutput: copyOutputSummary(_:),
+                        stageOutput: stageOutputFollowUp(_:),
+                        startSideChat: startOutputSideChat(parent:action:),
+                        resolveBranch: resolveOutputBranch(artifact:resolution:branchRunId:),
+                        saveKnowledge: saveOutputKnowledge(_:)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            SecondaryButton(title: "Capture", systemImage: "tray.and.arrow.down") {
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .alert("Post Jira Update?", isPresented: $showJiraWriteBackApproval, presenting: pendingJiraWriteBackPlan) { plan in
+            Button("Post Comment") {
+                showJiraWriteBackApproval = false
                 Task {
-                    await model.createWorkItem(workspaceId: selectedWorkspaceId)
-                    selectedWorkItemId = model.snapshot.workItems.first?.id
+                    _ = await model.postJiraWriteBack(workItemId: selectedJiraItem?.id ?? selectedWorkItemId, approved: true)
+                    pendingJiraWriteBackPlan = nil
                 }
             }
-            PrimaryButton(title: "Run", systemImage: "play.fill") {
-                Task { await model.run(workItemId: selectedWorkItemId) }
+            Button("Cancel", role: .cancel) {
+                pendingJiraWriteBackPlan = nil
             }
-            .disabled(model.isRunning)
+        } message: { plan in
+            Text(plan.approvalSummary)
+        }
+        .task(id: jiraEvidenceCacheInputKey) {
+            await refreshJiraEvidenceSummaryCache(
+                key: jiraEvidenceCacheInputKey,
+                artifacts: snapshot.artifacts
+            )
+        }
+        .task(id: selectedJiraWriteBackCacheInputKey) {
+            await refreshSelectedJiraWriteBackCache(
+                key: selectedJiraWriteBackCacheInputKey,
+                workspacePath: selectedJiraWorkspace?.pathDisplay
+            )
+        }
+        .task {
+            await armJiraWorkbenchMount()
+        }
+        .onDisappear {
+            jiraWorkbenchReady = false
         }
     }
 
@@ -15245,6 +22766,95 @@ private struct WorkItemsPage: View {
         return "Current sprint not synced yet"
     }
 
+    private var selectedJiraWriteBackReadiness: JiraWriteBackReadiness {
+        cachedJiraWriteBackReadiness ?? JiraWriteBackReadiness(
+            state: .missingConfiguration,
+            title: "Checking",
+            detail: "Checking Jira write-back configuration.",
+            missingItems: []
+        )
+    }
+
+    private var selectedJiraWriteBackSetupGuide: JiraWriteBackSetupGuide {
+        cachedJiraWriteBackSetupGuide ?? JiraWriteBackSetupGuide(
+            envFilePath: "",
+            envDirectoryPath: selectedJiraWorkspace?.pathDisplay ?? NSHomeDirectory(),
+            revealDirectoryPath: selectedJiraWorkspace?.pathDisplay ?? NSHomeDirectory(),
+            envDirectoryExists: true,
+            envFileExists: false,
+            summary: "Checking private Jira write-back settings.",
+            template: "",
+            missingItems: []
+        )
+    }
+
+    private var jiraEvidenceCacheInputKey: String {
+        let count = snapshot.artifacts.count
+        let latestCreated = snapshot.artifacts.map(\.createdAt).max()?.timeIntervalSinceReferenceDate ?? 0
+        let latestVerified = snapshot.artifacts.compactMap(\.verifiedAt).max()?.timeIntervalSinceReferenceDate ?? 0
+        return "\(count):\(Int(latestCreated * 1000)):\(Int(latestVerified * 1000))"
+    }
+
+    private var selectedJiraWriteBackCacheInputKey: String {
+        selectedJiraWorkspace?.pathDisplay ?? "__no_workspace__"
+    }
+
+    private func jiraEvidenceSummary(for item: WorkItem) -> JiraTicketEvidenceSummary {
+        jiraEvidenceSummaryCache[item.id] ?? JiraTicketEvidenceSummary(
+            outputCount: 0,
+            artifactRefCount: 0,
+            pendingCommands: []
+        )
+    }
+
+    private func armJiraWorkbenchMount() async {
+        jiraWorkbenchReady = false
+        try? await Task.sleep(nanoseconds: 90_000_000)
+        guard !Task.isCancelled else { return }
+        jiraWorkbenchReady = true
+    }
+
+    private func refreshJiraEvidenceSummaryCache(key: String, artifacts: [Artifact]) async {
+        if jiraEvidenceSummaryCacheKey != key {
+            jiraEvidenceSummaryCacheKey = key
+            jiraEvidenceSummaryCache = jiraTicketLightEvidenceSummariesByWorkItemId(artifacts: artifacts)
+        }
+        let summaries = await Task.detached(priority: .utility) {
+            jiraTicketEvidenceSummariesByWorkItemId(artifacts: artifacts)
+        }.value
+        guard jiraEvidenceSummaryCacheKey == key else { return }
+        jiraEvidenceSummaryCache = summaries
+    }
+
+    private func refreshSelectedJiraWriteBackCache(key: String, workspacePath: String?) async {
+        guard jiraWriteBackCacheKey != key || cachedJiraWriteBackReadiness == nil || cachedJiraWriteBackSetupGuide == nil else {
+            return
+        }
+        jiraWriteBackCacheKey = key
+        cachedJiraWriteBackReadiness = JiraWriteBackReadiness(
+            state: .missingConfiguration,
+            title: "Checking",
+            detail: "Checking Jira write-back configuration.",
+            missingItems: []
+        )
+        cachedJiraWriteBackSetupGuide = nil
+
+        let result = await Task.detached(priority: .utility) {
+            let readiness = JiraTicketFetcher.writeBackReadiness(
+                workspacePath: workspacePath,
+                loadShellEnvironment: false
+            )
+            let guide = JiraTicketFetcher.writeBackSetupGuide(
+                workspacePath: workspacePath,
+                readiness: readiness
+            )
+            return (readiness, guide)
+        }.value
+        guard jiraWriteBackCacheKey == key else { return }
+        cachedJiraWriteBackReadiness = result.0
+        cachedJiraWriteBackSetupGuide = result.1
+    }
+
     private func syncJira() {
         Task {
             if let itemId = await model.syncJiraTickets(scope: .currentSprint, workspaceId: selectedWorkspaceId) {
@@ -15257,7 +22867,7 @@ private struct WorkItemsPage: View {
     private func startSelectedTicket() {
         Task {
             let itemId = selectedJiraItem?.id ?? selectedWorkItemId
-            if let runId = await model.startJiraTicketWork(workItemId: itemId) {
+            if let runId = await model.startJiraTicketWork(workItemId: itemId, workspaceId: selectedWorkspaceId) {
                 selectedJiraRunId = runId
                 if let run = model.snapshot.runs.first(where: { $0.id == runId }) {
                     selectedWorkItemId = run.workItemId
@@ -15272,7 +22882,7 @@ private struct WorkItemsPage: View {
             model.statusLine = "Select a Jira ticket first"
             return
         }
-        let workspace = model.snapshot.workspaces.first { $0.id == item.workspaceId }
+        let workspace = selectedJiraWorkspace
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(jiraTicketAgentBrief(for: item, workspace: workspace), forType: .string)
         model.statusLine = "\(item.jira?.key ?? "Jira ticket") brief copied"
@@ -15283,9 +22893,50 @@ private struct WorkItemsPage: View {
             model.statusLine = "Select a Jira ticket first"
             return
         }
-        let workspace = model.snapshot.workspaces.first { $0.id == item.workspaceId }
+        let workspace = selectedJiraWorkspace
         copyTextToPasteboard(jiraTicketUpdateDraft(for: item, snapshot: model.snapshot, workspace: workspace).comment)
         model.statusLine = "\(item.jira?.key ?? "Jira ticket") update copied"
+    }
+
+    private func reviewSelectedJiraWriteBack() {
+        guard let item = selectedJiraItem else {
+            model.statusLine = "Select a Jira ticket first"
+            return
+        }
+        let workspace = selectedJiraWorkspace
+        let readiness = JiraTicketFetcher.writeBackReadiness(
+            workspacePath: workspace?.pathDisplay,
+            loadShellEnvironment: true
+        )
+        guard readiness.isReady else {
+            model.statusLine = readiness.detail
+            return
+        }
+        guard let plan = model.jiraWriteBackPlan(workItemId: item.id) else {
+            return
+        }
+        guard plan.requiresExplicitApproval else {
+            model.statusLine = plan.denialReason ?? "Jira write-back is not allowed"
+            return
+        }
+        pendingJiraWriteBackPlan = plan
+        showJiraWriteBackApproval = true
+    }
+
+    private func copySelectedJiraWriteBackSetup() {
+        copyTextToPasteboard(selectedJiraWriteBackSetupGuide.template)
+        model.statusLine = "Jira write-back env template copied"
+    }
+
+    private func revealSelectedJiraWriteBackSetup() {
+        let guide = selectedJiraWriteBackSetupGuide
+        NSWorkspace.shared.open(URL(fileURLWithPath: guide.revealDirectoryPath, isDirectory: true))
+        if guide.envDirectoryExists {
+            model.statusLine = "Opened Jira write-back private env folder"
+        } else {
+            copyTextToPasteboard(guide.envFilePath)
+            model.statusLine = "Private env folder missing; opened nearest folder and copied env path"
+        }
     }
 
     private func openSelectedJiraTicket() {
@@ -15321,19 +22972,55 @@ private struct WorkItemsPage: View {
     private func stageOutputFollowUp(_ artifact: Artifact) {
         let run = artifactSourceRun(artifact, snapshot: snapshot)
         let item = artifactWorkItem(artifact, snapshot: snapshot) ?? selectedJiraItem
+        let action = artifactFollowUpAction(artifact: artifact, run: run, workItem: item)
         selectedWorkspaceId = artifact.workspaceId
         selectedWorkItemId = item?.id ?? artifact.workItemId
         if let run {
             selectedJiraRunId = run.id
         }
         _ = model.stageAssistantPrompt(
-            title: item?.sourceType == .jira ? "Jira output follow-up" : "Output follow-up",
-            prompt: artifactFollowUpPrompt(artifact: artifact, run: run, workItem: item),
+            title: runFollowUpStagedLabel(action),
+            prompt: action.prompt,
             agentKind: .codex,
+            permissionMode: action.permissionMode,
             workspaceId: artifact.workspaceId,
             workItemId: item?.id ?? artifact.workItemId
         )
         navigate(.chat)
+    }
+
+    private func startOutputSideChat(parent: AgentRun, action: RunFollowUpAction) {
+        selectedWorkspaceId = parent.workspaceId
+        selectedWorkItemId = parent.workItemId
+        selectedJiraRunId = parent.id
+        model.activeRunId = parent.id
+        navigate(.chat)
+        Task {
+            if let childId = await model.startFollowUpSideChat(
+                parentRunId: parent.id,
+                prompt: action.prompt,
+                permissionMode: action.permissionMode,
+                followUpLabel: runFollowUpStagedLabel(action)
+            ),
+               let child = model.snapshot.runs.first(where: { $0.id == childId }) {
+                selectedWorkspaceId = child.workspaceId
+                selectedWorkItemId = child.workItemId
+            }
+        }
+    }
+
+    private func resolveOutputBranch(
+        artifact: Artifact,
+        resolution: ArtifactBranchResolution,
+        branchRunId: EntityID?
+    ) {
+        Task {
+            await model.markArtifactBranchResolution(
+                artifactId: artifact.id,
+                resolution: resolution,
+                branchRunId: branchRunId
+            )
+        }
     }
 
     private func saveOutputKnowledge(_ artifact: Artifact) {
@@ -15341,9 +23028,49 @@ private struct WorkItemsPage: View {
     }
 }
 
+private struct JiraWorkbenchDeferredPlaceholder: View {
+    let item: WorkItem?
+    let syncSummary: String
+    let isSyncing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: isSyncing ? "arrow.triangle.2.circlepath" : "checklist")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 30, height: 30)
+                    .background(PKTheme.primary.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item?.jira?.key ?? "Jira workspace")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(isSyncing ? "Syncing Jira tickets" : syncSummary)
+                        .font(.caption)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+            }
+
+            Text(item?.title.firstLineFallback("Preparing selected ticket workspace") ?? "Preparing ticket workspace")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(2)
+        }
+        .padding(14)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(PKTheme.control.opacity(0.32))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(16)
+    }
+}
+
 private struct JiraTicketSidebar: View {
     let items: [WorkItem]
     let totalCount: Int
+    let evidenceSummary: (WorkItem) -> JiraTicketEvidenceSummary
     @Binding var query: String
     @Binding var selectedWorkItemId: EntityID?
     @Binding var selectedWorkspaceId: EntityID?
@@ -15352,17 +23079,17 @@ private struct JiraTicketSidebar: View {
     let sync: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text("Jira")
-                            .font(.system(size: 22, weight: .semibold))
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(PKTheme.text)
                         CountBadge(value: totalCount)
                     }
                     Text(syncSummary)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.caption)
                         .foregroundStyle(PKTheme.text3)
                         .lineLimit(1)
                 }
@@ -15380,6 +23107,7 @@ private struct JiraTicketSidebar: View {
                 .disabled(isSyncing)
                 .help("Sync current sprint")
             }
+            .padding(16)
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
@@ -15395,13 +23123,17 @@ private struct JiraTicketSidebar: View {
             .background(PKTheme.control.opacity(0.54))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+            .overlay(alignment: .bottom) { Rectangle().fill(PKTheme.edge).frame(height: 1) }
 
             ScrollView {
                 LazyVStack(spacing: 9) {
                     ForEach(items) { item in
                         JiraWorkspaceTicketRow(
                             item: item,
-                            selected: selectedWorkItemId == item.id
+                            selected: selectedWorkItemId == item.id,
+                            evidenceSummary: evidenceSummary(item)
                         ) {
                             selectedWorkItemId = item.id
                             selectedWorkspaceId = item.workspaceId
@@ -15415,19 +23147,18 @@ private struct JiraTicketSidebar: View {
                         )
                     }
                 }
+                .padding(12)
             }
         }
-        .padding(16)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(PKTheme.panel.opacity(0.72))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(PKTheme.panel.opacity(0.48))
     }
 }
 
 private struct JiraWorkspaceTicketRow: View {
     let item: WorkItem
     let selected: Bool
+    let evidenceSummary: JiraTicketEvidenceSummary
     let action: () -> Void
 
     private var tint: Color {
@@ -15476,6 +23207,8 @@ private struct JiraWorkspaceTicketRow: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(PKTheme.text3)
                     .lineLimit(1)
+
+                    JiraTicketRowEvidenceStrip(summary: evidenceSummary)
                 }
             }
             .padding(11)
@@ -15491,19 +23224,87 @@ private struct JiraWorkspaceTicketRow: View {
 private struct JiraTicketChatWorkbench: View {
     let item: WorkItem?
     let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkItemId: EntityID?
+    @Binding var selectedWorkspaceId: EntityID?
     @Binding var selectedRunId: EntityID?
+    @ObservedObject var model: NativeAppModel
     let isRunning: Bool
     let isSyncing: Bool
+    let isPostingUpdate: Bool
+    let writeBackReadiness: JiraWriteBackReadiness
+    let writeBackSetupGuide: JiraWriteBackSetupGuide
     let sync: () -> Void
     let start: () -> Void
     let copyBrief: () -> Void
     let copyUpdate: () -> Void
+    let postUpdate: () -> Void
+    let copyWriteBackSetup: () -> Void
+    let revealWriteBackSetup: () -> Void
     let openJira: () -> Void
     let openChat: () -> Void
     let openRunInChat: (AgentRun) -> Void
     let copyOutput: (Artifact) -> Void
     let stageOutput: (Artifact) -> Void
+    let startSideChat: (AgentRun, RunFollowUpAction) -> Void
+    let resolveBranch: (Artifact, ArtifactBranchResolution, EntityID?) -> Void
     let saveKnowledge: (Artifact) -> Void
+    @State private var ticketCardExpanded = false
+
+    init(
+        item: WorkItem?,
+        snapshot: NativeStoreSnapshot,
+        selectedWorkItemId: Binding<EntityID?>,
+        selectedWorkspaceId: Binding<EntityID?>,
+        selectedRunId: Binding<EntityID?>,
+        model: NativeAppModel,
+        isRunning: Bool,
+        isSyncing: Bool,
+        isPostingUpdate: Bool,
+        writeBackReadiness: JiraWriteBackReadiness,
+        writeBackSetupGuide: JiraWriteBackSetupGuide,
+        sync: @escaping () -> Void,
+        start: @escaping () -> Void,
+        copyBrief: @escaping () -> Void,
+        copyUpdate: @escaping () -> Void,
+        postUpdate: @escaping () -> Void,
+        copyWriteBackSetup: @escaping () -> Void,
+        revealWriteBackSetup: @escaping () -> Void,
+        openJira: @escaping () -> Void,
+        openChat: @escaping () -> Void,
+        openRunInChat: @escaping (AgentRun) -> Void,
+        copyOutput: @escaping (Artifact) -> Void,
+        stageOutput: @escaping (Artifact) -> Void,
+        startSideChat: @escaping (AgentRun, RunFollowUpAction) -> Void,
+        resolveBranch: @escaping (Artifact, ArtifactBranchResolution, EntityID?) -> Void,
+        saveKnowledge: @escaping (Artifact) -> Void
+    ) {
+        self.item = item
+        self.snapshot = snapshot
+        self._selectedWorkItemId = selectedWorkItemId
+        self._selectedWorkspaceId = selectedWorkspaceId
+        self._selectedRunId = selectedRunId
+        self._model = ObservedObject(wrappedValue: model)
+        self.isRunning = isRunning
+        self.isSyncing = isSyncing
+        self.isPostingUpdate = isPostingUpdate
+        self.writeBackReadiness = writeBackReadiness
+        self.writeBackSetupGuide = writeBackSetupGuide
+        self.sync = sync
+        self.start = start
+        self.copyBrief = copyBrief
+        self.copyUpdate = copyUpdate
+        self.postUpdate = postUpdate
+        self.copyWriteBackSetup = copyWriteBackSetup
+        self.revealWriteBackSetup = revealWriteBackSetup
+        self.openJira = openJira
+        self.openChat = openChat
+        self.openRunInChat = openRunInChat
+        self.copyOutput = copyOutput
+        self.stageOutput = stageOutput
+        self.startSideChat = startSideChat
+        self.resolveBranch = resolveBranch
+        self.saveKnowledge = saveKnowledge
+    }
 
     private var runs: [AgentRun] {
         guard let item else { return [] }
@@ -15525,118 +23326,188 @@ private struct JiraTicketChatWorkbench: View {
         return snapshot.artifacts.filter { $0.workItemId == item.id }
     }
 
+    private var selectedTicketWorkspace: Workspace? {
+        let workspaceId = selectedWorkspaceId ?? item?.workspaceId
+        return workspaceId.flatMap { id in snapshot.workspaces.first { $0.id == id } }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        Group {
             if let item {
-                header(item)
-
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ticketBrief(item)
-                        chatList
-                    }
-                    .frame(width: 280)
-
-                    JiraRunConversationPane(
+                HStack(spacing: 12) {
+                    ConversationWorkspace(
                         run: selectedRun,
+                        snapshot: snapshot,
+                        selectedWorkspace: selectedTicketWorkspace,
+                        selectedWorkspaceId: $selectedWorkspaceId,
+                        selectedWorkItemId: $selectedWorkItemId,
+                        model: model,
+                        focusedGeneratedUIAction: .constant(nil),
+                        immersive: true,
+                        paneLabel: item.jira?.key,
+                        locksComposerWorkspaceToRun: false,
+                        newChat: {
+                            selectedRunId = nil
+                            selectedWorkItemId = item.id
+                            if selectedWorkspaceId == nil {
+                                selectedWorkspaceId = item.workspaceId
+                            }
+                            _ = model.stageJiraTicketForChat(
+                                workItemId: item.id,
+                                workspaceId: selectedWorkspaceId
+                            )
+                        },
+                        startFollowUpSideChat: startSideChat,
+                        openWorkItem: {},
+                        preComposerContent: AnyView(ticketComposerCard(item)),
+                        startConversation: { userInput in
+                            let runId = await model.startJiraTicketFromChat(
+                                workItemId: item.id,
+                                userInput: userInput,
+                                workspaceId: selectedWorkspaceId ?? item.workspaceId
+                            )
+                            if let runId {
+                                await MainActor.run {
+                                    selectedRunId = runId
+                                }
+                            }
+                            return runId
+                        }
+                    )
+                    .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+
+                    JiraTicketWorkspaceInspector(
                         item: item,
                         snapshot: snapshot,
+                        runs: runs,
+                        selectedRunId: $selectedRunId,
                         artifacts: artifacts,
-                        openRunInChat: openRunInChat,
                         copyOutput: copyOutput,
                         stageOutput: stageOutput,
+                        startSideChat: startSideChat,
+                        resolveBranch: resolveBranch,
                         saveKnowledge: saveKnowledge
                     )
-                        .frame(maxWidth: .infinity, minHeight: 480, alignment: .topLeading)
+                    .frame(width: 268)
                 }
             } else {
                 EmptyMiniState(title: "No Jira ticket selected", subtitle: "Sync the current sprint, then choose a ticket from the list.")
             }
-
-            Spacer(minLength: 0)
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, minHeight: 620, alignment: .topLeading)
-        .background(PKTheme.panel.opacity(0.72))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func ticketComposerCard(_ item: WorkItem) -> some View {
+        VStack(alignment: .leading, spacing: ticketCardExpanded ? 10 : 0) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        Text(item.jira?.key ?? "Jira")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(PKTheme.primary)
+                        StatusPill(text: item.jira?.status ?? item.state.rawValue, color: statusColor(item.state))
+                        if let issueType = item.jira?.issueType, !issueType.isEmpty {
+                            CountBadge(text: issueType)
+                        }
+                        if ticketCardExpanded,
+                           let assignee = item.jira?.assignee,
+                           !assignee.isEmpty {
+                            Label(assignee, systemImage: "person")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(PKTheme.text3)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Text(item.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(ticketCardExpanded ? 2 : 1)
+                        .truncationMode(.tail)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 7) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            ticketCardExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: ticketCardExpanded ? "chevron.down" : "chevron.up")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(PKTheme.text2)
+                    .background(PKTheme.control.opacity(0.62))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .help(ticketCardExpanded ? "Collapse ticket details" : "Expand ticket details")
+
+                    ComposerIconButton(symbol: "arrow.clockwise", title: "Sync Jira", action: sync)
+                        .disabled(isSyncing)
+                    ComposerIconButton(symbol: "doc.on.doc", title: "Copy Brief", action: copyBrief)
+                    ComposerIconButton(symbol: "text.bubble", title: "Copy Update", action: copyUpdate)
+                    ComposerIconButton(symbol: isPostingUpdate ? "paperplane.fill" : "paperplane", title: "Post Update", action: postUpdate)
+                        .disabled(isPostingUpdate)
+                    if item.jira?.url?.isEmpty == false {
+                        ComposerIconButton(symbol: "arrow.up.right.square", title: "Open Jira", action: openJira)
+                    }
+                    PrimaryButton(title: isRunning ? "Running" : "Start", systemImage: "play.fill", action: start)
+                        .disabled(isRunning)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+
+            if ticketCardExpanded {
+                JiraTicketExpandedComposerDetails(
+                    item: item,
+                    runs: runs,
+                    artifacts: artifacts,
+                    writeBackReadiness: writeBackReadiness
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PKTheme.control.opacity(0.30))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
+}
 
-    private func header(_ item: WorkItem) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(item.jira?.key ?? "Jira")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(PKTheme.primary)
-                    StatusPill(text: item.jira?.status ?? item.state.rawValue, color: statusColor(item.state))
-                    if let issueType = item.jira?.issueType, !issueType.isEmpty {
-                        CountBadge(text: issueType)
-                    }
-                }
+private struct JiraTicketExpandedComposerDetails: View {
+    let item: WorkItem
+    let runs: [AgentRun]
+    let artifacts: [Artifact]
+    let writeBackReadiness: JiraWriteBackReadiness
 
-                Text(item.title)
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(PKTheme.text)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 12) {
-                    if let assignee = item.jira?.assignee, !assignee.isEmpty {
-                        Label(assignee, systemImage: "person")
-                    }
-                    if let sprint = item.jira?.sprint, !sprint.isEmpty {
-                        Label(sprint, systemImage: "figure.run")
-                    }
-                    if let updated = item.jira?.remoteUpdatedAt, !updated.isEmpty {
-                        Label(updated, systemImage: "clock")
-                    }
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(PKTheme.text3)
-                .lineLimit(1)
-
-                JiraTicketContextStrip(
-                    item: item,
-                    chatCount: runs.count,
-                    evidenceSummary: jiraTicketEvidenceSummary(artifacts: artifacts)
-                )
-            }
-
-            Spacer()
-
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                SecondaryButton(title: "Sync", systemImage: "arrow.clockwise", action: sync)
-                    .disabled(isSyncing)
-                SecondaryButton(title: "Copy Brief", systemImage: "doc.on.doc", action: copyBrief)
-                SecondaryButton(title: "Copy Update", systemImage: "text.bubble", action: copyUpdate)
-                if item.jira?.url?.isEmpty == false {
-                    SecondaryButton(title: "Open Jira", systemImage: "arrow.up.right.square", action: openJira)
-                }
-                SecondaryButton(title: "Open Chat", systemImage: "text.bubble", action: openChat)
-                PrimaryButton(title: isRunning ? "Running" : "Start", systemImage: "play.fill", action: start)
-                    .disabled(isRunning)
+                JiraTicketMiniMetric(label: "Assignee", value: item.jira?.assignee ?? "Unassigned", symbol: "person")
+                JiraTicketMiniMetric(label: "Priority", value: item.jira?.priority ?? "P\(item.priority)", symbol: "flag")
+                JiraTicketMiniMetric(label: "Chats", value: "\(runs.count)", symbol: "text.bubble")
+                JiraTicketMiniMetric(label: "Outputs", value: "\(artifacts.count)", symbol: "shippingbox")
+                JiraTicketMiniMetric(label: "Write-back", value: writeBackReadiness.isReady ? "Ready" : "Setup", symbol: "paperplane")
             }
-            .fixedSize(horizontal: true, vertical: false)
-        }
-    }
 
-    private func ticketBrief(_ item: WorkItem) -> some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Text("Ticket")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(PKTheme.text2)
-            Text(item.description.isEmpty ? "No Jira description synced yet." : item.description)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(PKTheme.text3)
-                .lineLimit(8)
-                .fixedSize(horizontal: false, vertical: true)
+            if !item.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(item.description)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if !item.acceptanceCriteria.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Acceptance")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(PKTheme.text3)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.text4)
                     ForEach(Array(item.acceptanceCriteria.prefix(3)), id: \.self) { criterion in
                         HStack(alignment: .top, spacing: 7) {
                             Image(systemName: "checkmark.circle")
@@ -15644,62 +23515,570 @@ private struct JiraTicketChatWorkbench: View {
                                 .foregroundStyle(PKTheme.ok)
                                 .padding(.top, 2)
                             Text(criterion)
-                                .font(.caption)
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(PKTheme.text3)
                                 .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
             }
-
-            JiraTicketRefsView(title: "Source refs", refs: item.sourceRefs)
-            JiraTicketRefsView(title: "External refs", refs: item.externalRefs)
         }
-        .padding(12)
-        .background(PKTheme.control.opacity(0.38))
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(PKTheme.surfaceRaised.opacity(0.34))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct JiraTicketMiniMetric: View {
+    let label: String
+    let value: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(PKTheme.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label.uppercased())
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(PKTheme.text4)
+                Text(value.isEmpty ? "None" : value)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, minHeight: 34)
+        .background(PKTheme.control.opacity(0.32))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private enum JiraTicketInspectorTab: String, CaseIterable, Identifiable {
+    case recentChats = "Chats"
+    case outputs = "Outputs"
+    case files = "Files"
+
+    var id: String { rawValue }
+
+    var title: String { rawValue }
+}
+
+private struct JiraTicketWorkspaceInspector: View {
+    let item: WorkItem
+    let snapshot: NativeStoreSnapshot
+    let runs: [AgentRun]
+    @Binding var selectedRunId: EntityID?
+    let artifacts: [Artifact]
+    let copyOutput: (Artifact) -> Void
+    let stageOutput: (Artifact) -> Void
+    let startSideChat: (AgentRun, RunFollowUpAction) -> Void
+    let resolveBranch: (Artifact, ArtifactBranchResolution, EntityID?) -> Void
+    let saveKnowledge: (Artifact) -> Void
+    @State private var selectedTab: JiraTicketInspectorTab = .recentChats
+
+    private var fileRefs: [JiraTicketInspectorFileRef] {
+        var refs: [JiraTicketInspectorFileRef] = []
+        refs.append(contentsOf: item.sourceRefs.enumerated().map { index, ref in
+            JiraTicketInspectorFileRef(
+                id: "source-\(index)-\(ref.label)",
+                symbol: "link",
+                title: ref.label,
+                subtitle: ref.kind,
+                uri: ref.uri
+            )
+        })
+        refs.append(contentsOf: item.externalRefs.enumerated().map { index, ref in
+            JiraTicketInspectorFileRef(
+                id: "external-\(index)-\(ref.label)",
+                symbol: "arrow.up.right.square",
+                title: ref.label,
+                subtitle: ref.kind,
+                uri: ref.uri
+            )
+        })
+        refs.append(contentsOf: artifacts.filter { !$0.uri.isEmpty }.map { artifact in
+            JiraTicketInspectorFileRef(
+                id: "artifact-\(artifact.id.rawValue)",
+                symbol: artifactOutputSymbol(artifact.kind),
+                title: artifact.title,
+                subtitle: artifactKindLabel(artifact.kind),
+                uri: artifact.uri
+            )
+        })
+        return refs
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Workspace")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(item.jira?.key ?? "Jira ticket")
+                        .font(.caption)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+                Spacer()
+                CountBadge(value: runs.count + artifacts.count + fileRefs.count)
+            }
+            .padding(14)
+
+            Picker("Jira inspector", selection: $selectedTab) {
+                ForEach(JiraTicketInspectorTab.allCases) { tab in
+                    Text(tab.title).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+
+            Rectangle()
+                .fill(PKTheme.edge.opacity(0.72))
+                .frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    switch selectedTab {
+                    case .recentChats:
+                        recentChatsView
+                    case .outputs:
+                        outputsView
+                    case .files:
+                        filesView
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(PKTheme.panel.opacity(0.46))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var recentChatsView: some View {
+        Group {
+            if runs.isEmpty {
+                EmptyMiniState(title: "No recent chats", subtitle: "Start from the input to create the first ticket chat.")
+            } else {
+                ForEach(runs) { run in
+                    JiraInspectorRunRow(
+                        run: run,
+                        selected: selectedRunId == run.id,
+                        action: { selectedRunId = run.id }
+                    )
+                }
+            }
+        }
+    }
+
+    private var outputsView: some View {
+        Group {
+            if artifacts.isEmpty {
+                EmptyMiniState(title: "No outputs yet", subtitle: "Reports, patches, screenshots, and verification results will appear here.")
+            } else {
+                ForEach(artifacts) { artifact in
+                    JiraInspectorArtifactRow(
+                        artifact: artifact,
+                        sourceRun: artifactSourceRun(artifact, snapshot: snapshot),
+                        copyOutput: { copyOutput(artifact) },
+                        stageOutput: { stageOutput(artifact) },
+                        saveKnowledge: { saveKnowledge(artifact) }
+                    )
+                }
+            }
+        }
+    }
+
+    private var filesView: some View {
+        Group {
+            if fileRefs.isEmpty {
+                EmptyMiniState(title: "No files or refs", subtitle: "Linked Jira refs and generated files will appear here.")
+            } else {
+                ForEach(fileRefs) { ref in
+                    JiraInspectorFileRow(ref: ref)
+                }
+            }
+        }
+    }
+}
+
+private struct JiraInspectorRunRow: View {
+    let run: AgentRun
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    StatusPill(text: run.state.rawValue, color: runStateColor(run.state))
+                    Spacer()
+                    Text((run.startedAt ?? Date()).formatted(date: .omitted, time: .shortened))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(PKTheme.text4)
+                }
+                Text(run.promptSnapshot.firstLineFallback("Ticket chat"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(2)
+                if !run.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(run.transcript.firstLineFallback("Output captured"))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(2)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .background(selected ? PKTheme.selected : PKTheme.surfaceRaised.opacity(0.42))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.edgeStrong : PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct JiraInspectorArtifactRow: View {
+    let artifact: Artifact
+    let sourceRun: AgentRun?
+    let copyOutput: () -> Void
+    let stageOutput: () -> Void
+    let saveKnowledge: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: artifactOutputSymbol(artifact.kind))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(artifactStatusColor(artifact.status))
+                    .frame(width: 28, height: 28)
+                    .background(artifactStatusColor(artifact.status).opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(artifact.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(2)
+                    HStack(spacing: 5) {
+                        StatusPill(text: artifactKindLabel(artifact.kind), color: artifactStatusColor(artifact.status))
+                        StatusPill(text: artifact.status.rawValue, color: artifactStatusColor(artifact.status))
+                    }
+                    if let sourceRun {
+                        Text(sourceRun.promptSnapshot.firstLineFallback("Source chat"))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(PKTheme.text4)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                MessageActionButton(systemImage: "doc.on.doc", help: "Copy output", action: copyOutput)
+                MessageActionButton(systemImage: "arrow.turn.down.right", help: "Stage output to chat", action: stageOutput)
+                MessageActionButton(systemImage: "brain.head.profile", help: "Save knowledge", action: saveKnowledge)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(PKTheme.surfaceRaised.opacity(0.42))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct JiraTicketInspectorFileRef: Identifiable, Hashable {
+    let id: String
+    let symbol: String
+    let title: String
+    let subtitle: String
+    let uri: String?
+}
+
+private struct JiraInspectorFileRow: View {
+    let ref: JiraTicketInspectorFileRef
+
+    var body: some View {
+        Button {
+            openRef()
+        } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: ref.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 28, height: 28)
+                    .background(PKTheme.primary.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(ref.title.isEmpty ? "Untitled ref" : ref.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(2)
+                    Text(ref.subtitle)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(1)
+                    if let uri = ref.uri, !uri.isEmpty {
+                        Text(uri)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .background(PKTheme.surfaceRaised.opacity(0.42))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(ref.uri?.isEmpty != false)
+    }
+
+    private func openRef() {
+        guard let uri = ref.uri, !uri.isEmpty else { return }
+        if let url = URL(string: uri), url.scheme != nil {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: uri))
+        }
+    }
+}
+
+private struct JiraTicketDetailSidebar: View {
+    let item: WorkItem
+    let runs: [AgentRun]
+    @Binding var selectedRunId: EntityID?
+    let artifacts: [Artifact]
+    let evidenceSummary: JiraTicketEvidenceSummary
+    let writeBackReadiness: JiraWriteBackReadiness
+    let writeBackSetupGuide: JiraWriteBackSetupGuide
+    let copyWriteBackSetup: () -> Void
+    let revealWriteBackSetup: () -> Void
+    let postWriteBack: () -> Void
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            headerView
+            detailScrollView
+        }
+        .padding(14)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(PKTheme.control.opacity(0.28))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private var chatList: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text("Chats")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(PKTheme.text2)
-                Spacer()
-                CountBadge(value: runs.count)
-            }
+    private var writeBackHistory: [JiraTicketWriteBackHistoryEntry] {
+        jiraTicketWriteBackHistory(artifacts: artifacts)
+    }
 
-            ForEach(runs) { run in
-                Button {
-                    selectedRunId = run.id
-                } label: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            StatusPill(text: run.state.rawValue, color: run.state == .failed ? PKTheme.err : PKTheme.primary)
-                            Spacer()
-                            Text((run.startedAt ?? Date()).formatted(date: .omitted, time: .shortened))
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(PKTheme.text4)
-                        }
-                        Text(run.promptSnapshot.firstLineFallback("Ticket chat"))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(PKTheme.text)
-                            .lineLimit(2)
+    private var actionableWriteBackHistory: [JiraTicketWriteBackHistoryEntry] {
+        jiraTicketActionableWriteBackHistory(artifacts: artifacts)
+    }
+
+    private var writeBackAuditTimeline: [JiraTicketWriteBackAuditStep] {
+        jiraTicketWriteBackAuditTimeline(artifacts: artifacts)
+    }
+
+    private var headerView: some View {
+        HStack {
+            Text("Details")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(PKTheme.text)
+            Spacer()
+            Button(action: close) {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(PKTheme.text3)
+            .background(PKTheme.control.opacity(0.48))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .help("Hide details")
+        }
+    }
+
+    private var detailScrollView: some View {
+        ScrollView {
+            detailContent
+        }
+    }
+
+    private var detailContent: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            ticketSection
+            descriptionSection
+            acceptanceSection
+            evidenceSection
+            writeBackSection
+            chatsSection
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var ticketSection: some View {
+        detailSection("Ticket") {
+            JiraTicketDetailRow(label: "Jira", value: item.jira?.key ?? "Unknown")
+            JiraTicketDetailRow(label: "Status", value: item.jira?.status ?? item.state.rawValue)
+            JiraTicketDetailRow(label: "Assignee", value: item.jira?.assignee ?? "Unassigned")
+            JiraTicketDetailRow(label: "Priority", value: item.jira?.priority ?? "P\(item.priority)")
+            if let sprint = item.jira?.sprint, !sprint.isEmpty {
+                JiraTicketDetailRow(label: "Sprint", value: sprint)
+            }
+        }
+    }
+
+    private var descriptionSection: some View {
+        detailSection("Description") {
+            Text(item.description.isEmpty ? "No Jira description synced yet." : item.description)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(PKTheme.text3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var acceptanceSection: some View {
+        if !item.acceptanceCriteria.isEmpty {
+            detailSection("Acceptance") {
+                ForEach(Array(item.acceptanceCriteria.prefix(5)), id: \.self) { criterion in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(PKTheme.ok)
+                            .padding(.top, 2)
+                        Text(criterion)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(PKTheme.text3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(selectedRun?.id == run.id ? PKTheme.selected : PKTheme.surfaceRaised.opacity(0.42))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(selectedRun?.id == run.id ? PKTheme.edgeStrong : PKTheme.edge, lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
             }
+        }
+    }
 
-            if runs.isEmpty {
-                EmptyMiniState(title: "No chats yet", subtitle: "Start this ticket to create the first working chat.")
+    private var evidenceSection: some View {
+        detailSection("Evidence") {
+            JiraTicketDetailRow(label: "Chats", value: "\(runs.count)")
+            JiraTicketDetailRow(label: "Outputs", value: "\(evidenceSummary.outputCount)")
+            JiraTicketDetailRow(label: "Refs", value: evidenceSummary.artifactRefsLabel)
+            if evidenceSummary.hasWriteBackResult {
+                JiraTicketDetailRow(label: "Writeback", value: evidenceSummary.writeBackLabel)
+                if let writeBackHelp = evidenceSummary.writeBackHelp {
+                    Text(writeBackHelp)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(PKTheme.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            JiraTicketRefsView(title: "Source refs", refs: item.sourceRefs)
+            JiraTicketRefsView(title: "External refs", refs: item.externalRefs)
+        }
+    }
+
+    private var writeBackSection: some View {
+        detailSection("Write-back") {
+            JiraWriteBackSetupRow(
+                readiness: writeBackReadiness,
+                guide: writeBackSetupGuide,
+                copyTemplate: copyWriteBackSetup,
+                revealDirectory: revealWriteBackSetup
+            )
+            JiraWriteBackHistoryList(
+                entries: writeBackHistory,
+                actionableEntries: actionableWriteBackHistory,
+                auditSteps: writeBackAuditTimeline,
+                postWriteBack: postWriteBack
+            )
+        }
+    }
+
+    private var chatsSection: some View {
+        detailSection("Chats") {
+            if runs.isEmpty {
+                Text("No chats yet.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+            } else {
+                ForEach(runs) { run in
+                    Button {
+                        selectedRunId = run.id
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                StatusPill(text: run.state.rawValue, color: run.state == .failed ? PKTheme.err : PKTheme.primary)
+                                Spacer()
+                                Text((run.startedAt ?? Date()).formatted(date: .omitted, time: .shortened))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(PKTheme.text4)
+                            }
+                            Text(run.promptSnapshot.firstLineFallback("Ticket chat"))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(PKTheme.text)
+                                .lineLimit(2)
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(selectedRunId == run.id ? PKTheme.selected : PKTheme.surfaceRaised.opacity(0.42))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selectedRunId == run.id ? PKTheme.edgeStrong : PKTheme.edge, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func detailSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(PKTheme.text3)
+            content()
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(PKTheme.surfaceRaised.opacity(0.42))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct JiraTicketDetailRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label.uppercased())
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(PKTheme.text4)
+                .frame(width: 62, alignment: .leading)
+            Text(value.isEmpty ? "None" : value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(PKTheme.text2)
+                .lineLimit(2)
+            Spacer(minLength: 0)
         }
     }
 }
@@ -15708,6 +24087,7 @@ private struct JiraTicketContextStrip: View {
     let item: WorkItem
     let chatCount: Int
     let evidenceSummary: JiraTicketEvidenceSummary
+    let writeBackReadiness: JiraWriteBackReadiness
 
     var body: some View {
         HStack(spacing: 8) {
@@ -15736,6 +24116,22 @@ private struct JiraTicketContextStrip: View {
             if evidenceSummary.artifactRefCount > 0 {
                 JiraTicketMetricChip(symbol: "link", label: "Refs", value: evidenceSummary.artifactRefsLabel)
             }
+            if evidenceSummary.hasWriteBackResult {
+                JiraTicketMetricChip(
+                    symbol: evidenceSummary.writeBackState == "failed" ? "exclamationmark.triangle" : "checkmark.seal",
+                    label: "Last post",
+                    value: evidenceSummary.writeBackLabel,
+                    color: jiraWriteBackResultColor(evidenceSummary),
+                    helpText: evidenceSummary.writeBackHelp
+                )
+            }
+            JiraTicketMetricChip(
+                symbol: writeBackReadiness.isReady ? "paperplane" : "exclamationmark.triangle",
+                label: "Write-back",
+                value: writeBackReadiness.title,
+                color: jiraWriteBackReadinessColor(writeBackReadiness),
+                helpText: writeBackReadiness.detail
+            )
             if !evidenceSummary.pendingCommands.isEmpty {
                 JiraTicketMetricChip(
                     symbol: "terminal",
@@ -15752,13 +24148,14 @@ private struct JiraTicketMetricChip: View {
     let symbol: String
     let label: String
     let value: String
+    var color: Color = PKTheme.primary
     var helpText: String?
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(PKTheme.primary)
+                .foregroundStyle(color)
             VStack(alignment: .leading, spacing: 1) {
                 Text(label.uppercased())
                     .font(.system(size: 8.5, weight: .semibold))
@@ -15775,6 +24172,228 @@ private struct JiraTicketMetricChip: View {
         .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .help(helpText ?? "\(label): \(value.isEmpty ? "None" : value)")
+    }
+}
+
+private struct JiraWriteBackSetupRow: View {
+    let readiness: JiraWriteBackReadiness
+    let guide: JiraWriteBackSetupGuide
+    let copyTemplate: () -> Void
+    let revealDirectory: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: readiness.isReady ? "checkmark.seal" : "exclamationmark.triangle")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(jiraWriteBackReadinessColor(readiness))
+                    .frame(width: 22, height: 22)
+                    .background(jiraWriteBackReadinessColor(readiness).opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(readiness.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(guide.summary)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(PKTheme.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            JiraTicketDetailRow(label: "Private env", value: guide.envFilePath)
+            JiraTicketDetailRow(label: "Folder", value: guide.envDirectoryExists ? "Ready" : "Missing")
+            JiraTicketDetailRow(label: "File", value: guide.envFileExists ? "Found" : "Not created")
+            if !guide.missingItems.isEmpty {
+                JiraTicketDetailRow(label: "Missing", value: guide.missingItems.joined(separator: ", "))
+            }
+
+            HStack(spacing: 8) {
+                SecondaryButton(title: "Copy Template", systemImage: "doc.on.doc", action: copyTemplate)
+                SecondaryButton(title: "Reveal Folder", systemImage: "folder", action: revealDirectory)
+            }
+        }
+    }
+}
+
+private struct JiraWriteBackHistoryList: View {
+    let entries: [JiraTicketWriteBackHistoryEntry]
+    let actionableEntries: [JiraTicketWriteBackHistoryEntry]
+    let auditSteps: [JiraTicketWriteBackAuditStep]
+    let postWriteBack: () -> Void
+    @State private var focusActionable = false
+
+    private var visibleEntries: [JiraTicketWriteBackHistoryEntry] {
+        focusActionable ? actionableEntries : entries
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Recent attempts")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(PKTheme.text4)
+                Spacer(minLength: 0)
+                if !actionableEntries.isEmpty {
+                    JiraWriteBackHistoryFilterButton(
+                        title: "All",
+                        selected: !focusActionable,
+                        action: { focusActionable = false }
+                    )
+                    JiraWriteBackHistoryFilterButton(
+                        title: "Needs action",
+                        selected: focusActionable,
+                        action: { focusActionable = true }
+                    )
+                }
+            }
+            if !auditSteps.isEmpty {
+                JiraWriteBackAuditTimelineView(steps: auditSteps)
+            }
+            if entries.isEmpty {
+                Text("No write-back attempts yet.")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+            } else if visibleEntries.isEmpty {
+                Text("No write-back attempts need action.")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(visibleEntries) { entry in
+                        JiraWriteBackHistoryRow(entry: entry, postWriteBack: postWriteBack)
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+private struct JiraWriteBackAuditTimelineView: View {
+    let steps: [JiraTicketWriteBackAuditStep]
+
+    private var indexedSteps: [(offset: Int, element: JiraTicketWriteBackAuditStep)] {
+        Array(steps.enumerated())
+    }
+
+    private var helpText: String {
+        steps
+            .map { "\($0.label): \($0.signal)" }
+            .joined(separator: "\n")
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(indexedSteps, id: \.element.id) { index, step in
+                    JiraWriteBackAuditStepChip(step: step)
+                    if index < steps.count - 1 {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(PKTheme.text4)
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+        }
+        .background(PKTheme.control.opacity(0.36))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .help(helpText)
+    }
+}
+
+private struct JiraWriteBackAuditStepChip: View {
+    let step: JiraTicketWriteBackAuditStep
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: jiraWriteBackAuditSymbol(step))
+                .font(.system(size: 9.5, weight: .bold))
+                .foregroundStyle(jiraWriteBackAuditColor(step))
+            Text(step.label)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(PKTheme.text2)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 7)
+        .frame(height: 22)
+        .background(jiraWriteBackAuditColor(step).opacity(step.isActionable ? 0.16 : 0.1))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(jiraWriteBackAuditColor(step).opacity(0.46), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .help(step.signal)
+    }
+}
+
+private struct JiraWriteBackHistoryFilterButton: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(selected ? PKTheme.primaryText : PKTheme.text3)
+                .padding(.horizontal, 7)
+                .frame(height: 22)
+                .background(selected ? PKTheme.primary : PKTheme.control.opacity(0.54))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected ? PKTheme.primary.opacity(0.92) : PKTheme.edge.opacity(0.82), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct JiraWriteBackHistoryRow: View {
+    let entry: JiraTicketWriteBackHistoryEntry
+    let postWriteBack: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: jiraWriteBackHistorySymbol(entry))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(jiraWriteBackHistoryColor(entry))
+                .frame(width: 18, height: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(entry.label)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PKTheme.text2)
+                    Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(PKTheme.text4)
+                }
+                Text(entry.signal)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let uri = entry.artifactURI, !uri.isEmpty {
+                    Text(uri)
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if let actionTitle = entry.actionTitle {
+                Button(action: postWriteBack) {
+                    Label(actionTitle, systemImage: jiraWriteBackHistoryActionSymbol(entry))
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(PKTheme.text2)
+                        .padding(.horizontal, 8)
+                        .frame(height: 24)
+                        .background(PKTheme.control.opacity(0.72))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.86), lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("\(actionTitle) Jira write-back through readiness and approval checks")
+            }
+        }
+        .help(entry.signal)
     }
 }
 
@@ -15812,6 +24431,8 @@ private struct JiraRunConversationPane: View {
     let openRunInChat: (AgentRun) -> Void
     let copyOutput: (Artifact) -> Void
     let stageOutput: (Artifact) -> Void
+    let startSideChat: (AgentRun, RunFollowUpAction) -> Void
+    let resolveBranch: (Artifact, ArtifactBranchResolution, EntityID?) -> Void
     let saveKnowledge: (Artifact) -> Void
 
     var body: some View {
@@ -15850,26 +24471,17 @@ private struct JiraRunConversationPane: View {
                             Text("Outputs")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(PKTheme.text2)
-                            ForEach(artifacts) { artifact in
-                                let sourceRun = artifactSourceRun(artifact, snapshot: snapshot)
-                                ArtifactOutputRow(
-                                    artifact: artifact,
-                                    sourceRun: sourceRun,
-                                    workItem: item,
-                                    openRun: sourceRun.map { run in
-                                        { openRunInChat(run) }
-                                    },
-                                    copySummary: {
-                                        copyOutput(artifact)
-                                    },
-                                    stageFollowUp: {
-                                        stageOutput(artifact)
-                                    },
-                                    saveKnowledge: {
-                                        saveKnowledge(artifact)
-                                    }
-                                )
-                            }
+                            ArtifactOutputList(
+                                artifacts: artifacts,
+                                snapshot: snapshot,
+                                workItem: item,
+                                openRun: openRunInChat,
+                                copyOutput: copyOutput,
+                                stageOutput: stageOutput,
+                                startSideChat: startSideChat,
+                                resolveBranch: resolveBranch,
+                                saveKnowledge: saveKnowledge
+                            )
                         }
                     }
                 }
@@ -15877,6 +24489,7 @@ private struct JiraRunConversationPane: View {
             }
         }
         .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(PKTheme.control.opacity(0.28))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -16030,6 +24643,12 @@ private struct WorkbenchDetail: View {
     @Binding var detailTab: DetailTab
     let run: () -> Void
     let openChat: () -> Void
+    var openRun: ((AgentRun) -> Void)? = nil
+    var copyOutput: ((Artifact) -> Void)? = nil
+    var stageOutput: ((Artifact) -> Void)? = nil
+    var startSideChat: ((AgentRun, RunFollowUpAction) -> Void)? = nil
+    var resolveBranch: ((Artifact, ArtifactBranchResolution, EntityID?) -> Void)? = nil
+    var saveKnowledge: ((Artifact) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -16075,7 +24694,16 @@ private struct WorkbenchDetail: View {
             case .sources:
                 SourcesPanel(item: item)
             case .outputs:
-                OutputsPanel(item: item, snapshot: snapshot)
+                OutputsPanel(
+                    item: item,
+                    snapshot: snapshot,
+                    openRun: openRun,
+                    copyOutput: copyOutput,
+                    stageOutput: stageOutput,
+                    startSideChat: startSideChat,
+                    resolveBranch: resolveBranch,
+                    saveKnowledge: saveKnowledge
+                )
             }
 
             Spacer(minLength: 0)
@@ -16130,6 +24758,8 @@ private struct OutputsPanel: View {
     var openRun: ((AgentRun) -> Void)? = nil
     var copyOutput: ((Artifact) -> Void)? = nil
     var stageOutput: ((Artifact) -> Void)? = nil
+    var startSideChat: ((AgentRun, RunFollowUpAction) -> Void)? = nil
+    var resolveBranch: ((Artifact, ArtifactBranchResolution, EntityID?) -> Void)? = nil
     var saveKnowledge: ((Artifact) -> Void)? = nil
 
     private var outputs: [Artifact] {
@@ -16142,40 +24772,169 @@ private struct OutputsPanel: View {
                 OutputPanelSummary(outputs: outputs)
             }
 
-            ForEach(outputs) { artifact in
-                let sourceRun = artifactSourceRun(artifact, snapshot: snapshot)
-                ArtifactOutputRow(
-                    artifact: artifact,
-                    sourceRun: sourceRun,
-                    workItem: item,
-                    openRun: sourceRun.flatMap { run in
-                        openRun.map { open in
-                            { open(run) }
-                        }
-                    },
-                    copySummary: {
-                        if let copyOutput {
-                            copyOutput(artifact)
-                        } else {
-                            copyTextToPasteboard(artifactClipboardSummary(
-                                artifact: artifact,
-                                run: sourceRun,
-                                workItem: item
-                            ))
-                        }
-                    },
-                    stageFollowUp: stageOutput.map { stage in
-                        { stage(artifact) }
-                    },
-                    saveKnowledge: saveKnowledge.map { save in
-                        { save(artifact) }
-                    }
-                )
-            }
+            ArtifactOutputList(
+                artifacts: outputs,
+                snapshot: snapshot,
+                workItem: item,
+                openRun: openRun,
+                copyOutput: copyOutput,
+                stageOutput: stageOutput,
+                startSideChat: startSideChat,
+                resolveBranch: resolveBranch,
+                saveKnowledge: saveKnowledge
+            )
             if outputs.isEmpty {
                 EmptyMiniState(title: "No outputs yet", subtitle: "Verification notes, patches, and Obsidian artifacts appear here.")
             }
         }
+    }
+}
+
+private struct ArtifactOutputList: View {
+    let artifacts: [Artifact]
+    let snapshot: NativeStoreSnapshot
+    var workItem: WorkItem? = nil
+    var limit: Int? = nil
+    var openRun: ((AgentRun) -> Void)? = nil
+    var copyOutput: ((Artifact) -> Void)? = nil
+    var stageOutput: ((Artifact) -> Void)? = nil
+    var startSideChat: ((AgentRun, RunFollowUpAction) -> Void)? = nil
+    var resolveBranch: ((Artifact, ArtifactBranchResolution, EntityID?) -> Void)? = nil
+    var saveKnowledge: ((Artifact) -> Void)? = nil
+
+    @State private var selectedReviewFilter: ArtifactReviewOutputFilter = .actionRequired
+
+    private var showReviewFilter: Bool {
+        artifactReviewFilterIsUseful(artifacts)
+    }
+
+    private var reviewFilterOptions: [ArtifactReviewOutputFilterOption] {
+        artifactReviewOutputFilterOptions(artifacts)
+    }
+
+    private var effectiveReviewFilter: ArtifactReviewOutputFilter {
+        guard showReviewFilter else { return .all }
+        let filters = Set(reviewFilterOptions.map(\.filter))
+        return filters.contains(selectedReviewFilter) ? selectedReviewFilter : .all
+    }
+
+    private var visibleArtifacts: [Artifact] {
+        artifactReviewFilteredArtifacts(artifacts, filter: effectiveReviewFilter)
+    }
+
+    private var groups: [ArtifactReviewOutputGroup] {
+        artifactReviewOutputGroups(visibleArtifacts, limit: limit)
+    }
+
+    private var showGroupHeaders: Bool {
+        artifactReviewGroupingIsUseful(visibleArtifacts)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if showReviewFilter {
+                ArtifactReviewFilterPicker(
+                    selection: $selectedReviewFilter,
+                    options: reviewFilterOptions
+                )
+            }
+
+            ForEach(groups) { group in
+                if showGroupHeaders {
+                    ArtifactReviewGroupHeader(group: group)
+                }
+                ForEach(group.artifacts) { artifact in
+                    let sourceRun = artifactSourceRun(artifact, snapshot: snapshot)
+                    let item = workItem ?? artifactWorkItem(artifact, snapshot: snapshot)
+                    let followUpAction = stageOutput == nil && startSideChat == nil ? nil : artifactFollowUpAction(artifact: artifact, run: sourceRun, workItem: item)
+                    let sideChatLineage = artifactSideChatLineage(artifact: artifact, sourceRun: sourceRun, snapshot: snapshot)
+                    let lineageRun = artifactLineageTargetRun(sideChatLineage, snapshot: snapshot)
+                    ArtifactOutputRow(
+                        artifact: artifact,
+                        sourceRun: sourceRun,
+                        workItem: item,
+                        memoryCards: nativeArtifactWorkspaceMemoryCards(artifact: artifact, snapshot: snapshot),
+                        followUpAction: followUpAction,
+                        sideChatLineage: sideChatLineage,
+                        openLineageRun: lineageRun.flatMap { targetRun in
+                            openRun.map { open in
+                                { open(targetRun) }
+                            }
+                        },
+                        resolveBranch: resolveBranch.flatMap { resolve in
+                            sideChatLineage.map { lineage in
+                                { resolution in
+                                    resolve(artifact, resolution, lineage.targetRunId)
+                                }
+                            }
+                        },
+                        openRun: sourceRun.flatMap { run in
+                            openRun.map { open in
+                                { open(run) }
+                            }
+                        },
+                        copySummary: {
+                            if let copyOutput {
+                                copyOutput(artifact)
+                            } else {
+                                copyTextToPasteboard(artifactClipboardSummary(
+                                    artifact: artifact,
+                                    run: sourceRun,
+                                    workItem: item
+                                ))
+                            }
+                        },
+                        stageFollowUp: stageOutput.map { stage in
+                            { stage(artifact) }
+                        },
+                        startSideChat: startSideChat,
+                        saveKnowledge: saveKnowledge.map { save in
+                            { save(artifact) }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+private struct ArtifactReviewFilterPicker: View {
+    @Binding var selection: ArtifactReviewOutputFilter
+    let options: [ArtifactReviewOutputFilterOption]
+
+    var body: some View {
+        Picker("Output state", selection: $selection) {
+            ForEach(options) { option in
+                Text("\(option.filter.title) \(option.count)")
+                    .tag(option.filter)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(maxWidth: 480)
+        .help("Filter saved outputs by review state")
+    }
+}
+
+private struct ArtifactReviewGroupHeader: View {
+    let group: ArtifactReviewOutputGroup
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: group.kind.symbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(group.kind.color)
+                .frame(width: 18, height: 18)
+                .background(group.kind.color.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+            Text(group.kind.title)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(PKTheme.text3)
+                .textCase(.uppercase)
+            Spacer(minLength: 0)
+            CountBadge(value: group.artifacts.count)
+        }
+        .padding(.top, 2)
     }
 }
 
@@ -16208,9 +24967,15 @@ private struct ArtifactOutputRow: View {
     let artifact: Artifact
     let sourceRun: AgentRun?
     let workItem: WorkItem?
+    let memoryCards: [KnowledgeCard]
+    let followUpAction: RunFollowUpAction?
+    let sideChatLineage: ArtifactSideChatLineage?
+    let openLineageRun: (() -> Void)?
+    let resolveBranch: ((ArtifactBranchResolution) -> Void)?
     let openRun: (() -> Void)?
     let copySummary: () -> Void
     let stageFollowUp: (() -> Void)?
+    let startSideChat: ((AgentRun, RunFollowUpAction) -> Void)?
     let saveKnowledge: (() -> Void)?
 
     @State private var copied = false
@@ -16240,6 +25005,21 @@ private struct ArtifactOutputRow: View {
                     if !artifact.sourceRefs.isEmpty {
                         StatusPill(text: "\(artifact.sourceRefs.count) refs", color: PKTheme.primary)
                     }
+                    if !memoryCards.isEmpty {
+                        StatusPill(
+                            text: memoryCards.count == 1 ? "Memory" : "Memory \(memoryCards.count)",
+                            color: PKTheme.primary
+                        )
+                    }
+                    if let branchResolution = artifactBranchResolution(artifact) {
+                        StatusPill(
+                            text: artifactBranchResolutionPillText(branchResolution),
+                            color: artifactBranchResolutionColor(branchResolution)
+                        )
+                    }
+                    if let followUpAction {
+                        StatusPill(text: followUpAction.workflowLabel, color: PKTheme.primary)
+                    }
                 }
 
                 HStack(spacing: 8) {
@@ -16252,6 +25032,13 @@ private struct ArtifactOutputRow: View {
                 .font(.caption2)
                 .foregroundStyle(PKTheme.text3)
                 .lineLimit(1)
+
+                if let sideChatLineage {
+                    ArtifactSideChatLineagePill(
+                        lineage: sideChatLineage,
+                        openLineage: openLineageRun
+                    )
+                }
 
                 if !artifact.provenance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     HStack(alignment: .top, spacing: 6) {
@@ -16275,9 +25062,20 @@ private struct ArtifactOutputRow: View {
             HStack(spacing: 5) {
                 if let stageFollowUp {
                     MessageActionButton(
-                        systemImage: "arrow.turn.down.right",
-                        help: "Stage follow-up",
+                        systemImage: followUpAction?.symbol ?? "arrow.turn.down.right",
+                        help: artifactFollowUpHelp(followUpAction),
                         action: stageFollowUp
+                    )
+                }
+                if let sourceRun,
+                   let followUpAction,
+                   let startSideChat {
+                    MessageActionButton(
+                        systemImage: "rectangle.split.2x1",
+                        help: "Start \(followUpAction.title) side chat - \(followUpAction.workflowSummary)",
+                        action: {
+                            startSideChat(sourceRun, followUpAction)
+                        }
                     )
                 }
                 if let saveKnowledge {
@@ -16286,6 +25084,18 @@ private struct ArtifactOutputRow: View {
                         help: "Save knowledge note",
                         action: saveKnowledge
                     )
+                }
+                if sideChatLineage != nil,
+                   let resolveBranch {
+                    ForEach(ArtifactBranchResolution.allCases, id: \.rawValue) { resolution in
+                        MessageActionButton(
+                            systemImage: artifactBranchResolutionSymbol(resolution),
+                            help: artifactBranchResolutionHelp(resolution),
+                            action: {
+                                resolveBranch(resolution)
+                            }
+                        )
+                    }
                 }
                 if let openRun {
                     MessageActionButton(
@@ -16313,6 +25123,43 @@ private struct ArtifactOutputRow: View {
         .background(PKTheme.surfaceRaised.opacity(0.42))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct ArtifactSideChatLineagePill: View {
+    let lineage: ArtifactSideChatLineage
+    let openLineage: (() -> Void)?
+
+    var body: some View {
+        if let openLineage {
+            Button(action: openLineage) {
+                content
+            }
+            .buttonStyle(.plain)
+            .help(lineage.help)
+        } else {
+            content
+                .help(lineage.help)
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 6) {
+            Label(lineage.title, systemImage: lineage.symbol)
+                .font(.system(size: 9, weight: .bold))
+                .lineLimit(1)
+            Text(lineage.detail)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+        }
+        .foregroundStyle(PKTheme.primary)
+        .padding(.horizontal, 7)
+        .frame(height: 20, alignment: .leading)
+        .background(PKTheme.primary.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.primary.opacity(0.18), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
@@ -16477,6 +25324,7 @@ private struct WorkflowPage: View {
     @Binding var selectedWorkItemId: EntityID?
     @ObservedObject var model: NativeAppModel
     let navigate: (NativeRoute) -> Void
+    let openDeepLink: (URL) -> Void
 
     private var selectedWorkspace: Workspace? {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
@@ -16510,6 +25358,10 @@ private struct WorkflowPage: View {
                     attentionCount: snapshot.runs.filter { $0.state == .waitingForUser || $0.state == .failed }.count
                 )
 
+                if model.nativeNotificationReadiness.requiresWorkflowAttention {
+                    NotificationReadinessStrip(readiness: model.nativeNotificationReadiness)
+                }
+
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 12) {
                         LibrarySummary(
@@ -16539,6 +25391,17 @@ private struct WorkflowPage: View {
                             )
                         }
                         ForEach(snapshot.automations) { automation in
+                            let notificationPayload = model.notificationActionPayload(
+                                for: automation,
+                                workspaceId: selectedWorkspaceId,
+                                workItemId: selectedWorkItemId
+                            )
+                            let canOpenNativeLink = notificationPayload?.primaryURL != nil
+                            let nativeLinkTitle = notificationPayload?.primaryLink.map { "Open \($0.label)" } ?? "Open Evidence"
+                            let canScheduleNotification = notificationPayload?.primaryURL != nil
+                            let notificationTitle = notificationPayload?.primaryLink.map {
+                                "Schedule notification: \($0.label) - \(model.nativeNotificationReadiness.detail)"
+                            } ?? "Schedule notification - \(model.nativeNotificationReadiness.detail)"
                             WorkflowCard(
                                 symbol: "gearshape.2",
                                 title: automation.name,
@@ -16549,7 +25412,13 @@ private struct WorkflowPage: View {
                                 outputs: 2,
                                 effort: automation.state.rawValue,
                                 actionTitle: "Stage Automation",
-                                action: { launchAutomation(automation) }
+                                action: { launchAutomation(automation) },
+                                secondaryActionTitle: canOpenNativeLink ? nativeLinkTitle : nil,
+                                secondarySystemImage: "link",
+                                secondaryAction: canOpenNativeLink ? { openAutomationNativeLink(automation) } : nil,
+                                tertiaryActionTitle: canScheduleNotification ? notificationTitle : nil,
+                                tertiarySystemImage: "bell.badge",
+                                tertiaryAction: canScheduleNotification ? { scheduleAutomationNotification(automation) } : nil
                             )
                         }
                         if snapshot.automations.isEmpty {
@@ -16573,7 +25442,12 @@ private struct WorkflowPage: View {
                     openChat()
                 }
             }
+            CountBadge(text: model.nativeNotificationReadiness.badgeText)
+                .help(model.nativeNotificationReadiness.detail)
             CountBadge(text: "\(nativeWorkflowLaunchTemplates.count + snapshot.automations.count) recipes")
+        }
+        .task {
+            await model.refreshNativeNotificationReadiness()
         }
     }
 
@@ -16584,18 +25458,31 @@ private struct WorkflowPage: View {
     }
 
     private func launchAutomation(_ automation: Automation) {
-        _ = model.stageAssistantPrompt(
-            title: automation.name,
-            prompt: """
-            Run the saved automation workflow "\(automation.name)" for {project}.
+        _ = model.stageAutomation(automation, workspaceId: selectedWorkspaceId, workItemId: selectedWorkItemId)
+        openChat()
+    }
 
-            Inspect the current automation state, identify required inputs, execute the workflow as far as current permissions allow, and summarize outputs, blockers, and the next safe action.
-            """,
-            agentKind: .codex,
+    private func openAutomationNativeLink(_ automation: Automation) {
+        guard let payload = model.notificationActionPayload(
+            for: automation,
             workspaceId: selectedWorkspaceId,
             workItemId: selectedWorkItemId
-        )
-        openChat()
+        ), let url = payload.primaryURL else {
+            model.statusLine = "No native evidence link for \(automation.name)"
+            return
+        }
+        openDeepLink(url)
+        model.statusLine = "\(payload.title) evidence opened"
+    }
+
+    private func scheduleAutomationNotification(_ automation: Automation) {
+        Task {
+            await model.scheduleAutomationNotification(
+                automation,
+                workspaceId: selectedWorkspaceId,
+                workItemId: selectedWorkItemId
+            )
+        }
     }
 
     private func openChat() {
@@ -16608,6 +25495,9 @@ private struct MissionControlPage: View {
     let snapshot: NativeStoreSnapshot
     @Binding var selectedWorkspaceId: EntityID?
     @Binding var selectedWorkItemId: EntityID?
+    @Binding var detailTab: DetailTab
+    @Binding var focusedFollowUpLaneLabel: String?
+    @Binding var focusedGeneratedUIAction: GeneratedUIActionFocus?
     @ObservedObject var model: NativeAppModel
     let navigate: (NativeRoute) -> Void
     let refresh: () -> Void
@@ -16632,6 +25522,58 @@ private struct MissionControlPage: View {
         snapshot.artifacts.filter { $0.status == .ready }.count
     }
 
+    private var artifactReviewSummary: ArtifactReviewMissionSummary {
+        artifactReviewMissionSummary(snapshot.artifacts)
+    }
+
+    private var artifactReviewTarget: ArtifactReviewMissionTarget? {
+        artifactReviewTargets.first
+    }
+
+    private var artifactReviewTargets: [ArtifactReviewMissionTarget] {
+        artifactReviewMissionTargets(snapshot: snapshot, limit: 4)
+    }
+
+    private var visibleArtifactReviewTargets: [ArtifactReviewMissionTarget] {
+        missionFollowUpLanePinnedArtifactReviewTargets(
+            artifactReviewTargets,
+            focusTarget: focusedFollowUpLaneItem?.target,
+            snapshot: snapshot
+        )
+    }
+
+    private var generatedUITargets: [GeneratedUIMissionTarget] {
+        generatedUIMissionTargets(snapshot: snapshot, limit: 4)
+    }
+
+    private var generatedUIAttentionCount: Int {
+        generatedUITargets.count
+    }
+
+    private var followUpLaneSummary: [MissionFollowUpLaneSummaryItem] {
+        missionFollowUpLaneSummary(snapshot: snapshot)
+    }
+
+    private var focusedFollowUpLaneItem: MissionFollowUpLaneSummaryItem? {
+        missionFollowUpLaneFocusedItem(in: followUpLaneSummary, currentLabel: focusedFollowUpLaneLabel)
+    }
+
+    private var acknowledgedTrailItems: [MissionAcknowledgedTrailItem] {
+        missionAcknowledgedTrailItems(snapshot: snapshot, limit: 4)
+    }
+
+    private var crossAgentHandoffItems: [MissionAgentHandoffTrailItem] {
+        missionAgentHandoffTrailItems(snapshot: snapshot, limit: 4)
+    }
+
+    private var visibleCrossAgentHandoffItems: [MissionAgentHandoffTrailItem] {
+        missionFollowUpLanePinnedHandoffItems(
+            crossAgentHandoffItems,
+            focusTarget: focusedFollowUpLaneItem?.target,
+            snapshot: snapshot
+        )
+    }
+
     private var prioritizedRuns: [AgentRun] {
         snapshot.runs.sorted { lhs, rhs in
             let lhsRank = missionRunPriority(lhs)
@@ -16639,6 +25581,14 @@ private struct MissionControlPage: View {
             if lhsRank != rhsRank { return lhsRank < rhsRank }
             return (lhs.startedAt ?? .distantPast) > (rhs.startedAt ?? .distantPast)
         }
+    }
+
+    private var visiblePrioritizedRuns: [AgentRun] {
+        missionFollowUpLanePinnedRuns(
+            prioritizedRuns,
+            focusTarget: focusedFollowUpLaneItem?.target,
+            snapshot: snapshot
+        )
     }
 
     private var healthyCapabilities: Int {
@@ -16662,8 +25612,21 @@ private struct MissionControlPage: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
                     RuntimeCard(title: "ACTIVE", value: "\(activeRuns.count)", subtitle: "Queued, running, or waiting", color: activeRuns.isEmpty ? PKTheme.text3 : PKTheme.ok)
-                    RuntimeCard(title: "ATTENTION", value: "\(attentionRuns.count)", subtitle: "\(waitingRuns.count) waiting · \(failedRuns.count) failed", color: attentionRuns.isEmpty ? PKTheme.text3 : PKTheme.warn)
+                    RuntimeCard(
+                        title: "ATTENTION",
+                        value: "\(attentionRuns.count + generatedUIAttentionCount)",
+                        subtitle: "\(waitingRuns.count) waiting · \(failedRuns.count) failed · \(generatedUIAttentionCount) UI",
+                        color: attentionRuns.isEmpty && generatedUIAttentionCount == 0 ? PKTheme.text3 : PKTheme.warn
+                    )
                     RuntimeCard(title: "EVIDENCE", value: "\(readyEvidenceCount)", subtitle: "Ready artifacts", color: readyEvidenceCount == 0 ? PKTheme.text3 : PKTheme.primary)
+                    RuntimeActionCard(
+                        title: "OUTPUT REVIEW",
+                        value: "\(artifactReviewSummary.attentionCount)",
+                        subtitle: artifactReviewSummary.subtitle,
+                        color: artifactReviewMissionColor(artifactReviewSummary),
+                        isEnabled: artifactReviewTarget != nil,
+                        action: openOutputReviewTarget
+                    )
                     RuntimeCard(title: "HEALTH", value: "\(healthyCapabilities)/\(snapshot.capabilities.count)", subtitle: "\(checkCapabilities) check · \(missingCapabilities) missing", color: missingCapabilities > 0 ? PKTheme.err : checkCapabilities > 0 ? PKTheme.warn : PKTheme.ok)
                 }
 
@@ -16671,8 +25634,25 @@ private struct MissionControlPage: View {
                     activeRuns: activeRuns.count,
                     waitingRuns: waitingRuns.count,
                     failedRuns: failedRuns.count,
-                    readyEvidenceCount: readyEvidenceCount
+                    readyEvidenceCount: readyEvidenceCount,
+                    outputReviewAttentionCount: artifactReviewSummary.attentionCount,
+                    generatedUIAttentionCount: generatedUIAttentionCount
                 )
+
+                if !followUpLaneSummary.isEmpty {
+                    MissionFollowUpLaneStrip(
+                        items: followUpLaneSummary,
+                        openItem: openFollowUpLane(_:)
+                    )
+                }
+
+                if let focusedFollowUpLaneItem {
+                    MissionFollowUpLaneFocusBanner(
+                        item: focusedFollowUpLaneItem,
+                        open: { openFollowUpLane(focusedFollowUpLaneItem) },
+                        clear: clearFollowUpLaneFocus
+                    )
+                }
 
                 if let enterpriseGoalSummary {
                     MissionEnterpriseGoalCard(
@@ -16684,10 +25664,54 @@ private struct MissionControlPage: View {
 
                 MissionAgentLoadStrip(snapshot: snapshot)
 
+                if !visibleCrossAgentHandoffItems.isEmpty {
+                    MissionAgentHandoffTrailList(
+                        items: visibleCrossAgentHandoffItems,
+                        focusedWorkItemId: missionFollowUpLaneFocusedHandoffWorkItemId(focusedFollowUpLaneItem?.target),
+                        openItem: openAgentHandoffTrailItem(_:),
+                        openLatestEvidence: openAgentHandoffLatestEvidence(_:),
+                        copyLatestEvidenceLink: copyAgentHandoffLatestEvidenceLink(_:),
+                        stageNextHandoff: stageAgentHandoffFollowUp(_:)
+                    )
+                }
+
+                if !visibleArtifactReviewTargets.isEmpty {
+                    MissionOutputReviewList(
+                        targets: visibleArtifactReviewTargets,
+                        focusedArtifactId: missionFollowUpLaneFocusedArtifactId(focusedFollowUpLaneItem?.target),
+                        openTarget: openOutputReviewTarget(_:),
+                        startSideChat: startOutputReviewTargetSideChat(_:),
+                        copyReviewLink: copyOutputReviewLink,
+                        copyTargetLink: copyOutputReviewTargetLink(_:),
+                        dismissTarget: dismissOutputReviewTarget(_:),
+                        markResolved: markOutputReviewTargetResolved(_:)
+                    )
+                }
+
+                if !generatedUITargets.isEmpty {
+                    MissionGeneratedUIActionList(
+                        targets: generatedUITargets,
+                        openTarget: openGeneratedUITarget(_:),
+                        stageTarget: stageGeneratedUITarget(_:),
+                        dismissTarget: dismissGeneratedUITarget(_:)
+                    )
+                }
+
+                if !acknowledgedTrailItems.isEmpty {
+                    MissionAcknowledgedTrailList(
+                        items: acknowledgedTrailItems,
+                        openItem: openAcknowledgedTrailItem(_:)
+                    )
+                }
+
                 HStack(alignment: .top, spacing: 12) {
                     InspectorSection(title: "Runtime Queue") {
-                        ForEach(prioritizedRuns.prefix(8)) { run in
-                            MissionRunRow(run: run, snapshot: snapshot)
+                        ForEach(visiblePrioritizedRuns.prefix(8)) { run in
+                            MissionRunRow(
+                                run: run,
+                                snapshot: snapshot,
+                                isFocused: missionFollowUpLaneTargetMatchesRun(focusedFollowUpLaneItem?.target, run: run)
+                            )
                         }
                     }
                     InspectorSection(title: "Capability Health") {
@@ -16700,7 +25724,17 @@ private struct MissionControlPage: View {
             }
         } actions: {
             SecondaryButton(title: "Audit", systemImage: "checklist.checked", action: stageEnterpriseParityAudit)
+            SecondaryButton(title: "Report", systemImage: "doc.on.doc", action: copyEnterpriseAuditReport)
             SecondaryButton(title: "Refresh", systemImage: "arrow.clockwise", action: refresh)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pikiclawOpenFocusedMissionLane)) { _ in
+            openFocusedFollowUpLane()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pikiclawFocusNextMissionLane)) { _ in
+            focusFollowUpLane(direction: .next)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pikiclawFocusPreviousMissionLane)) { _ in
+            focusFollowUpLane(direction: .previous)
         }
     }
 
@@ -16708,6 +25742,261 @@ private struct MissionControlPage: View {
         guard let summary = enterpriseGoalSummary else { return }
         selectedWorkspaceId = summary.workspaceId
         selectedWorkItemId = summary.workItemId
+    }
+
+    private func openOutputReviewTarget() {
+        guard let target = artifactReviewTarget else { return }
+        openOutputReviewTarget(target)
+    }
+
+    private func openFollowUpLane(_ item: MissionFollowUpLaneSummaryItem) {
+        guard let target = item.target else {
+            model.statusLine = "No \(item.label) follow-up target is available"
+            return
+        }
+        focusedFollowUpLaneLabel = item.label
+
+        switch target {
+        case .chat(let runId, let workspaceId, let workItemId, let title):
+            selectedWorkspaceId = workspaceId
+            selectedWorkItemId = workItemId
+            model.activeRunId = runId
+            model.draftPrompt = ""
+            model.statusLine = "Opened \(item.label) lane: \(title)"
+            navigate(.chat)
+        case .output(let artifactId, _, _, let title):
+            guard let reviewTarget = artifactReviewMissionTargets(snapshot: snapshot)
+                .first(where: { $0.artifactId == artifactId }) else {
+                model.statusLine = "No \(item.label) saved output target is available"
+                return
+            }
+            openOutputReviewTarget(reviewTarget)
+            model.statusLine = "Opened \(item.label) lane: \(title)"
+        case .handoff(let workItemId, _, let title):
+            guard let handoffItem = missionAgentHandoffTrailItems(snapshot: snapshot)
+                .first(where: { $0.workItemId == workItemId }) else {
+                model.statusLine = "No handoff target is available"
+                return
+            }
+            openAgentHandoffTrailItem(handoffItem)
+            model.statusLine = "Opened \(item.label) lane: \(title)"
+        }
+    }
+
+    private func openFocusedFollowUpLane() {
+        guard let focusedFollowUpLaneItem else {
+            model.statusLine = missionOpenFocusedLaneUnavailableStatus
+            return
+        }
+        openFollowUpLane(focusedFollowUpLaneItem)
+    }
+
+    private func focusFollowUpLane(direction: MissionFollowUpLaneFocusDirection) {
+        guard let item = missionFollowUpLaneSteppedFocusItem(
+            in: followUpLaneSummary,
+            currentLabel: focusedFollowUpLaneLabel,
+            direction: direction
+        ) else {
+            model.statusLine = missionFocusLaneUnavailableStatus
+            return
+        }
+        focusedFollowUpLaneLabel = item.label
+        model.statusLine = "Focused \(item.label) Mission lane"
+    }
+
+    private func clearFollowUpLaneFocus() {
+        focusedFollowUpLaneLabel = nil
+        model.statusLine = "Mission lane focus cleared"
+    }
+
+    private func openOutputReviewTarget(_ target: ArtifactReviewMissionTarget) {
+        selectedWorkspaceId = target.workspaceId
+        selectedWorkItemId = target.workItemId
+        detailTab = .outputs
+        model.statusLine = "Opened \(target.kind.title.lowercased()) output: \(target.title)"
+        navigate(.workItems)
+    }
+
+    private func markOutputReviewTargetResolved(_ target: ArtifactReviewMissionTarget) {
+        Task {
+            await model.markArtifactBranchResolution(
+                artifactId: target.artifactId,
+                resolution: .resolved
+            )
+        }
+    }
+
+    private func dismissOutputReviewTarget(_ target: ArtifactReviewMissionTarget) {
+        Task {
+            await model.dismissArtifactReview(artifactId: target.artifactId)
+        }
+    }
+
+    private func startOutputReviewTargetSideChat(_ target: ArtifactReviewMissionTarget) {
+        guard let start = artifactReviewMissionSideChatStart(target: target, snapshot: snapshot) else {
+            model.statusLine = "Output review needs a source run before branching"
+            return
+        }
+        selectedWorkspaceId = start.workspaceId
+        selectedWorkItemId = start.workItemId ?? target.workItemId
+        model.activeRunId = start.parentRunId
+        model.statusLine = "Starting output review branch: \(target.title)"
+        navigate(.chat)
+        Task {
+            if let childId = await model.startFollowUpSideChat(
+                parentRunId: start.parentRunId,
+                prompt: start.prompt,
+                permissionMode: start.permissionMode,
+                followUpLabel: start.followUpLabel
+            ),
+               let child = model.snapshot.runs.first(where: { $0.id == childId }) {
+                await model.dismissArtifactReview(artifactId: target.artifactId)
+                selectedWorkspaceId = child.workspaceId
+                selectedWorkItemId = child.workItemId
+                model.statusLine = "Started output review branch: \(target.title)"
+            }
+        }
+    }
+
+    private func openGeneratedUITarget(_ target: GeneratedUIMissionTarget) {
+        selectedWorkspaceId = target.workspaceId
+        selectedWorkItemId = target.workItemId
+        model.activeRunId = target.runId
+        focusedGeneratedUIAction = GeneratedUIActionFocus(runId: target.runId, actionId: target.actionId)
+        model.draftPrompt = ""
+        model.statusLine = target.openStatusLine
+        navigate(.chat)
+    }
+
+    private func stageGeneratedUITarget(_ target: GeneratedUIMissionTarget) {
+        selectedWorkspaceId = target.workspaceId
+        selectedWorkItemId = target.workItemId
+        model.activeRunId = target.runId
+        if model.stageAssistantPrompt(
+            title: target.stageTitle,
+            prompt: target.actionPrompt,
+            agentKind: .codex,
+            permissionMode: target.permissionMode,
+            workspaceId: target.workspaceId,
+            workItemId: target.workItemId
+        ) {
+            focusedGeneratedUIAction = nil
+            navigate(.chat)
+            NotificationCenter.default.post(name: .pikiclawFocusCommandCenter, object: nil)
+            Task { await model.markChatRead(runId: target.runId) }
+        }
+    }
+
+    private func dismissGeneratedUITarget(_ target: GeneratedUIMissionTarget) {
+        focusedGeneratedUIAction = nil
+        Task {
+            await model.markChatRead(runId: target.runId)
+            model.statusLine = "Dismissed \(target.actionTitle) from Mission Control"
+        }
+    }
+
+    private func openAcknowledgedTrailItem(_ item: MissionAcknowledgedTrailItem) {
+        selectedWorkspaceId = item.workspaceId
+        selectedWorkItemId = item.workItemId
+        switch item.kind {
+        case .generatedUI:
+            if let runId = item.runId {
+                model.activeRunId = runId
+            }
+            model.statusLine = "Opened acknowledged \(item.title)"
+            navigate(.chat)
+        case .outputReview:
+            detailTab = .outputs
+            model.statusLine = "Opened acknowledged \(item.title)"
+            navigate(.workItems)
+        }
+    }
+
+    private func openAgentHandoffTrailItem(_ item: MissionAgentHandoffTrailItem) {
+        selectedWorkspaceId = item.workspaceId
+        selectedWorkItemId = item.workItemId
+        if let runId = item.latestRunId {
+            model.activeRunId = runId
+        }
+        detailTab = .outputs
+        model.statusLine = "Opened cross-agent handoff: \(item.title)"
+        navigate(.workItems)
+    }
+
+    private func openAgentHandoffLatestEvidence(_ item: MissionAgentHandoffTrailItem) {
+        switch missionAgentHandoffLatestEvidenceDestination(item) {
+        case .chat(let runId):
+            selectedWorkspaceId = item.workspaceId
+            selectedWorkItemId = item.workItemId
+            model.activeRunId = runId
+            model.draftPrompt = ""
+            model.statusLine = "Opened latest handoff chat: \(item.title)"
+            navigate(.chat)
+        case .outputs(let artifactId):
+            selectedWorkspaceId = item.workspaceId
+            selectedWorkItemId = item.workItemId
+            detailTab = .outputs
+            let artifactTitle = snapshot.artifacts
+                .first(where: { $0.id == artifactId })?
+                .title
+                .firstLineFallback("output")
+                ?? item.handoffLatestEvidenceIdentity?.firstLineFallback("output")
+                ?? "output"
+            model.statusLine = "Opened latest handoff output: \(artifactTitle)"
+            navigate(.workItems)
+        case .workItem:
+            openAgentHandoffTrailItem(item)
+        }
+    }
+
+    private func copyAgentHandoffLatestEvidenceLink(_ item: MissionAgentHandoffTrailItem) {
+        copyTextToPasteboard(missionAgentHandoffLatestEvidenceURL(item))
+        model.statusLine = "Copied latest handoff link: \(item.title)"
+    }
+
+    private func copyOutputReviewLink() {
+        copyTextToPasteboard(nativeMissionOutputReviewURL)
+        model.statusLine = "Copied output review link"
+    }
+
+    private func copyOutputReviewTargetLink(_ target: ArtifactReviewMissionTarget) {
+        copyTextToPasteboard(artifactReviewMissionTargetURL(target))
+        model.statusLine = "Copied output link: \(target.title)"
+    }
+
+    private func copyEnterpriseAuditReport() {
+        let report = enterpriseAuditReport(snapshot: snapshot)
+        copyTextToPasteboard(report.markdown)
+        model.statusLine = "Copied enterprise audit report with \(report.evidenceLinks.count) links"
+    }
+
+    private func stageAgentHandoffFollowUp(_ item: MissionAgentHandoffTrailItem) {
+        let action = missionAgentHandoffFollowUpAction(item)
+        selectedWorkspaceId = item.workspaceId
+        selectedWorkItemId = item.workItemId
+        if let runId = item.latestRunId {
+            model.activeRunId = runId
+        }
+        if model.stageAssistantPrompt(
+            title: item.handoffStageTitle,
+            prompt: action.prompt,
+            agentKind: item.nextAgentKind,
+            permissionMode: action.permissionMode,
+            workspaceId: item.workspaceId,
+            workItemId: item.workItemId
+        ) {
+            navigate(.chat)
+            NotificationCenter.default.post(name: .pikiclawFocusCommandCenter, object: nil)
+            Task {
+                await model.recordAgentHandoffStaged(
+                    workItemId: item.workItemId,
+                    workspaceId: item.workspaceId,
+                    latestRunId: item.latestRunId,
+                    nextAgentKind: item.nextAgentKind,
+                    title: item.title
+                )
+            }
+        }
     }
 
     private func stageEnterpriseParityAudit() {
@@ -16718,6 +26007,145 @@ private struct MissionControlPage: View {
             navigate(.chat)
             NotificationCenter.default.post(name: .pikiclawFocusCommandCenter, object: nil)
         }
+    }
+}
+
+private struct MissionGeneratedUIActionList: View {
+    let targets: [GeneratedUIMissionTarget]
+    let openTarget: (GeneratedUIMissionTarget) -> Void
+    let stageTarget: (GeneratedUIMissionTarget) -> Void
+    let dismissTarget: (GeneratedUIMissionTarget) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.stack")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.warn)
+                Text("Generated UI")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.text)
+                CountBadge(text: "\(targets.count) actions")
+                Spacer(minLength: 0)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 8)], spacing: 8) {
+                ForEach(targets) { target in
+                    MissionGeneratedUIActionRow(
+                        target: target,
+                        open: { openTarget(target) },
+                        stage: { stageTarget(target) },
+                        dismiss: { dismissTarget(target) }
+                    )
+                }
+            }
+        }
+        .padding(12)
+        .background(PKTheme.warn.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.warn.opacity(0.30), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionGeneratedUIActionRow: View {
+    let target: GeneratedUIMissionTarget
+    let open: () -> Void
+    let stage: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: open) {
+                HStack(spacing: 9) {
+                    Image(systemName: target.actionSymbol)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(PKTheme.warn)
+                        .frame(width: 24, height: 24)
+                        .background(PKTheme.warn.opacity(0.13))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(target.actionTitle)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(PKTheme.text)
+                                .lineLimit(1)
+                            Text(target.actionKind)
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundStyle(PKTheme.warn)
+                                .lineLimit(1)
+                            if let readinessBadgeText = target.readinessBadgeText {
+                                Text(readinessBadgeText)
+                                    .font(.system(size: 8, weight: .heavy))
+                                    .foregroundStyle(PKTheme.warn)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 4)
+                                    .frame(height: 14)
+                                    .background(PKTheme.warn.opacity(0.10))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                            if let shortcutLabel = target.shortcutLabel {
+                                Text(shortcutLabel)
+                                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                    .foregroundStyle(PKTheme.warn)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 4)
+                                    .frame(height: 14)
+                                    .background(PKTheme.warn.opacity(0.13))
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(PKTheme.warn.opacity(0.28), lineWidth: 1))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                        Text(target.missionDetail)
+                            .font(.caption2)
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.warn)
+                }
+                .padding(.leading, 9)
+                .padding(.trailing, 8)
+                .frame(minHeight: 48)
+            }
+            .buttonStyle(.plain)
+            .help(target.keepsAttentionWhenOpened
+                ? "Open \(target.actionTitle) in chat without dismissing the generated UI action"
+                : "Open \(target.actionTitle) action in chat"
+            )
+
+            Rectangle()
+                .fill(PKTheme.warn.opacity(0.18))
+                .frame(width: 1, height: 30)
+
+            Button(action: stage) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 34, height: 48)
+            }
+            .buttonStyle(.plain)
+            .help("Stage \(target.actionTitle) follow-up")
+
+            Rectangle()
+                .fill(PKTheme.warn.opacity(0.18))
+                .frame(width: 1, height: 30)
+
+            Button(action: dismiss) {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+                    .frame(width: 34, height: 48)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss \(target.actionTitle) from Mission Control")
+        }
+        .background(PKTheme.panelAlt.opacity(0.76))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.warn.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -16777,6 +26205,444 @@ private struct MissionEnterpriseGoalCard: View {
     }
 }
 
+private struct MissionAgentHandoffTrailList: View {
+    let items: [MissionAgentHandoffTrailItem]
+    let focusedWorkItemId: EntityID?
+    let openItem: (MissionAgentHandoffTrailItem) -> Void
+    let openLatestEvidence: (MissionAgentHandoffTrailItem) -> Void
+    let copyLatestEvidenceLink: (MissionAgentHandoffTrailItem) -> Void
+    let stageNextHandoff: (MissionAgentHandoffTrailItem) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.primary)
+                Text("Agent Handoffs")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.text)
+                CountBadge(text: "\(items.count) work items")
+                Spacer(minLength: 0)
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible(minimum: 420), spacing: 8)], spacing: 8) {
+                ForEach(items) { item in
+                    MissionAgentHandoffTrailRow(
+                        item: item,
+                        isFocused: item.workItemId == focusedWorkItemId
+                    ) {
+                        openItem(item)
+                    } openLatestEvidence: {
+                        openLatestEvidence(item)
+                    } copyLatestEvidenceLink: {
+                        copyLatestEvidenceLink(item)
+                    } stageNextHandoff: {
+                        stageNextHandoff(item)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(PKTheme.primary.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.primary.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionAgentHandoffTrailRow: View {
+    let item: MissionAgentHandoffTrailItem
+    let isFocused: Bool
+    let open: () -> Void
+    let openLatestEvidence: () -> Void
+    let copyLatestEvidenceLink: () -> Void
+    let stageNextHandoff: () -> Void
+
+    private var followUpAction: RunFollowUpAction {
+        missionAgentHandoffFollowUpAction(item)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: open) {
+                HStack(spacing: 9) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(PKTheme.primary)
+                        .frame(width: 24, height: 24)
+                        .background(PKTheme.primary.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(PKTheme.text)
+                            .lineLimit(1)
+
+                        HStack(spacing: 5) {
+                            ForEach(item.agentKinds, id: \.rawValue) { kind in
+                                CountBadge(text: agentShortLabel(kind))
+                            }
+                            CountBadge(text: "\(item.branchCount) branches")
+                            CountBadge(text: "\(item.outputCount) outputs")
+                            CountBadge(text: item.handoffStateLabel)
+                            CountBadge(text: followUpAction.workflowLabel)
+                                .help(runFollowUpActionHelp(followUpAction))
+                            if isFocused {
+                                CountBadge(text: "Pinned")
+                            }
+                            if let freshnessLabel = item.handoffFreshnessLabel {
+                                CountBadge(text: freshnessLabel)
+                                    .help(item.handoffFreshnessDetail ?? freshnessLabel)
+                            }
+                            if let identityBadge = item.handoffLatestEvidenceIdentityBadge {
+                                CountBadge(text: identityBadge)
+                                    .help(missionAgentHandoffLatestEvidenceIdentityLine(item))
+                            }
+                        }
+
+                        Text(item.handoffTimelineDetail)
+                            .font(.caption2)
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.primary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open cross-agent handoff for \(item.title)")
+
+            HStack(spacing: 6) {
+                Button(action: openLatestEvidence) {
+                    Image(systemName: missionAgentHandoffLatestEvidenceDestination(item).symbol)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.text2)
+                        .frame(width: 26, height: 26)
+                        .background(PKTheme.text3.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help(missionAgentHandoffLatestEvidenceDestination(item).help)
+
+                Button(action: copyLatestEvidenceLink) {
+                    Image(systemName: "link")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.text2)
+                        .frame(width: 26, height: 26)
+                        .background(PKTheme.text3.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Copy latest handoff link")
+
+                Button(action: stageNextHandoff) {
+                    Image(systemName: item.handoffActionSymbol)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.primary)
+                        .frame(width: 26, height: 26)
+                        .background(PKTheme.primary.opacity(0.13))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Stage \(followUpAction.title) follow-up - \(runFollowUpActionHelp(followUpAction))")
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(minHeight: 58)
+        .background(PKTheme.panelAlt.opacity(isFocused ? 0.90 : 0.66))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.primary.opacity(isFocused ? 0.62 : 0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionAcknowledgedTrailList: View {
+    let items: [MissionAcknowledgedTrailItem]
+    let openItem: (MissionAcknowledgedTrailItem) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+                Text("Recently Handled")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.text)
+                CountBadge(text: "\(items.count) items")
+                Spacer(minLength: 0)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 8)], spacing: 8) {
+                ForEach(items) { item in
+                    MissionAcknowledgedTrailRow(item: item) {
+                        openItem(item)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(PKTheme.panel.opacity(0.46))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionAcknowledgedTrailRow: View {
+    let item: MissionAcknowledgedTrailItem
+    let open: () -> Void
+
+    private var tone: Color {
+        switch item.kind {
+        case .generatedUI:
+            return PKTheme.warn
+        case .outputReview:
+            return PKTheme.primary
+        }
+    }
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 9) {
+                Image(systemName: item.kind.symbol)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(tone)
+                    .frame(width: 24, height: 24)
+                    .background(tone.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(item.kind.title)
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(tone)
+                            .lineLimit(1)
+                        Text(item.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(PKTheme.text)
+                            .lineLimit(1)
+                    }
+                    Text("\(item.detail) · \(item.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(tone)
+            }
+            .padding(.horizontal, 9)
+            .frame(minHeight: 48)
+            .background(PKTheme.panelAlt.opacity(0.58))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(tone.opacity(0.18), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .help("Open recently handled \(item.kind.title.lowercased()): \(item.title)")
+    }
+}
+
+private struct MissionOutputReviewList: View {
+    let targets: [ArtifactReviewMissionTarget]
+    let focusedArtifactId: EntityID?
+    let openTarget: (ArtifactReviewMissionTarget) -> Void
+    let startSideChat: (ArtifactReviewMissionTarget) -> Void
+    let copyReviewLink: () -> Void
+    let copyTargetLink: (ArtifactReviewMissionTarget) -> Void
+    let dismissTarget: (ArtifactReviewMissionTarget) -> Void
+    let markResolved: (ArtifactReviewMissionTarget) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.primary)
+                Text("Output Review")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.text)
+                CountBadge(text: "\(targets.count) targets")
+                Spacer(minLength: 0)
+                Button(action: copyReviewLink) {
+                    Image(systemName: "link")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.text2)
+                        .frame(width: 24, height: 24)
+                        .background(PKTheme.text3.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Copy output review link")
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 8)], spacing: 8) {
+                ForEach(targets) { target in
+                    MissionOutputReviewRow(
+                        target: target,
+                        isFocused: target.artifactId == focusedArtifactId,
+                        open: { openTarget(target) },
+                        startSideChat: { startSideChat(target) },
+                        copyLink: { copyTargetLink(target) },
+                        dismiss: { dismissTarget(target) },
+                        markResolved: { markResolved(target) }
+                    )
+                }
+            }
+        }
+        .padding(12)
+        .background(PKTheme.panel.opacity(0.62))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionOutputReviewRow: View {
+    let target: ArtifactReviewMissionTarget
+    let isFocused: Bool
+    let open: () -> Void
+    let startSideChat: () -> Void
+    let copyLink: () -> Void
+    let dismiss: () -> Void
+    let markResolved: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: open) {
+                HStack(spacing: 9) {
+                    Image(systemName: target.kind.symbol)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(target.kind.color)
+                        .frame(width: 24, height: 24)
+                        .background(target.kind.color.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(target.kind.title)
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundStyle(target.kind.color)
+                                .lineLimit(1)
+                            if !target.followUpWorkflowLabel.isEmpty {
+                                Label(target.followUpWorkflowLabel, systemImage: target.followUpSymbol)
+                                    .font(.system(size: 8, weight: .heavy))
+                                    .foregroundStyle(target.kind.color.opacity(0.84))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 5)
+                                    .frame(height: 16)
+                                    .background(target.kind.color.opacity(0.10))
+                                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                            }
+                            if isFocused {
+                                CountBadge(text: "Pinned")
+                            }
+                            Text(target.title)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(PKTheme.text)
+                                .lineLimit(1)
+                        }
+                        Text("\(target.workItemTitle) · \(target.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(target.kind.color)
+                }
+                .padding(.leading, 9)
+                .padding(.trailing, 8)
+                .frame(minHeight: 48)
+            }
+            .buttonStyle(.plain)
+            .help(missionOutputReviewTargetHelp(target))
+
+            Rectangle()
+                .fill(target.kind.color.opacity(0.18))
+                .frame(width: 1, height: 30)
+
+            Button(action: startSideChat) {
+                Image(systemName: "rectangle.split.2x1")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(target.sourceRunId == nil ? PKTheme.text4 : target.kind.color)
+                    .frame(width: 34, height: 48)
+            }
+            .buttonStyle(.plain)
+            .disabled(target.sourceRunId == nil)
+            .help(missionOutputReviewSideChatHelp(target))
+
+            Rectangle()
+                .fill(target.kind.color.opacity(0.18))
+                .frame(width: 1, height: 30)
+
+            Button(action: copyLink) {
+                Image(systemName: "link")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(PKTheme.text2)
+                    .frame(width: 34, height: 48)
+            }
+            .buttonStyle(.plain)
+            .help("Copy output link for \(target.title)")
+
+            Rectangle()
+                .fill(target.kind.color.opacity(0.18))
+                .frame(width: 1, height: 30)
+
+            Button(action: dismiss) {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+                    .frame(width: 34, height: 48)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss \(target.title) from Mission Control")
+
+            Rectangle()
+                .fill(target.kind.color.opacity(0.18))
+                .frame(width: 1, height: 30)
+
+            Button(action: markResolved) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(PKTheme.ok)
+                    .frame(width: 34, height: 48)
+            }
+            .buttonStyle(.plain)
+            .help("Mark \(target.title) resolved")
+        }
+        .background(PKTheme.panelAlt.opacity(isFocused ? 0.94 : 0.76))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(target.kind.color.opacity(isFocused ? 0.64 : 0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private func missionOutputReviewTargetHelp(_ target: ArtifactReviewMissionTarget) -> String {
+    let base = "Open \(target.title) in Work Item outputs"
+    guard !target.followUpWorkflowLabel.isEmpty,
+          !target.followUpWorkflowSummary.isEmpty else {
+        return base
+    }
+    return "\(base) - \(target.followUpWorkflowLabel): \(target.followUpWorkflowSummary)"
+}
+
+private func missionOutputReviewSideChatHelp(_ target: ArtifactReviewMissionTarget) -> String {
+    guard target.sourceRunId != nil else {
+        return "No source run for \(target.title)"
+    }
+    guard !target.followUpWorkflowLabel.isEmpty,
+          !target.followUpWorkflowSummary.isEmpty else {
+        return "Start side chat from \(target.title)"
+    }
+    return "Start \(target.followUpWorkflowLabel) side chat - \(target.followUpWorkflowSummary)"
+}
+
 private func missionRunPriority(_ run: AgentRun) -> Int {
     switch run.state {
     case .waitingForUser, .failed:
@@ -16792,58 +26658,574 @@ private func missionRunPriority(_ run: AgentRun) -> Int {
     }
 }
 
+private func artifactReviewMissionColor(_ summary: ArtifactReviewMissionSummary) -> Color {
+    if summary.blockedCount > 0 { return PKTheme.err }
+    if summary.needsFollowUpCount > 0 { return PKTheme.warn }
+    if summary.readyToReviewCount > 0 { return PKTheme.primary }
+    if summary.resolvedCount > 0 { return PKTheme.ok }
+    return PKTheme.text3
+}
+
 private struct MissionAttentionSummary: View {
     let activeRuns: Int
     let waitingRuns: Int
     let failedRuns: Int
     let readyEvidenceCount: Int
+    let outputReviewAttentionCount: Int
+    let generatedUIAttentionCount: Int
+
+    private var state: MissionAttentionSummaryState {
+        missionAttentionSummaryState(
+            activeRuns: activeRuns,
+            waitingRuns: waitingRuns,
+            failedRuns: failedRuns,
+            readyEvidenceCount: readyEvidenceCount,
+            outputReviewAttentionCount: outputReviewAttentionCount,
+            generatedUIAttentionCount: generatedUIAttentionCount
+        )
+    }
 
     private var tone: Color {
-        if failedRuns > 0 || waitingRuns > 0 { return PKTheme.warn }
-        if activeRuns > 0 { return PKTheme.ok }
-        return PKTheme.primary
-    }
-
-    private var title: String {
-        if failedRuns > 0 { return "Failed runs need review" }
-        if waitingRuns > 0 { return "Agent is waiting for input" }
-        if activeRuns > 0 { return "Agents are working" }
-        if readyEvidenceCount > 0 { return "Evidence is ready to reuse" }
-        return "Runtime is clear"
-    }
-
-    private var detail: String {
-        if failedRuns > 0 { return "\(failedRuns) failed run(s), \(waitingRuns) waiting, \(readyEvidenceCount) evidence artifact(s)." }
-        if waitingRuns > 0 { return "\(waitingRuns) run(s) need your input before more work stacks up." }
-        if activeRuns > 0 { return "\(activeRuns) active run(s). Watch queue order before starting more." }
-        if readyEvidenceCount > 0 { return "\(readyEvidenceCount) saved artifact(s) are available for handoff or review." }
-        return "No active or blocked agent work in the native snapshot."
+        switch state.tone {
+        case .warning:
+            return PKTheme.warn
+        case .ok:
+            return PKTheme.ok
+        case .primary:
+            return PKTheme.primary
+        }
     }
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: failedRuns > 0 || waitingRuns > 0 ? "exclamationmark.triangle.fill" : "gauge.with.dots.needle.67percent")
+            Image(systemName: state.symbol)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(PKTheme.primaryText)
                 .frame(width: 32, height: 32)
                 .background(tone)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(state.title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(PKTheme.text)
-                Text(detail)
+                Text(state.detail)
                     .font(.caption)
                     .foregroundStyle(PKTheme.text3)
                     .lineLimit(1)
             }
             Spacer()
-            StatusPill(text: failedRuns + waitingRuns > 0 ? "ATTENTION" : "CLEAR", color: tone)
+            StatusPill(text: state.status, color: tone)
         }
         .padding(12)
         .background(PKTheme.panel.opacity(0.62))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(tone.opacity(0.24), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+enum MissionAttentionTone: Equatable {
+    case warning
+    case ok
+    case primary
+}
+
+struct MissionAttentionSummaryState: Equatable {
+    var title: String
+    var detail: String
+    var status: String
+    var symbol: String
+    var tone: MissionAttentionTone
+}
+
+func missionAttentionSummaryState(
+    activeRuns: Int,
+    waitingRuns: Int,
+    failedRuns: Int,
+    readyEvidenceCount: Int,
+    outputReviewAttentionCount: Int,
+    generatedUIAttentionCount: Int
+) -> MissionAttentionSummaryState {
+    if failedRuns > 0 {
+        return MissionAttentionSummaryState(
+            title: "Failed runs need review",
+            detail: "\(failedRuns) failed run(s), \(waitingRuns) waiting, \(generatedUIAttentionCount) generated UI action(s), \(readyEvidenceCount) evidence artifact(s).",
+            status: "ATTENTION",
+            symbol: "exclamationmark.triangle.fill",
+            tone: .warning
+        )
+    }
+    if waitingRuns > 0 {
+        return MissionAttentionSummaryState(
+            title: "Agent is waiting for input",
+            detail: "\(waitingRuns) run(s) need your input before more work stacks up.",
+            status: "ATTENTION",
+            symbol: "exclamationmark.triangle.fill",
+            tone: .warning
+        )
+    }
+    if generatedUIAttentionCount > 0 {
+        return MissionAttentionSummaryState(
+            title: "Generated UI actions need input",
+            detail: "\(generatedUIAttentionCount) clickable generated UI action(s) are ready across active outputs.",
+            status: "ATTENTION",
+            symbol: "rectangle.stack.fill",
+            tone: .warning
+        )
+    }
+    if outputReviewAttentionCount > 0 {
+        return MissionAttentionSummaryState(
+            title: "Saved outputs need review",
+            detail: "\(outputReviewAttentionCount) saved output(s) are blocked or need follow-up.",
+            status: "ATTENTION",
+            symbol: "exclamationmark.triangle.fill",
+            tone: .warning
+        )
+    }
+    if activeRuns > 0 {
+        return MissionAttentionSummaryState(
+            title: "Agents are working",
+            detail: "\(activeRuns) active run(s). Watch queue order before starting more.",
+            status: "CLEAR",
+            symbol: "gauge.with.dots.needle.67percent",
+            tone: .ok
+        )
+    }
+    if readyEvidenceCount > 0 {
+        return MissionAttentionSummaryState(
+            title: "Evidence is ready to reuse",
+            detail: "\(readyEvidenceCount) saved artifact(s) are available for handoff or review.",
+            status: "CLEAR",
+            symbol: "gauge.with.dots.needle.67percent",
+            tone: .primary
+        )
+    }
+    return MissionAttentionSummaryState(
+        title: "Runtime is clear",
+        detail: "No active or blocked agent work in the native snapshot.",
+        status: "CLEAR",
+        symbol: "gauge.with.dots.needle.67percent",
+        tone: .primary
+    )
+}
+
+struct MissionFollowUpLaneSummaryItem: Identifiable, Equatable, Sendable {
+    var label: String
+    var symbol: String
+    var summary: String
+    var chatCount: Int
+    var outputCount: Int
+    var handoffCount: Int
+    var target: MissionFollowUpLaneTarget?
+
+    var id: String { label }
+    var totalCount: Int { chatCount + outputCount + handoffCount }
+
+    var detail: String {
+        "\(chatCount) chat · \(outputCount) output · \(handoffCount) handoff"
+    }
+
+    var previewDetail: String {
+        guard let target else {
+            return "\(summary) · \(detail)"
+        }
+        return "\(target.actionLabel) · \(target.title) · \(detail)"
+    }
+}
+
+enum MissionFollowUpLaneTarget: Equatable, Sendable {
+    case chat(runId: EntityID, workspaceId: EntityID, workItemId: EntityID?, title: String)
+    case output(artifactId: EntityID, workspaceId: EntityID, workItemId: EntityID, title: String)
+    case handoff(workItemId: EntityID, workspaceId: EntityID, title: String)
+
+    var actionLabel: String {
+        switch self {
+        case .chat:
+            return "Open chat"
+        case .output:
+            return "Open output"
+        case .handoff:
+            return "Open handoff"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .chat(_, _, _, let title),
+             .output(_, _, _, let title),
+             .handoff(_, _, let title):
+            return title
+        }
+    }
+}
+
+enum MissionFollowUpLaneFocusDirection: Sendable {
+    case next
+    case previous
+}
+
+func missionFollowUpLaneFocusedRunId(_ target: MissionFollowUpLaneTarget?) -> EntityID? {
+    guard case .chat(let runId, _, _, _) = target else { return nil }
+    return runId
+}
+
+func missionFollowUpLaneFocusedArtifactId(_ target: MissionFollowUpLaneTarget?) -> EntityID? {
+    guard case .output(let artifactId, _, _, _) = target else { return nil }
+    return artifactId
+}
+
+func missionFollowUpLaneFocusedHandoffWorkItemId(_ target: MissionFollowUpLaneTarget?) -> EntityID? {
+    guard case .handoff(let workItemId, _, _) = target else { return nil }
+    return workItemId
+}
+
+func missionFollowUpLaneTargetMatchesRun(_ target: MissionFollowUpLaneTarget?, run: AgentRun) -> Bool {
+    missionFollowUpLaneFocusedRunId(target) == run.id
+}
+
+func missionFollowUpLaneFocusedItem(
+    in items: [MissionFollowUpLaneSummaryItem],
+    currentLabel: String?
+) -> MissionFollowUpLaneSummaryItem? {
+    guard let currentLabel else { return nil }
+    return items.first { $0.label == currentLabel && $0.target != nil }
+}
+
+func missionFollowUpLaneSteppedFocusItem(
+    in items: [MissionFollowUpLaneSummaryItem],
+    currentLabel: String?,
+    direction: MissionFollowUpLaneFocusDirection
+) -> MissionFollowUpLaneSummaryItem? {
+    let focusableItems = items.filter { $0.target != nil }
+    guard !focusableItems.isEmpty else { return nil }
+    guard let currentLabel,
+          let currentIndex = focusableItems.firstIndex(where: { $0.label == currentLabel }) else {
+        switch direction {
+        case .next:
+            return focusableItems.first
+        case .previous:
+            return focusableItems.last
+        }
+    }
+
+    switch direction {
+    case .next:
+        return focusableItems[(currentIndex + 1) % focusableItems.count]
+    case .previous:
+        return focusableItems[(currentIndex - 1 + focusableItems.count) % focusableItems.count]
+    }
+}
+
+func missionFollowUpLanePinnedRuns(
+    _ runs: [AgentRun],
+    focusTarget: MissionFollowUpLaneTarget?,
+    snapshot: NativeStoreSnapshot
+) -> [AgentRun] {
+    guard let runId = missionFollowUpLaneFocusedRunId(focusTarget),
+          let focusedRun = snapshot.runs.first(where: { $0.id == runId }) else {
+        return runs
+    }
+    return [focusedRun] + runs.filter { $0.id != runId }
+}
+
+func missionFollowUpLanePinnedArtifactReviewTargets(
+    _ targets: [ArtifactReviewMissionTarget],
+    focusTarget: MissionFollowUpLaneTarget?,
+    snapshot: NativeStoreSnapshot
+) -> [ArtifactReviewMissionTarget] {
+    guard let artifactId = missionFollowUpLaneFocusedArtifactId(focusTarget),
+          let focusedTarget = artifactReviewMissionTargets(snapshot: snapshot)
+            .first(where: { $0.artifactId == artifactId }) else {
+        return targets
+    }
+    return [focusedTarget] + targets.filter { $0.artifactId != artifactId }
+}
+
+func missionFollowUpLanePinnedHandoffItems(
+    _ items: [MissionAgentHandoffTrailItem],
+    focusTarget: MissionFollowUpLaneTarget?,
+    snapshot: NativeStoreSnapshot
+) -> [MissionAgentHandoffTrailItem] {
+    guard let workItemId = missionFollowUpLaneFocusedHandoffWorkItemId(focusTarget),
+          let focusedItem = missionAgentHandoffTrailItems(snapshot: snapshot)
+            .first(where: { $0.workItemId == workItemId }) else {
+        return items
+    }
+    return [focusedItem] + items.filter { $0.workItemId != workItemId }
+}
+
+private let missionFollowUpLaneDefinitions: [(label: String, symbol: String, summary: String)] = [
+    ("Triage", "ladybug", "Cause, seam, fix"),
+    ("MR", "checkmark.seal", "Review readiness"),
+    ("Write-back", "checklist", "Jira status"),
+    ("Hardening", "puzzlepiece.extension", "Skill recovery"),
+    ("Handoff", "arrow.triangle.branch", "Next agent context")
+]
+
+private let missionFollowUpLaneLabels = Set(missionFollowUpLaneDefinitions.map { $0.label })
+
+func missionFollowUpLaneSummary(snapshot: NativeStoreSnapshot) -> [MissionFollowUpLaneSummaryItem] {
+    let workItemsById = Dictionary(uniqueKeysWithValues: snapshot.workItems.map { ($0.id, $0) })
+    var chatCounts: [String: Int] = [:]
+    var outputCounts: [String: Int] = [:]
+    var handoffCounts: [String: Int] = [:]
+    var chatTargets: [String: MissionFollowUpLaneTarget] = [:]
+    var outputTargets: [String: MissionFollowUpLaneTarget] = [:]
+    var handoffTargets: [String: MissionFollowUpLaneTarget] = [:]
+
+    for run in snapshot.runs where missionRunShouldContributeFollowUpLane(run) {
+        let workItem = run.workItemId.flatMap { workItemsById[$0] }
+        let actions = chatRunFollowUpActions(
+            run: run,
+            workItem: workItem,
+            assistantText: run.transcript
+        )
+        guard let lane = missionFollowUpLaneLabel(for: actions) else {
+            continue
+        }
+        chatCounts[lane, default: 0] += 1
+        if chatTargets[lane] == nil {
+            chatTargets[lane] = .chat(
+                runId: run.id,
+                workspaceId: run.workspaceId,
+                workItemId: run.workItemId,
+                title: missionFollowUpLaneChatTitle(run: run, workItem: workItem)
+            )
+        }
+    }
+
+    for target in artifactReviewMissionTargets(snapshot: snapshot) {
+        guard missionFollowUpLaneLabels.contains(target.followUpWorkflowLabel) else { continue }
+        outputCounts[target.followUpWorkflowLabel, default: 0] += 1
+        if outputTargets[target.followUpWorkflowLabel] == nil {
+            outputTargets[target.followUpWorkflowLabel] = .output(
+                artifactId: target.artifactId,
+                workspaceId: target.workspaceId,
+                workItemId: target.workItemId,
+                title: target.title.firstLineFallback("saved output")
+            )
+        }
+    }
+
+    for item in missionAgentHandoffTrailItems(snapshot: snapshot) {
+        let action = missionAgentHandoffFollowUpAction(item)
+        guard missionFollowUpLaneLabels.contains(action.workflowLabel) else { continue }
+        handoffCounts[action.workflowLabel, default: 0] += 1
+        if handoffTargets[action.workflowLabel] == nil {
+            handoffTargets[action.workflowLabel] = .handoff(
+                workItemId: item.workItemId,
+                workspaceId: item.workspaceId,
+                title: item.title.firstLineFallback("cross-agent handoff")
+            )
+        }
+    }
+
+    return missionFollowUpLaneDefinitions.compactMap { definition in
+        let chatCount = chatCounts[definition.label, default: 0]
+        let outputCount = outputCounts[definition.label, default: 0]
+        let handoffCount = handoffCounts[definition.label, default: 0]
+        guard chatCount + outputCount + handoffCount > 0 else { return nil }
+        return MissionFollowUpLaneSummaryItem(
+            label: definition.label,
+            symbol: definition.symbol,
+            summary: definition.summary,
+            chatCount: chatCount,
+            outputCount: outputCount,
+            handoffCount: handoffCount,
+            target: chatTargets[definition.label]
+                ?? outputTargets[definition.label]
+                ?? handoffTargets[definition.label]
+        )
+    }
+}
+
+private func missionFollowUpLaneChatTitle(run: AgentRun, workItem: WorkItem?) -> String {
+    if let workItemTitle = workItem?.title.firstLineFallback(""),
+       !workItemTitle.isEmpty {
+        return workItemTitle
+    }
+    return run.promptSnapshot.firstLineFallback("chat follow-up")
+}
+
+private func missionFollowUpLaneLabel(for actions: [RunFollowUpAction]) -> String? {
+    let laneActions = actions.filter { missionFollowUpLaneLabels.contains($0.workflowLabel) }
+    if let hardeningAction = laneActions.first(where: { $0.workflowLabel == "Hardening" }) {
+        return hardeningAction.workflowLabel
+    }
+    return laneActions.first?.workflowLabel
+}
+
+private func missionRunShouldContributeFollowUpLane(_ run: AgentRun) -> Bool {
+    switch run.state {
+    case .failed, .waitingForUser:
+        return true
+    case .queued, .starting, .running, .cancelling, .completed, .cancelled, .stale, .draft:
+        return false
+    }
+}
+
+private struct MissionFollowUpLaneStrip: View {
+    let items: [MissionFollowUpLaneSummaryItem]
+    let openItem: (MissionFollowUpLaneSummaryItem) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.primary)
+                Text("Follow-up Lanes")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.text)
+                CountBadge(text: "\(items.reduce(0) { $0 + $1.totalCount }) active")
+                Spacer(minLength: 0)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 8)], spacing: 8) {
+                ForEach(items) { item in
+                    MissionFollowUpLaneCard(
+                        item: item,
+                        open: { openItem(item) }
+                    )
+                }
+            }
+        }
+        .padding(12)
+        .background(PKTheme.panel.opacity(0.62))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.primary.opacity(0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionFollowUpLaneFocusBanner: View {
+    let item: MissionFollowUpLaneSummaryItem
+    let open: () -> Void
+    let clear: () -> Void
+
+    private var color: Color {
+        missionFollowUpLaneColor(item.label)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "scope")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(color)
+                .frame(width: 24, height: 24)
+                .background(color.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("Pinned \(item.label)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    if let target = item.target {
+                        CountBadge(text: target.actionLabel)
+                    }
+                    CountBadge(text: missionOpenFocusedLaneShortcutLabel)
+                    CountBadge(text: missionFocusLaneShortcutHint)
+                }
+                Text(item.previewDetail)
+                    .font(.caption2)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                Button(action: clear) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(PKTheme.text2)
+                        .frame(width: 26, height: 26)
+                        .background(PKTheme.text3.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Clear Mission lane focus")
+
+                Button(action: open) {
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(color)
+                        .frame(width: 26, height: 26)
+                        .background(color.opacity(0.13))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Open \(item.label) lane target")
+            }
+        }
+        .padding(10)
+        .background(PKTheme.panelAlt.opacity(0.74))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.34), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct MissionFollowUpLaneCard: View {
+    let item: MissionFollowUpLaneSummaryItem
+    let open: () -> Void
+
+    private var color: Color {
+        missionFollowUpLaneColor(item.label)
+    }
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 9) {
+                Image(systemName: item.symbol)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(color)
+                    .frame(width: 24, height: 24)
+                    .background(color.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(item.label)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(PKTheme.text)
+                            .lineLimit(1)
+                        CountBadge(value: item.totalCount)
+                    }
+                    Text(item.previewDetail)
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(item.target == nil)
+        .background(PKTheme.panelAlt.opacity(0.70))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help("\(item.target?.actionLabel ?? "Open") for \(item.label). \(item.summary). \(item.detail).")
+    }
+}
+
+private func missionFollowUpLaneColor(_ label: String) -> Color {
+    switch label {
+    case "Triage":
+        return PKTheme.err
+    case "MR":
+        return PKTheme.primary
+    case "Write-back":
+        return PKTheme.warn
+    case "Hardening":
+        return PKTheme.ok
+    case "Handoff":
+        return PKTheme.primary
+    default:
+        return PKTheme.text3
     }
 }
 
@@ -16917,6 +27299,7 @@ private struct MissionAgentLoadCard: View {
 private struct MissionRunRow: View {
     let run: AgentRun
     let snapshot: NativeStoreSnapshot
+    let isFocused: Bool
 
     private var runAgentKind: NativeAgentKind {
         agentKind(for: run, snapshot: snapshot)
@@ -16954,6 +27337,9 @@ private struct MissionRunRow: View {
                         .foregroundStyle(PKTheme.text)
                         .lineLimit(1)
                     StatusPill(text: run.state.rawValue, color: runStateColor(run.state))
+                    if isFocused {
+                        CountBadge(text: "Pinned")
+                    }
                 }
                 Text(subtitle)
                     .font(.caption)
@@ -16963,8 +27349,8 @@ private struct MissionRunRow: View {
             Spacer(minLength: 0)
         }
         .padding(9)
-        .background(PKTheme.surfaceRaised.opacity(missionRunPriority(run) == 0 ? 0.82 : 0.56))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(runStateColor(run.state).opacity(0.22), lineWidth: 1))
+        .background(PKTheme.surfaceRaised.opacity(isFocused ? 0.94 : missionRunPriority(run) == 0 ? 0.82 : 0.56))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(runStateColor(run.state).opacity(isFocused ? 0.64 : 0.22), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -17073,7 +27459,7 @@ private struct AssistantSurfacePage: View {
                 )
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 12)], spacing: 12) {
-                    ForEach(assistantLaunchTemplates) { template in
+                    ForEach(assistantLaunchTemplatesForContext(assistantLaunchTemplates, recommendation: assistantRecommendation)) { template in
                         Button {
                             launch(template)
                         } label: {
@@ -17170,7 +27556,8 @@ private struct AgentStudioPage: View {
                             AgentStudioProfileCard(
                                 profile: profile,
                                 selected: selectedProfile?.id == profile.id,
-                                capability: capability(for: profile)
+                                capability: capability(for: profile),
+                                bestFor: enterpriseAgentBestForSummary(profile: profile, snapshot: snapshot)
                             ) {
                                 selectedAgentKind = profile.kind
                             }
@@ -17242,6 +27629,10 @@ private struct AgentStudioPage: View {
 
     private func testSelectedAgent() {
         let kind = selectedProfile?.kind ?? selectedAgentKind
+        if model.stageAgentSmokePrerequisite(kind: kind, workspaceId: selectedWorkspaceId) {
+            navigate(.terminal)
+            return
+        }
         Task {
             if let runId = await model.startAgentSmokeTest(kind: kind, workspaceId: selectedWorkspaceId),
                let run = model.snapshot.runs.first(where: { $0.id == runId }) {
@@ -17268,6 +27659,7 @@ private struct AgentStudioProfileCard: View {
     let profile: AgentProfile
     let selected: Bool
     let capability: Capability?
+    let bestFor: String
     let action: () -> Void
 
     var body: some View {
@@ -17285,10 +27677,13 @@ private struct AgentStudioProfileCard: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(PKTheme.text)
                         .lineLimit(1)
-                    Text(profile.executableName)
-                        .font(.caption)
-                        .foregroundStyle(PKTheme.text3)
-                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(profile.executableName)
+                        Text(bestFor)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
                 }
 
                 Spacer()
@@ -17407,12 +27802,28 @@ private struct EnterpriseAlignmentPanel: View {
         Array(parityRows.prefix(6))
     }
 
+    private var agentFitCards: [EnterpriseAgentFitCardModel] {
+        enterpriseAgentFitCards(parityRows: parityRows)
+    }
+
     var body: some View {
         AgentStudioWindow(title: "Enterprise Alignment", subtitle: "Codex, Claude, and Gemini parity for the native client.") {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top, spacing: 10) {
                     ForEach(readinessRows) { row in
                         EnterpriseReadinessTile(row: row)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Agent Fit")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(agentFitCards) { card in
+                            EnterpriseAgentFitCardView(card: card)
+                        }
                     }
                 }
 
@@ -17438,6 +27849,162 @@ private struct EnterpriseAlignmentPanel: View {
                 }
             }
         }
+    }
+}
+
+struct EnterpriseAgentFitCardModel: Identifiable, Hashable {
+    var id: NativeAgentKind { agentKind }
+    let agentKind: NativeAgentKind
+    let mode: AgentEnterpriseCapabilityMode
+    let coverageLabel: String
+    let bestFor: [String]
+    let gapLabel: String?
+    let summary: String
+    let nextAction: String
+}
+
+func enterpriseAgentFitCards(parityRows: [AgentEnterpriseCapabilityRow]) -> [EnterpriseAgentFitCardModel] {
+    AgentEnterpriseAlignment.focusAgents.map { agentKind in
+        let cells: [(key: AgentEnterpriseCapabilityKey, cell: AgentEnterpriseCapabilityCell)] = parityRows.compactMap { row in
+            guard let cell = row.cells.first(where: { $0.agentKind == agentKind }) else { return nil }
+            return (row.key, cell)
+        }
+        let readyCells = cells.filter { $0.cell.mode.isReady }
+        let sortedReadyCells = readyCells.sorted { lhs, rhs in
+            let lhsMode = enterpriseAgentFitModePriority(lhs.cell.mode)
+            let rhsMode = enterpriseAgentFitModePriority(rhs.cell.mode)
+            if lhsMode != rhsMode { return lhsMode < rhsMode }
+            return enterpriseAgentFitCapabilityPriority(lhs.key) < enterpriseAgentFitCapabilityPriority(rhs.key)
+        }
+        let nativeCount = readyCells.filter { $0.cell.mode == .native }.count
+        let portableCount = readyCells.filter { $0.cell.mode == .portable }.count
+        let mode: AgentEnterpriseCapabilityMode
+        if nativeCount > 0 {
+            mode = .native
+        } else if portableCount > 0 {
+            mode = .portable
+        } else {
+            mode = cells.first?.cell.mode ?? .missing
+        }
+        let bestFor = sortedReadyCells
+            .prefix(3)
+            .map { enterpriseAgentFitWorkLabel($0.key) }
+        let unsupportedGap = cells.first { $0.cell.mode == .unsupported }?.key
+        let firstGap = cells.first { !$0.cell.mode.isReady }
+        let nextAction = firstGap?.cell.nextAction
+            ?? sortedReadyCells.first?.cell.nextAction
+            ?? "Detect or configure \(agentKind.enterpriseLabel) before launch."
+        return EnterpriseAgentFitCardModel(
+            agentKind: agentKind,
+            mode: mode,
+            coverageLabel: "\(readyCells.count)/\(max(cells.count, 1))",
+            bestFor: bestFor.isEmpty ? ["Detect and login"] : Array(bestFor),
+            gapLabel: unsupportedGap.map { "Gap: \($0.title)" },
+            summary: "\(nativeCount) native · \(portableCount) portable",
+            nextAction: nextAction
+        )
+    }
+}
+
+private func enterpriseAgentFitModePriority(_ mode: AgentEnterpriseCapabilityMode) -> Int {
+    switch mode {
+    case .native: return 0
+    case .portable: return 1
+    case .unsupported: return 2
+    case .missing: return 3
+    case .disabled: return 4
+    }
+}
+
+private func enterpriseAgentFitCapabilityPriority(_ key: AgentEnterpriseCapabilityKey) -> Int {
+    switch key {
+    case .issueWorkflow: return 0
+    case .planReview: return 1
+    case .approvalGate: return 2
+    case .forkWorktree: return 3
+    case .mcpTools: return 4
+    case .artifacts: return 5
+    case .activeSteering: return 6
+    case .resume: return 7
+    case .goalContinuity: return 8
+    case .multimodalArtifacts: return 9
+    case .humanLoop: return 10
+    }
+}
+
+private func enterpriseAgentFitWorkLabel(_ key: AgentEnterpriseCapabilityKey) -> String {
+    switch key {
+    case .issueWorkflow: return "Jira / issue updates"
+    case .planReview: return "Plan and review"
+    case .goalContinuity: return "Durable goals"
+    case .humanLoop: return "Human loop"
+    case .approvalGate: return "Approval gates"
+    case .artifacts: return "Artifact capture"
+    case .resume: return "Resume work"
+    case .forkWorktree: return "Forked follow-up"
+    case .activeSteering: return "Active steering"
+    case .mcpTools: return "MCP / tool use"
+    case .multimodalArtifacts: return "Media artifacts"
+    }
+}
+
+private struct EnterpriseAgentFitCardView: View {
+    let card: EnterpriseAgentFitCardModel
+
+    private var tone: Color {
+        enterpriseModeColor(card.mode)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: agentSymbol(card.agentKind))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 28, height: 28)
+                    .background(agentTint(card.agentKind))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(card.agentKind.enterpriseLabel)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    Text(card.summary)
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                StatusPill(text: card.coverageLabel, color: tone)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(card.bestFor, id: \.self) { item in
+                    HStack(spacing: 6) {
+                        Dot(color: tone)
+                        Text(item)
+                            .font(.caption)
+                            .foregroundStyle(PKTheme.text2)
+                            .lineLimit(1)
+                    }
+                }
+                if let gapLabel = card.gapLabel {
+                    HStack(spacing: 6) {
+                        Dot(color: PKTheme.err)
+                        Text(gapLabel)
+                            .font(.caption)
+                            .foregroundStyle(PKTheme.err)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+        .background(PKTheme.inset.opacity(0.58))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(tone.opacity(0.30), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help(card.nextAction)
     }
 }
 
@@ -17580,6 +28147,8 @@ private struct SystemSurfacePage: View {
 
     let route: NativeRoute
     let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkspaceId: EntityID?
+    @ObservedObject var model: NativeAppModel
     let statusLine: String
     let restartBlocked: Bool
     let restart: () -> Void
@@ -17617,6 +28186,18 @@ private struct SystemSurfacePage: View {
                     }
                 case .settings:
                     AppearanceSettingsCard(selection: themePreference)
+                    WorkspaceWorkflowSettingsCard(
+                        snapshot: snapshot,
+                        selectedWorkspaceId: $selectedWorkspaceId,
+                        save: { workspaceId, config in
+                            Task {
+                                await model.updateWorkspaceWorkflowConfig(
+                                    workspaceId: workspaceId,
+                                    config: config
+                                )
+                            }
+                        }
+                    )
                     RestartSettingsCard(
                         statusLine: statusLine,
                         blocked: restartBlocked,
@@ -17698,6 +28279,173 @@ private struct AppearanceSettingsCard: View {
         .background(PKTheme.panel.opacity(0.7))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct WorkspaceWorkflowSettingsCard: View {
+    let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkspaceId: EntityID?
+    let save: (EntityID, WorkspaceWorkflowConfig) -> Void
+
+    @State private var branchNamePattern = WorkspaceWorkflowConfig.defaultBranchNamePattern
+    @State private var baseBranchName = ""
+    @State private var codingPromptTemplate = WorkspaceWorkflowConfig.defaultCodingPromptTemplate
+    @State private var reviewPromptTemplate = WorkspaceWorkflowConfig.defaultReviewPromptTemplate
+
+    private var selectedWorkspace: Workspace? {
+        if let selectedWorkspaceId,
+           let workspace = snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) {
+            return workspace
+        }
+        return snapshot.workspaces.first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 34, height: 34)
+                    .background(PKTheme.primary.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Workflow Rules")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(selectedWorkspace?.name ?? "No workspace")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+                Spacer()
+                StatusPill(text: "Workspace", color: PKTheme.primary)
+            }
+
+            if snapshot.workspaces.isEmpty {
+                EmptyMiniState(title: "No workspaces", subtitle: "Add a project before configuring workflow rules.")
+            } else {
+                ProjectPickerChip(
+                    snapshot: snapshot,
+                    selectedWorkspaceId: $selectedWorkspaceId,
+                    accent: PKTheme.primary,
+                    compact: true
+                )
+
+                HStack(spacing: 8) {
+                    WorkflowSettingsTextField(
+                        title: "Branch pattern",
+                        placeholder: WorkspaceWorkflowConfig.defaultBranchNamePattern,
+                        text: $branchNamePattern
+                    )
+                    WorkflowSettingsTextField(
+                        title: "Base branch",
+                        placeholder: "current",
+                        text: $baseBranchName
+                    )
+                }
+
+                WorkflowSettingsPromptEditor(
+                    title: "Coding prompt",
+                    text: $codingPromptTemplate
+                )
+                WorkflowSettingsPromptEditor(
+                    title: "Review prompt",
+                    text: $reviewPromptTemplate
+                )
+
+                HStack(spacing: 8) {
+                    SecondaryButton(title: "Restore defaults", systemImage: "arrow.counterclockwise") {
+                        branchNamePattern = WorkspaceWorkflowConfig.defaultBranchNamePattern
+                        baseBranchName = ""
+                        codingPromptTemplate = WorkspaceWorkflowConfig.defaultCodingPromptTemplate
+                        reviewPromptTemplate = WorkspaceWorkflowConfig.defaultReviewPromptTemplate
+                    }
+                    PrimaryButton(title: "Save rules", systemImage: "checkmark") {
+                        saveCurrentConfig()
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(PKTheme.panel.opacity(0.7))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear(perform: loadSelectedWorkspaceConfig)
+        .onChange(of: selectedWorkspaceId) { _, _ in
+            loadSelectedWorkspaceConfig()
+        }
+    }
+
+    private func loadSelectedWorkspaceConfig() {
+        guard let workspace = selectedWorkspace else {
+            branchNamePattern = WorkspaceWorkflowConfig.defaultBranchNamePattern
+            baseBranchName = ""
+            codingPromptTemplate = WorkspaceWorkflowConfig.defaultCodingPromptTemplate
+            reviewPromptTemplate = WorkspaceWorkflowConfig.defaultReviewPromptTemplate
+            return
+        }
+        let config = workspace.workflowConfig ?? WorkspaceWorkflowConfig()
+        branchNamePattern = taskStageNonEmpty(config.branchNamePattern) ?? WorkspaceWorkflowConfig.defaultBranchNamePattern
+        baseBranchName = config.baseBranchName?.gitTrimmed ?? ""
+        codingPromptTemplate = taskStageNonEmpty(config.codingPromptTemplate) ?? WorkspaceWorkflowConfig.defaultCodingPromptTemplate
+        reviewPromptTemplate = taskStageNonEmpty(config.reviewPromptTemplate) ?? WorkspaceWorkflowConfig.defaultReviewPromptTemplate
+    }
+
+    private func saveCurrentConfig() {
+        guard let workspace = selectedWorkspace else { return }
+        let config = WorkspaceWorkflowConfig(
+            branchNamePattern: taskStageNonEmpty(branchNamePattern) ?? WorkspaceWorkflowConfig.defaultBranchNamePattern,
+            baseBranchName: taskStageNonEmpty(baseBranchName),
+            codingPromptTemplate: taskStageNonEmpty(codingPromptTemplate) ?? WorkspaceWorkflowConfig.defaultCodingPromptTemplate,
+            reviewPromptTemplate: taskStageNonEmpty(reviewPromptTemplate) ?? WorkspaceWorkflowConfig.defaultReviewPromptTemplate
+        )
+        save(workspace.id, config)
+    }
+}
+
+private struct WorkflowSettingsTextField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .heavy))
+                .foregroundStyle(PKTheme.text4)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(PKTheme.text)
+                .padding(.horizontal, 9)
+                .frame(height: 32)
+                .background(PKTheme.control.opacity(0.62))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct WorkflowSettingsPromptEditor: View {
+    let title: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .heavy))
+                .foregroundStyle(PKTheme.text4)
+            TextEditor(text: $text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(PKTheme.text2)
+                .frame(height: 92)
+                .scrollContentBackground(.hidden)
+                .background(PKTheme.inset.opacity(0.54))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
     }
 }
 
@@ -18075,6 +28823,12 @@ private struct WorkflowCard: View {
     let effort: String
     let actionTitle: String
     let action: () -> Void
+    var secondaryActionTitle: String? = nil
+    var secondarySystemImage: String = "link"
+    var secondaryAction: (() -> Void)? = nil
+    var tertiaryActionTitle: String? = nil
+    var tertiarySystemImage: String = "bell"
+    var tertiaryAction: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -18101,16 +28855,46 @@ private struct WorkflowCard: View {
                 MetricBox(label: "OUTPUTS", value: "\(outputs)")
                 MetricBox(label: "EFFORT", value: effort)
             }
-            Button(action: action) {
-                HStack {
-                    Spacer()
-                    Text(actionTitle)
-                    Image(systemName: "arrow.right")
+            HStack(spacing: 8) {
+                if let tertiaryActionTitle,
+                   let tertiaryAction {
+                    Button(action: tertiaryAction) {
+                        Image(systemName: tertiarySystemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text2)
+                            .frame(width: 34, height: 30)
+                            .background(PKTheme.control.opacity(0.74))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .help(tertiaryActionTitle)
                 }
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(PKTheme.primary)
+                if let secondaryActionTitle,
+                   let secondaryAction {
+                    Button(action: secondaryAction) {
+                        Image(systemName: secondarySystemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text2)
+                            .frame(width: 34, height: 30)
+                            .background(PKTheme.control.opacity(0.74))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .help(secondaryActionTitle)
+                }
+                Button(action: action) {
+                    HStack {
+                        Spacer()
+                        Text(actionTitle)
+                        Image(systemName: "arrow.right")
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.primary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(16)
         .background(PKTheme.panel.opacity(0.72))
@@ -18150,6 +28934,60 @@ private struct WorkflowEmptyState: View {
     }
 }
 
+private extension NativeNotificationReadiness {
+    var requiresWorkflowAttention: Bool {
+        !canSchedule
+    }
+
+    var workflowAttentionSymbol: String {
+        switch self {
+        case .denied:
+            "bell.slash"
+        case .notDetermined:
+            "bell.badge"
+        case .unknown:
+            "questionmark.circle"
+        case .authorized, .provisional, .ephemeral:
+            "bell"
+        }
+    }
+}
+
+private struct NotificationReadinessStrip: View {
+    let readiness: NativeNotificationReadiness
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: readiness.workflowAttentionSymbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PKTheme.warn)
+                .frame(width: 30, height: 30)
+                .background(PKTheme.warn.opacity(0.13))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(readiness.badgeText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(1)
+                Text(readiness.detail)
+                    .font(.caption)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PKTheme.warn.opacity(0.07))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.warn.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help(readiness.detail)
+    }
+}
+
 private struct AssistantTemplateCard: View {
     let template: AssistantLaunchTemplate
     let currentPermissionMode: PermissionMode
@@ -18170,8 +29008,8 @@ private struct AssistantTemplateCard: View {
                     .background(PKTheme.primary.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 Spacer()
-                if isRecommended {
-                    StatusPill(text: "Suggested", color: PKTheme.ok)
+                if let recommendationReason {
+                    StatusPill(text: "Best: \(recommendationReason)", color: PKTheme.ok)
                 }
                 StatusPill(text: template.badge, color: PKTheme.primary)
             }
@@ -18207,6 +29045,10 @@ private struct AssistantContextPackPreview: View {
         [GridItem(.adaptive(minimum: 36, maximum: 48), spacing: 6)]
     }
 
+    private var visibleHighlights: [String] {
+        assistantContextPackVisibleHighlights(summary: summary)
+    }
+
     private var helpText: String {
         var parts = [
             "Outputs: \(summary.outputCount)",
@@ -18215,6 +29057,18 @@ private struct AssistantContextPackPreview: View {
             "Validation evidence: \(summary.validationEvidenceCount)",
             "Decision signals: \(summary.decisionSignalCount)",
             "Actionable notes: \(summary.actionableNoteCount)",
+            "Reproduction notes: \(summary.reproductionNoteCount)",
+            "Diagnosis notes: \(summary.diagnosisNoteCount)",
+            "Review findings: \(summary.reviewFindingCount)",
+            "Handoff drafts: \(summary.handoffDraftCount)",
+            "Branch decisions: \(summary.branchDecisionCount)",
+            "MR/PR refs: \(summary.reviewRefCount)",
+            "Jira refs: \(summary.jiraRefCount)",
+            "Jira write-back: \(summary.jiraWriteBackSignalCount)",
+            "Code refs: \(summary.codeRefCount)",
+            "Skill refs: \(summary.skillRefCount)",
+            "Skill recovery: \(summary.skillRecoveryCount)",
+            "Failure signals: \(summary.failureSignalCount)",
             "Knowledge cards: \(summary.knowledgeCardCount)",
             "Recent runs: \(summary.recentRunCount)"
         ]
@@ -18230,23 +29084,116 @@ private struct AssistantContextPackPreview: View {
         if !summary.actionableNotes.isEmpty {
             parts.append(summary.actionableNotes.joined(separator: "\n"))
         }
+        if !summary.reproductionNotes.isEmpty {
+            parts.append(summary.reproductionNotes.joined(separator: "\n"))
+        }
+        if !summary.diagnosisNotes.isEmpty {
+            parts.append(summary.diagnosisNotes.joined(separator: "\n"))
+        }
+        if !summary.reviewFindings.isEmpty {
+            parts.append(summary.reviewFindings.joined(separator: "\n"))
+        }
+        if !summary.handoffDrafts.isEmpty {
+            parts.append(summary.handoffDrafts.joined(separator: "\n"))
+        }
+        if !summary.branchDecisions.isEmpty {
+            parts.append(summary.branchDecisions.joined(separator: "\n"))
+        }
+        if !summary.reviewRefs.isEmpty {
+            parts.append(summary.reviewRefs.joined(separator: "\n"))
+        }
+        if !summary.jiraRefs.isEmpty {
+            parts.append(summary.jiraRefs.joined(separator: "\n"))
+        }
+        if !summary.jiraWriteBackSignals.isEmpty {
+            parts.append(summary.jiraWriteBackSignals.joined(separator: "\n"))
+        }
+        if !summary.codeRefs.isEmpty {
+            parts.append(summary.codeRefs.joined(separator: "\n"))
+        }
+        if !summary.skillRefs.isEmpty {
+            parts.append(summary.skillRefs.joined(separator: "\n"))
+        }
+        if !summary.skillRecoveries.isEmpty {
+            parts.append(summary.skillRecoveries.joined(separator: "\n"))
+        }
+        if !summary.failureSignals.isEmpty {
+            parts.append(summary.failureSignals.joined(separator: "\n"))
+        }
         return parts.joined(separator: "\n")
     }
 
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
-            AssistantContextPackChip(symbol: "shippingbox", value: summary.outputCount, title: "Outputs")
-            AssistantContextPackChip(symbol: "link", value: summary.artifactRefCount, title: "Artifact refs")
-            AssistantContextPackChip(symbol: "terminal", value: summary.pendingCommandCount, title: "Pending commands")
-            AssistantContextPackChip(symbol: "checkmark.seal", value: summary.validationEvidenceCount, title: "Validation evidence")
-            AssistantContextPackChip(symbol: "exclamationmark.triangle", value: summary.decisionSignalCount, title: "Decision signals")
-            AssistantContextPackChip(symbol: "checklist", value: summary.actionableNoteCount, title: "Actionable notes")
-            AssistantContextPackChip(symbol: "rectangle.stack", value: summary.knowledgeCardCount, title: "Knowledge cards")
-            AssistantContextPackChip(symbol: "text.bubble", value: summary.recentRunCount, title: "Recent runs")
+        VStack(alignment: .leading, spacing: 7) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                AssistantContextPackChip(symbol: "shippingbox", value: summary.outputCount, title: "Outputs")
+                AssistantContextPackChip(symbol: "link", value: summary.artifactRefCount, title: "Artifact refs")
+                AssistantContextPackChip(symbol: "terminal", value: summary.pendingCommandCount, title: "Pending commands")
+                AssistantContextPackChip(symbol: "checkmark.seal", value: summary.validationEvidenceCount, title: "Validation evidence")
+                AssistantContextPackChip(symbol: "exclamationmark.triangle", value: summary.decisionSignalCount, title: "Decision signals")
+                AssistantContextPackChip(symbol: "checklist", value: summary.actionableNoteCount, title: "Actionable notes")
+                AssistantContextPackChip(symbol: "list.bullet.clipboard", value: summary.reproductionNoteCount, title: "Reproduction notes")
+                AssistantContextPackChip(symbol: "stethoscope", value: summary.diagnosisNoteCount, title: "Diagnosis notes")
+                AssistantContextPackChip(symbol: "text.badge.checkmark", value: summary.reviewFindingCount, title: "Review findings")
+                AssistantContextPackChip(symbol: "doc.text", value: summary.handoffDraftCount, title: "Handoff drafts")
+                AssistantContextPackChip(symbol: "arrow.branch", value: summary.branchDecisionCount, title: "Branch decisions")
+                AssistantContextPackChip(symbol: "arrow.triangle.pull", value: summary.reviewRefCount, title: "MR/PR refs")
+                AssistantContextPackChip(symbol: "number", value: summary.jiraRefCount, title: "Jira refs")
+                AssistantContextPackChip(symbol: "paperplane", value: summary.jiraWriteBackSignalCount, title: "Jira write-back")
+                AssistantContextPackChip(symbol: "chevron.left.forwardslash.chevron.right", value: summary.codeRefCount, title: "Code refs")
+                AssistantContextPackChip(symbol: "puzzlepiece.extension", value: summary.skillRefCount, title: "Skill refs")
+                AssistantContextPackChip(symbol: "wrench.and.screwdriver", value: summary.skillRecoveryCount, title: "Skill recovery")
+                AssistantContextPackChip(symbol: "xmark.octagon", value: summary.failureSignalCount, title: "Failure signals")
+                AssistantContextPackChip(symbol: "rectangle.stack", value: summary.knowledgeCardCount, title: "Knowledge cards")
+                AssistantContextPackChip(symbol: "text.bubble", value: summary.recentRunCount, title: "Recent runs")
+            }
+
+            if !visibleHighlights.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(visibleHighlights.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .help(helpText)
         .accessibilityLabel(summary.hasContextPack ? "Assistant context attached" : "No assistant context attached")
     }
+}
+
+func assistantContextPackVisibleHighlights(
+    summary: AssistantLaunchContextSummary,
+    limit: Int = 3
+) -> [String] {
+    guard limit > 0 else { return [] }
+    let candidates = [
+        assistantContextPackHighlight("Skill recovery", summary.skillRecoveries),
+        assistantContextPackHighlight("Review", summary.reviewFindings),
+        assistantContextPackHighlight("Jira write-back", summary.jiraWriteBackSignals),
+        assistantContextPackHighlight("Failure", summary.failureSignals),
+        assistantContextPackHighlight("Diagnosis", summary.diagnosisNotes),
+        assistantContextPackHighlight("Reproduce", summary.reproductionNotes),
+        assistantContextPackHighlight("Skill", summary.skillRefs),
+        assistantContextPackHighlight("Pending", summary.pendingCommands),
+        assistantContextPackHighlight("Validation", summary.validationEvidence),
+        assistantContextPackHighlight("Decision", summary.decisionSignals),
+        assistantContextPackHighlight("Action", summary.actionableNotes),
+        assistantContextPackHighlight("Handoff", summary.handoffDrafts),
+        assistantContextPackHighlight("MR/PR", summary.reviewRefs),
+        assistantContextPackHighlight("Jira", summary.jiraRefs),
+        assistantContextPackHighlight("Code", summary.codeRefs),
+        assistantContextPackHighlight("Native link", summary.nativeLinks)
+    ].compactMap { $0 }
+    return Array(candidates.prefix(limit))
+}
+
+private func assistantContextPackHighlight(_ label: String, _ values: [String]) -> String? {
+    guard let value = values.first?.gitTrimmed, !value.isEmpty else { return nil }
+    return "\(label): \(value)"
 }
 
 private struct AssistantContextPackChip: View {
@@ -18588,6 +29535,7 @@ private func assistantLaunchPrompt(_ prompt: String, templateId: String) -> Stri
     [
         runFollowUpNonEmpty(prompt),
         runFollowUpNonEmpty(assistantLaunchOutputContract(for: templateId)),
+        runFollowUpNonEmpty(runFollowUpGeneratedUIOutputContract()),
         runFollowUpNonEmpty(assistantLaunchHandoffContract(for: templateId))
     ]
         .compactMap { $0 }
@@ -18618,7 +29566,10 @@ private func assistantLaunchOutputContract(for templateId: String) -> String {
         - Keep non-blocking observations separate from release blockers.
         """
     case "bug-analysis", "log-analysis", "skill-hardening", "mr-review", "validation", "jira-update", "capture-evidence":
-        return runFollowUpOutputContract(for: templateId)
+        return runFollowUpOutputContract(
+            for: templateId,
+            generatedUIRole: runFollowUpGeneratedUIRole(for: templateId)
+        )
     case "jira-execution":
         return """
         Output contract:
@@ -18834,14 +29785,22 @@ func assistantLaunchTemplatesForContext(
     _ templates: [AssistantLaunchTemplate],
     recommendation: AssistantLaunchRecommendation?
 ) -> [AssistantLaunchTemplate] {
-    guard let recommendation,
-          let index = templates.firstIndex(where: { $0.id == recommendation.templateId }) else {
+    guard let recommendedTemplate = assistantLaunchRecommendedTemplate(in: templates, recommendation: recommendation),
+          let index = templates.firstIndex(of: recommendedTemplate) else {
         return templates
     }
     var ordered = templates
-    let recommended = ordered.remove(at: index)
-    ordered.insert(recommended, at: 0)
+    let movedTemplate = ordered.remove(at: index)
+    ordered.insert(movedTemplate, at: 0)
     return ordered
+}
+
+func assistantLaunchRecommendedTemplate(
+    in templates: [AssistantLaunchTemplate],
+    recommendation: AssistantLaunchRecommendation?
+) -> AssistantLaunchTemplate? {
+    guard let recommendation else { return nil }
+    return templates.first { $0.id == recommendation.templateId }
 }
 
 func assistantLaunchRecommendation(
@@ -18849,57 +29808,178 @@ func assistantLaunchRecommendation(
     workItem: WorkItem?
 ) -> AssistantLaunchRecommendation? {
     let signalText = assistantRecommendationSignalText(summary)
+    let hasJiraContext = workItem?.sourceType == .jira || workItem?.jira != nil || summary.jiraRefCount > 0
+    let hasActionableJiraWriteBackSignal = assistantJiraWriteBackSignalsNeedAction(summary.jiraWriteBackSignals)
     if assistantSignalContainsSkillFailure(signalText) {
         return AssistantLaunchRecommendation(templateId: "skill-hardening", reason: "Skill signal")
+    }
+    if summary.skillRecoveryCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "skill-hardening", reason: "Skill recovery")
+    }
+    if summary.skillRefCount > 0, assistantSignalContainsSkillContext(signalText) {
+        return AssistantLaunchRecommendation(templateId: "skill-hardening", reason: "Skill context")
     }
     if assistantSignalContainsLogSignal(signalText) {
         return AssistantLaunchRecommendation(templateId: "log-analysis", reason: "Log lookup")
     }
+    if summary.failureSignalCount > 0, !assistantFailureSignalsAreOnlyJiraWriteBack(summary.failureSignals) {
+        return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Failed output")
+    }
+    if summary.diagnosisNoteCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Diagnosis")
+    }
+    if summary.reproductionNoteCount > 0, assistantSignalContainsBugAnalysisSignal(signalText) {
+        return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Reproduction")
+    }
+    if assistantReviewFindingsContainBlockingSeverity(summary.reviewFindings) {
+        return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Review finding")
+    }
+    if assistantReviewFindingsAreClean(summary.reviewFindings) {
+        if summary.pendingCommandCount > 0 {
+            return AssistantLaunchRecommendation(templateId: "validation", reason: "Pending check")
+        }
+        if hasJiraContext,
+           summary.validationEvidenceCount > 0 || summary.decisionSignalCount > 0 || summary.actionableNoteCount > 0 || hasActionableJiraWriteBackSignal {
+            return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Jira update")
+        }
+    } else if summary.reviewFindingCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "mr-review", reason: "Review findings")
+    }
+    if summary.branchDecisionCount > 0, assistantSignalContainsBranchBlocker(signalText) {
+        return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Branch decision")
+    }
+    if summary.handoffDraftCount > 0, assistantSignalContainsJiraDraft(signalText) {
+        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Handoff draft")
+    }
+    if summary.handoffDraftCount > 0, assistantSignalContainsReviewDraft(signalText) {
+        return AssistantLaunchRecommendation(templateId: "mr-review", reason: "Handoff draft")
+    }
+    if summary.handoffDraftCount > 0, workItem?.sourceType == .jira || workItem?.jira != nil || summary.jiraRefCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Handoff draft")
+    }
+    if summary.branchDecisionCount > 0, workItem?.sourceType == .jira || workItem?.jira != nil || summary.jiraRefCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Branch decision")
+    }
+    if summary.branchDecisionCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "mr-review", reason: "Branch decision")
+    }
+    if hasActionableJiraWriteBackSignal {
+        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Jira write-back")
+    }
     if summary.pendingCommandCount > 0 {
         return AssistantLaunchRecommendation(templateId: "validation", reason: "Pending check")
+    }
+    if assistantSignalContainsValidationGap(signalText) {
+        return AssistantLaunchRecommendation(templateId: "validation", reason: "Validation gap")
     }
     if assistantSignalContainsBlockingSignal(signalText) {
         return AssistantLaunchRecommendation(templateId: "bug-analysis", reason: "Blocked output")
     }
+    if summary.reviewRefCount > 0 || assistantSignalContainsReviewSignal(signalText) {
+        return AssistantLaunchRecommendation(templateId: "mr-review", reason: "MR/PR context")
+    }
+    if workItem?.sourceType == .jira || workItem?.jira != nil || summary.jiraRefCount > 0 {
+        if summary.validationEvidenceCount > 0 || summary.decisionSignalCount > 0 || summary.actionableNoteCount > 0 {
+            return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Jira update")
+        }
+        if summary.jiraRefCount > 0 {
+            return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Jira context")
+        }
+        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Selected Jira")
+    }
+    if summary.codeRefCount > 0 {
+        return AssistantLaunchRecommendation(templateId: "mr-review", reason: "Code context")
+    }
     if summary.validationEvidenceCount > 0 || summary.decisionSignalCount > 0 || summary.actionableNoteCount > 0 {
         return AssistantLaunchRecommendation(templateId: "mr-review", reason: "Review-ready context")
-    }
-    if workItem?.sourceType == .jira || workItem?.jira != nil {
-        return AssistantLaunchRecommendation(templateId: "jira-execution", reason: "Selected Jira")
     }
     return nil
 }
 
 private func assistantRecommendationSignalText(_ summary: AssistantLaunchContextSummary) -> String {
-    (summary.pendingCommands + summary.validationEvidence + summary.decisionSignals + summary.actionableNotes)
+    (summary.pendingCommands + summary.validationEvidence + summary.decisionSignals + summary.actionableNotes + summary.reproductionNotes + summary.diagnosisNotes + summary.reviewFindings + summary.handoffDrafts + summary.branchDecisions + summary.reviewRefs + summary.jiraRefs + summary.jiraWriteBackSignals + summary.codeRefs + summary.skillRefs + summary.skillRecoveries + summary.failureSignals)
         .joined(separator: "\n")
         .lowercased()
 }
 
-private func assistantSignalContainsSkillFailure(_ text: String) -> Bool {
-    guard text.contains("skill")
-        || text.contains("skill.md")
-        || text.contains("iva_logtracer")
-        || text.contains("/logtrace")
-        || text.contains("/clickhouse") else {
-        return false
-    }
-    return text.contains("failed")
+private func assistantSignalContainsBugAnalysisSignal(_ text: String) -> Bool {
+    text.contains("bug")
+        || text.contains("issue")
+        || text.contains("crash")
         || text.contains("failure")
-        || text.contains("missing")
-        || text.contains("not found")
-        || text.contains("cannot")
-        || text.contains("unable")
+        || text.contains("failed")
+        || text.contains("问题")
+        || text.contains("故障")
+        || text.contains("崩溃")
+        || text.contains("失败")
+        || text.contains("异常")
+        || text.contains("无法")
+        || text.contains("不能")
+}
+
+private func assistantReviewFindingsContainBlockingSeverity(_ findings: [String]) -> Bool {
+    findings.contains { finding in
+        let lower = finding.lowercased()
+        return lower.contains("[p0]") || lower.contains("[p1]")
+    }
+}
+
+private func assistantReviewFindingsAreClean(_ findings: [String]) -> Bool {
+    !findings.isEmpty && findings.allSatisfy(runFollowUpReviewTextIsClean(_:))
+}
+
+private func assistantFailureSignalsAreOnlyJiraWriteBack(_ signals: [String]) -> Bool {
+    !signals.isEmpty && signals.allSatisfy(runFollowUpFailureSignalIsJiraWriteBack(_:))
+}
+
+private func assistantJiraWriteBackSignalsNeedAction(_ signals: [String]) -> Bool {
+    signals.contains(where: runFollowUpJiraWriteBackSignalNeedsAction(_:))
+}
+
+private func assistantSignalContainsJiraDraft(_ text: String) -> Bool {
+    text.contains("jira draft")
+        || text.contains("jira update")
+        || text.contains("jira comment")
+        || text.contains("jira 草稿")
+        || text.contains("jira 更新")
+        || text.contains("jira 评论")
+        || text.contains("工单草稿")
+        || text.contains("工单更新")
+}
+
+private func assistantSignalContainsReviewDraft(_ text: String) -> Bool {
+    text.contains("mr draft")
+        || text.contains("review draft")
+        || text.contains("mr review comment")
+        || text.contains("approval note")
+        || text.contains("mr 草稿")
+        || text.contains("mr 评审")
+        || text.contains("评审草稿")
+        || text.contains("评审意见")
+        || text.contains("审批意见")
+}
+
+private func assistantSignalContainsBranchBlocker(_ text: String) -> Bool {
+    text.contains("branch blocked")
+        || text.contains("branch needs follow-up")
+        || text.contains("needs follow-up")
+        || text.contains("blocked")
+        || text.contains("分支阻塞")
+        || text.contains("分支需要跟进")
+        || text.contains("需要跟进")
+        || text.contains("阻塞")
+}
+
+private func assistantSignalContainsSkillContext(_ text: String) -> Bool {
+    runtimeTextContainsSkillContextSignal(text)
+}
+
+private func assistantSignalContainsSkillFailure(_ text: String) -> Bool {
+    runtimeTextContainsSkillFailureSignal(text)
 }
 
 private func assistantSignalContainsLogSignal(_ text: String) -> Bool {
-    text.contains("/logtrace")
-        || text.contains("/clickhouse")
-        || text.contains("conversationid")
-        || text.contains("sessionid")
-        || text.contains("traceid")
-        || text.contains("requestid")
-        || text.contains("taskid")
+    runtimeTextContainsLogLookupSignal(text)
 }
 
 private func assistantSignalContainsBlockingSignal(_ text: String) -> Bool {
@@ -18909,8 +29989,84 @@ private func assistantSignalContainsBlockingSignal(_ text: String) -> Bool {
         || text.contains("request changes")
         || text.contains("failed")
         || text.contains("failure")
-        || text.contains("risk:")
+        || assistantSignalContainsBlockingRisk(text)
         || text.contains("missing")
+        || text.contains("阻塞")
+        || text.contains("未准备好")
+        || text.contains("不能合并")
+        || text.contains("无法合并")
+        || text.contains("请求修改")
+        || text.contains("必须修复")
+        || text.contains("失败")
+        || text.contains("缺少")
+        || text.contains("缺失")
+        || text.contains("无法")
+}
+
+private func assistantSignalContainsValidationGap(_ text: String) -> Bool {
+    text.contains("validation gap")
+        || text.contains("verification gap")
+        || text.contains("test gap")
+        || text.contains("missing test")
+        || text.contains("missing tests")
+        || text.contains("missing validation")
+        || text.contains("smoke has not run")
+        || text.contains("smoke was not run")
+        || text.contains("smoke not run")
+        || text.contains("smoke pass has not run")
+        || text.contains("smoke pass was not run")
+        || text.contains("验证缺口")
+        || text.contains("校验缺口")
+        || text.contains("测试缺口")
+        || text.contains("缺少测试")
+        || text.contains("缺少验证")
+        || text.contains("缺失测试")
+        || text.contains("缺失验证")
+        || text.contains("未验证")
+        || text.contains("没有验证")
+        || text.contains("未跑测试")
+        || text.contains("没有跑测试")
+        || text.contains("未跑 smoke")
+        || text.contains("没跑 smoke")
+        || text.contains("smoke 未跑")
+        || text.contains("smoke 没跑")
+}
+
+private func assistantSignalContainsBlockingRisk(_ text: String) -> Bool {
+    text.contains("blocking risk")
+        || text.contains("critical risk")
+        || text.contains("high risk")
+        || text.contains("ship risk")
+        || text.contains("release risk")
+        || text.contains("risk: data loss")
+        || text.contains("risk: cannot")
+        || text.contains("risk: unable")
+        || text.contains("risk: not ready")
+        || text.contains("risk: must fix")
+        || text.contains("阻塞风险")
+        || text.contains("高风险")
+        || text.contains("发布风险")
+        || text.contains("合并风险")
+        || text.contains("数据丢失")
+}
+
+private func assistantSignalContainsReviewSignal(_ text: String) -> Bool {
+    text.contains("/-/merge_requests/")
+        || text.contains("/merge_requests/")
+        || text.contains("/pull/")
+        || text.contains("/pulls/")
+        || text.contains("merge request")
+        || text.contains("pull request")
+        || text.contains("mr:")
+        || text.contains("mr review")
+        || text.contains("review comment")
+        || text.contains("ready to merge")
+        || text.contains("合并请求")
+        || text.contains("拉取请求")
+        || text.contains("mr 评审")
+        || text.contains("评审评论")
+        || text.contains("评审意见")
+        || text.contains("准备合并")
 }
 
 func assistantTemplatePermissionMode(
@@ -18925,6 +30081,1222 @@ func workItemOutputs(for item: WorkItem?, snapshot: NativeStoreSnapshot) -> [Art
     return snapshot.artifacts
         .filter { $0.workItemId == item.id }
         .sorted { $0.createdAt > $1.createdAt }
+}
+
+enum ArtifactReviewGroupKind: String, CaseIterable, Hashable, Sendable {
+    case blocked
+    case needsFollowUp
+    case unreviewed
+    case resolved
+
+    var title: String {
+        switch self {
+        case .blocked: "Blocked"
+        case .needsFollowUp: "Needs follow-up"
+        case .unreviewed: "Ready to review"
+        case .resolved: "Resolved"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .blocked: "exclamationmark.octagon"
+        case .needsFollowUp: "arrow.turn.down.right"
+        case .unreviewed: "tray.full"
+        case .resolved: "checkmark.seal"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .blocked: PKTheme.err
+        case .needsFollowUp: PKTheme.warn
+        case .unreviewed: PKTheme.primary
+        case .resolved: PKTheme.ok
+        }
+    }
+}
+
+enum ArtifactReviewOutputFilter: String, CaseIterable, Hashable, Sendable {
+    case actionRequired
+    case blocked
+    case needsFollowUp
+    case unreviewed
+    case resolved
+    case all
+
+    var title: String {
+        switch self {
+        case .actionRequired: "Action"
+        case .blocked: "Blocked"
+        case .needsFollowUp: "Follow-up"
+        case .unreviewed: "Ready"
+        case .resolved: "Done"
+        case .all: "All"
+        }
+    }
+}
+
+struct ArtifactReviewOutputGroup: Identifiable, Hashable {
+    var kind: ArtifactReviewGroupKind
+    var artifacts: [Artifact]
+
+    var id: String {
+        kind.rawValue
+    }
+}
+
+struct ArtifactReviewOutputFilterOption: Identifiable, Hashable {
+    var filter: ArtifactReviewOutputFilter
+    var count: Int
+
+    var id: String {
+        filter.rawValue
+    }
+}
+
+struct ArtifactReviewMissionSummary: Equatable, Sendable {
+    var blockedCount: Int
+    var needsFollowUpCount: Int
+    var readyToReviewCount: Int
+    var resolvedCount: Int
+    var totalCount: Int
+
+    var attentionCount: Int {
+        blockedCount + needsFollowUpCount
+    }
+
+    var subtitle: String {
+        "\(blockedCount) blocked · \(needsFollowUpCount) follow-up · \(readyToReviewCount) ready"
+    }
+}
+
+struct ArtifactReviewMissionTarget: Identifiable, Equatable, Sendable {
+    var artifactId: EntityID
+    var workspaceId: EntityID
+    var workItemId: EntityID
+    var sourceRunId: EntityID?
+    var kind: ArtifactReviewGroupKind
+    var title: String
+    var workItemTitle: String
+    var createdAt: Date
+    var followUpWorkflowLabel: String = ""
+    var followUpWorkflowSummary: String = ""
+    var followUpSymbol: String = "arrow.turn.down.right"
+
+    var id: EntityID {
+        artifactId
+    }
+}
+
+struct ArtifactReviewMissionSideChatStart: Equatable, Sendable {
+    var parentRunId: EntityID
+    var workspaceId: EntityID
+    var workItemId: EntityID?
+    var followUpLabel: String
+    var prompt: String
+    var permissionMode: PermissionMode?
+}
+
+struct GeneratedUIMissionTarget: Identifiable, Equatable {
+    var runId: EntityID
+    var workspaceId: EntityID
+    var workItemId: EntityID?
+    var actionId: String
+    var actionTitle: String
+    var actionKind: String
+    var actionDetail: String
+    var actionSymbol: String
+    var actionPrompt: String
+    var permissionMode: PermissionMode?
+    var readinessBadgeText: String?
+    var readinessDetail: String?
+    var shortcutLabel: String?
+    var keepsAttentionWhenOpened: Bool
+    var runTitle: String
+    var createdAt: Date
+    var state: RunState
+
+    var id: String {
+        "\(runId)-\(actionId)"
+    }
+
+    var stageTitle: String {
+        "\(actionTitle) - \(actionDetail)"
+    }
+
+    var missionDetail: String {
+        let source = "\(runTitle) · \(createdAt.formatted(date: .abbreviated, time: .shortened))"
+        guard let readinessDetail, !readinessDetail.isEmpty else { return source }
+        return "\(readinessDetail) · \(source)"
+    }
+
+    var openStatusLine: String {
+        let suffix = keepsAttentionWhenOpened ? "; still pending until staged or dismissed" : ""
+        return "Opened \(actionTitle) action: \(runTitle)\(suffix)"
+    }
+}
+
+enum MissionAcknowledgedTrailKind: String, Equatable, Sendable {
+    case generatedUI
+    case outputReview
+
+    var title: String {
+        switch self {
+        case .generatedUI:
+            return "Generated UI"
+        case .outputReview:
+            return "Output review"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .generatedUI:
+            return "rectangle.stack.badge.checkmark"
+        case .outputReview:
+            return "tray.full"
+        }
+    }
+}
+
+struct MissionAcknowledgedTrailItem: Identifiable, Equatable, Sendable {
+    var id: String
+    var kind: MissionAcknowledgedTrailKind
+    var title: String
+    var detail: String
+    var createdAt: Date
+    var workspaceId: EntityID
+    var workItemId: EntityID?
+    var runId: EntityID?
+    var artifactId: EntityID?
+}
+
+struct MissionAgentHandoffTrailItem: Identifiable, Equatable, Sendable {
+    var workItemId: EntityID
+    var workspaceId: EntityID
+    var title: String
+    var detail: String
+    var agentKinds: [NativeAgentKind]
+    var runCount: Int
+    var branchCount: Int
+    var outputCount: Int
+    var updatedAt: Date
+    var latestRunId: EntityID?
+    var nextAgentKind: NativeAgentKind
+    var handoffState: MissionAgentHandoffState
+    var handoffFreshness: MissionAgentHandoffFreshness?
+    var handoffStagedAt: Date?
+    var handoffLatestEvidenceAt: Date?
+    var handoffLatestEvidenceSource: MissionAgentHandoffEvidenceSource?
+    var handoffLatestEvidenceIdentity: String?
+    var handoffLatestEvidenceRefId: EntityID?
+
+    var id: EntityID {
+        workItemId
+    }
+
+    var handoffStateLabel: String {
+        handoffState.label(for: nextAgentKind)
+    }
+
+    var handoffFreshnessLabel: String? {
+        handoffFreshness?.label
+    }
+
+    var handoffFreshnessDetail: String? {
+        missionAgentHandoffFreshnessDetail(self)
+    }
+
+    var handoffLatestEvidenceSourceLabel: String? {
+        handoffLatestEvidenceSource?.evidenceLabel
+    }
+
+    var handoffLatestEvidenceIdentityLabel: String? {
+        handoffLatestEvidenceIdentity
+    }
+
+    var handoffLatestEvidenceIdentityBadge: String? {
+        missionAgentHandoffEvidenceIdentityBadge(self)
+    }
+
+    var handoffTimelineDetail: String {
+        let base = "\(detail) · \(updatedAt.formatted(date: .abbreviated, time: .shortened))"
+        guard let handoffFreshnessDetail else { return base }
+        return "\(base) · \(handoffFreshnessDetail)"
+    }
+
+    var handoffStageTitle: String {
+        switch handoffState {
+        case .waiting:
+            return "Handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        case .staged:
+            if handoffFreshness == .stale {
+                return "Refresh stale handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+            }
+            return "Refresh handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        case .pickedUp:
+            return "Follow up with \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        }
+    }
+
+    var handoffActionLabel: String {
+        switch handoffState {
+        case .waiting:
+            return "Stage handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        case .staged:
+            if handoffFreshness == .stale {
+                return "Refresh stale handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+            }
+            return "Refresh staged handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        case .pickedUp:
+            return "Follow up with \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        }
+    }
+
+    var handoffActionSymbol: String {
+        switch handoffState {
+        case .waiting:
+            return "arrowshape.turn.up.right"
+        case .staged:
+            return "arrow.clockwise"
+        case .pickedUp:
+            return "arrowshape.turn.up.right.circle"
+        }
+    }
+}
+
+enum MissionAgentHandoffFreshness: String, Equatable, Sendable {
+    case fresh
+    case stale
+
+    var label: String {
+        switch self {
+        case .fresh:
+            return "Fresh"
+        case .stale:
+            return "Stale evidence"
+        }
+    }
+}
+
+enum MissionAgentHandoffEvidenceSource: String, Equatable, Sendable {
+    case run
+    case output
+
+    var evidenceLabel: String {
+        switch self {
+        case .run:
+            return "run evidence"
+        case .output:
+            return "output evidence"
+        }
+    }
+
+    var newEvidenceLabel: String {
+        switch self {
+        case .run:
+            return "new run"
+        case .output:
+            return "new output"
+        }
+    }
+
+    var sortRank: Int {
+        switch self {
+        case .run:
+            return 1
+        case .output:
+            return 0
+        }
+    }
+}
+
+enum MissionAgentHandoffEvidenceDestination: Equatable, Sendable {
+    case chat(runId: EntityID)
+    case outputs(artifactId: EntityID)
+    case workItem
+
+    var symbol: String {
+        switch self {
+        case .chat:
+            return "bubble.left.and.bubble.right"
+        case .outputs:
+            return "tray.full"
+        case .workItem:
+            return "target"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .chat:
+            return "Open latest handoff chat"
+        case .outputs:
+            return "Open latest handoff output"
+        case .workItem:
+            return "Open cross-agent handoff"
+        }
+    }
+}
+
+enum MissionAgentHandoffState: String, Equatable, Sendable {
+    case waiting
+    case staged
+    case pickedUp
+
+    func label(for agentKind: NativeAgentKind) -> String {
+        let agent = missionAgentHandoffAuditAgentLabel(agentKind)
+        switch self {
+        case .waiting:
+            return "Waiting \(agent)"
+        case .staged:
+            return "Staged \(agent)"
+        case .pickedUp:
+            return "Picked up \(agent)"
+        }
+    }
+}
+
+let artifactMissionReviewDismissedRefKind = "mission-review-dismissed"
+let nativeMissionOutputReviewURL = "pikiclaw://mission-control/output-review"
+
+func artifactMissionReviewDismissed(_ artifact: Artifact) -> Bool {
+    artifact.sourceRefs.contains { $0.kind == artifactMissionReviewDismissedRefKind }
+}
+
+func artifactMissionReviewDismissedRef() -> SourceRef {
+    SourceRef(
+        kind: artifactMissionReviewDismissedRefKind,
+        label: "dismissed",
+        uri: nativeMissionOutputReviewURL
+    )
+}
+
+func artifactReviewMissionTargetURL(_ target: ArtifactReviewMissionTarget) -> String {
+    "pikiclaw://artifacts/\(target.artifactId.rawValue)"
+}
+
+func generatedUIMissionRunAcknowledged(_ run: AgentRun) -> Bool {
+    run.readAt != nil
+}
+
+func missionAgentHandoffTrailItems(
+    snapshot: NativeStoreSnapshot,
+    limit: Int? = nil
+) -> [MissionAgentHandoffTrailItem] {
+    let focusKinds = Set(AgentEnterpriseAlignment.focusAgents)
+    let profilesById = Dictionary(uniqueKeysWithValues: snapshot.agentProfiles.map { ($0.id, $0) })
+    let artifactsByWorkItem = Dictionary(grouping: snapshot.artifacts.compactMap { artifact -> (EntityID, Artifact)? in
+        guard let workItemId = artifact.workItemId else { return nil }
+        return (workItemId, artifact)
+    }, by: { $0.0 })
+        .mapValues { pairs in pairs.map { $0.1 } }
+
+    let runsByWorkItem = Dictionary(grouping: snapshot.runs.compactMap { run -> (EntityID, AgentRun)? in
+        guard let workItemId = run.workItemId,
+              let profile = profilesById[run.agentProfileId],
+              focusKinds.contains(profile.kind) else {
+            return nil
+        }
+        return (workItemId, run)
+    }, by: { $0.0 })
+        .mapValues { pairs in pairs.map { $0.1 } }
+
+    let items = snapshot.workItems.compactMap { item -> MissionAgentHandoffTrailItem? in
+        let runs = runsByWorkItem[item.id] ?? []
+        let outputs = artifactsByWorkItem[item.id] ?? []
+        var agentKinds = Set(runs.compactMap { profilesById[$0.agentProfileId]?.kind }.filter { focusKinds.contains($0) })
+        for artifact in outputs {
+            guard let sourceRun = artifactSourceRun(artifact, snapshot: snapshot),
+                  let kind = profilesById[sourceRun.agentProfileId]?.kind,
+                  focusKinds.contains(kind) else {
+                continue
+            }
+            agentKinds.insert(kind)
+        }
+        guard agentKinds.count >= 2 else { return nil }
+
+        let sortedRuns = runs.sorted { lhs, rhs in
+            missionAgentHandoffRunDate(lhs) > missionAgentHandoffRunDate(rhs)
+        }
+        let updatedAt = max(
+            sortedRuns.first.map(missionAgentHandoffRunDate(_:)) ?? .distantPast,
+            outputs.map(\.createdAt).max() ?? .distantPast
+        )
+        let branchCount = runs.filter { $0.sideChatOfRunId != nil }.count
+        let orderedKinds = missionAgentHandoffOrderedKinds(Array(agentKinds))
+        let fallbackNextAgentKind = missionAgentHandoffNextAgentKind(
+            agentKinds: orderedKinds,
+            latestRun: sortedRuns.first,
+            profilesById: profilesById
+        )
+        let auditState = missionAgentHandoffAuditState(
+            workItemId: item.id,
+            fallbackNextAgentKind: fallbackNextAgentKind,
+            snapshot: snapshot,
+            profilesById: profilesById
+        )
+        let nextAgentKind = auditState.targetAgentKind
+        let detailParts = [
+            orderedKinds.map(agentShortLabel(_:)).joined(separator: " -> "),
+            workspaceName(for: item.workspaceId, snapshot: snapshot)
+        ].filter { !$0.isEmpty }
+        return MissionAgentHandoffTrailItem(
+            workItemId: item.id,
+            workspaceId: item.workspaceId,
+            title: item.title.firstLineFallback("Work item"),
+            detail: detailParts.joined(separator: " · "),
+            agentKinds: orderedKinds,
+            runCount: runs.count,
+            branchCount: branchCount,
+            outputCount: outputs.count,
+            updatedAt: updatedAt == .distantPast ? item.updatedAt : updatedAt,
+            latestRunId: sortedRuns.first?.id,
+            nextAgentKind: nextAgentKind,
+            handoffState: auditState.state,
+            handoffFreshness: auditState.freshness,
+            handoffStagedAt: auditState.stagedAt,
+            handoffLatestEvidenceAt: auditState.latestEvidenceAt,
+            handoffLatestEvidenceSource: auditState.latestEvidenceSource,
+            handoffLatestEvidenceIdentity: auditState.latestEvidenceIdentity,
+            handoffLatestEvidenceRefId: auditState.latestEvidenceRefId
+        )
+    }
+
+    let sorted = items.sorted { lhs, rhs in
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        return lhs.title < rhs.title
+    }
+    if let limit {
+        return Array(sorted.prefix(max(0, limit)))
+    }
+    return sorted
+}
+
+private func missionAgentHandoffRunDate(_ run: AgentRun) -> Date {
+    run.endedAt ?? run.startedAt ?? run.messages.last?.createdAt ?? .distantPast
+}
+
+private func missionAgentHandoffOrderedKinds(_ kinds: [NativeAgentKind]) -> [NativeAgentKind] {
+    let order = AgentEnterpriseAlignment.focusAgents
+    return kinds.sorted { lhs, rhs in
+        let lhsIndex = order.firstIndex(of: lhs) ?? Int.max
+        let rhsIndex = order.firstIndex(of: rhs) ?? Int.max
+        if lhsIndex != rhsIndex { return lhsIndex < rhsIndex }
+        return lhs.rawValue < rhs.rawValue
+    }
+}
+
+func missionAgentHandoffFollowUpAction(_ item: MissionAgentHandoffTrailItem) -> RunFollowUpAction {
+    RunFollowUpAction(
+        id: "agent-handoff",
+        title: "Handoff",
+        detail: item.handoffActionDetail,
+        symbol: item.handoffActionSymbol,
+        permissionMode: .askBeforeEdit,
+        prompt: missionAgentHandoffFollowUpPrompt(item)
+    )
+}
+
+func missionAgentHandoffLatestEvidenceDestination(_ item: MissionAgentHandoffTrailItem) -> MissionAgentHandoffEvidenceDestination {
+    switch item.handoffLatestEvidenceSource {
+    case .run:
+        if let refId = item.handoffLatestEvidenceRefId ?? item.latestRunId {
+            return .chat(runId: refId)
+        }
+    case .output:
+        if let refId = item.handoffLatestEvidenceRefId {
+            return .outputs(artifactId: refId)
+        }
+    case nil:
+        break
+    }
+
+    if let latestRunId = item.latestRunId {
+        return .chat(runId: latestRunId)
+    }
+    return .workItem
+}
+
+func missionAgentHandoffLatestEvidenceURL(_ item: MissionAgentHandoffTrailItem) -> String {
+    "pikiclaw://mission-control/latest-evidence/\(item.workItemId.rawValue)"
+}
+
+func missionAgentHandoffAuditSummary(nextAgentKind: NativeAgentKind, title: String) -> String {
+    "Staged agent handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind)) for \(title.firstLineFallback("work item"))"
+}
+
+func missionAgentHandoffAuditAgentLabel(_ kind: NativeAgentKind) -> String {
+    switch kind {
+    case .claude: return "Claude"
+    case .codex: return "Codex"
+    case .cursor: return "Cursor"
+    case .gemini: return "Gemini"
+    case .githubCopilot: return "Copilot"
+    case .hermes: return "Hermes"
+    case .customCLI: return "CLI"
+    }
+}
+
+func missionAgentHandoffFollowUpPrompt(_ item: MissionAgentHandoffTrailItem) -> String {
+    let latestRun = item.latestRunId?.rawValue ?? "none"
+    let involvedAgents = item.agentKinds.map(agentShortLabel(_:)).joined(separator: " -> ")
+    return """
+    Continue the cross-agent handoff for \(item.title).
+
+    Target next agent: \(agentShortLabel(item.nextAgentKind))
+    Handoff state: \(item.handoffStateLabel)
+    Recovery mode: \(missionAgentHandoffRecoveryModeLine(item))
+    Freshness: \(missionAgentHandoffFreshnessLine(item))
+    Staged at: \(missionAgentHandoffTimestampLine(item.handoffStagedAt))
+    Latest evidence at: \(missionAgentHandoffTimestampLine(item.handoffLatestEvidenceAt))
+    Latest evidence source: \(missionAgentHandoffLatestEvidenceSourceLine(item))
+    Latest evidence identity: \(missionAgentHandoffLatestEvidenceIdentityLine(item))
+    Latest evidence link: \(missionAgentHandoffLatestEvidenceURL(item))
+    Agents already involved: \(involvedAgents)
+    Work item id: \(item.workItemId.rawValue)
+    Latest run: \(latestRun)
+    Runs: \(item.runCount)
+    Branches: \(item.branchCount)
+    Outputs: \(item.outputCount)
+    Handoff detail: \(item.detail)
+
+    \(missionAgentHandoffRecoveryInstruction(item))
+    """
+}
+
+private extension MissionAgentHandoffTrailItem {
+    var handoffActionDetail: String {
+        switch handoffState {
+        case .waiting:
+            return "Next: \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        case .staged:
+            if handoffFreshness == .stale {
+                return "Refresh stale: \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+            }
+            return "Refresh: \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        case .pickedUp:
+            return "Follow up: \(missionAgentHandoffAuditAgentLabel(nextAgentKind))"
+        }
+    }
+}
+
+private func missionAgentHandoffFreshnessLine(_ item: MissionAgentHandoffTrailItem) -> String {
+    switch (item.handoffState, item.handoffFreshness) {
+    case (.waiting, _):
+        return "not staged yet"
+    case (.staged, .stale):
+        return "stale because newer run or output evidence arrived after staging"
+    case (.staged, .fresh), (.staged, nil):
+        return "fresh; no newer run or output evidence has arrived since staging"
+    case (.pickedUp, _):
+        return "target agent has already picked up this handoff"
+    }
+}
+
+private func missionAgentHandoffFreshnessDetail(_ item: MissionAgentHandoffTrailItem) -> String? {
+    switch (item.handoffState, item.handoffFreshness) {
+    case (.waiting, _):
+        return nil
+    case (.staged, .stale):
+        return "Staged \(missionAgentHandoffTimestampLabel(item.handoffStagedAt)) · latest \(missionAgentHandoffEvidenceSourceLabel(item))\(missionAgentHandoffEvidenceIdentityPhrase(item)) \(missionAgentHandoffTimestampLabel(item.handoffLatestEvidenceAt))"
+    case (.staged, .fresh), (.staged, nil):
+        return "Staged \(missionAgentHandoffTimestampLabel(item.handoffStagedAt)) · no newer evidence · latest \(missionAgentHandoffEvidenceSourceLabel(item))\(missionAgentHandoffEvidenceIdentityPhrase(item))"
+    case (.pickedUp, _):
+        return "Picked up after \(missionAgentHandoffTimestampLabel(item.handoffStagedAt)) · latest \(missionAgentHandoffEvidenceSourceLabel(item))\(missionAgentHandoffEvidenceIdentityPhrase(item))"
+    }
+}
+
+private func missionAgentHandoffLatestEvidenceSourceLine(_ item: MissionAgentHandoffTrailItem) -> String {
+    guard let source = item.handoffLatestEvidenceSource else { return "not available" }
+    switch (item.handoffState, item.handoffFreshness) {
+    case (.waiting, _):
+        return "not available"
+    case (.staged, .stale):
+        return "\(source.newEvidenceLabel) after staging"
+    case (.staged, .fresh), (.staged, nil):
+        return "latest \(source.rawValue) before staging"
+    case (.pickedUp, _):
+        return "latest \(source.rawValue) after staging"
+    }
+}
+
+private func missionAgentHandoffLatestEvidenceIdentityLine(_ item: MissionAgentHandoffTrailItem) -> String {
+    guard let identity = item.handoffLatestEvidenceIdentity?.gitTrimmed, !identity.isEmpty else {
+        return "not available"
+    }
+    guard let source = item.handoffLatestEvidenceSource else {
+        return identity
+    }
+    return "\(source.rawValue): \(identity)"
+}
+
+private func missionAgentHandoffEvidenceSourceLabel(_ item: MissionAgentHandoffTrailItem) -> String {
+    item.handoffLatestEvidenceSource?.evidenceLabel ?? "evidence"
+}
+
+private func missionAgentHandoffEvidenceIdentityPhrase(_ item: MissionAgentHandoffTrailItem) -> String {
+    guard let identity = item.handoffLatestEvidenceIdentity?.gitTrimmed, !identity.isEmpty else {
+        return ""
+    }
+    return " \(identity)"
+}
+
+private func missionAgentHandoffEvidenceIdentityBadge(_ item: MissionAgentHandoffTrailItem) -> String? {
+    guard let identity = item.handoffLatestEvidenceIdentity?.gitTrimmed,
+          !identity.isEmpty,
+          let source = item.handoffLatestEvidenceSource else {
+        return nil
+    }
+    let label: String
+    switch source {
+    case .run:
+        label = "Run"
+    case .output:
+        label = "Output"
+    }
+    let compact = runFollowUpCompactedEvidenceLine(identity)
+    let clipped = compact.count > 34 ? "\(compact.prefix(34))..." : compact
+    return "\(label): \(clipped)"
+}
+
+private func missionAgentHandoffTimestampLine(_ date: Date?) -> String {
+    guard let date else { return "not available" }
+    return missionAgentHandoffTimestampLabel(date)
+}
+
+private func missionAgentHandoffTimestampLabel(_ date: Date?) -> String {
+    guard let date else { return "unknown time" }
+    return date.formatted(date: .abbreviated, time: .shortened)
+}
+
+private func missionAgentHandoffRecoveryModeLine(_ item: MissionAgentHandoffTrailItem) -> String {
+    switch item.handoffState {
+    case .waiting:
+        return "stage a fresh handoff draft"
+    case .staged:
+        if item.handoffFreshness == .stale {
+            return "refresh a stale staged handoff because newer evidence arrived"
+        }
+        return "refresh a staged handoff that has not been picked up"
+    case .pickedUp:
+        return "follow up after the target agent picked up the handoff"
+    }
+}
+
+private func missionAgentHandoffRecoveryInstruction(_ item: MissionAgentHandoffTrailItem) -> String {
+    switch item.handoffState {
+    case .waiting:
+        return "Start from the latest run and saved outputs. Identify what the previous agents already established, what remains uncertain, and the smallest next action this target agent should take. Preserve validation evidence, artifact refs, blockers, and source refs. If the next step needs a file edit, commit, push, external post, credential change, or destructive command, draft the plan and wait for confirmation."
+    case .staged:
+        if item.handoffFreshness == .stale {
+            return "Refresh the stale staged handoff using the newer evidence that arrived after staging. First say what changed, whether the previous staged handoff is still valid, stale, or blocked, and which latest run or output should drive the target agent's next action. Preserve validation evidence, artifact refs, blockers, and source refs. Do not claim the handoff was picked up unless a newer target-agent run exists."
+        }
+        return "Refresh the staged handoff draft using the latest run and saved outputs. First say whether the previous staged handoff is still valid, stale, or blocked. Then return the smallest ready-to-run next action for the target agent, preserving validation evidence, artifact refs, blockers, and source refs. Do not claim the handoff was picked up unless a newer target-agent run exists."
+    case .pickedUp:
+        return "Continue after the target agent picked up the handoff. Compare the target agent's latest work with earlier Codex, Claude, and Gemini evidence, then return remaining gaps, validation status, and the next governed action. Preserve artifact refs, blockers, and source refs."
+    }
+}
+
+private func missionAgentHandoffNextAgentKind(
+    agentKinds: [NativeAgentKind],
+    latestRun: AgentRun?,
+    profilesById: [EntityID: AgentProfile]
+) -> NativeAgentKind {
+    let focusAgents = AgentEnterpriseAlignment.focusAgents
+    let used = Set(agentKinds)
+    if let missing = focusAgents.first(where: { !used.contains($0) }) {
+        return missing
+    }
+    guard let latestKind = latestRun.flatMap({ profilesById[$0.agentProfileId]?.kind }),
+          let latestIndex = focusAgents.firstIndex(of: latestKind),
+          !focusAgents.isEmpty else {
+        return .codex
+    }
+    let nextIndex = focusAgents.index(after: latestIndex)
+    return focusAgents[nextIndex == focusAgents.endIndex ? focusAgents.startIndex : nextIndex]
+}
+
+private func missionAgentHandoffAuditState(
+    workItemId: EntityID,
+    fallbackNextAgentKind: NativeAgentKind,
+    snapshot: NativeStoreSnapshot,
+    profilesById: [EntityID: AgentProfile]
+) -> (state: MissionAgentHandoffState, targetAgentKind: NativeAgentKind, freshness: MissionAgentHandoffFreshness?, stagedAt: Date?, latestEvidenceAt: Date?, latestEvidenceSource: MissionAgentHandoffEvidenceSource?, latestEvidenceIdentity: String?, latestEvidenceRefId: EntityID?) {
+    guard let event = snapshot.auditEvents
+        .filter({ event in
+            event.workItemId == workItemId
+                && missionAgentHandoffAuditTargetKind(from: event.summary) != nil
+        })
+        .max(by: { $0.createdAt < $1.createdAt }) else {
+        return (.waiting, fallbackNextAgentKind, nil, nil, nil, nil, nil, nil)
+    }
+
+    let targetAgentKind = missionAgentHandoffAuditTargetKind(from: event.summary) ?? fallbackNextAgentKind
+    let workItemRuns = snapshot.runs.filter { $0.workItemId == workItemId }
+    let latestEvidence = missionAgentHandoffLatestEvidence(
+        workItemRuns: workItemRuns,
+        artifacts: snapshot.artifacts.filter { $0.workItemId == workItemId }
+    )
+    let pickedUp = workItemRuns.contains { run in
+        guard run.id != event.runId,
+              let kind = profilesById[run.agentProfileId]?.kind,
+              kind == targetAgentKind else {
+            return false
+        }
+        return missionAgentHandoffRunDate(run) >= event.createdAt
+    }
+    if pickedUp {
+        return (.pickedUp, targetAgentKind, nil, event.createdAt, latestEvidence.date, latestEvidence.source, latestEvidence.identity, latestEvidence.refId)
+    }
+
+    let newerRun = workItemRuns.contains { run in
+        run.id != event.runId && missionAgentHandoffRunDate(run) > event.createdAt
+    }
+    let newerOutput = snapshot.artifacts.contains { artifact in
+        artifact.workItemId == workItemId && artifact.createdAt > event.createdAt
+    }
+    return (.staged, targetAgentKind, newerRun || newerOutput ? .stale : .fresh, event.createdAt, latestEvidence.date, latestEvidence.source, latestEvidence.identity, latestEvidence.refId)
+}
+
+private func missionAgentHandoffLatestEvidence(
+    workItemRuns: [AgentRun],
+    artifacts: [Artifact]
+) -> (date: Date?, source: MissionAgentHandoffEvidenceSource?, identity: String?, refId: EntityID?) {
+    let runEvidence = workItemRuns
+        .map { (date: missionAgentHandoffRunDate($0), source: MissionAgentHandoffEvidenceSource.run, identity: $0.id.rawValue, refId: $0.id) }
+        .filter { $0.date != .distantPast }
+    let outputEvidence = artifacts
+        .map { (date: $0.createdAt, source: MissionAgentHandoffEvidenceSource.output, identity: $0.title.firstLineFallback($0.id.rawValue), refId: $0.id) }
+    guard let latest = (runEvidence + outputEvidence).max(by: { lhs, rhs in
+        if lhs.date != rhs.date {
+            return lhs.date < rhs.date
+        }
+        return lhs.source.sortRank < rhs.source.sortRank
+    }) else {
+        return (nil, nil, nil, nil)
+    }
+    return (latest.date, latest.source, latest.identity, latest.refId)
+}
+
+private func missionAgentHandoffAuditTargetKind(from summary: String) -> NativeAgentKind? {
+    guard summary.hasPrefix("Staged agent handoff to ") else { return nil }
+    return AgentEnterpriseAlignment.focusAgents.first { kind in
+        summary.contains("to \(missionAgentHandoffAuditAgentLabel(kind)) for ")
+    }
+}
+
+func missionAcknowledgedTrailItems(
+    snapshot: NativeStoreSnapshot,
+    limit: Int? = nil
+) -> [MissionAcknowledgedTrailItem] {
+    let workItemsById = Dictionary(uniqueKeysWithValues: snapshot.workItems.map { ($0.id, $0) })
+    var items: [MissionAcknowledgedTrailItem] = []
+
+    for run in snapshot.runs where generatedUIMissionRunAcknowledged(run) {
+        let workItem = run.workItemId.flatMap { workItemsById[$0] }
+        let actions = chatRunFollowUpActions(
+            run: run,
+            workItem: workItem,
+            assistantText: run.transcript
+        )
+            .compactMap { action -> RunFollowUpAction? in
+                guard generatedUIMissionActionRank(action) != nil else { return nil }
+                return action
+            }
+        guard !actions.isEmpty, let readAt = run.readAt else { continue }
+        let firstAction = actions[0]
+        let actionTitle = actions.count == 1 ? firstAction.title : "\(actions.count) actions"
+        let runTitle = generatedUIMissionRunTitle(run: run, workItem: workItem)
+        let actionKinds = Array(Set(actions.map { generatedUIMissionActionKind($0) })).sorted()
+        let actionKindLabel = actionKinds.joined(separator: " + ").gitTrimmed
+        let detail = [
+            runTitle,
+            actionKindLabel.isEmpty ? nil : actionKindLabel
+        ]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+        items.append(MissionAcknowledgedTrailItem(
+            id: "generated-ui-\(run.id)",
+            kind: .generatedUI,
+            title: actionTitle,
+            detail: detail.isEmpty ? runTitle : detail,
+            createdAt: readAt,
+            workspaceId: run.workspaceId,
+            workItemId: run.workItemId,
+            runId: run.id,
+            artifactId: nil
+        ))
+    }
+
+    for artifact in snapshot.artifacts where artifactMissionReviewDismissed(artifact) {
+        let workItem = artifact.workItemId.flatMap { workItemsById[$0] }
+        let group = artifactReviewGroupKind(for: artifact)
+        let dismissedAt = artifactMissionReviewDismissedDate(artifact: artifact, snapshot: snapshot)
+        let detail = [
+            workItem?.title.firstLineFallback("Task") ?? "Output",
+            group.title
+        ]
+            .joined(separator: " · ")
+        items.append(MissionAcknowledgedTrailItem(
+            id: "output-review-\(artifact.id)",
+            kind: .outputReview,
+            title: artifact.title.firstLineFallback("Output"),
+            detail: detail,
+            createdAt: dismissedAt,
+            workspaceId: artifact.workspaceId,
+            workItemId: artifact.workItemId,
+            runId: artifact.runId,
+            artifactId: artifact.id
+        ))
+    }
+
+    let sorted = items.sorted { lhs, rhs in
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+        return lhs.id < rhs.id
+    }
+    if let limit {
+        return Array(sorted.prefix(max(0, limit)))
+    }
+    return sorted
+}
+
+private func artifactMissionReviewDismissedDate(
+    artifact: Artifact,
+    snapshot: NativeStoreSnapshot
+) -> Date {
+    let expectedSummary = "Dismissed output \(artifact.title.firstLineFallback("output")) from Mission Control"
+    return snapshot.auditEvents
+        .last(where: { event in
+            event.summary == expectedSummary
+                && event.workspaceId == artifact.workspaceId
+                && event.workItemId == artifact.workItemId
+                && event.runId == artifact.runId
+        })?
+        .createdAt
+        ?? artifact.verifiedAt
+        ?? artifact.createdAt
+}
+
+func artifactReviewMissionSummary(_ artifacts: [Artifact]) -> ArtifactReviewMissionSummary {
+    let visibleArtifacts = artifacts.filter { !artifactMissionReviewDismissed($0) }
+    return visibleArtifacts.reduce(into: ArtifactReviewMissionSummary(
+        blockedCount: 0,
+        needsFollowUpCount: 0,
+        readyToReviewCount: 0,
+        resolvedCount: 0,
+        totalCount: visibleArtifacts.count
+    )) { summary, artifact in
+        switch artifactReviewGroupKind(for: artifact) {
+        case .blocked:
+            summary.blockedCount += 1
+        case .needsFollowUp:
+            summary.needsFollowUpCount += 1
+        case .unreviewed:
+            summary.readyToReviewCount += 1
+        case .resolved:
+            summary.resolvedCount += 1
+        }
+    }
+}
+
+func artifactReviewMissionTarget(snapshot: NativeStoreSnapshot) -> ArtifactReviewMissionTarget? {
+    artifactReviewMissionTargets(snapshot: snapshot, limit: 1).first
+}
+
+func artifactReviewMissionTargets(
+    snapshot: NativeStoreSnapshot,
+    limit: Int? = nil
+) -> [ArtifactReviewMissionTarget] {
+    let workItemsById = Dictionary(uniqueKeysWithValues: snapshot.workItems.map { ($0.id, $0) })
+    let workItemIds = Set(snapshot.workItems.map(\.id))
+    var remaining = limit ?? Int.max
+    guard remaining > 0 else { return [] }
+    return snapshot.artifacts
+        .filter { artifact in
+            guard let workItemId = artifact.workItemId else { return false }
+            return workItemIds.contains(workItemId)
+                && !artifactMissionReviewDismissed(artifact)
+                && artifactReviewMissionTargetRank(artifactReviewGroupKind(for: artifact)) < Int.max
+        }
+        .sorted { lhs, rhs in
+            let lhsRank = artifactReviewMissionTargetRank(artifactReviewGroupKind(for: lhs))
+            let rhsRank = artifactReviewMissionTargetRank(artifactReviewGroupKind(for: rhs))
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return lhs.createdAt > rhs.createdAt
+        }
+        .compactMap { artifact in
+            guard remaining > 0,
+                  let workItemId = artifact.workItemId,
+                  let workItem = workItemsById[workItemId] else {
+                return nil
+            }
+            remaining -= 1
+            let sourceRun = artifactSourceRun(artifact, snapshot: snapshot)
+            let followUpAction = artifactFollowUpAction(artifact: artifact, run: sourceRun, workItem: workItem)
+            return ArtifactReviewMissionTarget(
+                artifactId: artifact.id,
+                workspaceId: artifact.workspaceId,
+                workItemId: workItemId,
+                sourceRunId: sourceRun?.id,
+                kind: artifactReviewGroupKind(for: artifact),
+                title: artifact.title,
+                workItemTitle: workItem.title,
+                createdAt: artifact.createdAt,
+                followUpWorkflowLabel: followUpAction.workflowLabel,
+                followUpWorkflowSummary: followUpAction.workflowSummary,
+                followUpSymbol: followUpAction.symbol
+            )
+        }
+}
+
+func artifactReviewMissionSideChatStart(
+    target: ArtifactReviewMissionTarget,
+    snapshot: NativeStoreSnapshot
+) -> ArtifactReviewMissionSideChatStart? {
+    guard let artifact = snapshot.artifacts.first(where: { $0.id == target.artifactId }),
+          let parent = artifactSourceRun(artifact, snapshot: snapshot) else {
+        return nil
+    }
+    let item = artifactWorkItem(artifact, snapshot: snapshot)
+    let action = artifactFollowUpAction(artifact: artifact, run: parent, workItem: item)
+    return ArtifactReviewMissionSideChatStart(
+        parentRunId: parent.id,
+        workspaceId: parent.workspaceId,
+        workItemId: item?.id ?? parent.workItemId,
+        followUpLabel: runFollowUpStagedLabel(action),
+        prompt: action.prompt,
+        permissionMode: action.permissionMode
+    )
+}
+
+private func artifactReviewMissionTargetRank(_ kind: ArtifactReviewGroupKind) -> Int {
+    switch kind {
+    case .blocked:
+        return 0
+    case .needsFollowUp:
+        return 1
+    case .unreviewed:
+        return 2
+    case .resolved:
+        return Int.max
+    }
+}
+
+func generatedUIMissionTargets(
+    snapshot: NativeStoreSnapshot,
+    limit: Int? = nil
+) -> [GeneratedUIMissionTarget] {
+    let workItemsById = Dictionary(uniqueKeysWithValues: snapshot.workItems.map { ($0.id, $0) })
+    var remaining = limit ?? Int.max
+    guard remaining > 0 else { return [] }
+
+    let sortedRuns = snapshot.runs.sorted { lhs, rhs in
+        let lhsRank = generatedUIMissionRunRank(lhs.state)
+        let rhsRank = generatedUIMissionRunRank(rhs.state)
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        return generatedUIMissionRunDate(lhs) > generatedUIMissionRunDate(rhs)
+    }
+
+    var targets: [GeneratedUIMissionTarget] = []
+    for run in sortedRuns
+    where generatedUIMissionRunRank(run.state) < Int.max && !generatedUIMissionRunAcknowledged(run) {
+        let workItem = run.workItemId.flatMap { workItemsById[$0] }
+        let actions = chatRunFollowUpActions(
+            run: run,
+            workItem: workItem,
+            assistantText: run.transcript
+        )
+            .compactMap { action -> RunFollowUpAction? in
+                guard generatedUIMissionActionRank(action) != nil else { return nil }
+                return action
+            }
+
+        for action in actions {
+            guard remaining > 0 else { return targets }
+            let formReadiness = action.generatedForm.map { form in
+                runFollowUpGeneratedFormReadiness(form, values: [:])
+            }
+            let shortcut = runFollowUpGeneratedUIShortcut(
+                for: action,
+                in: actions,
+                formValues: [:]
+            )
+            targets.append(GeneratedUIMissionTarget(
+                runId: run.id,
+                workspaceId: run.workspaceId,
+                workItemId: run.workItemId,
+                actionId: action.id,
+                actionTitle: action.title,
+                actionKind: generatedUIMissionActionKind(action),
+                actionDetail: action.detail,
+                actionSymbol: action.symbol,
+                actionPrompt: action.prompt,
+                permissionMode: action.permissionMode,
+                readinessBadgeText: formReadiness?.requiredBadgeText,
+                readinessDetail: formReadiness?.missingSummary,
+                shortcutLabel: shortcut?.label,
+                keepsAttentionWhenOpened: true,
+                runTitle: generatedUIMissionRunTitle(run: run, workItem: workItem),
+                createdAt: generatedUIMissionRunDate(run),
+                state: run.state
+            ))
+            remaining -= 1
+        }
+    }
+
+    return targets
+}
+
+private func generatedUIMissionRunRank(_ state: RunState) -> Int {
+    switch state {
+    case .waitingForUser:
+        return 0
+    case .failed:
+        return 1
+    case .completed:
+        return 2
+    case .cancelled, .stale:
+        return 3
+    case .queued, .starting, .running, .cancelling, .draft:
+        return Int.max
+    }
+}
+
+private func generatedUIMissionRunDate(_ run: AgentRun) -> Date {
+    run.endedAt ?? run.startedAt ?? run.messages.last?.createdAt ?? .distantPast
+}
+
+private func generatedUIMissionRunTitle(run: AgentRun, workItem: WorkItem?) -> String {
+    let workItemTitle = workItem?.title.gitTrimmed ?? ""
+    if !workItemTitle.isEmpty { return workItemTitle }
+    return run.promptSnapshot.firstLineFallback("Agent run")
+}
+
+private func generatedUIMissionActionRank(_ action: RunFollowUpAction) -> Int? {
+    switch action.generatedUIRole {
+    case .confirmationApprove:
+        return 0
+    case .choice:
+        return 1
+    case .form:
+        return 2
+    case .continuation:
+        return 3
+    case .confirmationDecline:
+        return 4
+    case .toolCard, .artifactCard, .fileCard, .evidenceCard, .handoffDraft, .saveEvidence, .knowledgeNote, .knowledgeCompare, .none:
+        return nil
+    }
+}
+
+private func generatedUIMissionActionKind(_ action: RunFollowUpAction) -> String {
+    switch action.generatedUIRole {
+    case .confirmationApprove, .confirmationDecline:
+        return "Confirm"
+    case .choice:
+        return "Choice"
+    case .form:
+        return "Form"
+    case .continuation:
+        return "Continue"
+    case .handoffDraft:
+        return "Handoff"
+    case .toolCard, .artifactCard, .fileCard, .evidenceCard, .saveEvidence, .knowledgeNote, .knowledgeCompare, .none:
+        return "Action"
+    }
+}
+
+func artifactReviewGroupingIsUseful(_ artifacts: [Artifact]) -> Bool {
+    artifacts.contains { artifactBranchResolution($0) != nil }
+}
+
+func artifactReviewFilterIsUseful(_ artifacts: [Artifact]) -> Bool {
+    artifacts.count >= 4
+        && artifactReviewGroupingIsUseful(artifacts)
+        && artifactReviewOutputFilterOptions(artifacts).count > 2
+}
+
+func artifactReviewOutputFilterOptions(_ artifacts: [Artifact]) -> [ArtifactReviewOutputFilterOption] {
+    let filters: [ArtifactReviewOutputFilter] = [
+        .actionRequired,
+        .blocked,
+        .needsFollowUp,
+        .unreviewed,
+        .resolved,
+        .all
+    ]
+    return filters.compactMap { filter in
+        let count = artifactReviewOutputCount(artifacts, filter: filter)
+        guard count > 0 else { return nil }
+        return ArtifactReviewOutputFilterOption(filter: filter, count: count)
+    }
+}
+
+func artifactReviewFilteredArtifacts(
+    _ artifacts: [Artifact],
+    filter: ArtifactReviewOutputFilter
+) -> [Artifact] {
+    artifacts.filter { artifactReviewOutputFilter(filter, includes: $0) }
+}
+
+private func artifactReviewOutputCount(
+    _ artifacts: [Artifact],
+    filter: ArtifactReviewOutputFilter
+) -> Int {
+    artifacts.reduce(0) { count, artifact in
+        count + (artifactReviewOutputFilter(filter, includes: artifact) ? 1 : 0)
+    }
+}
+
+private func artifactReviewOutputFilter(
+    _ filter: ArtifactReviewOutputFilter,
+    includes artifact: Artifact
+) -> Bool {
+    let kind = artifactReviewGroupKind(for: artifact)
+    switch filter {
+    case .actionRequired:
+        return kind != .resolved
+    case .blocked:
+        return kind == .blocked
+    case .needsFollowUp:
+        return kind == .needsFollowUp
+    case .unreviewed:
+        return kind == .unreviewed
+    case .resolved:
+        return kind == .resolved
+    case .all:
+        return true
+    }
+}
+
+func artifactReviewOutputGroups(_ artifacts: [Artifact], limit: Int? = nil) -> [ArtifactReviewOutputGroup] {
+    var remaining = limit ?? Int.max
+    var groups: [ArtifactReviewOutputGroup] = []
+    for kind in ArtifactReviewGroupKind.allCases {
+        guard remaining > 0 else { break }
+        let matching = artifacts.filter { artifactReviewGroupKind(for: $0) == kind }
+        guard !matching.isEmpty else { continue }
+        let selected = Array(matching.prefix(remaining))
+        guard !selected.isEmpty else { continue }
+        groups.append(ArtifactReviewOutputGroup(kind: kind, artifacts: selected))
+        remaining -= selected.count
+    }
+    return groups
+}
+
+func artifactReviewGroupKind(for artifact: Artifact) -> ArtifactReviewGroupKind {
+    switch artifactBranchResolution(artifact) {
+    case .blocked:
+        return .blocked
+    case .needsFollowUp:
+        return .needsFollowUp
+    case .resolved:
+        return .resolved
+    case nil:
+        return .unreviewed
+    }
 }
 
 func artifactSourceRun(_ artifact: Artifact, snapshot: NativeStoreSnapshot) -> AgentRun? {
@@ -18944,6 +31316,154 @@ func artifactSourceRun(_ artifact: Artifact, snapshot: NativeStoreSnapshot) -> A
 func artifactWorkItem(_ artifact: Artifact, snapshot: NativeStoreSnapshot) -> WorkItem? {
     guard let workItemId = artifact.workItemId else { return nil }
     return snapshot.workItems.first(where: { $0.id == workItemId })
+}
+
+func nativeRunOutputArtifacts(run: AgentRun, snapshot: NativeStoreSnapshot) -> [Artifact] {
+    let runURI = "pikiclaw://runs/\(run.id.rawValue)"
+    return snapshot.artifacts
+        .filter { artifact in
+            artifact.runId == run.id
+                || artifact.sourceRefs.contains { ref in
+                    ref.kind == "chat-run" && ref.uri == runURI
+                }
+        }
+        .sorted { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            return lhs.createdAt > rhs.createdAt
+        }
+}
+
+func nativeArtifactWorkspaceMemoryCards(
+    artifact: Artifact,
+    snapshot: NativeStoreSnapshot
+) -> [KnowledgeCard] {
+    snapshot.knowledgeCards
+        .filter { card in
+            card.scope == .workspace && card.artifactRefs.contains(artifact.id)
+        }
+        .sorted(by: nativeKnowledgeCardRecencySort)
+}
+
+func nativeWorkspaceMemoryCards(
+    snapshot: NativeStoreSnapshot,
+    workspace: Workspace?
+) -> [KnowledgeCard] {
+    guard let workspace else { return [] }
+    let workspaceArtifactIds = Set(snapshot.artifacts
+        .filter { $0.workspaceId == workspace.id }
+        .map(\.id))
+
+    return snapshot.knowledgeCards
+        .filter { card in
+            guard card.scope == .workspace else { return false }
+            if !workspaceArtifactIds.isDisjoint(with: Set(card.artifactRefs)) {
+                return true
+            }
+            return nativeKnowledgeCard(card, references: workspace)
+        }
+        .sorted(by: nativeKnowledgeCardRecencySort)
+}
+
+private func nativeKnowledgeCardRecencySort(_ lhs: KnowledgeCard, _ rhs: KnowledgeCard) -> Bool {
+    if lhs.updatedAt == rhs.updatedAt {
+        return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+    }
+    return lhs.updatedAt > rhs.updatedAt
+}
+
+private func nativeKnowledgeCard(_ card: KnowledgeCard, references workspace: Workspace) -> Bool {
+    let tokens = nativeWorkspaceMemoryReferenceTokens(workspace)
+    return card.sourceRefs.contains { ref in
+        guard ref.kind == "workspace" else { return false }
+        return tokens.contains(nativeWorkspaceMemoryToken(ref.label))
+            || tokens.contains(nativeWorkspaceMemoryToken(ref.uri ?? ""))
+    }
+}
+
+private func nativeWorkspaceMemoryReferenceTokens(_ workspace: Workspace) -> Set<String> {
+    Set([
+        workspace.id.rawValue,
+        workspace.name,
+        workspace.pathDisplay
+    ].map(nativeWorkspaceMemoryToken).filter { !$0.isEmpty })
+}
+
+private func nativeWorkspaceMemoryToken(_ value: String) -> String {
+    value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+}
+
+struct ArtifactSideChatLineage: Hashable {
+    let title: String
+    let detail: String
+    let symbol: String
+    let help: String
+    let targetRunId: EntityID
+}
+
+func artifactSideChatLineage(
+    artifact: Artifact,
+    sourceRun: AgentRun?,
+    snapshot: NativeStoreSnapshot
+) -> ArtifactSideChatLineage? {
+    guard let sourceRun else { return nil }
+    if let parentId = sourceRun.sideChatOfRunId,
+       let parent = snapshot.runs.first(where: { $0.id == parentId }) {
+        let label = sideChatPaneLabel(for: sourceRun)
+        let parentTitle = parent.promptSnapshot.firstLineFallback("Parent")
+        return ArtifactSideChatLineage(
+            title: "Branch",
+            detail: "\(label) from \(parentTitle)",
+            symbol: "arrow.triangle.branch",
+            help: "Open the \(label) side chat transcript.",
+            targetRunId: sourceRun.id
+        )
+    }
+
+    let children = artifactSideChatChildren(for: sourceRun, snapshot: snapshot)
+    guard !children.isEmpty else { return nil }
+    let target = children[0]
+    let visibleLabels = children.prefix(2).map(sideChatPaneLabel(for:))
+    let overflow = children.count > visibleLabels.count ? " +\(children.count - visibleLabels.count)" : ""
+    let title = children.count == 1 ? "1 branch" : "\(children.count) branches"
+    let targetLabel = sideChatPaneLabel(for: target)
+    return ArtifactSideChatLineage(
+        title: title,
+        detail: "\(visibleLabels.joined(separator: ", "))\(overflow)",
+        symbol: "arrow.triangle.branch",
+        help: "Open the \(targetLabel) side chat transcript.",
+        targetRunId: target.id
+    )
+}
+
+func artifactLineageTargetRun(_ lineage: ArtifactSideChatLineage?, snapshot: NativeStoreSnapshot) -> AgentRun? {
+    guard let lineage else { return nil }
+    return snapshot.runs.first(where: { $0.id == lineage.targetRunId })
+}
+
+func artifactBranchResolution(_ artifact: Artifact) -> ArtifactBranchResolution? {
+    artifact.sourceRefs
+        .last(where: { $0.kind == "artifact-resolution" })
+        .flatMap { ArtifactBranchResolution(rawValue: $0.label) }
+}
+
+private func artifactSideChatChildren(for sourceRun: AgentRun, snapshot: NativeStoreSnapshot) -> [AgentRun] {
+    var seen = Set<EntityID>()
+    var children: [AgentRun] = []
+    for childId in sourceRun.sideChatRunIds {
+        guard let child = snapshot.runs.first(where: { $0.id == childId }),
+              !seen.contains(child.id) else {
+            continue
+        }
+        seen.insert(child.id)
+        children.append(child)
+    }
+    for child in snapshot.runs where child.sideChatOfRunId == sourceRun.id && !seen.contains(child.id) {
+        seen.insert(child.id)
+        children.append(child)
+    }
+    return children
 }
 
 func artifactDisplaySubtitle(_ artifact: Artifact, sourceRun: AgentRun?) -> String {
@@ -18985,6 +31505,16 @@ func artifactURIKind(_ artifact: Artifact) -> String {
     if value.hasPrefix("http://") || value.hasPrefix("https://") { return "Link" }
     if value.hasPrefix("/") || value.hasPrefix("~") { return "File" }
     return value.isEmpty ? "No URI" : "URI"
+}
+
+func openArtifactURI(_ artifact: Artifact) {
+    let uri = artifact.uri.gitTrimmed
+    guard !uri.isEmpty else { return }
+    if let url = URL(string: uri), url.scheme != nil {
+        NSWorkspace.shared.open(url)
+    } else {
+        NSWorkspace.shared.open(URL(fileURLWithPath: (uri as NSString).expandingTildeInPath))
+    }
 }
 
 func artifactSourceLabel(_ run: AgentRun, workItem: WorkItem?) -> String {
@@ -19035,7 +31565,7 @@ func artifactClipboardSummary(artifact: Artifact, run: AgentRun?, workItem: Work
 }
 
 private func artifactSignalSummaryLines(artifact: Artifact, run: AgentRun?) -> [String] {
-    let output = artifact.provenance.gitTrimmed
+    let output = artifactFollowUpSignalText(artifact).gitTrimmed
     guard !output.isEmpty else { return [] }
 
     var lines: [String] = []
@@ -19047,6 +31577,31 @@ private func artifactSignalSummaryLines(artifact: Artifact, run: AgentRun?) -> [
     let actionableNotes = runFollowUpActionableNotes(from: output)
     if !actionableNotes.isEmpty {
         lines.append("Actionable notes: \(actionableNotes.joined(separator: "; "))")
+    }
+
+    let reproductionNotes = runFollowUpReproductionNotes(from: output)
+    if !reproductionNotes.isEmpty {
+        lines.append("Reproduction notes: \(reproductionNotes.joined(separator: "; "))")
+    }
+
+    let diagnosisNotes = runFollowUpDiagnosisNotes(from: output)
+    if !diagnosisNotes.isEmpty {
+        lines.append("Diagnosis notes: \(diagnosisNotes.joined(separator: "; "))")
+    }
+
+    let reviewFindings = runFollowUpReviewFindings(from: output)
+    if !reviewFindings.isEmpty {
+        lines.append("Review findings: \(reviewFindings.joined(separator: "; "))")
+    }
+
+    let handoffDrafts = runFollowUpHandoffDrafts(from: output)
+    if !handoffDrafts.isEmpty {
+        lines.append("Handoff drafts: \(handoffDrafts.joined(separator: "; "))")
+    }
+
+    let failureSignals = runFollowUpFailureSignals(from: output)
+    if !failureSignals.isEmpty {
+        lines.append("Failure signals: \(failureSignals.joined(separator: "; "))")
     }
 
     let validationEvidence = runFollowUpValidationEvidence(from: output)
@@ -19069,23 +31624,46 @@ func artifactFollowUpPrompt(artifact: Artifact, run: AgentRun?, workItem: WorkIt
         ?? run?.promptSnapshot.firstLineFallback("this chat")
         ?? artifact.title.firstLineFallback("this output")
     let summary = artifactClipboardSummary(artifact: artifact, run: run, workItem: workItem)
-    let jiraKey = workItem?.jira?.key ?? workItem?.sourceRefs.first(where: { $0.kind == "jira" })?.label
-    let isJira = workItem?.sourceType == .jira || jiraKey != nil
-    let isReviewOutput = artifact.kind == .pullRequest || artifact.kind == .reviewComment || workItem?.state == .review
+    let metadata = artifactFollowUpActionMetadata(artifact: artifact, workItem: workItem)
     let instruction: String
-    if isJira {
+    switch metadata.id {
+    case "skill-hardening":
         instruction = """
-        Prepare a Jira-ready update for \(target).
+        Harden the skill path behind this saved output for \(target).
 
-        Use the saved evidence below. Separate confirmed facts from guesses, include validation status, blockers, and next concrete action, and keep the result concise enough to paste as a Jira comment. If the evidence points to a failure, identify the smallest next debug or fix step.
+        Use the saved evidence below. Identify the exact skill or command, inspect SKILL.md and scripts before changing behavior, make invocation and failure recovery faster, preserve environment and credential boundaries, and name focused validation.
         """
-    } else if isReviewOutput {
+    case "log-analysis":
+        instruction = """
+        Trace this saved output through logs for \(target).
+
+        Use the saved evidence below. Keep conversationId, sessionId, traceId, requestId, and taskId distinct, prefer the narrowest log lookup, and return a phase-by-phase summary with field/source ambiguity called out before guessing.
+        """
+    case "bug-analysis":
+        instruction = """
+        Analyze this saved output as a bug in \(target).
+
+        Use the saved evidence below. Separate confirmed facts from guesses, preserve reproduction and diagnosis notes, identify the likely seam, propose the smallest safe fix, and name the focused validation that should close the loop.
+        """
+    case "validation":
+        instruction = """
+        Continue by validating this saved output for \(target).
+
+        Use the saved evidence below. Prefer the narrowest pending command when present, otherwise choose the smallest useful test, build, or manual check. Report exact pass/fail evidence and keep implementation fixes separate.
+        """
+    case "mr-review":
         instruction = """
         Prepare an MR-ready review note for \(target).
 
         Use the saved evidence below. Lead with actionable findings and risk, include file or source references when present, call out verification status, and end with a concise merge recommendation. Keep it short enough to paste into a merge request review.
         """
-    } else {
+    case "jira-update":
+        instruction = """
+        Prepare a Jira-ready update for \(target).
+
+        Use the saved evidence below. Separate confirmed facts from guesses, include validation status, blockers, and next concrete action, and keep the result concise enough to paste as a Jira comment. If the evidence points to a failure, identify the smallest next debug or fix step.
+        """
+    default:
         instruction = """
         Continue from this saved output for \(target).
 
@@ -19099,6 +31677,144 @@ func artifactFollowUpPrompt(artifact: Artifact, run: AgentRun?, workItem: WorkIt
     Saved output:
     \(summary)
     """
+}
+
+func artifactFollowUpAction(artifact: Artifact, run: AgentRun?, workItem: WorkItem?) -> RunFollowUpAction {
+    let metadata = artifactFollowUpActionMetadata(artifact: artifact, workItem: workItem)
+    return RunFollowUpAction(
+        id: metadata.id,
+        title: metadata.title,
+        symbol: metadata.symbol,
+        permissionMode: metadata.permissionMode,
+        prompt: artifactFollowUpPrompt(artifact: artifact, run: run, workItem: workItem)
+    )
+}
+
+private func artifactFollowUpActionMetadata(
+    artifact: Artifact,
+    workItem: WorkItem?
+) -> (id: String, title: String, symbol: String, permissionMode: PermissionMode) {
+    if artifact.kind == .traceBundle {
+        return ("log-analysis", "Logs", "waveform.path.ecg", .readOnly)
+    }
+    let output = artifactFollowUpSignalText(artifact).gitTrimmed
+    if artifactFollowUpContainsSkillHardeningSignal(output) {
+        return ("skill-hardening", "Skill", "puzzlepiece.extension", .askBeforeEdit)
+    }
+    if artifactFollowUpContainsLogSignal(output) {
+        return ("log-analysis", "Logs", "waveform.path.ecg", .readOnly)
+    }
+    if artifact.status == .failed
+        || artifactFollowUpContainsBugSignal(output) {
+        return ("bug-analysis", "Bug", "ladybug", .readOnly)
+    }
+    if artifact.kind == .verificationResult {
+        return ("validation", "Validate", "testtube.2", .askBeforeEdit)
+    }
+    if artifactFollowUpIsReviewArtifact(artifact)
+        || artifactFollowUpContainsReviewSignal(artifact: artifact, output: output) {
+        return ("mr-review", "Review", "checkmark.seal", .readOnly)
+    }
+    if artifactFollowUpIsJira(workItem: workItem) {
+        return ("jira-update", "Jira", "checklist", .readOnly)
+    }
+    if workItem?.state == .review {
+        return ("mr-review", "Review", "checkmark.seal", .readOnly)
+    }
+    switch artifact.kind {
+    case .patch, .generatedCode, .pullRequest, .reviewComment:
+        return ("mr-review", "Review", "checkmark.seal", .readOnly)
+    case .markdownReport, .obsidianNote, .document, .screenshot:
+        return ("capture-evidence", "Evidence", "archivebox", .readOnly)
+    case .commandOutputSummary:
+        return ("continue", "Continue", "play.circle", .askBeforeEdit)
+    case .traceBundle, .verificationResult:
+        return ("continue", "Continue", "play.circle", .askBeforeEdit)
+    }
+}
+
+private func artifactFollowUpSignalText(_ artifact: Artifact) -> String {
+    var lines = [
+        artifact.title,
+        artifact.uri,
+        artifact.provenance
+    ]
+    lines.append(contentsOf: artifact.sourceRefs.map { ref in
+        [ref.kind, ref.label, ref.uri ?? ""]
+            .joined(separator: " ")
+            .gitTrimmed
+    })
+    return lines
+        .map(\.gitTrimmed)
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n")
+}
+
+private func artifactFollowUpContainsSkillHardeningSignal(_ output: String) -> Bool {
+    runtimeTextContainsSkillFailureOrRecoverySignal(output)
+}
+
+private func artifactFollowUpContainsLogSignal(_ output: String) -> Bool {
+    runtimeTextContainsLogLookupSignal(output)
+}
+
+private func artifactFollowUpContainsBugSignal(_ output: String) -> Bool {
+    if !runFollowUpDiagnosisNotes(from: output).isEmpty {
+        return true
+    }
+    if followUpContainsActionableFailureSignal(output)
+        || followUpContainsBlockingDecisionSignal(output)
+        || followUpContainsBlockingReviewFinding(output) {
+        return true
+    }
+    guard !runFollowUpReproductionNotes(from: output).isEmpty else {
+        return false
+    }
+    return outputContainsFailureSignal(output)
+        || output.contains("问题")
+        || output.contains("故障")
+        || output.contains("崩溃")
+        || output.contains("失败")
+        || output.contains("异常")
+        || output.contains("无法")
+        || output.contains("不能")
+}
+
+private func artifactFollowUpContainsReviewSignal(artifact: Artifact, output: String) -> Bool {
+    let lower = "\(artifact.title)\n\(artifact.uri)\n\(output)".lowercased()
+    return !runFollowUpReviewFindings(from: output).isEmpty
+        || lower.contains("/-/merge_requests/")
+        || lower.contains("/merge_requests/")
+        || lower.contains("/pull/")
+        || lower.contains("/pulls/")
+        || lower.contains("merge request")
+        || lower.contains("pull request")
+        || lower.contains("mr review")
+        || lower.contains("review comment")
+        || lower.contains("合并请求")
+        || lower.contains("拉取请求")
+        || lower.contains("mr 评审")
+        || lower.contains("评审评论")
+        || lower.contains("评审意见")
+}
+
+private func artifactFollowUpIsJira(workItem: WorkItem?) -> Bool {
+    guard let workItem else { return false }
+    return workItem.sourceType == .jira
+        || workItem.jira != nil
+        || workItem.sourceRefs.contains { $0.kind.lowercased() == "jira" }
+}
+
+private func artifactFollowUpIsReviewArtifact(_ artifact: Artifact) -> Bool {
+    artifact.kind == .pullRequest
+        || artifact.kind == .reviewComment
+        || artifact.kind == .patch
+        || artifact.kind == .generatedCode
+}
+
+private func artifactFollowUpHelp(_ action: RunFollowUpAction?) -> String {
+    guard let action else { return "Stage follow-up" }
+    return "Stage \(action.title) follow-up - \(runFollowUpActionHelp(action))"
 }
 
 private func dedupedSourceRefs(_ refs: [SourceRef]) -> [SourceRef] {
@@ -19142,6 +31858,107 @@ private func artifactStatusColor(_ status: ArtifactStatus) -> Color {
         return PKTheme.text4
     case .draft:
         return PKTheme.primary
+    }
+}
+
+private func artifactBranchResolutionPillText(_ resolution: ArtifactBranchResolution) -> String {
+    switch resolution {
+    case .resolved: "branch resolved"
+    case .blocked: "branch blocked"
+    case .needsFollowUp: "needs follow-up"
+    }
+}
+
+private func artifactBranchResolutionSymbol(_ resolution: ArtifactBranchResolution) -> String {
+    switch resolution {
+    case .resolved: "checkmark.seal"
+    case .blocked: "exclamationmark.octagon"
+    case .needsFollowUp: "arrow.turn.down.right"
+    }
+}
+
+private func artifactBranchResolutionHelp(_ resolution: ArtifactBranchResolution) -> String {
+    switch resolution {
+    case .resolved: "Mark branch review resolved"
+    case .blocked: "Mark branch review blocked"
+    case .needsFollowUp: "Mark branch review needs follow-up"
+    }
+}
+
+private func artifactBranchResolutionColor(_ resolution: ArtifactBranchResolution) -> Color {
+    switch resolution {
+    case .resolved: PKTheme.ok
+    case .blocked: PKTheme.err
+    case .needsFollowUp: PKTheme.warn
+    }
+}
+
+private func jiraWriteBackReadinessColor(_ readiness: JiraWriteBackReadiness) -> Color {
+    switch readiness.state {
+    case .ready: PKTheme.ok
+    case .missingConfiguration: PKTheme.warn
+    case .invalidBaseURL: PKTheme.err
+    }
+}
+
+private func jiraWriteBackResultColor(_ summary: JiraTicketEvidenceSummary) -> Color {
+    switch summary.writeBackState {
+    case "posted": PKTheme.ok
+    case "failed": PKTheme.err
+    default: PKTheme.warn
+    }
+}
+
+private func jiraWriteBackHistoryColor(_ entry: JiraTicketWriteBackHistoryEntry) -> Color {
+    switch entry.state {
+    case "posted":
+        return PKTheme.ok
+    case "failed":
+        return PKTheme.err
+    default:
+        return entry.isActionable ? PKTheme.warn : PKTheme.text3
+    }
+}
+
+private func jiraWriteBackHistorySymbol(_ entry: JiraTicketWriteBackHistoryEntry) -> String {
+    switch entry.state {
+    case "posted":
+        return "checkmark.seal"
+    case "failed":
+        return "exclamationmark.triangle"
+    default:
+        return entry.isActionable ? "arrow.uturn.forward" : "paperplane"
+    }
+}
+
+private func jiraWriteBackHistoryActionSymbol(_ entry: JiraTicketWriteBackHistoryEntry) -> String {
+    switch entry.state {
+    case "failed":
+        return "arrow.clockwise"
+    default:
+        return "paperplane"
+    }
+}
+
+private func jiraWriteBackAuditColor(_ step: JiraTicketWriteBackAuditStep) -> Color {
+    switch step.state {
+    case "posted":
+        return PKTheme.ok
+    case "failed":
+        return PKTheme.err
+    default:
+        return step.isActionable ? PKTheme.warn : PKTheme.text3
+    }
+}
+
+private func jiraWriteBackAuditSymbol(_ step: JiraTicketWriteBackAuditStep) -> String {
+    switch step.state {
+    case "posted":
+        return "checkmark.seal"
+    case "failed":
+        return "exclamationmark.triangle"
+    default:
+        return step.isActionable ? "arrow.uturn.forward" : "paperplane"
     }
 }
 
@@ -19215,6 +32032,22 @@ private func isLiveRunState(_ state: RunState) -> Bool {
     }
 }
 
+func conversationShouldPrepareFollowUpActions(state: RunState?, isRunning: Bool) -> Bool {
+    if isRunning { return false }
+    switch state {
+    case .queued, .starting, .running, .cancelling:
+        return false
+    case .waitingForUser, .completed, .failed, .cancelled, .stale, .draft, .none:
+        return true
+    }
+}
+
+func nativeAgentDockActivityCount(for runs: [AgentRun]) -> Int {
+    runs.filter { run in
+        isLiveRunState(run.state) || run.isCompletedUnread
+    }.count
+}
+
 private func agentCapability(for profile: AgentProfile, snapshot: NativeStoreSnapshot) -> Capability? {
     snapshot.capabilities.first { capability in
         capability.name.localizedCaseInsensitiveContains(profile.displayName)
@@ -19245,12 +32078,9 @@ private func agentHealthText(_ health: CapabilityHealthState?) -> String {
     }
 }
 
-private func agentDockHelp(profile: AgentProfile, active: Bool, attentionCount: Int, snapshot: NativeStoreSnapshot) -> String {
-    if attentionCount > 0 {
-        return "\(profile.displayName) · \(attentionCount) run(s) need attention"
-    }
-    if active {
-        return "\(profile.displayName) · running"
+private func agentDockHelp(profile: AgentProfile, activityCount: Int, snapshot: NativeStoreSnapshot) -> String {
+    if activityCount > 0 {
+        return "\(profile.displayName) · \(activityCount) active or unread chat\(activityCount == 1 ? "" : "s")"
     }
     return "\(profile.displayName) · \(agentHealthText(agentCapability(for: profile, snapshot: snapshot)?.healthState))"
 }
@@ -19275,6 +32105,53 @@ private func enterpriseReadinessColor(_ row: EnterpriseReadinessRow) -> Color {
     return row.ready > 0 ? PKTheme.ok : PKTheme.text3
 }
 
+func enterpriseAgentBestForSummary(profile: AgentProfile, snapshot: NativeStoreSnapshot) -> String {
+    guard AgentEnterpriseAlignment.focusAgents.contains(profile.kind) else {
+        return "Best for native workspace runs"
+    }
+    guard profile.isEnabled else {
+        return "Best after Detect + Login"
+    }
+
+    let readyKeys = AgentEnterpriseAlignment.parityRows(snapshot: snapshot).compactMap { row -> AgentEnterpriseCapabilityKey? in
+        guard row.cells.first(where: { $0.agentKind == profile.kind })?.mode.isReady == true else {
+            return nil
+        }
+        return row.key
+    }
+    guard !readyKeys.isEmpty else {
+        return "Best after readiness check"
+    }
+
+    let preferredOrder = enterpriseBestForCapabilityOrder(for: profile.kind)
+    let orderedKeys = readyKeys.sorted { lhs, rhs in
+        let lhsIndex = preferredOrder.firstIndex(of: lhs) ?? Int.max
+        let rhsIndex = preferredOrder.firstIndex(of: rhs) ?? Int.max
+        if lhsIndex == rhsIndex {
+            return lhs.rawValue < rhs.rawValue
+        }
+        return lhsIndex < rhsIndex
+    }
+    let labels = orderedKeys
+        .prefix(3)
+        .map { $0.title.lowercased() }
+        .joined(separator: ", ")
+    return "Best for \(labels)"
+}
+
+private func enterpriseBestForCapabilityOrder(for kind: NativeAgentKind) -> [AgentEnterpriseCapabilityKey] {
+    switch kind {
+    case .codex:
+        return [.issueWorkflow, .approvalGate, .artifacts, .goalContinuity, .mcpTools]
+    case .claude:
+        return [.planReview, .approvalGate, .forkWorktree, .mcpTools, .resume]
+    case .gemini:
+        return [.issueWorkflow, .artifacts, .mcpTools, .goalContinuity, .multimodalArtifacts]
+    case .cursor, .githubCopilot, .hermes, .customCLI:
+        return AgentEnterpriseCapabilityKey.allCases
+    }
+}
+
 private func agentDisplayName(_ kind: NativeAgentKind) -> String {
     switch kind {
     case .claude: return "Claude Code"
@@ -19288,15 +32165,7 @@ private func agentDisplayName(_ kind: NativeAgentKind) -> String {
 }
 
 private func agentShortLabel(_ kind: NativeAgentKind) -> String {
-    switch kind {
-    case .claude: return "Claude"
-    case .codex: return "Codex"
-    case .cursor: return "Cursor"
-    case .gemini: return "Gemini"
-    case .githubCopilot: return "Copilot"
-    case .hermes: return "Hermes"
-    case .customCLI: return "CLI"
-    }
+    missionAgentHandoffAuditAgentLabel(kind)
 }
 
 private func agentSymbol(_ kind: NativeAgentKind) -> String {
@@ -19457,6 +32326,10 @@ private func copyTextToPasteboard(_ text: String) {
 private extension String {
     var gitTrimmed: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 
     func firstLineFallback(_ fallback: String) -> String {

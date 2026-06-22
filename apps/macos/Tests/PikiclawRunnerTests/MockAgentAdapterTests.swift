@@ -7,7 +7,8 @@ import Testing
     let run = AgentRun(
         workspaceId: workspaceId,
         agentProfileId: EntityID("agent"),
-        promptSnapshot: "test"
+        promptSnapshot: "test",
+        pinnedAt: nil
     )
     let request = AgentLaunchRequest(workspacePath: "/tmp", prompt: "test", run: run)
     let adapter = MockAgentAdapter(output: ["one", "two"])
@@ -21,4 +22,3 @@ import Testing
     #expect(events.contains(.output("one")))
     #expect(events.last == .completed(exitCode: 0))
 }
-

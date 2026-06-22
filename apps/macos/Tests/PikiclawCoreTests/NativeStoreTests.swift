@@ -12,9 +12,9 @@ import Testing
     let artifacts = try await store.listArtifacts(workItemId: nil)
 
     #expect(workspaces.count == 1)
-    #expect(workItems.count == 2)
+    #expect(workItems.count == 4)
     #expect(runs.count == 1)
-    #expect(artifacts.count == 2)
+    #expect(artifacts.count == 3)
 }
 
 @Test func previewSeedIncludesUsingSuperpowersSkill() throws {
@@ -45,6 +45,36 @@ import Testing
     #expect(goal.acceptanceCriteria.contains("Agent Studio shows parity gaps, readiness, and setup actions"))
     #expect(artifact.kind == .obsidianNote)
     #expect(artifact.uri.contains("mac-native-enterprise-agent-parity-goal.md"))
+}
+
+@Test func previewSeedIncludesGeneratedUIDemoRun() throws {
+    let seed = NativeAppSeed.preview()
+    let workItem = try #require(seed.workItems.first { $0.id == "workitem-generated-ui-demo" })
+    let run = try #require(seed.runs.first { $0.id == "run-generated-ui-demo" })
+
+    #expect(workItem.title == "Verify generated UI rail")
+    #expect(workItem.state == .review)
+    #expect(workItem.currentRunId == run.id)
+    #expect(run.workItemId == workItem.id)
+    #expect(run.state == .completed)
+    #expect(run.transcript.contains("```pikiclaw-ui"))
+    #expect(run.transcript.contains("\"form\""))
+    #expect(run.transcript.contains("\"confirm\""))
+}
+
+@Test func previewSeedIncludesAgentHandoffDemo() throws {
+    let seed = NativeAppSeed.preview()
+    let workItem = try #require(seed.workItems.first { $0.id == "workitem-agent-handoff-demo" })
+    let output = try #require(seed.artifacts.first { $0.id == "artifact-handoff-demo-latest-output" })
+    let auditEvent = try #require(seed.auditEvents.first { $0.id == "audit-handoff-demo-staged" })
+
+    #expect(workItem.title == "Review cross-agent handoff")
+    #expect(workItem.state == .review)
+    #expect(output.workItemId == workItem.id)
+    #expect(output.runId == workItem.currentRunId)
+    #expect(output.kind == .verificationResult)
+    #expect(auditEvent.workItemId == workItem.id)
+    #expect(auditEvent.summary.contains("Staged agent handoff to Gemini"))
 }
 
 @Test func enterpriseAlignmentSummariesTrackFocusAgentReadiness() throws {
@@ -139,4 +169,26 @@ import Testing
     let run = try JSONDecoder().decode(AgentRun.self, from: json)
     #expect(run.sideChatOfRunId == nil)
     #expect(run.sideChatRunIds.isEmpty)
+    #expect(run.pinnedAt == nil)
+    #expect(!run.isPinned)
+}
+
+@Test func agentRunCodablePreservesPinnedAt() throws {
+    let pinnedAt = Date(timeIntervalSince1970: 1_777_777)
+    let run = AgentRun(
+        id: "run-pinned",
+        workspaceId: "workspace-1",
+        agentProfileId: "agent-1",
+        state: .completed,
+        startedAt: pinnedAt,
+        promptSnapshot: "Pinned chat",
+        transcript: "Done",
+        pinnedAt: pinnedAt
+    )
+
+    let data = try JSONEncoder().encode(run)
+    let decoded = try JSONDecoder().decode(AgentRun.self, from: data)
+
+    #expect(decoded.pinnedAt == pinnedAt)
+    #expect(decoded.isPinned)
 }

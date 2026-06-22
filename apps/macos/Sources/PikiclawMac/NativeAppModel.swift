@@ -23,6 +23,19 @@ struct AssistantLaunchContextSummary: Hashable {
     var validationEvidence: [String]
     var decisionSignals: [String]
     var actionableNotes: [String]
+    var reproductionNotes: [String] = []
+    var diagnosisNotes: [String] = []
+    var reviewFindings: [String] = []
+    var handoffDrafts: [String] = []
+    var branchDecisions: [String] = []
+    var reviewRefs: [String] = []
+    var jiraRefs: [String] = []
+    var jiraWriteBackSignals: [String] = []
+    var codeRefs: [String] = []
+    var skillRefs: [String] = []
+    var skillRecoveries: [String] = []
+    var failureSignals: [String] = []
+    var nativeLinks: [String] = []
     var knowledgeCardCount: Int
     var recentRunCount: Int
 
@@ -42,6 +55,58 @@ struct AssistantLaunchContextSummary: Hashable {
         actionableNotes.count
     }
 
+    var reproductionNoteCount: Int {
+        reproductionNotes.count
+    }
+
+    var diagnosisNoteCount: Int {
+        diagnosisNotes.count
+    }
+
+    var reviewFindingCount: Int {
+        reviewFindings.count
+    }
+
+    var handoffDraftCount: Int {
+        handoffDrafts.count
+    }
+
+    var branchDecisionCount: Int {
+        branchDecisions.count
+    }
+
+    var reviewRefCount: Int {
+        reviewRefs.count
+    }
+
+    var jiraRefCount: Int {
+        jiraRefs.count
+    }
+
+    var jiraWriteBackSignalCount: Int {
+        jiraWriteBackSignals.count
+    }
+
+    var codeRefCount: Int {
+        codeRefs.count
+    }
+
+    var skillRefCount: Int {
+        skillRefs.count
+    }
+
+    var skillRecoveryCount: Int {
+        skillRecoveries.count
+    }
+
+    var failureSignalCount: Int {
+        failureSignals.count
+    }
+
+    var nativeLinkCount: Int {
+        nativeLinks.count
+    }
+
     var hasContextPack: Bool {
         outputCount > 0
             || artifactRefCount > 0
@@ -49,8 +114,44 @@ struct AssistantLaunchContextSummary: Hashable {
             || validationEvidenceCount > 0
             || decisionSignalCount > 0
             || actionableNoteCount > 0
+            || reproductionNoteCount > 0
+            || diagnosisNoteCount > 0
+            || reviewFindingCount > 0
+            || handoffDraftCount > 0
+            || branchDecisionCount > 0
+            || reviewRefCount > 0
+            || jiraRefCount > 0
+            || jiraWriteBackSignalCount > 0
+            || codeRefCount > 0
+            || skillRefCount > 0
+            || skillRecoveryCount > 0
+            || failureSignalCount > 0
+            || nativeLinkCount > 0
             || knowledgeCardCount > 0
             || recentRunCount > 0
+    }
+}
+
+struct NativeActionLink: Hashable, Sendable {
+    var label: String
+    var uri: String
+    var displayText: String
+
+    var url: URL? {
+        URL(string: uri)
+    }
+}
+
+struct NativeNotificationActionPayload: Hashable, Sendable {
+    var automationId: EntityID
+    var automationName: String
+    var title: String
+    var body: String
+    var primaryLink: NativeActionLink?
+    var links: [NativeActionLink]
+
+    var primaryURL: URL? {
+        primaryLink?.url
     }
 }
 
@@ -185,6 +286,51 @@ let nativeWorkflowLaunchTemplates: [NativeWorkflowLaunchTemplate] = [
     )
 ]
 
+enum ArtifactBranchResolution: String, CaseIterable, Sendable {
+    case resolved
+    case blocked
+    case needsFollowUp = "needs-follow-up"
+
+    var title: String {
+        switch self {
+        case .resolved: "Resolved"
+        case .blocked: "Blocked"
+        case .needsFollowUp: "Needs follow-up"
+        }
+    }
+
+    var artifactStatus: ArtifactStatus {
+        switch self {
+        case .resolved: .verified
+        case .blocked: .failed
+        case .needsFollowUp: .ready
+        }
+    }
+
+    var statusLine: String {
+        switch self {
+        case .resolved: "Artifact marked resolved"
+        case .blocked: "Artifact marked blocked"
+        case .needsFollowUp: "Artifact marked for follow-up"
+        }
+    }
+}
+
+private extension RunnerEvent {
+    var isOutput: Bool {
+        if case .output = self {
+            return true
+        }
+        return false
+    }
+}
+
+private struct NativeBranchLookupResult: Sendable {
+    let insideWorkTree: Bool
+    let currentBranch: String?
+    let branches: [String]
+}
+
 @MainActor
 final class NativeAppModel: ObservableObject {
     @Published var snapshot = NativeStoreSnapshot(seed: .preview())
@@ -202,24 +348,30 @@ final class NativeAppModel: ObservableObject {
     @Published var terminalIsRunning = false
     @Published var terminalWorkingDirectories: [EntityID: String] = [:]
     @Published var jiraSyncIsRunning = false
+    @Published var jiraWriteBackIsPosting = false
+    @Published var nativeNotificationReadiness: NativeNotificationReadiness = .unknown
 
     private let store: JSONNativeStore
     private let agentAdapterFactory: @Sendable (AgentDescriptor) -> any AgentAdapter
+    private let nativeNotificationCenter: any NativeNotificationCenterClient
     private var didRecoverPersistedActiveRuns = false
     private var lastStagedAssistantPrompt: String?
     private var lastStagedAssistantUserInput: String?
     private var lastStagedJiraPrompt: String?
     private var lastStagedJiraUserInput: String?
     @MainActor private static var restartInFlight = false
+    nonisolated static let runOutputFlushInterval: TimeInterval = 0.20
 
     init(
         store: JSONNativeStore? = nil,
         agentAdapterFactory: @escaping @Sendable (AgentDescriptor) -> any AgentAdapter = { descriptor in
             ProcessAgentAdapter(descriptor: descriptor)
-        }
+        },
+        nativeNotificationCenter: any NativeNotificationCenterClient = SystemNativeNotificationCenterClient()
     ) {
         self.store = store ?? JSONNativeStore()
         self.agentAdapterFactory = agentAdapterFactory
+        self.nativeNotificationCenter = nativeNotificationCenter
         Task {
             await recoverPersistedActiveRunsOnLaunch()
             await reload()
@@ -409,23 +561,15 @@ final class NativeAppModel: ObservableObject {
         guard let workspace else { return nil }
 
         do {
-            let insideWorkTree = try Self.gitOutput(["rev-parse", "--is-inside-work-tree"], in: workspace.pathDisplay).gitTrimmed
-            guard insideWorkTree == "true" else {
+            let lookup = try await Self.lookupBranches(in: workspace.pathDisplay)
+            guard lookup.insideWorkTree else {
                 return await clearBranchState(for: workspace)
             }
 
-            let showCurrent = try Self.gitOutput(["branch", "--show-current"], in: workspace.pathDisplay).gitTrimmed
-            let fallbackCurrent = showCurrent.isEmpty
-                ? try Self.gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], in: workspace.pathDisplay).gitTrimmed
-                : showCurrent
-            let currentBranch = fallbackCurrent == "HEAD" ? "Detached HEAD" : fallbackCurrent
-            let branchList = try Self.gitOutput(["branch", "--format=%(refname:short)"], in: workspace.pathDisplay)
-            let branches = Self.orderedBranches(currentBranch: currentBranch, branchList: branchList)
+            branchOptionsByWorkspace[workspace.id] = lookup.branches
+            branchStatusByWorkspace[workspace.id] = lookup.branches.isEmpty ? "No local branches found" : nil
 
-            branchOptionsByWorkspace[workspace.id] = branches
-            branchStatusByWorkspace[workspace.id] = branches.isEmpty ? "No local branches found" : nil
-
-            let storedBranch = currentBranch.isEmpty ? nil : currentBranch
+            let storedBranch = lookup.currentBranch
             if workspace.currentBranch != storedBranch {
                 var updated = workspace
                 updated.currentBranch = storedBranch
@@ -492,6 +636,23 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    func updateWorkspaceWorkflowConfig(workspaceId: EntityID, config: WorkspaceWorkflowConfig) async {
+        do {
+            var next = try await store.loadSnapshot()
+            guard let index = next.workspaces.firstIndex(where: { $0.id == workspaceId }) else {
+                statusLine = "Workspace workflow settings failed: workspace not found"
+                return
+            }
+            next.workspaces[index].workflowConfig = config
+            next.workspaces[index].lastOpenedAt = Date()
+            try await store.replaceSnapshot(next)
+            statusLine = "Workspace workflow settings saved"
+            await reload()
+        } catch {
+            statusLine = "Workspace workflow settings failed: \(error.localizedDescription)"
+        }
+    }
+
     func prepareNewChat() {
         activeRunId = nil
         draftPrompt = ""
@@ -514,11 +675,19 @@ final class NativeAppModel: ObservableObject {
             var next = try await store.loadSnapshot()
             let capability = Self.agentCapability(for: profile, detection: detection)
             _ = Self.upsertCapability(capability, into: &next.capabilities)
+            let detectionAllowsEnablement = Self.agentDetectionAllowsEnablement(detection)
+            let enabledProfile = Self.enableAgentProfileIfReady(profile, detection: detection, in: &next.agentProfiles)
             try await store.replaceSnapshot(next)
             snapshot = next
             if detection.isAvailable {
                 let path = detection.executablePath.map(Self.shortTerminalPath) ?? profile.executableName
-                statusLine = "\(profile.displayName) detected at \(path)"
+                if enabledProfile {
+                    statusLine = "\(profile.displayName) ready and enabled"
+                } else if detectionAllowsEnablement {
+                    statusLine = "\(profile.displayName) detected at \(path)"
+                } else {
+                    statusLine = "\(profile.displayName) detected; login before enabling"
+                }
             } else {
                 statusLine = "\(profile.displayName) unavailable: \(detection.detail)"
             }
@@ -543,6 +712,19 @@ final class NativeAppModel: ObservableObject {
         }
         terminalCommand = Self.agentLoginCommand(for: profile)
         statusLine = "\(profile.displayName) login command staged in Context Terminal"
+        return true
+    }
+
+    @discardableResult
+    func stageAgentSmokePrerequisite(kind: NativeAgentKind? = nil, workspaceId: EntityID? = nil) -> Bool {
+        let requestedKind = kind ?? selectedAgentKind
+        guard let profile = snapshot.agentProfiles.first(where: { $0.kind == requestedKind }) ?? snapshot.agentProfiles.first else {
+            statusLine = "No agent profile configured"
+            return false
+        }
+        guard !profile.isEnabled else { return false }
+        guard stageAgentLogin(kind: profile.kind, workspaceId: workspaceId) else { return false }
+        statusLine = "\(profile.displayName) needs Detect + Login before Test; login command staged"
         return true
     }
 
@@ -578,6 +760,35 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
+    func recordAgentHandoffStaged(
+        workItemId: EntityID,
+        workspaceId: EntityID,
+        latestRunId: EntityID?,
+        nextAgentKind: NativeAgentKind,
+        title: String
+    ) async -> Bool {
+        do {
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .permissionDecision,
+                actor: "user",
+                summary: missionAgentHandoffAuditSummary(
+                    nextAgentKind: nextAgentKind,
+                    title: title
+                ),
+                runId: latestRunId,
+                workItemId: workItemId,
+                workspaceId: workspaceId
+            ))
+            await reload()
+            statusLine = "Handoff to \(missionAgentHandoffAuditAgentLabel(nextAgentKind)) staged"
+            return true
+        } catch {
+            statusLine = "Handoff audit failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
     func stageWorkflow(
         _ template: NativeWorkflowLaunchTemplate,
         workspaceId: EntityID? = nil,
@@ -589,6 +800,83 @@ final class NativeAppModel: ObservableObject {
         draftPrompt = launchPrompt(from: template.prompt, workspace: workspace, workItem: workItem)
         statusLine = "\(template.title) workflow staged"
         return true
+    }
+
+    @discardableResult
+    func stageAutomation(
+        _ automation: Automation,
+        workspaceId: EntityID? = nil,
+        workItemId: EntityID? = nil
+    ) -> Bool {
+        let workspace = selectedWorkspace(id: workspaceId ?? automation.workspaceId) ?? snapshot.workspaces.first
+        let workItem = selectedWorkItem(id: workItemId, workspaceId: workspace?.id)
+        selectedAgentKind = .codex
+        draftPrompt = launchPrompt(
+            from: automationLaunchPrompt(automation, workspace: workspace, workItem: workItem),
+            workspace: workspace,
+            workItem: workItem
+        )
+        statusLine = "\(automation.name) automation staged"
+        return true
+    }
+
+    func automationPrimaryNativeURL(
+        _ automation: Automation,
+        workspaceId: EntityID? = nil,
+        workItemId: EntityID? = nil
+    ) -> URL? {
+        notificationActionPayload(for: automation, workspaceId: workspaceId, workItemId: workItemId)?.primaryURL
+    }
+
+    func notificationActionPayload(
+        for automation: Automation,
+        workspaceId: EntityID? = nil,
+        workItemId: EntityID? = nil
+    ) -> NativeNotificationActionPayload? {
+        guard automation.kind == .notificationFollowUp else { return nil }
+        let workspace = selectedWorkspace(id: workspaceId ?? automation.workspaceId) ?? snapshot.workspaces.first
+        let workItem = selectedWorkItem(id: workItemId, workspaceId: workspace?.id)
+        let artifacts = relevantArtifacts(workspace: workspace, workItem: workItem)
+        let links = Array(nativeContextActionLinks(workspace: workspace, workItem: workItem, artifacts: artifacts)
+            .prefix(5))
+        let primaryLink = links.first { $0.url != nil }
+        let target = workItem?.title.gitTrimmed.nilIfEmpty
+            ?? workspace?.name.gitTrimmed.nilIfEmpty
+            ?? "Pikiclaw"
+        let body = primaryLink.map { "Open \($0.label) for \(target)." }
+            ?? "No native evidence link yet for \(target)."
+        return NativeNotificationActionPayload(
+            automationId: automation.id,
+            automationName: automation.name,
+            title: automation.name,
+            body: body,
+            primaryLink: primaryLink,
+            links: links
+        )
+    }
+
+    func refreshNativeNotificationReadiness() async {
+        nativeNotificationReadiness = await NativeNotificationBridge.readiness(center: nativeNotificationCenter)
+    }
+
+    @discardableResult
+    func scheduleAutomationNotification(
+        _ automation: Automation,
+        workspaceId: EntityID? = nil,
+        workItemId: EntityID? = nil
+    ) async -> Bool {
+        guard let payload = notificationActionPayload(
+            for: automation,
+            workspaceId: workspaceId,
+            workItemId: workItemId
+        ) else {
+            statusLine = "No notification payload for \(automation.name)"
+            return false
+        }
+        let result = await NativeNotificationBridge.enqueue(payload, center: nativeNotificationCenter)
+        nativeNotificationReadiness = result.readiness
+        statusLine = result.statusLine
+        return result.didEnqueue
     }
 
     @discardableResult
@@ -619,6 +907,47 @@ final class NativeAppModel: ObservableObject {
         """, workspace: workspace, workItem: workItem)
         statusLine = "Workflow import staged"
         return true
+    }
+
+    private func automationLaunchPrompt(_ automation: Automation, workspace: Workspace?, workItem: WorkItem?) -> String {
+        let schedule = automation.scheduleDescription?.gitTrimmed.nilIfEmpty ?? "manual"
+        let timing = [
+            automation.lastRunAt.map { "last run \($0.formatted(date: .abbreviated, time: .shortened))" },
+            automation.nextRunAt.map { "next run \($0.formatted(date: .abbreviated, time: .shortened))" }
+        ].compactMap { $0 }.joined(separator: "; ")
+        let timingLine = timing.isEmpty ? "not scheduled by the native client yet" : timing
+        let prompt = """
+        Run the saved automation workflow "\(automation.name)" for {project}.
+
+        Automation payload:
+        - Kind: \(automation.kind.rawValue)
+        - State: \(automation.state.rawValue)
+        - Schedule: \(schedule)
+        - Timing: \(timingLine)
+
+        \(automationNativeLinksBlock(automation, workspace: workspace, workItem: workItem))
+
+        Inspect the current automation state, identify required inputs, execute the workflow as far as current permissions allow, and summarize outputs, blockers, and the next safe action.
+        """
+        return prompt.gitTrimmed
+    }
+
+    private func automationNativeLinksBlock(_ automation: Automation, workspace: Workspace?, workItem: WorkItem?) -> String {
+        let artifacts = relevantArtifacts(workspace: workspace, workItem: workItem)
+        let links = nativeContextLinks(workspace: workspace, workItem: workItem, artifacts: artifacts)
+            .prefix(5)
+        guard !links.isEmpty else {
+            return automation.kind == .notificationFollowUp
+                ? "Notification payload native links: none yet; inspect the selected work item and recent runs before acting."
+                : "Native links: none yet; inspect the selected work item and recent runs before acting."
+        }
+        let title = automation.kind == .notificationFollowUp
+            ? "Notification payload native links"
+            : "Native links"
+        return """
+        \(title):
+        \(links.map { "- \($0)" }.joined(separator: "\n"))
+        """
     }
 
     @discardableResult
@@ -653,7 +982,7 @@ final class NativeAppModel: ObservableObject {
             return nil
         }
         guard profile.isEnabled else {
-            statusLine = "\(profile.displayName) is disabled. Enable it before testing."
+            _ = stageAgentSmokePrerequisite(kind: profile.kind, workspaceId: workspaceId)
             return nil
         }
 
@@ -707,7 +1036,7 @@ final class NativeAppModel: ObservableObject {
             try await store.replaceSnapshot(syncing)
             snapshot = syncing
 
-            let fetched = try await JiraTicketFetcher.fetch(scope: scope)
+            let fetched = try await JiraTicketFetcher.fetch(scope: scope, workspacePath: workspace.pathDisplay)
             var next = try await store.loadSnapshot()
             let summary = next.applyJiraTickets(fetched.tickets, workspaceId: workspace.id, projectId: projectId)
             next.jiraSync = JiraSyncState(
@@ -741,7 +1070,7 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
-    func startJiraTicketWork(workItemId: EntityID?) async -> EntityID? {
+    func startJiraTicketWork(workItemId: EntityID?, workspaceId: EntityID? = nil) async -> EntityID? {
         let explicit = workItemId.flatMap { id in snapshot.workItems.first(where: { $0.id == id && $0.sourceType == .jira }) }
         let fallback = snapshot.workItems.first(where: { $0.sourceType == .jira && $0.state != .done && $0.state != .cancelled })
         guard let item = explicit ?? fallback else {
@@ -749,11 +1078,15 @@ final class NativeAppModel: ObservableObject {
             return nil
         }
         prepareJiraExecutionPermission()
-        return await run(workItemId: item.id)
+        return await run(workItemId: item.id, workspaceId: workspaceId)
     }
 
     @discardableResult
-    func stageJiraTicketForChat(workItemId: EntityID?, userInput: String? = nil) -> EntityID? {
+    func stageJiraTicketForChat(
+        workItemId: EntityID?,
+        userInput: String? = nil,
+        workspaceId: EntityID? = nil
+    ) -> EntityID? {
         let explicit = workItemId.flatMap { id in snapshot.workItems.first(where: { $0.id == id && $0.sourceType == .jira }) }
         let fallback = jiraTicketCardCandidates(from: snapshot.workItems, selectedWorkItemId: workItemId, limit: 1).first
         guard let item = explicit ?? fallback else {
@@ -761,7 +1094,8 @@ final class NativeAppModel: ObservableObject {
             return nil
         }
         prepareJiraExecutionPermission()
-        let workspace = snapshot.workspaces.first { $0.id == item.workspaceId }
+        let requestedWorkspace = workspaceId.flatMap { id in snapshot.workspaces.first { $0.id == id } }
+        let workspace = requestedWorkspace ?? snapshot.workspaces.first { $0.id == item.workspaceId }
         let normalizedUserInput = normalizedJiraUserInput(userInput)
         draftPrompt = jiraTicketLaunchPrompt(for: item, workspace: workspace, userInput: normalizedUserInput)
         lastStagedJiraPrompt = draftPrompt
@@ -770,14 +1104,164 @@ final class NativeAppModel: ObservableObject {
         return item.id
     }
 
+    func jiraWriteBackPlan(workItemId: EntityID?) -> JiraTicketWriteBackPlan? {
+        let explicit = workItemId.flatMap { id in snapshot.workItems.first(where: { $0.id == id && $0.sourceType == .jira }) }
+        let fallback = jiraTicketCardCandidates(from: snapshot.workItems, selectedWorkItemId: workItemId, limit: 1).first
+        guard let item = explicit ?? fallback else {
+            statusLine = "Sync or select a Jira ticket first"
+            return nil
+        }
+
+        let workspace = snapshot.workspaces.first { $0.id == item.workspaceId }
+        let draft = jiraTicketUpdateDraft(for: item, snapshot: snapshot, workspace: workspace)
+        let plan = PikiclawCore.jiraTicketWriteBackPlan(
+            for: item,
+            draft: draft,
+            permissionMode: selectedPermissionMode
+        )
+        if let denialReason = plan.denialReason {
+            statusLine = denialReason
+        } else {
+            statusLine = "Review \(plan.issueKey) Jira write-back"
+        }
+        return plan
+    }
+
+    @discardableResult
+    func postJiraWriteBack(workItemId: EntityID?, approved: Bool) async -> Bool {
+        guard let plan = jiraWriteBackPlan(workItemId: workItemId) else { return false }
+        guard plan.gate == .requiresApproval else {
+            statusLine = plan.denialReason ?? "Jira write-back is not allowed"
+            return false
+        }
+        guard approved else {
+            statusLine = "Jira write-back needs explicit approval"
+            return false
+        }
+        guard !jiraWriteBackIsPosting else {
+            statusLine = "Jira write-back already posting"
+            return false
+        }
+        let explicit = workItemId.flatMap { id in snapshot.workItems.first(where: { $0.id == id && $0.sourceType == .jira }) }
+        guard let item = explicit ?? snapshot.workItems.first(where: { $0.sourceType == .jira && $0.jira?.key == plan.issueKey }) else {
+            statusLine = "Selected Jira ticket is no longer available"
+            return false
+        }
+
+        let workspace = snapshot.workspaces.first { $0.id == item.workspaceId }
+        jiraWriteBackIsPosting = true
+        do {
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .permissionDecision,
+                actor: "user",
+                summary: plan.auditSummary,
+                workItemId: item.id,
+                workspaceId: item.workspaceId
+            ))
+            try await JiraTicketFetcher.postComment(
+                issueKey: plan.issueKey,
+                comment: plan.comment,
+                workspacePath: workspace?.pathDisplay
+            )
+            try await recordJiraWriteBackArtifact(
+                plan: plan,
+                item: item,
+                workspace: workspace,
+                state: "posted",
+                error: nil
+            )
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .capabilityInvocation,
+                actor: "pikiclaw",
+                summary: "Posted Jira comment to \(plan.issueKey)",
+                workItemId: item.id,
+                workspaceId: item.workspaceId
+            ))
+            jiraWriteBackIsPosting = false
+            await reload()
+            statusLine = "\(plan.issueKey) update posted to Jira"
+            return true
+        } catch {
+            let failureStatus = "Jira write-back failed: \(error.localizedDescription)"
+            try? await recordJiraWriteBackArtifact(
+                plan: plan,
+                item: item,
+                workspace: workspace,
+                state: "failed",
+                error: error
+            )
+            try? await store.appendAuditEvent(AuditEvent(
+                kind: .capabilityInvocation,
+                actor: "pikiclaw",
+                summary: "Jira write-back failed for \(plan.issueKey): \(error.localizedDescription)",
+                workItemId: item.id,
+                workspaceId: item.workspaceId
+            ))
+            jiraWriteBackIsPosting = false
+            await reload()
+            statusLine = failureStatus
+            return false
+        }
+    }
+
+    private func recordJiraWriteBackArtifact(
+        plan: JiraTicketWriteBackPlan,
+        item: WorkItem,
+        workspace: Workspace?,
+        state: String,
+        error: Error?
+    ) async throws {
+        var next = try await store.loadSnapshot()
+        let now = Date()
+        let isPosted = state == "posted"
+        let title = isPosted
+            ? "Jira write-back posted: \(plan.issueKey)"
+            : "Jira write-back failed: \(plan.issueKey)"
+        let jiraURI = item.jira?.url?.gitTrimmed.nilIfEmpty
+        let uri = jiraURI ?? "pikiclaw://jira/\(plan.issueKey)/write-back"
+        let errorLine = error.map { "Error: \($0.localizedDescription)" }
+        let provenance = [
+            isPosted
+                ? "Jira write-back: Posted \(plan.issueKey) to Jira."
+                : "Jira write-back: Failed \(plan.issueKey); retry or paste the draft manually.",
+            "Draft title: \(plan.title)",
+            "Comment length: \(plan.comment.count) characters.",
+            workspace.map { "Workspace: \($0.name) (\($0.pathDisplay))" },
+            errorLine
+        ]
+            .compactMap { $0?.gitTrimmed.nilIfEmpty }
+            .joined(separator: "\n")
+        let artifact = Artifact(
+            workspaceId: item.workspaceId,
+            workItemId: item.id,
+            kind: .commandOutputSummary,
+            title: title,
+            uri: uri,
+            status: isPosted ? .verified : .failed,
+            provenance: provenance,
+            createdAt: now,
+            verifiedAt: isPosted ? now : nil,
+            sourceRefs: [
+                SourceRef(kind: "jira", label: plan.issueKey, uri: jiraURI),
+                SourceRef(kind: "jira-write-back", label: state, uri: uri)
+            ]
+        )
+        next.artifacts.append(artifact)
+        if let itemIndex = next.workItems.firstIndex(where: { $0.id == item.id }) {
+            next.workItems[itemIndex].updatedAt = now
+        }
+        try await store.replaceSnapshot(next)
+    }
+
     @discardableResult
     func startJiraTicketFromChat(
         workItemId: EntityID?,
         parentRunId: EntityID? = nil,
-        userInput: String? = nil
+        userInput: String? = nil,
+        workspaceId: EntityID? = nil
     ) async -> EntityID? {
-        guard let stagedId = stageJiraTicketForChat(workItemId: workItemId, userInput: userInput) else { return nil }
-        return await run(workItemId: stagedId, sideChatOfRunId: parentRunId, promptOverride: draftPrompt)
+        guard let stagedId = stageJiraTicketForChat(workItemId: workItemId, userInput: userInput, workspaceId: workspaceId) else { return nil }
+        return await run(workItemId: stagedId, sideChatOfRunId: parentRunId, promptOverride: draftPrompt, workspaceId: workspaceId)
     }
 
     private func prepareJiraExecutionPermission() {
@@ -819,11 +1303,28 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    func toggleRunPinned(_ runId: EntityID) async {
+        do {
+            var next = try await store.loadSnapshot()
+            guard let index = next.runs.firstIndex(where: { $0.id == runId }) else {
+                statusLine = "Chat not found"
+                return
+            }
+            let shouldPin = next.runs[index].pinnedAt == nil
+            next.runs[index].pinnedAt = shouldPin ? Date() : nil
+            try await store.replaceSnapshot(next)
+            statusLine = shouldPin ? "Chat pinned" : "Chat unpinned"
+            await reload()
+        } catch {
+            statusLine = "Pin chat failed: \(error.localizedDescription)"
+        }
+    }
+
     func markChatRead(runId: EntityID) async {
         do {
             var next = try await store.loadSnapshot()
             guard let index = next.runs.firstIndex(where: { $0.id == runId }),
-                  next.runs[index].isCompletedUnread else {
+                  next.runs[index].readAt == nil else {
                 return
             }
             next.runs[index].readAt = Date()
@@ -831,6 +1332,43 @@ final class NativeAppModel: ObservableObject {
             snapshot = next
         } catch {
             statusLine = "Mark chat read failed: \(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    func dismissArtifactReview(artifactId: EntityID) async -> Bool {
+        do {
+            var next = try await store.loadSnapshot()
+            guard let artifactIndex = next.artifacts.firstIndex(where: { $0.id == artifactId }) else {
+                statusLine = "Output not found"
+                return false
+            }
+            var artifact = next.artifacts[artifactIndex]
+            if !artifactMissionReviewDismissed(artifact) {
+                artifact.sourceRefs.append(artifactMissionReviewDismissedRef())
+                next.artifacts[artifactIndex] = artifact
+                if let workItemId = artifact.workItemId,
+                   let itemIndex = next.workItems.firstIndex(where: { $0.id == workItemId }) {
+                    next.workItems[itemIndex].updatedAt = Date()
+                }
+                try await store.replaceSnapshot(next)
+                try await store.appendAuditEvent(AuditEvent(
+                    kind: .artifactCreated,
+                    actor: "user",
+                    summary: "Dismissed output \(artifact.title.firstLineFallback("output")) from Mission Control",
+                    runId: artifact.runId,
+                    workItemId: artifact.workItemId,
+                    workspaceId: artifact.workspaceId
+                ))
+                snapshot = try await store.loadSnapshot()
+            } else {
+                snapshot = next
+            }
+            statusLine = "Output hidden from Mission Control"
+            return true
+        } catch {
+            statusLine = "Dismiss output failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -1096,6 +1634,60 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
+    func markArtifactBranchResolution(
+        artifactId: EntityID,
+        resolution: ArtifactBranchResolution,
+        branchRunId: EntityID? = nil
+    ) async -> Bool {
+        do {
+            var next = try await store.loadSnapshot()
+            guard let artifactIndex = next.artifacts.firstIndex(where: { $0.id == artifactId }) else {
+                statusLine = "Output not found"
+                return false
+            }
+            let branchRun = branchRunId.flatMap { id in
+                next.runs.first(where: { $0.id == id })
+            }
+            var artifact = next.artifacts[artifactIndex]
+            artifact.status = resolution.artifactStatus
+            artifact.verifiedAt = resolution == .resolved ? Date() : nil
+            artifact.provenance = Self.artifactProvenance(
+                artifact.provenance,
+                marking: resolution,
+                branchRun: branchRun
+            )
+            artifact.sourceRefs.removeAll { $0.kind == "artifact-resolution" }
+            artifact.sourceRefs.append(SourceRef(
+                kind: "artifact-resolution",
+                label: resolution.rawValue,
+                uri: branchRun.map { "pikiclaw://runs/\($0.id.rawValue)" }
+            ))
+            next.artifacts[artifactIndex] = artifact
+
+            if let workItemId = artifact.workItemId,
+               let itemIndex = next.workItems.firstIndex(where: { $0.id == workItemId }) {
+                next.workItems[itemIndex].updatedAt = Date()
+            }
+
+            try await store.replaceSnapshot(next)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .artifactCreated,
+                actor: "user",
+                summary: "\(resolution.title) artifact \(artifact.title.firstLineFallback("output"))",
+                runId: branchRunId ?? artifact.runId,
+                workItemId: artifact.workItemId,
+                workspaceId: artifact.workspaceId
+            ))
+            snapshot = try await store.loadSnapshot()
+            statusLine = resolution.statusLine
+            return true
+        } catch {
+            statusLine = "Artifact decision failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
     func saveArtifactKnowledgeNote(artifactId: EntityID, obsidianRoot: URL? = nil) async -> EntityID? {
         do {
             var next = try await store.loadSnapshot()
@@ -1255,6 +1847,19 @@ final class NativeAppModel: ObservableObject {
         let validationEvidence = Array(Self.dedupedContextValues(artifacts.flatMap(Self.validationEvidence(from:))).prefix(4))
         let decisionSignals = Array(Self.dedupedContextValues(artifacts.flatMap(Self.decisionSignals(from:))).prefix(4))
         let actionableNotes = Array(Self.dedupedContextValues(artifacts.flatMap(Self.actionableNotes(from:))).prefix(4))
+        let reproductionNotes = Array(Self.dedupedContextValues(artifacts.flatMap(Self.reproductionNotes(from:))).prefix(4))
+        let diagnosisNotes = Array(Self.dedupedContextValues(artifacts.flatMap(Self.diagnosisNotes(from:))).prefix(4))
+        let reviewFindings = Array(Self.dedupedContextValues(artifacts.flatMap(Self.reviewFindings(from:))).prefix(5))
+        let handoffDrafts = Array(Self.dedupedContextValues(artifacts.flatMap(Self.handoffDrafts(from:))).prefix(3))
+        let branchDecisions = Array(Self.dedupedContextValues(artifacts.flatMap(Self.branchDecisions(from:))).prefix(4))
+        let reviewRefs = Array(Self.dedupedContextValues(Self.reviewRefs(artifacts: artifacts, workItem: workItem)).prefix(4))
+        let jiraRefs = Array(Self.dedupedContextValues(Self.jiraRefs(artifacts: artifacts, workItem: workItem)).prefix(4))
+        let jiraWriteBackSignals = Array(Self.dedupedContextValues(Self.jiraWriteBackSignals(artifacts: artifacts)).prefix(3))
+        let codeRefs = Array(Self.dedupedCodeRefs(Self.codeRefs(artifacts: artifacts, workItem: workItem)).prefix(6))
+        let skillRefs = Array(Self.dedupedContextValues(Self.skillRefs(artifacts: artifacts, workItem: workItem)).prefix(6))
+        let skillRecoveries = Array(Self.dedupedContextValues(Self.skillRecoveries(artifacts: artifacts, workItem: workItem)).prefix(4))
+        let failureSignals = Array(Self.dedupedContextValues(artifacts.flatMap(Self.failureSignals(from:))).prefix(4))
+        let nativeLinks = Array(nativeContextLinks(workspace: workspace, workItem: workItem, artifacts: artifacts).prefix(5))
         let artifactRefs = artifacts
             .map(\.uri)
             .map(\.gitTrimmed)
@@ -1267,6 +1872,19 @@ final class NativeAppModel: ObservableObject {
             validationEvidence: validationEvidence,
             decisionSignals: decisionSignals,
             actionableNotes: actionableNotes,
+            reproductionNotes: reproductionNotes,
+            diagnosisNotes: diagnosisNotes,
+            reviewFindings: reviewFindings,
+            handoffDrafts: handoffDrafts,
+            branchDecisions: branchDecisions,
+            reviewRefs: reviewRefs,
+            jiraRefs: jiraRefs,
+            jiraWriteBackSignals: jiraWriteBackSignals,
+            codeRefs: codeRefs,
+            skillRefs: skillRefs,
+            skillRecoveries: skillRecoveries,
+            failureSignals: failureSignals,
+            nativeLinks: nativeLinks,
             knowledgeCardCount: cards.count,
             recentRunCount: recentRunsForContext(workspace: workspace, workItem: workItem).count
         )
@@ -1656,6 +2274,7 @@ final class NativeAppModel: ObservableObject {
                 createdAt: run.endedAt ?? Date()
             )
             run.transcript = ""
+            run.nativeSessionRef = nil
             run.state = .queued
             run.startedAt = Date()
             run.endedAt = nil
@@ -1925,13 +2544,19 @@ final class NativeAppModel: ObservableObject {
     func run(
         workItemId: EntityID?,
         sideChatOfRunId: EntityID? = nil,
-        promptOverride: String? = nil
+        promptOverride: String? = nil,
+        workspaceId: EntityID? = nil
     ) async -> EntityID? {
         guard let item = snapshot.workItems.first(where: { $0.id == workItemId }) ?? snapshot.workItems.first else {
-            guard let created = await createWorkItem() else { return nil }
-            return await run(workItemId: created)
+            guard let created = await createWorkItem(workspaceId: workspaceId) else { return nil }
+            return await run(workItemId: created, workspaceId: workspaceId)
         }
-        guard let workspace = snapshot.workspaces.first(where: { $0.id == item.workspaceId }) else {
+        let requestedWorkspace = workspaceId.flatMap { id in snapshot.workspaces.first { $0.id == id } }
+        if workspaceId != nil && requestedWorkspace == nil {
+            statusLine = "Workspace missing"
+            return nil
+        }
+        guard let workspace = requestedWorkspace ?? snapshot.workspaces.first(where: { $0.id == item.workspaceId }) else {
             statusLine = "Workspace missing"
             return nil
         }
@@ -1970,6 +2595,10 @@ final class NativeAppModel: ObservableObject {
                 }
             }
             var runningItem = item
+            if runningItem.workspaceId != launchWorkspace.id {
+                runningItem.workspaceId = launchWorkspace.id
+                runningItem.projectId = snapshot.projects.first(where: { $0.workspaceIds.contains(launchWorkspace.id) })?.id
+            }
             if runningItem.state.canTransition(to: .active) {
                 runningItem.state = .active
             }
@@ -2035,7 +2664,11 @@ final class NativeAppModel: ObservableObject {
 
             let descriptor = Self.agentDescriptor(for: profile)
             let adapter = agentAdapterFactory(descriptor)
-            let launchPrompt = Self.agentPrompt(for: run)
+            let resumesNativeSession = profile.kind == .codex
+                && run.nativeSessionRef?.gitTrimmed.nilIfEmpty != nil
+            let launchPrompt = resumesNativeSession
+                ? run.promptSnapshot.trimmingCharacters(in: .whitespacesAndNewlines)
+                : Self.agentPrompt(for: run)
             var request = AgentLaunchRequest(
                 workspacePath: workspace.pathDisplay,
                 prompt: launchPrompt,
@@ -2046,8 +2679,30 @@ final class NativeAppModel: ObservableObject {
             }
             request.arguments = arguments(for: profile.kind, request: request)
 
+            var lastOutputFlushAt = Date.distantPast
+            var hasDeferredRunFlush = false
+            var hasDeferredOutputFlush = false
             for try await event in adapter.start(request) {
                 apply(event, to: &run)
+                let now = Date()
+                if Self.shouldFlushRunEventForUI(
+                    event,
+                    now: now,
+                    lastOutputFlushAt: lastOutputFlushAt
+                ) {
+                    try await store.saveRun(run)
+                    publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
+                    hasDeferredRunFlush = false
+                    if event.isOutput || hasDeferredOutputFlush {
+                        lastOutputFlushAt = now
+                        hasDeferredOutputFlush = false
+                    }
+                } else {
+                    hasDeferredRunFlush = true
+                    hasDeferredOutputFlush = hasDeferredOutputFlush || event.isOutput
+                }
+            }
+            if hasDeferredRunFlush {
                 try await store.saveRun(run)
                 publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
             }
@@ -2066,25 +2721,30 @@ final class NativeAppModel: ObservableObject {
         if statusLine.hasPrefix("Loaded ") {
             statusLine = terminalStatusLine
         }
-        await autoCaptureEnterpriseParityEvidenceIfNeeded(for: run)
+        await autoCaptureRunEvidenceIfNeeded(for: run)
         if let preserveActiveRunId {
             activeRunId = preserveActiveRunId
         }
         return run.id
     }
 
-    private func autoCaptureEnterpriseParityEvidenceIfNeeded(for run: AgentRun) async {
-        guard Self.shouldAutoCaptureEnterpriseParityEvidence(for: run) else { return }
+    private func autoCaptureRunEvidenceIfNeeded(for run: AgentRun) async {
+        guard Self.shouldAutoCaptureRunEvidence(for: run) else { return }
+        let previousStatusLine = statusLine
         guard await captureRunEvidence(runId: run.id, actor: "runner") != nil else { return }
-        statusLine = run.state == .completed ? "Enterprise parity evidence saved" : "Enterprise parity failure evidence saved"
+        if run.workItemId == AgentEnterpriseAlignment.goalWorkItemId {
+            statusLine = run.state == .completed ? "Enterprise parity evidence saved" : "Enterprise parity failure evidence saved"
+        } else {
+            statusLine = previousStatusLine
+        }
     }
 
-    nonisolated private static func shouldAutoCaptureEnterpriseParityEvidence(for run: AgentRun) -> Bool {
-        guard run.workItemId == AgentEnterpriseAlignment.goalWorkItemId else { return false }
+    nonisolated private static func shouldAutoCaptureRunEvidence(for run: AgentRun) -> Bool {
+        guard run.workItemId != nil else { return false }
         switch run.state {
-        case .completed, .failed:
+        case .waitingForUser, .completed, .failed:
             return canCaptureEvidence(from: run)
-        case .queued, .starting, .running, .waitingForUser, .cancelling, .cancelled, .stale, .draft:
+        case .queued, .starting, .running, .cancelling, .cancelled, .stale, .draft:
             return false
         }
     }
@@ -2119,6 +2779,39 @@ final class NativeAppModel: ObservableObject {
             return detail.isEmpty ? auth : "\(auth) · \(detail)"
         }
         return "\(auth) · \(shortTerminalPath(executablePath))"
+    }
+
+    @discardableResult
+    nonisolated private static func enableAgentProfileIfReady(
+        _ profile: AgentProfile,
+        detection: AgentDetection,
+        in profiles: inout [AgentProfile]
+    ) -> Bool {
+        guard agentDetectionAllowsEnablement(detection),
+              let index = profiles.firstIndex(where: { $0.id == profile.id || $0.kind == profile.kind }),
+              profiles[index].isEnabled == false else {
+            return false
+        }
+        profiles[index].isEnabled = true
+        return true
+    }
+
+    nonisolated private static func agentDetectionAllowsEnablement(_ detection: AgentDetection) -> Bool {
+        guard detection.isAvailable else { return false }
+        let auth = detection.authState.gitTrimmed.lowercased()
+        guard !auth.isEmpty else { return false }
+        let blockers = [
+            "unknown",
+            "missing",
+            "unauthenticated",
+            "not authenticated",
+            "not logged in",
+            "login required",
+            "needs login",
+            "failed",
+            "error"
+        ]
+        return !blockers.contains { auth.contains($0) }
     }
 
     nonisolated private static func agentLoginCommand(for profile: AgentProfile) -> String {
@@ -2159,6 +2852,16 @@ final class NativeAppModel: ObservableObject {
         """
     }
 
+    nonisolated static func shouldFlushRunEventForUI(
+        _ event: RunnerEvent,
+        now: Date,
+        lastOutputFlushAt: Date,
+        outputFlushInterval: TimeInterval = runOutputFlushInterval
+    ) -> Bool {
+        guard event.isOutput else { return true }
+        return now.timeIntervalSince(lastOutputFlushAt) >= outputFlushInterval
+    }
+
     private func apply(_ event: RunnerEvent, to run: inout AgentRun) {
         switch event {
         case .stateChanged(let state):
@@ -2168,6 +2871,9 @@ final class NativeAppModel: ObservableObject {
             }
             statusLine = "Run \(state.rawValue)"
         case .output(let text):
+            if let nativeSessionRef = Self.codexNativeSessionRef(from: text) {
+                run.nativeSessionRef = nativeSessionRef
+            }
             run.transcript += text
             statusLine = "Streaming output"
         case .toolCallStarted(let name):
@@ -2216,6 +2922,22 @@ final class NativeAppModel: ObservableObject {
 
         User: \(current)
         """
+    }
+
+    nonisolated private static func codexNativeSessionRef(from output: String) -> String? {
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.first == "{",
+                  let data = trimmed.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["type"] as? String == "thread.started",
+                  let threadId = object["thread_id"] as? String,
+                  !threadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            return threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
     }
 
     nonisolated private static func canCaptureEvidence(from run: AgentRun) -> Bool {
@@ -2284,6 +3006,10 @@ final class NativeAppModel: ObservableObject {
             .filter { !$0.isEmpty }
         if !artifactLines.isEmpty {
             lines.append("- Related outputs:\n\(artifactLines.joined(separator: "\n"))")
+        }
+        let signalLines = followUpEvidenceSignalLines(artifacts: artifacts, workItem: workItem)
+        if !signalLines.isEmpty {
+            lines.append("- Extracted signals:\n\(signalLines.joined(separator: "\n"))")
         }
         let knowledgeLines = knowledgeCards
             .prefix(2)
@@ -2396,6 +3122,59 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    nonisolated private static func artifactProvenance(
+        _ provenance: String,
+        marking resolution: ArtifactBranchResolution,
+        branchRun: AgentRun?
+    ) -> String {
+        var lines = provenance
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.hasPrefix("Branch decision:") }
+        let branchLabel = branchRun.map(branchResolutionRunLabel(_:)) ?? "side chat"
+        lines.append("Branch decision: \(resolution.title) via \(branchLabel).")
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated private static func branchResolutionRunLabel(_ run: AgentRun) -> String {
+        if let ref = run.contextRefs.first(where: { $0.kind == "follow-up" }),
+           !ref.label.gitTrimmed.isEmpty {
+            return ref.label.gitTrimmed
+        }
+        return run.promptSnapshot.firstLineFallback("side chat")
+    }
+
+    nonisolated private static func branchDecisions(from artifact: Artifact) -> [String] {
+        guard let ref = artifact.sourceRefs.last(where: { $0.kind == "artifact-resolution" }),
+              let resolution = ArtifactBranchResolution(rawValue: ref.label.gitTrimmed) else {
+            return branchDecisionLines(in: artifact.provenance)
+        }
+
+        let title = artifact.title.firstLineFallback("Output")
+        let decision = branchDecisionLines(in: artifact.provenance).last
+        let branchURI = ref.uri?.gitTrimmed ?? ""
+        let branchRef = branchURI.isEmpty ? "" : " via \(branchURI)"
+        let prefix: String
+        switch resolution {
+        case .resolved:
+            prefix = "Branch resolved"
+        case .blocked:
+            prefix = "Branch blocked"
+        case .needsFollowUp:
+            prefix = "Branch needs follow-up"
+        }
+        let suffix = decision.map { " - \($0)" } ?? branchRef
+        return ["\(prefix): \(title)\(suffix)"]
+    }
+
+    nonisolated private static func branchDecisionLines(in value: String) -> [String] {
+        value
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).gitTrimmed }
+            .filter { $0.hasPrefix("Branch decision:") }
+            .map(compactedContextLine(_:))
+    }
+
     nonisolated private static func followUpArtifactContextLine(_ artifact: Artifact) -> String {
         let title = artifact.title.firstLineFallback("Output")
         var line = "- [\(artifact.kind.rawValue)/\(artifact.status.rawValue)] \(title)"
@@ -2407,6 +3186,134 @@ final class NativeAppModel: ObservableObject {
             line.append(" - \(uri)")
         }
         return line
+    }
+
+    nonisolated private static func followUpEvidenceSignalLines(artifacts: [Artifact], workItem: WorkItem?) -> [String] {
+        var lines: [String] = []
+        appendFollowUpSignalLine(
+            title: "Branch decisions",
+            values: artifacts.flatMap(branchDecisions(from:)),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Handoff drafts",
+            values: artifacts.flatMap(handoffDrafts(from:)),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Review findings",
+            values: artifacts.flatMap(reviewFindings(from:)),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Failure signals",
+            values: prioritizedFollowUpFailureSignals(from: artifacts),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Validation evidence",
+            values: prioritizedFollowUpValidationEvidence(from: artifacts),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Pending commands",
+            values: artifacts.flatMap(pendingCommands(from:)),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "MR/PR refs",
+            values: reviewRefs(artifacts: artifacts, workItem: workItem),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Jira refs",
+            values: jiraRefs(artifacts: artifacts, workItem: workItem),
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Jira write-back",
+            values: jiraWriteBackSignals(artifacts: artifacts),
+            limit: 3,
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Skill refs",
+            values: skillRefs(artifacts: artifacts, workItem: workItem),
+            limit: 3,
+            to: &lines
+        )
+        appendFollowUpSignalLine(
+            title: "Skill recovery",
+            values: skillRecoveries(artifacts: artifacts, workItem: workItem),
+            limit: 3,
+            to: &lines
+        )
+        return lines
+    }
+
+    nonisolated private static func prioritizedFollowUpFailureSignals(from artifacts: [Artifact]) -> [String] {
+        prioritizedFollowUpValues(
+            dedupedContextValues(artifacts.flatMap(failureSignals(from:))),
+            priority: followUpFailureSignalPriority(_:)
+        )
+    }
+
+    nonisolated private static func prioritizedFollowUpValidationEvidence(from artifacts: [Artifact]) -> [String] {
+        prioritizedFollowUpValues(
+            dedupedContextValues(artifacts.flatMap(validationEvidence(from:))),
+            priority: followUpValidationEvidencePriority(_:)
+        )
+    }
+
+    nonisolated private static func prioritizedFollowUpValues(
+        _ values: [String],
+        priority: (String) -> Int
+    ) -> [String] {
+        values.enumerated()
+            .sorted { lhs, rhs in
+                let leftPriority = priority(lhs.element)
+                let rightPriority = priority(rhs.element)
+                if leftPriority != rightPriority { return leftPriority < rightPriority }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    nonisolated private static func followUpFailureSignalPriority(_ value: String) -> Int {
+        let lower = value.lowercased()
+        if lower.hasPrefix("error:") || lower.contains(" error:") || lower.contains(" crashed") {
+            return 0
+        }
+        if lower.hasPrefix("exit:") || lower.contains("exit code") || lower.contains("exit status") {
+            return 1
+        }
+        if lower.hasPrefix("failure:") {
+            return 2
+        }
+        return 3
+    }
+
+    nonisolated private static func followUpValidationEvidencePriority(_ value: String) -> Int {
+        let command = value
+            .replacingOccurrences(of: " (failed)", with: "")
+            .replacingOccurrences(of: " (passed)", with: "")
+            .replacingOccurrences(of: " (timeout)", with: "")
+            .gitTrimmed
+        return looksLikeContextShellCommand(command) ? 0 : 1
+    }
+
+    nonisolated private static func appendFollowUpSignalLine(
+        title: String,
+        values: [String],
+        limit: Int = 2,
+        to lines: inout [String]
+    ) {
+        let compacted = dedupedContextValues(values)
+            .prefix(limit)
+            .map { compactedSideChatContext($0, limit: 260) }
+            .filter { !$0.isEmpty }
+        guard !compacted.isEmpty else { return }
+        lines.append("- \(title): \(compacted.joined(separator: "; "))")
     }
 
     nonisolated private static func followUpKnowledgeContextLine(_ card: KnowledgeCard) -> String {
@@ -2976,11 +3883,50 @@ final class NativeAppModel: ObservableObject {
         if let actionableLine = actionableNotesContextLine(artifacts) {
             lines.append(actionableLine)
         }
+        if let reproductionLine = reproductionNotesContextLine(artifacts) {
+            lines.append(reproductionLine)
+        }
+        if let diagnosisLine = diagnosisNotesContextLine(artifacts) {
+            lines.append(diagnosisLine)
+        }
+        if let reviewFindingLine = reviewFindingsContextLine(artifacts) {
+            lines.append(reviewFindingLine)
+        }
+        if let handoffLine = handoffDraftsContextLine(artifacts) {
+            lines.append(handoffLine)
+        }
+        if let branchLine = branchDecisionsContextLine(artifacts) {
+            lines.append(branchLine)
+        }
+        if let failureLine = failureSignalsContextLine(artifacts) {
+            lines.append(failureLine)
+        }
         if let validationLine = validationEvidenceContextLine(artifacts) {
             lines.append(validationLine)
         }
         if let refsLine = artifactRefsContextLine(artifacts) {
             lines.append(refsLine)
+        }
+        if let nativeLinksLine = nativeLinksContextLine(workspace: workspace, workItem: workItem, artifacts: artifacts) {
+            lines.append(nativeLinksLine)
+        }
+        if let reviewLine = reviewRefsContextLine(artifacts: artifacts, workItem: workItem) {
+            lines.append(reviewLine)
+        }
+        if let jiraLine = jiraRefsContextLine(artifacts: artifacts, workItem: workItem) {
+            lines.append(jiraLine)
+        }
+        if let writeBackLine = jiraWriteBackContextLine(artifacts) {
+            lines.append(writeBackLine)
+        }
+        if let codeLine = codeRefsContextLine(artifacts: artifacts, workItem: workItem) {
+            lines.append(codeLine)
+        }
+        if let skillLine = skillRefsContextLine(artifacts: artifacts, workItem: workItem) {
+            lines.append(skillLine)
+        }
+        if let recoveryLine = skillRecoveriesContextLine(artifacts: artifacts, workItem: workItem) {
+            lines.append(recoveryLine)
         }
         if let commandsLine = pendingCommandsContextLine(artifacts) {
             lines.append(commandsLine)
@@ -3081,6 +4027,55 @@ final class NativeAppModel: ObservableObject {
         return "- Artifact refs: \(values)"
     }
 
+    private func reviewRefsContextLine(artifacts: [Artifact], workItem: WorkItem?) -> String? {
+        let values = Self.dedupedContextValues(Self.reviewRefs(artifacts: artifacts, workItem: workItem))
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- MR/PR refs: \(values)"
+    }
+
+    private func jiraRefsContextLine(artifacts: [Artifact], workItem: WorkItem?) -> String? {
+        let values = Self.dedupedContextValues(Self.jiraRefs(artifacts: artifacts, workItem: workItem))
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- Jira refs: \(values)"
+    }
+
+    private func jiraWriteBackContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = Self.dedupedContextValues(Self.jiraWriteBackSignals(artifacts: artifacts))
+            .map(Self.jiraWriteBackContextValue(_:))
+            .prefix(3)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- Jira write-back: \(values)"
+    }
+
+    private func codeRefsContextLine(artifacts: [Artifact], workItem: WorkItem?) -> String? {
+        let values = Self.dedupedCodeRefs(Self.codeRefs(artifacts: artifacts, workItem: workItem))
+            .prefix(6)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- Code refs: \(values)"
+    }
+
+    private func skillRefsContextLine(artifacts: [Artifact], workItem: WorkItem?) -> String? {
+        let values = Self.dedupedContextValues(Self.skillRefs(artifacts: artifacts, workItem: workItem))
+            .prefix(6)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- Skill refs: \(values)"
+    }
+
+    private func skillRecoveriesContextLine(artifacts: [Artifact], workItem: WorkItem?) -> String? {
+        let values = Self.dedupedContextValues(Self.skillRecoveries(artifacts: artifacts, workItem: workItem))
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- Skill recovery: \(values)"
+    }
+
     private func decisionSignalsContextLine(_ artifacts: [Artifact]) -> String? {
         let values = artifacts
             .flatMap(Self.decisionSignals(from:))
@@ -3099,6 +4094,142 @@ final class NativeAppModel: ObservableObject {
             .joined(separator: "; ")
         guard !deduped.isEmpty else { return nil }
         return "- Actionable notes: \(deduped)"
+    }
+
+    private func reproductionNotesContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.reproductionNotes(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Reproduction notes: \(deduped)"
+    }
+
+    private func diagnosisNotesContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.diagnosisNotes(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Diagnosis notes: \(deduped)"
+    }
+
+    private func reviewFindingsContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.reviewFindings(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(5)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Review findings: \(deduped)"
+    }
+
+    private func handoffDraftsContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.handoffDrafts(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(3)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Handoff drafts: \(deduped)"
+    }
+
+    private func nativeLinksContextLine(workspace: Workspace?, workItem: WorkItem?, artifacts: [Artifact]) -> String? {
+        let values = nativeContextLinks(workspace: workspace, workItem: workItem, artifacts: artifacts)
+            .prefix(5)
+            .joined(separator: "; ")
+        guard !values.isEmpty else { return nil }
+        return "- Native links: \(values)"
+    }
+
+    private func nativeContextLinks(workspace: Workspace?, workItem: WorkItem?, artifacts: [Artifact]) -> [String] {
+        nativeContextActionLinks(workspace: workspace, workItem: workItem, artifacts: artifacts)
+            .map(\.displayText)
+    }
+
+    private func nativeContextActionLinks(workspace: Workspace?, workItem: WorkItem?, artifacts: [Artifact]) -> [NativeActionLink] {
+        var seen = Set<String>()
+        return nativeContextLinkRefs(workspace: workspace, workItem: workItem, artifacts: artifacts)
+            .compactMap { ref in
+                let displayText = sourceRefContextValue(ref).gitTrimmed
+                let label = ref.label.gitTrimmed.nilIfEmpty
+                    ?? ref.kind.gitTrimmed.nilIfEmpty
+                    ?? displayText
+                let uri = ref.uri?.gitTrimmed ?? ""
+                guard !displayText.isEmpty, !uri.isEmpty, seen.insert(displayText).inserted else { return nil }
+                return NativeActionLink(label: label, uri: uri, displayText: displayText)
+            }
+    }
+
+    private func nativeContextLinkRefs(workspace: Workspace?, workItem: WorkItem?, artifacts: [Artifact]) -> [SourceRef] {
+        var refs: [SourceRef] = []
+        if let handoff = missionAgentHandoffContextItem(workspace: workspace, workItem: workItem) {
+            refs.append(SourceRef(
+                kind: "",
+                label: "Mission latest evidence",
+                uri: missionAgentHandoffLatestEvidenceURL(handoff)
+            ))
+        }
+
+        let reviewTargets = artifactReviewMissionTargets(snapshot: snapshot)
+            .filter { target in
+                if let workItem {
+                    return target.workItemId == workItem.id
+                }
+                if let workspace {
+                    return target.workspaceId == workspace.id
+                }
+                return artifacts.contains { $0.id == target.artifactId }
+            }
+        if !reviewTargets.isEmpty {
+            refs.append(SourceRef(
+                kind: "",
+                label: "Mission output review",
+                uri: nativeMissionOutputReviewURL
+            ))
+            refs.append(contentsOf: reviewTargets.prefix(3).map { target in
+                SourceRef(
+                    kind: "",
+                    label: "Output: \(target.title)",
+                    uri: artifactReviewMissionTargetURL(target)
+                )
+            })
+        }
+
+        return refs
+    }
+
+    private func missionAgentHandoffContextItem(workspace: Workspace?, workItem: WorkItem?) -> MissionAgentHandoffTrailItem? {
+        let items = missionAgentHandoffTrailItems(snapshot: snapshot)
+        if let workItem {
+            return items.first { $0.workItemId == workItem.id }
+        }
+        if let workspace {
+            return items.first { $0.workspaceId == workspace.id }
+        }
+        return nil
+    }
+
+    private func branchDecisionsContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.branchDecisions(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Branch decisions: \(deduped)"
+    }
+
+    private func failureSignalsContextLine(_ artifacts: [Artifact]) -> String? {
+        let values = artifacts
+            .flatMap(Self.failureSignals(from:))
+        let deduped = Self.dedupedContextValues(values)
+            .prefix(4)
+            .joined(separator: "; ")
+        guard !deduped.isEmpty else { return nil }
+        return "- Failure signals: \(deduped)"
     }
 
     private func validationEvidenceContextLine(_ artifacts: [Artifact]) -> String? {
@@ -3201,6 +4332,518 @@ final class NativeAppModel: ObservableObject {
         }
 
         return notes
+    }
+
+    nonisolated private static func reviewRefs(artifacts: [Artifact], workItem: WorkItem?) -> [String] {
+        var refs: [String] = []
+        if let workItem {
+            refs.append(contentsOf: (workItem.sourceRefs + workItem.externalRefs).compactMap(reviewRef(from:)))
+            refs.append(contentsOf: reviewRefs(in: workItem.description))
+        }
+        for artifact in artifacts {
+            refs.append(contentsOf: reviewRefs(from: artifact))
+        }
+        return refs
+    }
+
+    nonisolated private static func reviewRefs(from artifact: Artifact) -> [String] {
+        var refs: [String] = []
+        if artifact.kind == .pullRequest || artifact.kind == .reviewComment {
+            let uri = artifact.uri.gitTrimmed
+            let suffix = uri.isEmpty ? "" : " (\(uri))"
+            refs.append("\(artifact.title.firstLineFallback("Review ref"))\(suffix)")
+        }
+        refs.append(contentsOf: artifact.sourceRefs.compactMap(reviewRef(from:)))
+        refs.append(contentsOf: reviewRefs(in: artifact.provenance))
+        refs.append(contentsOf: reviewRefs(in: artifact.uri))
+        return refs
+    }
+
+    nonisolated private static func reviewRef(from ref: SourceRef) -> String? {
+        let combined = [ref.kind, ref.label, ref.uri ?? ""].joined(separator: " ")
+        guard containsReviewSignal(combined) else { return nil }
+        let uri = ref.uri?.gitTrimmed ?? ""
+        return uri.isEmpty ? ref.label.firstLineFallback("Review ref") : "\(ref.label.firstLineFallback("Review ref")) (\(uri))"
+    }
+
+    nonisolated private static func reviewRefs(in value: String) -> [String] {
+        value
+            .split(whereSeparator: \.isNewline)
+            .map { strippedContextHeadingPrefix(strippedContextListPrefix(String($0))) }
+            .filter { containsReviewSignal($0) && !looksLikeStandaloneHandoffHeading($0) }
+            .map(compactedContextLine(_:))
+    }
+
+    nonisolated private static func looksLikeStandaloneHandoffHeading(_ line: String) -> Bool {
+        guard let heading = handoffHeading(from: line) else { return false }
+        return heading.body == nil
+    }
+
+    nonisolated private static func containsReviewSignal(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        return lower.contains("/-/merge_requests/")
+            || lower.contains("/merge_requests/")
+            || lower.contains("/pull/")
+            || lower.contains("/pulls/")
+            || lower.contains("merge request")
+            || lower.contains("pull request")
+            || lower.contains("mr:")
+            || lower.contains("mr review")
+            || lower.contains("review comment")
+            || lower.contains("合并请求")
+            || lower.contains("拉取请求")
+            || lower.contains("mr 评审")
+            || lower.contains("评审评论")
+            || lower.contains("评审意见")
+    }
+
+    nonisolated private static func jiraRefs(artifacts: [Artifact], workItem: WorkItem?) -> [String] {
+        var refs: [String] = []
+        if let workItem {
+            var hasStructuredJiraKey = false
+            if let jira = workItem.jira {
+                let key = jira.key.gitTrimmed
+                let uri = jira.url?.gitTrimmed ?? ""
+                if !key.isEmpty {
+                    hasStructuredJiraKey = true
+                    refs.append(uri.isEmpty ? key : "\(key) (\(uri))")
+                }
+            }
+            refs.append(contentsOf: (workItem.sourceRefs + workItem.externalRefs).compactMap(jiraRef(from:)))
+            if !hasStructuredJiraKey {
+                refs.append(contentsOf: jiraRefs(in: workItem.title))
+            }
+            refs.append(contentsOf: jiraRefs(in: workItem.description))
+        }
+        for artifact in artifacts {
+            refs.append(contentsOf: artifact.sourceRefs.compactMap(jiraRef(from:)))
+            refs.append(contentsOf: jiraRefs(in: artifact.title))
+            refs.append(contentsOf: jiraRefs(in: artifact.provenance))
+            refs.append(contentsOf: jiraRefs(in: artifact.uri))
+        }
+        return refs
+    }
+
+    nonisolated private static func jiraRef(from ref: SourceRef) -> String? {
+        guard ref.kind.lowercased() != "jira-write-back" else { return nil }
+        let combined = [ref.kind, ref.label, ref.uri ?? ""].joined(separator: " ")
+        guard ref.kind.lowercased() == "jira" || containsJiraTicketSignal(combined) else { return nil }
+        let label = ref.label.firstLineFallback("Jira ref")
+        let uri = ref.uri?.gitTrimmed ?? ""
+        return uri.isEmpty ? label : "\(label) (\(uri))"
+    }
+
+    nonisolated private static func jiraRefs(in value: String) -> [String] {
+        var refs: [String] = []
+        for rawLine in value.split(whereSeparator: \.isNewline).map(String.init) {
+            let line = strippedContextHeadingPrefix(strippedContextListPrefix(rawLine))
+            guard !line.isEmpty else { continue }
+            guard !isJiraWriteBackLine(line) else { continue }
+            let lower = line.lowercased()
+            if lower.contains("/browse/") || lower.contains("atlassian.net/browse/") {
+                refs.append(compactedContextLine(line))
+                continue
+            }
+            refs.append(contentsOf: jiraTicketKeys(in: line))
+        }
+        return refs
+    }
+
+    nonisolated private static func jiraWriteBackSignals(artifacts: [Artifact]) -> [String] {
+        jiraTicketEvidenceSummary(artifacts: artifacts).writeBackSignals
+    }
+
+    nonisolated private static func jiraWriteBackContextValue(_ value: String) -> String {
+        let prefix = "Jira write-back:"
+        guard value.hasPrefix(prefix) else { return value }
+        return String(value.dropFirst(prefix.count)).gitTrimmed
+    }
+
+    nonisolated private static func containsJiraTicketSignal(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        if lower.contains("/browse/") || lower.contains("atlassian.net/browse/") {
+            return true
+        }
+        return !jiraTicketKeys(in: value).isEmpty
+    }
+
+    nonisolated private static func jiraTicketKeys(in value: String) -> [String] {
+        var keys: [String] = []
+        var range = value.startIndex..<value.endIndex
+        while let match = value.range(of: #"\b[A-Z][A-Z0-9]+-[0-9]+\b"#, options: .regularExpression, range: range) {
+            keys.append(String(value[match]))
+            range = match.upperBound..<value.endIndex
+        }
+        return keys
+    }
+
+    nonisolated private static func codeRefs(artifacts: [Artifact], workItem: WorkItem?) -> [String] {
+        var refs: [String] = []
+        if let workItem {
+            refs.append(contentsOf: codeRefs(in: workItem.title))
+            refs.append(contentsOf: codeRefs(in: workItem.description))
+            refs.append(contentsOf: (workItem.sourceRefs + workItem.externalRefs).flatMap(codeRefs(from:)))
+        }
+        for artifact in artifacts {
+            refs.append(contentsOf: codeRefs(in: artifact.title))
+            refs.append(contentsOf: codeRefs(in: artifact.provenance))
+            refs.append(contentsOf: codeRefs(in: artifact.uri))
+            refs.append(contentsOf: artifact.sourceRefs.flatMap(codeRefs(from:)))
+        }
+        return refs
+    }
+
+    nonisolated private static func codeRefs(from ref: SourceRef) -> [String] {
+        codeRefs(in: [ref.kind, ref.label, ref.uri ?? ""].joined(separator: " "))
+    }
+
+    nonisolated private static func codeRefs(in value: String) -> [String] {
+        var refs: [String] = []
+        for rawLine in value.split(whereSeparator: \.isNewline).map(String.init) {
+            let line = strippedContextHeadingPrefix(strippedContextListPrefix(rawLine))
+            let candidates = backtickValues(in: line)
+                + line.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).map(String.init)
+            for candidate in candidates {
+                guard let ref = codeRef(from: candidate) else { continue }
+                refs.append(ref)
+            }
+        }
+        return refs
+    }
+
+    nonisolated private static func codeRef(from candidate: String) -> String? {
+        var value = candidate
+            .gitTrimmed
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'`()[]{}<>,;")))
+        while value.last.map({ ".;,)]}".contains($0) }) == true {
+            value.removeLast()
+        }
+        guard !value.isEmpty,
+              !value.contains("://"),
+              !value.contains("@"),
+              !value.contains("="),
+              value.range(of: #"^[A-Za-z0-9_./~+-]+(:[0-9]+){0,2}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        let pathPart = String(value.split(separator: ":", omittingEmptySubsequences: false).first ?? "")
+        guard pathPart.contains("."),
+              !pathPart.hasPrefix("-"),
+              !pathPart.hasSuffix(".") else {
+            return nil
+        }
+        let ext = (pathPart.split(separator: ".").last.map(String.init) ?? "").lowercased()
+        guard codeRefExtensions.contains(ext) else { return nil }
+        return value
+    }
+
+    nonisolated private static func skillRefs(artifacts: [Artifact], workItem: WorkItem?) -> [String] {
+        var refs: [String] = []
+        if let workItem {
+            refs.append(contentsOf: skillRefs(in: workItem.title))
+            refs.append(contentsOf: skillRefs(in: workItem.description))
+            refs.append(contentsOf: (workItem.sourceRefs + workItem.externalRefs).flatMap(skillRefs(from:)))
+        }
+        for artifact in artifacts {
+            refs.append(contentsOf: skillRefs(in: artifact.title))
+            refs.append(contentsOf: skillRefs(in: artifact.provenance))
+            refs.append(contentsOf: skillRefs(in: artifact.uri))
+            refs.append(contentsOf: artifact.sourceRefs.flatMap(skillRefs(from:)))
+        }
+        return refs
+    }
+
+    nonisolated private static func skillRefs(from ref: SourceRef) -> [String] {
+        skillRefs(in: [ref.kind, ref.label, ref.uri ?? ""].joined(separator: " "))
+    }
+
+    nonisolated private static func skillRecoveries(artifacts: [Artifact], workItem: WorkItem?) -> [String] {
+        var values: [String] = []
+        if let workItem {
+            values.append(contentsOf: skillRecoveries(in: workItem.title))
+            values.append(contentsOf: skillRecoveries(in: workItem.description))
+            values.append(contentsOf: (workItem.sourceRefs + workItem.externalRefs).flatMap(skillRecoveries(from:)))
+        }
+        for artifact in artifacts {
+            values.append(contentsOf: skillRecoveries(in: artifact.title))
+            values.append(contentsOf: skillRecoveries(in: artifact.provenance))
+            values.append(contentsOf: skillRecoveries(in: artifact.uri))
+            values.append(contentsOf: artifact.sourceRefs.flatMap(skillRecoveries(from:)))
+        }
+        return values
+    }
+
+    nonisolated private static func skillRecoveries(from ref: SourceRef) -> [String] {
+        skillRecoveries(in: [ref.kind, ref.label, ref.uri ?? ""].joined(separator: " "))
+    }
+
+    nonisolated private static func skillRecoveries(in value: String) -> [String] {
+        var recoveries: [String] = []
+        for rawLine in value.split(whereSeparator: \.isNewline).map(String.init) {
+            let line = strippedContextHeadingPrefix(strippedContextListPrefix(rawLine))
+            guard !line.isEmpty else { continue }
+            let commands = skillCommandRefs(in: line)
+            let envVars = skillEnvRefs(in: line)
+            let paths = skillPathRefs(in: line)
+
+            if lineLooksLikeSkillFailure(line),
+               let command = commands.first ?? inferredSkillCommand(in: line) {
+                if let envVar = envVars.first {
+                    recoveries.append("Recover \(command): set \(envVar) before rerun.")
+                } else {
+                    recoveries.append("Recover \(command): \(compactedContextLine(line))")
+                }
+            }
+
+            if let command = pendingCommand(from: line),
+               isSkillCommandRef(command) {
+                recoveries.append("Rerun: \(command)")
+            } else {
+                for command in commands where lineLooksLikeSkillCommandSuggestion(line) {
+                    recoveries.append("Rerun: \(command)")
+                }
+            }
+
+            if lineLooksLikeSkillInspection(line) || lineLooksLikeSkillFailure(line) {
+                for path in paths.prefix(2) {
+                    recoveries.append("Inspect skill: \(path)")
+                }
+            }
+        }
+        return dedupedContextValues(recoveries)
+    }
+
+    nonisolated private static func skillRefs(in value: String) -> [String] {
+        var refs: [String] = []
+        for rawLine in value.split(whereSeparator: \.isNewline).map(String.init) {
+            let line = strippedContextHeadingPrefix(strippedContextListPrefix(rawLine))
+            let candidates = backtickValues(in: line)
+                + line.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).map(String.init)
+            var lineRefs: [String] = []
+            for candidate in candidates {
+                guard let ref = skillRef(from: candidate) else { continue }
+                lineRefs.append(ref)
+            }
+            if !lineRefs.isEmpty, lineLooksLikeSkillFailure(line) {
+                refs.append(compactedContextLine(line))
+            }
+            refs.append(contentsOf: lineRefs)
+        }
+        return refs
+    }
+
+    nonisolated private static func skillCommandRefs(in value: String) -> [String] {
+        let commands = skillCandidateRefs(in: value).filter(isSkillCommandRef(_:))
+        let hasDetailedCommand = commands.contains { $0.contains(" ") }
+        guard hasDetailedCommand else { return commands }
+        return commands.filter { $0.contains(" ") }
+    }
+
+    nonisolated private static func skillEnvRefs(in value: String) -> [String] {
+        skillCandidateRefs(in: value).filter { ref in
+            ref.range(of: #"^[A-Z][A-Z0-9_]{2,}_(ENV_FILE|TOKEN_FILE|CONFIG|PROFILE)$"#, options: .regularExpression) != nil
+        }
+    }
+
+    nonisolated private static func skillPathRefs(in value: String) -> [String] {
+        skillCandidateRefs(in: value).filter { ref in
+            let lower = ref.lowercased()
+            return lower.contains(".pikiclaw/skills/")
+                || lower.contains(".codex/skills/")
+                || lower.contains(".agents/skills/")
+        }
+    }
+
+    nonisolated private static func skillCandidateRefs(in value: String) -> [String] {
+        let candidates = backtickValues(in: value)
+            + value.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).map(String.init)
+        return dedupedContextValues(candidates.compactMap(skillRef(from:)))
+    }
+
+    nonisolated private static func isSkillCommandRef(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        return lower.hasPrefix("/logtrace")
+            || lower.hasPrefix("/clickhouse")
+            || lower.hasPrefix("/sk_")
+    }
+
+    nonisolated private static func inferredSkillCommand(in line: String) -> String? {
+        let lower = line.lowercased()
+        if lower.contains("logtrace") { return "/logtrace" }
+        if lower.contains("clickhouse") || lower.contains("chsql") { return "/clickhouse" }
+        return nil
+    }
+
+    nonisolated private static func lineLooksLikeSkillCommandSuggestion(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        return lower.contains("next")
+            || lower.contains("rerun")
+            || lower.contains("retry")
+            || lower.contains("suggest")
+            || lower.contains("example")
+            || lower.contains("command")
+            || lower.contains("建议")
+            || lower.contains("命令")
+            || lower.contains("重试")
+            || lower.contains("重新运行")
+    }
+
+    nonisolated private static func lineLooksLikeSkillInspection(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        return lower.contains("inspect")
+            || lower.contains("read")
+            || lower.contains("open")
+            || lower.contains("check")
+            || lower.contains("检查")
+            || lower.contains("查看")
+            || lower.contains("打开")
+            || lower.contains("阅读")
+    }
+
+    nonisolated private static func skillRef(from candidate: String) -> String? {
+        let value = candidate
+            .gitTrimmed
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'`()[]{}<>,;")))
+        guard !value.isEmpty else { return nil }
+        let lower = value.lowercased()
+        if lower.hasPrefix("/logtrace")
+            || lower.hasPrefix("/clickhouse")
+            || lower.hasPrefix("/sk_") {
+            return value
+        }
+        switch lower {
+        case "iva-logtracer", "iva_logtracer":
+            return "iva-logtracer"
+        case "chsql":
+            return "chsql"
+        default:
+            break
+        }
+        if lower.contains(".pikiclaw/skills/")
+            || lower.contains(".codex/skills/")
+            || lower.contains(".agents/skills/") {
+            return value
+        }
+        if value.range(of: #"^[A-Z][A-Z0-9_]{2,}_(ENV_FILE|TOKEN_FILE|CONFIG|PROFILE)$"#, options: .regularExpression) != nil {
+            return value
+        }
+        return nil
+    }
+
+    nonisolated private static func lineLooksLikeSkillFailure(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        guard lower.contains("skill")
+            || lower.contains("技能")
+            || lower.contains("/logtrace")
+            || lower.contains("/clickhouse")
+            || lower.contains("iva-logtracer")
+            || lower.contains("iva_logtracer")
+            || lower.contains("chsql")
+            || lower.contains("skill.md") else {
+            return false
+        }
+        return lower.contains("failed")
+            || lower.contains("failure")
+            || lower.contains("missing")
+            || lower.contains("not found")
+            || lower.contains("cannot")
+            || lower.contains("unable")
+            || lower.contains("失败")
+            || lower.contains("缺少")
+            || lower.contains("缺失")
+            || lower.contains("找不到")
+            || lower.contains("无法")
+            || lower.contains("不能")
+    }
+
+    nonisolated private static func failureSignals(from artifact: Artifact) -> [String] {
+        var signals: [String] = []
+        if artifact.status == .failed {
+            signals.append("\(artifact.kind.rawValue) failed: \(artifact.title.firstLineFallback("Output"))")
+        }
+        signals.append(contentsOf: artifact.provenance
+            .split(whereSeparator: \.isNewline)
+            .compactMap { failureSignal(from: String($0)) })
+        return signals
+    }
+
+    nonisolated private static func failureSignal(from line: String) -> String? {
+        let stripped = strippedContextHeadingPrefix(strippedContextListPrefix(line))
+        guard !stripped.isEmpty else { return nil }
+        let lower = stripped.lowercased()
+        if lower.contains("no error")
+            || lower.contains("no errors")
+            || lower.contains("no failure")
+            || lower.contains("no failures")
+            || lower.contains("无错误")
+            || lower.contains("没有错误")
+            || lower.contains("无失败")
+            || lower.contains("没有失败") {
+            return nil
+        }
+        if isJiraWriteBackLine(stripped) {
+            return nil
+        }
+        if let (field, body) = labeledContextBody(from: stripped),
+           let label = failureLabel(for: field) {
+            let compacted = compactedContextLine(body)
+            return compacted.isEmpty ? nil : "\(label): \(compacted)"
+        }
+        if decisionSignal(from: stripped) != nil
+            || actionableNote(from: stripped) != nil
+            || reproductionLine(from: stripped) != nil
+            || diagnosisLine(from: stripped) != nil {
+            return nil
+        }
+        if lower.contains("process exited with code")
+            || lower.contains("exit code ")
+            || lower.contains("exit status ") {
+            return "Exit: \(compactedContextLine(stripped))"
+        }
+        if lower.hasPrefix("fatal error")
+            || lower.hasPrefix("error ")
+            || lower.contains(" error:")
+            || lower.contains(" exception")
+            || lower.contains(" crashed")
+            || lower.contains(" panic")
+            || stripped.hasPrefix("严重错误")
+            || stripped.hasPrefix("错误")
+            || stripped.contains("异常")
+            || stripped.contains("崩溃") {
+            return "Error: \(compactedContextLine(stripped))"
+        }
+        if lower.hasPrefix("failed ")
+            || lower.contains(" failed")
+            || lower.contains(" failure")
+            || lower.contains("timed out")
+            || lower.contains(" timeout")
+            || lower.contains("cannot ")
+            || lower.contains("unable to ")
+            || stripped.contains("失败")
+            || stripped.contains("超时")
+            || stripped.contains("无法")
+            || stripped.contains("不能")
+            || stripped.contains("缺少")
+            || stripped.contains("缺失") {
+            return "Failure: \(compactedContextLine(stripped))"
+        }
+        return nil
+    }
+
+    nonisolated private static func failureLabel(for value: String) -> String? {
+        let normalized = normalizedContextField(value)
+        switch normalized {
+        case "error", "errors", "exception", "fatal error", "crash", "panic", "stderr",
+             "错误", "异常", "严重错误", "崩溃":
+            return "Error"
+        case "failure", "failures", "failed", "command failed", "build failed", "test failed",
+             "失败", "命令失败", "构建失败", "测试失败":
+            return "Failure"
+        case "exit", "exit code", "exit status", "process exited", "process exit",
+             "退出", "退出码", "进程退出":
+            return "Exit"
+        default:
+            return nil
+        }
     }
 
     nonisolated private static func validationEvidence(from artifact: Artifact) -> [String] {
@@ -3320,22 +4963,405 @@ final class NativeAppModel: ObservableObject {
             .replacingOccurrences(of: "-", with: " ")
             .replacingOccurrences(of: "  ", with: " ")
         switch normalized {
-        case "blocker", "blockers", "blocked", "blocking", "blocked by":
+        case "blocker", "blockers", "blocked", "blocking", "blocked by",
+             "阻塞", "阻塞项", "被阻塞":
             return "Blocker"
-        case "risk", "risks", "residual risk", "remaining risk":
+        case "risk", "risks", "residual risk", "remaining risk",
+             "风险", "剩余风险":
             return "Risk"
-        case "open question", "open questions", "question", "questions":
+        case "open question", "open questions", "question", "questions",
+             "开放问题", "待确认问题":
             return "Open question"
-        case "missing input", "missing inputs", "missing info", "missing information":
+        case "missing input", "missing inputs", "missing info", "missing information",
+             "input needed", "inputs needed", "needed input", "needed inputs",
+             "required input", "required inputs",
+             "缺少输入", "缺失输入", "缺少信息", "缺失信息",
+             "需要补充", "待补充", "补充信息", "输入缺失":
             return "Missing input"
         case "next", "next action", "next actions", "next step", "next steps",
-             "next concrete action", "follow up", "followup", "todo", "to do":
+             "next concrete action", "follow up", "followup", "todo", "to do",
+             "下一步", "后续动作", "后续步骤", "待办":
             return "Next action"
-        case "validation gap", "verification gap", "test gap":
+        case "validation gap", "verification gap", "test gap",
+             "验证缺口", "测试缺口":
             return "Validation gap"
         default:
             return nil
         }
+    }
+
+    nonisolated private static func reproductionNotes(from artifact: Artifact) -> [String] {
+        let lines = artifact.provenance
+            .split(whereSeparator: \.isNewline)
+            .map { strippedContextHeadingPrefix(strippedContextListPrefix(String($0))) }
+            .filter { !$0.isEmpty }
+        var notes: [String] = []
+        var index = 0
+
+        while index < lines.count {
+            let line = lines[index]
+            if let note = reproductionLine(from: line) {
+                notes.append(note)
+                index += 1
+                continue
+            }
+            if let label = reproductionSectionLabel(from: line) {
+                var body: [String] = []
+                var nextIndex = index + 1
+                while nextIndex < lines.count, body.count < 4 {
+                    let next = lines[nextIndex]
+                    if looksLikeReproductionBoundary(next) {
+                        break
+                    }
+                    body.append(compactedContextLine(next))
+                    nextIndex += 1
+                }
+                if !body.isEmpty {
+                    notes.append("\(label): \(body.joined(separator: " | "))")
+                    index = nextIndex
+                    continue
+                }
+            }
+            index += 1
+        }
+
+        return notes
+    }
+
+    nonisolated private static func reproductionLine(from line: String) -> String? {
+        guard let (field, value) = labeledContextBody(from: line) else {
+            return nil
+        }
+        let body = compactedContextLine(value)
+        guard let label = reproductionLabel(for: field),
+              !body.isEmpty else {
+            return nil
+        }
+        return "\(label): \(body)"
+    }
+
+    nonisolated private static func reproductionSectionLabel(from line: String) -> String? {
+        guard line.hasSuffix(":") || line.hasSuffix("：") else { return nil }
+        return reproductionLabel(for: String(line.dropLast()))
+    }
+
+    nonisolated private static func reproductionLabel(for value: String) -> String? {
+        let normalized = normalizedContextField(value)
+        switch normalized {
+        case "repro", "reproduction", "steps", "steps to reproduce", "reproduction steps", "str",
+             "复现", "复现步骤", "重现", "重现步骤", "步骤", "操作步骤":
+            return "Steps"
+        case "observed", "observed behavior", "observed result",
+             "观察结果", "观察到", "现象", "异常表现":
+            return "Observed"
+        case "actual", "actual behavior", "actual result", "actual outcome",
+             "实际", "实际结果", "实际行为":
+            return "Actual"
+        case "expected", "expected behavior", "expected result", "expected outcome",
+             "预期", "预期结果", "预期行为", "期望结果":
+            return "Expected"
+        default:
+            return nil
+        }
+    }
+
+    nonisolated private static func looksLikeReproductionBoundary(_ line: String) -> Bool {
+        if reproductionLine(from: line) != nil || reproductionSectionLabel(from: line) != nil {
+            return true
+        }
+        if diagnosisLine(from: line) != nil || diagnosisSectionLabel(from: line) != nil {
+            return true
+        }
+        if decisionSignal(from: line) != nil || decisionSectionLabel(from: line) != nil {
+            return true
+        }
+        if actionableNote(from: line) != nil || actionableSectionLabel(from: line) != nil {
+            return true
+        }
+        guard line.hasSuffix(":") || line.hasSuffix("：") else {
+            return false
+        }
+        let heading = String(line.dropLast())
+        return contextSectionHeadings.contains(normalizedContextField(heading))
+    }
+
+    nonisolated private static func diagnosisNotes(from artifact: Artifact) -> [String] {
+        let lines = artifact.provenance
+            .split(whereSeparator: \.isNewline)
+            .map { strippedContextHeadingPrefix(strippedContextListPrefix(String($0))) }
+            .filter { !$0.isEmpty }
+        var notes: [String] = []
+        var index = 0
+
+        while index < lines.count {
+            let line = lines[index]
+            if let note = diagnosisLine(from: line) {
+                notes.append(note)
+                index += 1
+                continue
+            }
+            if let label = diagnosisSectionLabel(from: line) {
+                var body: [String] = []
+                var nextIndex = index + 1
+                while nextIndex < lines.count, body.count < 4 {
+                    let next = lines[nextIndex]
+                    if looksLikeDiagnosisBoundary(next) {
+                        break
+                    }
+                    body.append(compactedContextLine(next))
+                    nextIndex += 1
+                }
+                if !body.isEmpty {
+                    notes.append("\(label): \(body.joined(separator: " | "))")
+                    index = nextIndex
+                    continue
+                }
+            }
+            index += 1
+        }
+
+        return notes
+    }
+
+    nonisolated private static func diagnosisLine(from line: String) -> String? {
+        guard let (field, value) = labeledContextBody(from: line) else {
+            return nil
+        }
+        let body = compactedContextLine(value)
+        guard let label = diagnosisLabel(for: field),
+              !body.isEmpty else {
+            return nil
+        }
+        return "\(label): \(body)"
+    }
+
+    nonisolated private static func diagnosisSectionLabel(from line: String) -> String? {
+        guard line.hasSuffix(":") || line.hasSuffix("：") else { return nil }
+        return diagnosisLabel(for: String(line.dropLast()))
+    }
+
+    nonisolated private static func diagnosisLabel(for value: String) -> String? {
+        let normalized = normalizedContextField(value)
+        switch normalized {
+        case "diagnosis", "问题分析", "分析结论", "诊断":
+            return "Diagnosis"
+        case "root cause", "根因", "根本原因":
+            return "Root cause"
+        case "cause", "likely cause", "suspected cause",
+             "原因", "可能原因", "疑似原因", "直接原因":
+            return "Likely cause"
+        case "seam", "likely seam", "implementation seam", "affected seam", "suspect seam",
+             "相关模块", "受影响模块", "实现边界", "问题位置", "代码位置", "可疑位置":
+            return "Likely seam"
+        case "hypothesis", "working hypothesis", "假设", "工作假设":
+            return "Hypothesis"
+        case "impact", "customer impact", "user impact", "blast radius",
+             "影响", "用户影响", "客户影响", "影响范围", "风险范围":
+            return "Impact"
+        case "fix", "fix path", "fix plan", "proposed fix", "smallest fix", "smallest safe fix", "remediation",
+             "修复", "修复方案", "修复路径", "修复计划", "最小修复", "建议修复", "处理方案":
+            return "Fix path"
+        default:
+            return nil
+        }
+    }
+
+    nonisolated private static func looksLikeDiagnosisBoundary(_ line: String) -> Bool {
+        if diagnosisLine(from: line) != nil || diagnosisSectionLabel(from: line) != nil {
+            return true
+        }
+        if reproductionLine(from: line) != nil || reproductionSectionLabel(from: line) != nil {
+            return true
+        }
+        if decisionSignal(from: line) != nil || decisionSectionLabel(from: line) != nil {
+            return true
+        }
+        if actionableNote(from: line) != nil || actionableSectionLabel(from: line) != nil {
+            return true
+        }
+        guard line.hasSuffix(":") || line.hasSuffix("：") else {
+            return false
+        }
+        let heading = String(line.dropLast())
+        return contextSectionHeadings.contains(normalizedContextField(heading))
+    }
+
+    nonisolated private static func reviewFindings(from artifact: Artifact) -> [String] {
+        artifact.provenance
+            .split(whereSeparator: \.isNewline)
+            .compactMap { reviewFinding(from: String($0)) }
+    }
+
+    nonisolated private static func reviewFinding(from line: String) -> String? {
+        let stripped = strippedContextHeadingPrefix(strippedContextListPrefix(line))
+        guard !stripped.isEmpty else { return nil }
+        if let severityFinding = severityReviewFinding(from: stripped) {
+            return severityFinding
+        }
+        if let labeledFinding = labeledReviewFinding(from: stripped) {
+            return labeledFinding
+        }
+        return contextReviewTextIsClean(stripped)
+            ? compactedContextLine(stripped)
+            : nil
+    }
+
+    nonisolated private static func severityReviewFinding(from value: String) -> String? {
+        value.range(
+            of: #"^(?:finding\s*)?\[P[0-3]\]\s*[:\-–—]?\s*.+"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) == nil
+            ? nil
+            : compactedContextLine(value)
+    }
+
+    nonisolated private static func labeledReviewFinding(from value: String) -> String? {
+        for separator in [":", "：", " - ", " – ", " — "] {
+            guard let range = value.range(of: separator) else { continue }
+            let field = normalizedContextField(String(value[..<range.lowerBound]))
+            let body = compactedContextLine(String(value[range.upperBound...]))
+            guard !body.isEmpty,
+                  [
+                    "finding", "findings", "review finding", "review findings",
+                    "mr finding", "mr findings", "review comment",
+                    "mr review comment", "mr review feedback",
+                    "评审意见", "评审评论", "mr 评审意见", "mr 评审评论"
+                  ].contains(field) else {
+                continue
+            }
+            if contextReviewTextIsClean(body) {
+                return body
+            }
+            return "Finding: \(body)"
+        }
+        return nil
+    }
+
+    nonisolated private static func contextReviewTextIsClean(_ value: String) -> Bool {
+        let stripped = compactedContextLine(value)
+        let lower = stripped.lowercased()
+        if lower.hasPrefix("no findings")
+            || lower.hasPrefix("no issues found")
+            || lower.hasPrefix("no blocking findings") {
+            return true
+        }
+        let chineseCleanSignals = [
+            "无阻塞问题", "没有阻塞问题", "无阻塞发现", "没有阻塞发现",
+            "无阻塞项", "没有阻塞项", "无发现问题", "没有发现问题",
+            "无问题", "没有问题", "未发现问题", "没有发现阻塞"
+        ]
+        return chineseCleanSignals.contains { stripped.contains($0) }
+    }
+
+    nonisolated private static func handoffDrafts(from artifact: Artifact) -> [String] {
+        let lines = artifact.provenance
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).gitTrimmed }
+            .filter { !$0.isEmpty }
+        var drafts: [String] = []
+        var index = 0
+
+        while index < lines.count {
+            let stripped = strippedContextHeadingPrefix(strippedContextListPrefix(lines[index]))
+            guard let heading = handoffHeading(from: stripped) else {
+                index += 1
+                continue
+            }
+
+            var body = heading.body.map { [$0] } ?? []
+            var nextIndex = index + 1
+            while nextIndex < lines.count, body.count < 5 {
+                let next = strippedContextListPrefix(lines[nextIndex])
+                let normalizedNext = strippedContextHeadingPrefix(next)
+                if handoffHeading(from: normalizedNext) != nil {
+                    break
+                }
+                if looksLikeHandoffBoundary(normalizedNext), !body.isEmpty {
+                    break
+                }
+                body.append(compactedContextLine(next))
+                nextIndex += 1
+            }
+
+            let summary = body
+                .map(compactedContextLine(_:))
+                .filter { !$0.isEmpty }
+                .joined(separator: " | ")
+            if !summary.isEmpty {
+                drafts.append("\(heading.label): \(summary)")
+            }
+            index = max(nextIndex, index + 1)
+        }
+
+        return dedupedContextValues(drafts).prefix(3).map { $0 }
+    }
+
+    nonisolated private static func handoffHeading(from line: String) -> (label: String, body: String?)? {
+        let stripped = line.gitTrimmed
+        guard !stripped.isEmpty else { return nil }
+
+        for separator in [":", "："] {
+            guard let range = stripped.range(of: separator) else { continue }
+            let field = String(stripped[..<range.lowerBound])
+            guard let label = handoffLabel(for: field) else { continue }
+            let body = compactedContextLine(String(stripped[range.upperBound...]))
+            return (label, body.isEmpty ? nil : body)
+        }
+
+        guard !stripped.contains(":"),
+              !stripped.contains("：") else {
+            return nil
+        }
+        guard let label = handoffLabel(for: stripped) else { return nil }
+        return (label, nil)
+    }
+
+    nonisolated private static func handoffLabel(for value: String) -> String? {
+        let normalized = normalizedContextField(value)
+        let compact = normalized.replacingOccurrences(of: " ", with: "")
+
+        if normalized.contains("jira"),
+           normalized.contains("update") || normalized.contains("comment") {
+            return "Jira draft"
+        }
+        if normalized.contains("merge request")
+            || normalized.contains("pull request")
+            || normalized.contains("mr ") {
+            if normalized.contains("review") || normalized.contains("comment") || normalized.contains("approval") {
+                return "MR draft"
+            }
+        }
+        if normalized.contains("review comment") || normalized.contains("approval note") {
+            return "Review draft"
+        }
+        if normalized.contains("bug handoff") || normalized.contains("bug report") {
+            return "Bug handoff"
+        }
+        if normalized.contains("paste ready") || normalized == "handoff" || compact == "handoffdraft" {
+            return "Handoff draft"
+        }
+        return nil
+    }
+
+    nonisolated private static func looksLikeHandoffBoundary(_ line: String) -> Bool {
+        if isJiraWriteBackLine(line) {
+            return true
+        }
+        if let (field, _) = labeledContextBody(from: line) {
+            let normalized = normalizedContextField(field)
+            guard !handoffBodyFields.contains(normalized) else { return false }
+            return contextSectionHeadings.contains(normalized) || pendingCommandLabel(for: field) != nil
+        }
+
+        guard line.hasSuffix(":") || line.hasSuffix("：") else { return false }
+        let heading = String(line.dropLast())
+        return contextSectionHeadings.contains(normalizedContextField(heading))
+    }
+
+    nonisolated private static func isJiraWriteBackLine(_ line: String) -> Bool {
+        let normalized = normalizedContextField(line)
+        return normalized.hasPrefix("jira write back:")
+            || normalized.hasPrefix("jira write back ")
     }
 
     nonisolated private static func inferredActionableNote(from line: String) -> String? {
@@ -3396,15 +5422,19 @@ final class NativeAppModel: ObservableObject {
             .replacingOccurrences(of: "/", with: " ")
             .replacingOccurrences(of: "  ", with: " ")
         switch normalized {
-        case "decision", "ship decision", "merge decision", "go no go", "go or no go":
+        case "decision", "ship decision", "merge decision", "go no go", "go or no go",
+             "决策", "合并决策", "发布决策", "是否合并":
             return "Decision"
-        case "recommendation", "recommend", "recommended next action":
+        case "recommendation", "recommend", "recommended next action",
+             "建议", "推荐", "推荐下一步":
             return "Recommendation"
         case "readiness", "ready", "not ready", "ready not ready", "ready or not ready",
-             "merge readiness", "mr readiness", "review readiness":
+             "merge readiness", "mr readiness", "review readiness",
+             "就绪", "合并就绪", "mr 就绪", "评审就绪", "是否就绪":
             return "Readiness"
         case "approval", "approval note", "approval status", "review approval",
-             "request changes", "changes requested":
+             "request changes", "changes requested",
+             "审批", "审批说明", "审批状态", "评审审批", "请求修改":
             return "Approval"
         default:
             return nil
@@ -3419,10 +5449,24 @@ final class NativeAppModel: ObservableObject {
             || lower.hasPrefix("not ready for review") {
             return "Readiness: \(compactedContextLine(line))"
         }
+        if line.hasPrefix("可以合并")
+            || line.hasPrefix("不能合并")
+            || line.hasPrefix("可以进入评审")
+            || line.hasPrefix("不能进入评审")
+            || line.hasPrefix("已准备好")
+            || line.hasPrefix("未准备好") {
+            return "Readiness: \(compactedContextLine(line))"
+        }
         if lower.hasPrefix("approve")
             || lower.hasPrefix("approved")
             || lower.hasPrefix("request changes")
             || lower.hasPrefix("changes requested") {
+            return "Approval: \(compactedContextLine(line))"
+        }
+        if line.hasPrefix("批准")
+            || line.hasPrefix("同意")
+            || line.hasPrefix("请求修改")
+            || line.hasPrefix("需要修改") {
             return "Approval: \(compactedContextLine(line))"
         }
         return nil
@@ -3607,6 +5651,17 @@ final class NativeAppModel: ObservableObject {
         return out
     }
 
+    nonisolated private static func dedupedCodeRefs(_ values: [String]) -> [String] {
+        let deduped = dedupedContextValues(values)
+        let fullPathLeaves = Set(deduped.compactMap { ref -> String? in
+            guard ref.contains("/") else { return nil }
+            return ref.split(separator: "/").last.map(String.init)
+        })
+        return deduped.filter { ref in
+            ref.contains("/") || !fullPathLeaves.contains(ref)
+        }
+    }
+
     nonisolated private static let pendingCommandTrailingCharacters = CharacterSet(charactersIn: ".,;)]}")
 
     nonisolated private static let validationResultMarkers = [
@@ -3618,15 +5673,47 @@ final class NativeAppModel: ObservableObject {
         "status", "result", "summary", "validation", "tests", "changed files",
         "files changed", "file refs", "source refs", "external refs", "commands",
         "notes", "blockers", "next action", "open question", "risk", "findings",
+        "code refs", "code references", "file references", "changed file refs",
         "jira update", "mr review comment", "review comment", "expected", "actual",
         "observed", "decision", "recommendation", "readiness", "merge readiness",
         "mr readiness", "ready/not ready", "ready not ready", "ready or not ready",
         "approval", "approval note", "request changes", "changes requested",
+        "branch decision",
         "go/no-go", "go no go", "go or no go", "missing input", "missing inputs",
-        "validation gap", "verification gap", "test gap"
+        "validation gap", "verification gap", "test gap",
+        "状态", "结果", "总结", "验证", "测试", "变更文件", "文件引用",
+        "来源引用", "外部引用", "命令", "备注", "阻塞", "阻塞项",
+        "下一步", "开放问题", "待确认问题", "风险", "发现", "评审发现",
+        "代码引用", "jira 更新", "jira 评论", "mr 评审意见", "评审意见",
+        "评审评论", "预期", "预期结果", "实际", "实际结果", "观察结果",
+        "决策", "建议", "推荐", "就绪", "合并就绪", "评审就绪",
+        "审批", "审批说明", "请求修改", "分支决策", "缺少输入",
+        "缺失输入", "验证缺口", "测试缺口", "复现", "复现步骤",
+        "重现", "重现步骤", "诊断", "问题分析", "根因", "根本原因",
+        "原因", "可能原因", "影响", "用户影响", "修复", "修复方案",
+        "修复路径", "修复计划"
+    ]
+
+    nonisolated private static let handoffBodyFields: Set<String> = [
+        "status", "evidence"
+    ]
+
+    nonisolated private static let codeRefExtensions: Set<String> = [
+        "swift", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "md", "markdown",
+        "yml", "yaml", "toml", "xml", "plist", "sh", "py", "rb", "go", "rs",
+        "java", "kt", "kts", "gradle", "properties", "graphql", "sql", "css",
+        "scss", "html"
     ]
 
     nonisolated private static let actionableLeadPhrases: [(prefix: String, label: String)] = [
+        ("还缺", "Missing input"),
+        ("仍缺", "Missing input"),
+        ("缺少", "Missing input"),
+        ("缺失", "Missing input"),
+        ("需要补充", "Missing input"),
+        ("请补充", "Missing input"),
+        ("等待补充", "Missing input"),
+        ("等待", "Blocker"),
         ("Blocked by ", "Blocker"),
         ("Waiting on ", "Blocker"),
         ("Need ", "Next action"),
@@ -3889,7 +5976,11 @@ final class NativeAppModel: ObservableObject {
 
     nonisolated private static func upsertRun(_ run: AgentRun, into runs: inout [AgentRun]) {
         if let index = runs.firstIndex(where: { $0.id == run.id }) {
-            runs[index] = run
+            var next = run
+            if next.pinnedAt == nil {
+                next.pinnedAt = runs[index].pinnedAt
+            }
+            runs[index] = next
         } else {
             runs.insert(run, at: 0)
         }
@@ -3986,6 +6077,27 @@ final class NativeAppModel: ObservableObject {
             ordered.append(branch)
         }
         return ordered
+    }
+
+    nonisolated private static func lookupBranches(in path: String) async throws -> NativeBranchLookupResult {
+        try await Task.detached(priority: .userInitiated) {
+            let insideWorkTree = try Self.gitOutput(["rev-parse", "--is-inside-work-tree"], in: path).gitTrimmed
+            guard insideWorkTree == "true" else {
+                return NativeBranchLookupResult(insideWorkTree: false, currentBranch: nil, branches: [])
+            }
+
+            let showCurrent = try Self.gitOutput(["branch", "--show-current"], in: path).gitTrimmed
+            let fallbackCurrent = showCurrent.isEmpty
+                ? try Self.gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], in: path).gitTrimmed
+                : showCurrent
+            let currentBranch = fallbackCurrent == "HEAD" ? "Detached HEAD" : fallbackCurrent
+            let branchList = try Self.gitOutput(["branch", "--format=%(refname:short)"], in: path)
+            return NativeBranchLookupResult(
+                insideWorkTree: true,
+                currentBranch: currentBranch.isEmpty ? nil : currentBranch,
+                branches: Self.orderedBranches(currentBranch: currentBranch, branchList: branchList)
+            )
+        }.value
     }
 
     nonisolated private static func gitOutput(_ arguments: [String], in path: String) throws -> String {

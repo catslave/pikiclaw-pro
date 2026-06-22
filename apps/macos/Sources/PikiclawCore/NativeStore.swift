@@ -57,7 +57,7 @@ public struct NativeStoreSnapshot: Codable, Sendable {
             automations: seed.automations,
             agentProfiles: seed.agentProfiles,
             providerProfiles: seed.providerProfiles,
-            auditEvents: [],
+            auditEvents: seed.auditEvents,
             jiraSync: JiraSyncState()
         )
     }
@@ -356,7 +356,11 @@ public actor InMemoryNativeStore: WorkspaceStore, WorkItemStore, RunStore, Artif
     }
 
     public func saveRun(_ run: AgentRun) async throws {
-        runs[run.id] = run
+        var next = run
+        if next.pinnedAt == nil {
+            next.pinnedAt = runs[run.id]?.pinnedAt
+        }
+        runs[run.id] = next
     }
 
     public func deleteRun(id: EntityID) async throws {
@@ -419,6 +423,10 @@ public actor JSONNativeStore: WorkspaceStore, WorkItemStore, RunStore, ArtifactS
     }
 
     public static func defaultFileURL() -> URL {
+        if let override = ProcessInfo.processInfo.environment["PIKICLAW_MAC_NATIVE_STATE_FILE"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return appSupport
@@ -467,7 +475,12 @@ public actor JSONNativeStore: WorkspaceStore, WorkItemStore, RunStore, ArtifactS
     }
 
     public func saveRun(_ run: AgentRun) async throws {
-        upsert(run, into: &snapshot.runs)
+        var next = run
+        if next.pinnedAt == nil,
+           let existing = snapshot.runs.first(where: { $0.id == run.id })?.pinnedAt {
+            next.pinnedAt = existing
+        }
+        upsert(next, into: &snapshot.runs)
         try persist()
     }
 

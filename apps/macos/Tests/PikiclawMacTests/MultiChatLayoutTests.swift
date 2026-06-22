@@ -123,6 +123,138 @@ import Testing
     ])
 }
 
+@Test func visibleMultiChatRunsKeepsActiveSideWithinFourPanes() {
+    let parent = multiChatTestRun(id: "run-parent", title: "Parent")
+    var sides = (1...4).map { index in
+        multiChatTestRun(id: EntityID("run-side-\(index)"), title: "Side \(index)")
+    }
+    sides[3].sideChatOfRunId = parent.id
+
+    let focusedSideRunId = nativeEffectiveFocusedSideRunId(
+        activeRun: sides[3],
+        focusedSideRunId: nil
+    )
+    let visible = nativeVisibleMultiChatRuns(
+        parent: parent,
+        sideRuns: sides,
+        hiddenSideRunIds: [],
+        focusedSideRunId: focusedSideRunId
+    )
+
+    #expect(focusedSideRunId == "run-side-4")
+    #expect(visible.map(\.id) == [
+        "run-parent",
+        "run-side-1",
+        "run-side-2",
+        "run-side-4"
+    ])
+}
+
+@Test func temporaryPaneOpeningDeDuplicatesWithoutCappingWindowLayout() {
+    let duplicated = nativeTemporaryPaneRunIdsAfterOpening(
+        existing: ["run-one", "run-two"],
+        opening: "run-one",
+        activeRunId: "run-parent"
+    )
+    let uncapped = nativeTemporaryPaneRunIdsAfterOpening(
+        existing: ["run-one", "run-two", "run-three"],
+        opening: "run-four",
+        activeRunId: "run-parent"
+    )
+
+    #expect(duplicated == ["run-two", "run-one"])
+    #expect(uncapped == ["run-one", "run-two", "run-three", "run-four"])
+}
+
+@Test func temporaryPaneOpeningCanStillApplyExplicitCap() {
+    let capped = nativeTemporaryPaneRunIdsAfterOpening(
+        existing: ["run-one", "run-two", "run-three"],
+        opening: "run-four",
+        activeRunId: "run-parent",
+        maxPanes: 4
+    )
+
+    #expect(capped == ["run-two", "run-three", "run-four"])
+}
+
+@Test func temporaryPaneClosingRemovesOnlyClosedPaneAndKeepsFocusUseful() {
+    let focusedClosed = nativeTemporaryPaneStateAfterClosing(
+        existing: ["run-one", "run-two", "run-three"],
+        closing: "run-two",
+        focusedRunId: "run-two"
+    )
+    let backgroundClosed = nativeTemporaryPaneStateAfterClosing(
+        existing: ["run-one", "run-two", "run-three"],
+        closing: "run-one",
+        focusedRunId: "run-three"
+    )
+
+    #expect(focusedClosed.runIds == ["run-one", "run-three"])
+    #expect(focusedClosed.focusedRunId == "run-three")
+    #expect(backgroundClosed.runIds == ["run-two", "run-three"])
+    #expect(backgroundClosed.focusedRunId == "run-three")
+}
+
+@Test func temporaryPaneLayoutPreservesFocusedSideChat() {
+    let parent = multiChatTestRun(id: "run-parent", title: "Parent")
+    let sides = (1...3).map { index in
+        multiChatTestRun(id: EntityID("run-side-\(index)"), title: "Side \(index)")
+    }
+    let temporary = multiChatTestRun(id: "run-temporary", title: "Temporary")
+
+    let panes = nativeVisibleTemporaryMultiChatPanes(
+        parent: parent,
+        sideRuns: sides,
+        hiddenSideRunIds: [],
+        focusedSideRunId: "run-side-3",
+        temporaryRuns: [temporary],
+        focusedTemporaryRunId: temporary.id
+    )
+
+    #expect(panes.map(\.id) == [
+        "run-parent",
+        "run-side-3",
+        "run-temporary",
+        "run-side-1",
+        "run-side-2"
+    ])
+    #expect(panes.map(\.role) == [.primary, .side, .temporary, .side, .side])
+}
+
+@Test func temporaryPaneLayoutCanShowMoreThanFourPanesForScrolling() {
+    let parent = multiChatTestRun(id: "run-parent", title: "Parent")
+    let temporaryRuns = (1...4).map { index in
+        multiChatTestRun(id: EntityID("run-temporary-\(index)"), title: "Temporary \(index)")
+    }
+
+    let panes = nativeVisibleTemporaryMultiChatPanes(
+        parent: parent,
+        sideRuns: [],
+        hiddenSideRunIds: [],
+        focusedSideRunId: nil,
+        temporaryRuns: temporaryRuns,
+        focusedTemporaryRunId: nil
+    )
+
+    #expect(panes.map(\.id) == [
+        "run-parent",
+        "run-temporary-1",
+        "run-temporary-2",
+        "run-temporary-3",
+        "run-temporary-4"
+    ])
+}
+
+@Test func multiChatGridKeepsUpToFourPanesInsideOneScreen() {
+    #expect(nativeMultiChatGridColumnCount(for: 2) == 2)
+    #expect(nativeMultiChatGridRowsPerScreen(for: 2) == 1)
+    #expect(nativeMultiChatGridRowsPerScreen(for: 3) == 2)
+    #expect(nativeMultiChatGridRowsPerScreen(for: 4) == 2)
+    #expect(nativeMultiChatGridRowsPerScreen(for: 5) == 2)
+    #expect(nativeMultiChatPaneHeight(containerHeight: 1000, paneCount: 2, spacing: 12) == 1000)
+    #expect(nativeMultiChatPaneHeight(containerHeight: 1000, paneCount: 3, spacing: 12) == 494)
+}
+
 private struct MultiChatFixture {
     let directory: URL
     let store: JSONNativeStore

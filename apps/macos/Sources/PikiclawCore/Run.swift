@@ -73,6 +73,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var messages: [AgentRunMessage]
     public var transcript: String
     public var readAt: Date?
+    public var pinnedAt: Date?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -94,6 +95,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         case messages
         case transcript
         case readAt
+        case pinnedAt
     }
 
     public init(
@@ -114,7 +116,8 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         promptSnapshot: String,
         contextRefs: [ContextRef] = [],
         messages: [AgentRunMessage] = [],
-        transcript: String = ""
+        transcript: String = "",
+        pinnedAt: Date? = nil
     ) {
         self.id = id
         self.workItemId = workItemId
@@ -135,6 +138,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.messages = messages
         self.transcript = transcript
         self.readAt = nil
+        self.pinnedAt = pinnedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -158,12 +162,17 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.messages = try container.decodeIfPresent([AgentRunMessage].self, forKey: .messages) ?? []
         self.transcript = try container.decodeIfPresent(String.self, forKey: .transcript) ?? ""
         self.readAt = try container.decodeIfPresent(Date.self, forKey: .readAt)
+        self.pinnedAt = try container.decodeIfPresent(Date.self, forKey: .pinnedAt)
     }
 }
 
 public extension AgentRun {
     var isCompletedUnread: Bool {
         state == .completed && readAt == nil
+    }
+
+    var isPinned: Bool {
+        pinnedAt != nil
     }
 }
 

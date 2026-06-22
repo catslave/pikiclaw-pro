@@ -483,6 +483,525 @@ import Testing
     #expect(draft.comment.contains("Next action:\n- Run or review: swift build --product PikiclawMac"))
 }
 
+@Test func jiraTicketUpdateDraftIncludesBranchResolutionEvidence() {
+    let workspace = Workspace(
+        id: EntityID("workspace-branch-resolution"),
+        name: "pikiclaw",
+        pathDisplay: "/Users/michael.yang/Codes/Personal/pikiclaw"
+    )
+    let item = WorkItem(
+        id: EntityID("jira-branch-resolution"),
+        workspaceId: workspace.id,
+        title: "Close reviewed artifact",
+        sourceType: .jira,
+        state: .review,
+        jira: JiraWorkItemFields(
+            key: "IVAS-7100",
+            url: "https://jira.example.com/browse/IVAS-7100",
+            status: "In Review"
+        )
+    )
+    let resolved = Artifact(
+        id: EntityID("artifact-branch-resolved"),
+        workspaceId: workspace.id,
+        workItemId: item.id,
+        runId: "run-parent",
+        kind: .commandOutputSummary,
+        title: "Evidence: resolved branch",
+        uri: "pikiclaw://runs/run-parent/evidence",
+        status: .verified,
+        provenance: """
+        Captured output.
+        Branch decision: Resolved via Review - Read-only review.
+        """,
+        sourceRefs: [
+            SourceRef(
+                kind: "artifact-resolution",
+                label: "resolved",
+                uri: "pikiclaw://runs/run-review"
+            )
+        ]
+    )
+    let blocked = Artifact(
+        id: EntityID("artifact-branch-blocked"),
+        workspaceId: workspace.id,
+        workItemId: item.id,
+        runId: "run-parent",
+        kind: .verificationResult,
+        title: "Evidence: blocked branch",
+        uri: "pikiclaw://runs/run-parent/blocked",
+        status: .failed,
+        provenance: """
+        Captured output.
+        Branch decision: Blocked via Validate - Validate only.
+        """,
+        sourceRefs: [
+            SourceRef(
+                kind: "artifact-resolution",
+                label: "blocked",
+                uri: "pikiclaw://runs/run-validate"
+            )
+        ]
+    )
+    let snapshot = NativeStoreSnapshot(seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [resolved, blocked],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    ))
+
+    let draft = jiraTicketUpdateDraft(for: item, snapshot: snapshot)
+
+    #expect(draft.evidenceLines.contains("2 outputs captured; 2 refs linked."))
+    #expect(draft.evidenceLines.contains("Branch resolved: Evidence: resolved branch artifact pikiclaw://runs/run-parent/evidence via branch pikiclaw://runs/run-review."))
+    #expect(draft.validationLines.contains("Branch decision: Resolved via Review - Read-only review."))
+    #expect(draft.blockerLines.contains("Branch decision: Blocked via Validate - Validate only."))
+    #expect(draft.nextActionLines == [
+        "Resolve blocked branch for Evidence: blocked branch via branch pikiclaw://runs/run-validate before posting completion."
+    ])
+    #expect(draft.comment.contains("Evidence:\n- 2 outputs captured; 2 refs linked."))
+    #expect(draft.comment.contains("Validation:\n- Branch decision: Resolved via Review - Read-only review."))
+    #expect(draft.comment.contains("Blockers:\n- Branch decision: Blocked via Validate - Validate only."))
+    #expect(draft.comment.contains("Next action:\n- Resolve blocked branch for Evidence: blocked branch via branch pikiclaw://runs/run-validate before posting completion."))
+}
+
+@Test func jiraTicketUpdateDraftIncludesJiraWriteBackEvidence() {
+    let workspace = Workspace(
+        id: EntityID("workspace-writeback-evidence"),
+        name: "Writeback Evidence",
+        pathDisplay: "/tmp/writeback-evidence",
+        trustState: .trusted
+    )
+    let item = WorkItem(
+        id: EntityID("workitem-writeback-evidence"),
+        workspaceId: workspace.id,
+        title: "IVAS-7200: Post reviewed update",
+        sourceType: .jira,
+        state: .done,
+        jira: JiraWorkItemFields(key: "IVAS-7200", url: "https://jira.example.com/browse/IVAS-7200")
+    )
+    let posted = Artifact(
+        id: EntityID("artifact-writeback-posted"),
+        workspaceId: workspace.id,
+        workItemId: item.id,
+        kind: .commandOutputSummary,
+        title: "Jira write-back posted: IVAS-7200",
+        uri: "https://jira.example.com/browse/IVAS-7200",
+        status: .verified,
+        provenance: "Jira write-back: Posted IVAS-7200 to Jira.",
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "posted", uri: "https://jira.example.com/browse/IVAS-7200")
+        ]
+    )
+    let snapshot = NativeStoreSnapshot(seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [posted],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    ))
+
+    let draft = jiraTicketUpdateDraft(for: item, snapshot: snapshot)
+
+    #expect(draft.evidenceLines.contains("Jira write-back: Posted IVAS-7200 to Jira."))
+    #expect(draft.nextActionLines == [
+        "Jira write-back already posted; only post another update if new evidence changed."
+    ])
+}
+
+@Test func jiraTicketUpdateDraftIncludesJiraWriteBackFailure() {
+    let workspace = Workspace(
+        id: EntityID("workspace-writeback-failure"),
+        name: "Writeback Failure",
+        pathDisplay: "/tmp/writeback-failure",
+        trustState: .trusted
+    )
+    let item = WorkItem(
+        id: EntityID("workitem-writeback-failure"),
+        workspaceId: workspace.id,
+        title: "IVAS-7201: Retry reviewed update",
+        sourceType: .jira,
+        state: .review,
+        jira: JiraWorkItemFields(key: "IVAS-7201", url: "https://jira.example.com/browse/IVAS-7201")
+    )
+    let failed = Artifact(
+        id: EntityID("artifact-writeback-failed"),
+        workspaceId: workspace.id,
+        workItemId: item.id,
+        kind: .commandOutputSummary,
+        title: "Jira write-back failed: IVAS-7201",
+        uri: "https://jira.example.com/browse/IVAS-7201",
+        status: .failed,
+        provenance: "Jira write-back: Failed IVAS-7201; retry or paste the draft manually.",
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "failed", uri: "https://jira.example.com/browse/IVAS-7201")
+        ]
+    )
+    let snapshot = NativeStoreSnapshot(seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [failed],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    ))
+
+    let draft = jiraTicketUpdateDraft(for: item, snapshot: snapshot)
+
+    #expect(draft.blockerLines.contains("Jira write-back: Failed IVAS-7201; retry or paste the draft manually."))
+    #expect(draft.nextActionLines == [
+        "Fix Jira write-back failure, then retry or paste the draft manually."
+    ])
+}
+
+@Test func jiraTicketUpdateDraftIncludesChineseJiraWriteBackStatus() {
+    let workspace = Workspace(
+        id: EntityID("workspace-writeback-chinese"),
+        name: "Chinese Writeback",
+        pathDisplay: "/tmp/writeback-chinese",
+        trustState: .trusted
+    )
+    let item = WorkItem(
+        id: EntityID("workitem-writeback-chinese"),
+        workspaceId: workspace.id,
+        title: "IVAS-7203: Preserve Chinese write-back state",
+        sourceType: .jira,
+        state: .review,
+        jira: JiraWorkItemFields(key: "IVAS-7203", url: "https://jira.example.com/browse/IVAS-7203")
+    )
+    let failed = Artifact(
+        id: EntityID("artifact-writeback-chinese-failed"),
+        workspaceId: workspace.id,
+        workItemId: item.id,
+        kind: .commandOutputSummary,
+        title: "Jira 写回失败: IVAS-7203",
+        uri: "https://jira.example.com/browse/IVAS-7203",
+        status: .failed,
+        provenance: "Jira 写回失败：IVAS-7203 缺少 token，需要重试或手动粘贴草稿。",
+        createdAt: Date(timeIntervalSince1970: 20),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "failed", uri: "https://jira.example.com/browse/IVAS-7203")
+        ]
+    )
+    let posted = Artifact(
+        id: EntityID("artifact-writeback-chinese-posted"),
+        workspaceId: workspace.id,
+        workItemId: item.id,
+        kind: .commandOutputSummary,
+        title: "Jira 写回已发布: IVAS-7203",
+        uri: "https://jira.example.com/browse/IVAS-7203",
+        status: .verified,
+        provenance: "Jira 写回已发布：IVAS-7203 已发布到 Jira。",
+        createdAt: Date(timeIntervalSince1970: 10),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "posted", uri: "https://jira.example.com/browse/IVAS-7203")
+        ]
+    )
+    let snapshot = NativeStoreSnapshot(seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [posted, failed],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    ))
+
+    let draft = jiraTicketUpdateDraft(for: item, snapshot: snapshot)
+    let summary = jiraTicketEvidenceSummary(artifacts: [posted, failed])
+
+    #expect(draft.blockerLines.contains("Jira write-back: Jira 写回失败：IVAS-7203 缺少 token，需要重试或手动粘贴草稿。"))
+    #expect(summary.writeBackState == "failed")
+    #expect(summary.writeBackHelp == "Jira write-back: Jira 写回失败：IVAS-7203 缺少 token，需要重试或手动粘贴草稿。")
+}
+
+@Test func jiraTicketEvidenceSummarySurfacesLatestJiraWriteBackResult() {
+    let workspaceId = EntityID("workspace-writeback-summary")
+    let itemId = EntityID("workitem-writeback-summary")
+    let posted = Artifact(
+        id: EntityID("artifact-writeback-summary-posted"),
+        workspaceId: workspaceId,
+        workItemId: itemId,
+        kind: .commandOutputSummary,
+        title: "Jira write-back posted: IVAS-7200",
+        uri: "https://jira.example.com/browse/IVAS-7200",
+        status: .verified,
+        provenance: "Jira write-back: Posted IVAS-7200 to Jira.",
+        createdAt: Date(timeIntervalSince1970: 10),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "posted", uri: "https://jira.example.com/browse/IVAS-7200")
+        ]
+    )
+    let failed = Artifact(
+        id: EntityID("artifact-writeback-summary-failed"),
+        workspaceId: workspaceId,
+        workItemId: itemId,
+        kind: .commandOutputSummary,
+        title: "Jira write-back failed: IVAS-7200",
+        uri: "https://jira.example.com/browse/IVAS-7200",
+        status: .failed,
+        provenance: "Jira write-back: Failed IVAS-7200; retry or paste the draft manually.",
+        createdAt: Date(timeIntervalSince1970: 20),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "failed", uri: "https://jira.example.com/browse/IVAS-7200")
+        ]
+    )
+
+    let summary = jiraTicketEvidenceSummary(artifacts: [posted, failed])
+
+    #expect(summary.writeBackState == "failed")
+    #expect(summary.writeBackLabel == "Failed")
+    #expect(summary.writeBackSignals == [
+        "Jira write-back: Failed IVAS-7200; retry or paste the draft manually."
+    ])
+    #expect(summary.writeBackHelp == "Jira write-back: Failed IVAS-7200; retry or paste the draft manually.")
+    #expect(summary.hasWriteBackResult)
+}
+
+@Test func jiraTicketWriteBackHistoryKeepsAttemptsVisible() {
+    let workspaceId = EntityID("workspace-writeback-history")
+    let itemId = EntityID("workitem-writeback-history")
+    let posted = Artifact(
+        id: EntityID("artifact-writeback-history-posted"),
+        workspaceId: workspaceId,
+        workItemId: itemId,
+        kind: .commandOutputSummary,
+        title: "Jira write-back posted: IVAS-7200",
+        uri: "https://jira.example.com/browse/IVAS-7200",
+        status: .verified,
+        provenance: "Jira write-back: Posted IVAS-7200 to Jira.",
+        createdAt: Date(timeIntervalSince1970: 10),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "posted", uri: "https://jira.example.com/browse/IVAS-7200")
+        ]
+    )
+    let failed = Artifact(
+        id: EntityID("artifact-writeback-history-failed"),
+        workspaceId: workspaceId,
+        workItemId: itemId,
+        kind: .commandOutputSummary,
+        title: "Jira write-back failed: IVAS-7200",
+        uri: "pikiclaw://jira/IVAS-7200/write-back",
+        status: .failed,
+        provenance: "Jira write-back: Failed IVAS-7200; retry or paste the draft manually.",
+        createdAt: Date(timeIntervalSince1970: 20),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "failed", uri: "pikiclaw://jira/IVAS-7200/write-back")
+        ]
+    )
+    let manualPaste = Artifact(
+        id: EntityID("artifact-writeback-history-manual"),
+        workspaceId: workspaceId,
+        workItemId: itemId,
+        kind: .commandOutputSummary,
+        title: "Jira write-back manual paste: IVAS-7200",
+        uri: "pikiclaw://jira/IVAS-7200/manual-paste",
+        status: .ready,
+        provenance: "Jira write-back: Manual paste pending for IVAS-7200.",
+        createdAt: Date(timeIntervalSince1970: 30),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "manual-paste", uri: "pikiclaw://jira/IVAS-7200/manual-paste")
+        ]
+    )
+
+    let history = jiraTicketWriteBackHistory(artifacts: [posted, failed, manualPaste])
+    let summary = jiraTicketEvidenceSummary(artifacts: [posted, failed, manualPaste])
+
+    #expect(history.map(\.id) == [
+        EntityID("artifact-writeback-history-manual"),
+        EntityID("artifact-writeback-history-failed"),
+        EntityID("artifact-writeback-history-posted")
+    ])
+    #expect(history.map(\.label) == ["Manual paste", "Failed", "Posted"])
+    #expect(history.map(\.isActionable) == [true, true, false])
+    #expect(history.map(\.actionTitle) == ["Post", "Retry", nil])
+    #expect(history.first?.signal == "Jira write-back: Manual paste pending for IVAS-7200.")
+    #expect(history.first?.artifactURI == "pikiclaw://jira/IVAS-7200/manual-paste")
+    #expect(jiraTicketWriteBackHistory(artifacts: [posted, failed, manualPaste], limit: 2).map(\.label) == ["Manual paste", "Failed"])
+    #expect(summary.writeBackState == "manual-paste")
+    #expect(summary.writeBackLabel == "Manual paste")
+    #expect(summary.writeBackHelp == "Jira write-back: Manual paste pending for IVAS-7200.")
+}
+
+@Test func jiraTicketWriteBackAuditTimelineKeepsChronologicalAttemptChain() {
+    let workspaceId = EntityID("workspace-writeback-audit")
+    let itemId = EntityID("workitem-writeback-audit")
+
+    func writeBackArtifact(
+        id: String,
+        label: String,
+        title: String,
+        provenance: String,
+        createdAt: TimeInterval
+    ) -> Artifact {
+        Artifact(
+            id: EntityID(id),
+            workspaceId: workspaceId,
+            workItemId: itemId,
+            kind: .commandOutputSummary,
+            title: title,
+            uri: "pikiclaw://jira/IVAS-7200/write-back/\(label)",
+            status: label == "failed" ? .failed : .ready,
+            provenance: provenance,
+            createdAt: Date(timeIntervalSince1970: createdAt),
+            sourceRefs: [
+                SourceRef(kind: "jira-write-back", label: label, uri: "pikiclaw://jira/IVAS-7200/write-back/\(label)")
+            ]
+        )
+    }
+
+    let posted = writeBackArtifact(
+        id: "artifact-writeback-audit-posted",
+        label: "posted",
+        title: "Jira write-back posted: IVAS-7200",
+        provenance: "Jira write-back: Posted IVAS-7200 to Jira.",
+        createdAt: 10
+    )
+    let failed = writeBackArtifact(
+        id: "artifact-writeback-audit-failed",
+        label: "failed",
+        title: "Jira write-back failed: IVAS-7200",
+        provenance: "Jira write-back: Failed IVAS-7200; retry or paste the draft manually.",
+        createdAt: 20
+    )
+    let manualPaste = writeBackArtifact(
+        id: "artifact-writeback-audit-manual",
+        label: "manual-paste",
+        title: "Jira write-back manual paste: IVAS-7200",
+        provenance: "Jira write-back: Manual paste pending for IVAS-7200.",
+        createdAt: 30
+    )
+
+    let timeline = jiraTicketWriteBackAuditTimeline(artifacts: [manualPaste, failed, posted])
+
+    #expect(timeline.map(\.id) == [posted.id, failed.id, manualPaste.id])
+    #expect(timeline.map(\.label) == ["Posted", "Failed", "Manual paste"])
+    #expect(timeline.map(\.isActionable) == [false, true, true])
+    #expect(timeline.last?.signal == "Jira write-back: Manual paste pending for IVAS-7200.")
+    #expect(jiraTicketWriteBackAuditTimeline(artifacts: [posted, failed, manualPaste], limit: 2).map(\.label) == ["Failed", "Manual paste"])
+    #expect(jiraTicketWriteBackAuditTimeline(artifacts: [posted], limit: 0).isEmpty)
+}
+
+@Test func jiraTicketActionableWriteBackHistoryFindsBuriedFailures() {
+    let workspaceId = EntityID("workspace-writeback-actionable-history")
+    let itemId = EntityID("workitem-writeback-actionable-history")
+    let oldFailed = Artifact(
+        id: EntityID("artifact-writeback-actionable-old-failure"),
+        workspaceId: workspaceId,
+        workItemId: itemId,
+        kind: .commandOutputSummary,
+        title: "Jira write-back failed: IVAS-7202",
+        uri: "pikiclaw://jira/IVAS-7202/write-back",
+        status: .failed,
+        provenance: "Jira write-back: Failed IVAS-7202; retry or paste the draft manually.",
+        createdAt: Date(timeIntervalSince1970: 1),
+        sourceRefs: [
+            SourceRef(kind: "jira-write-back", label: "failed", uri: "pikiclaw://jira/IVAS-7202/write-back")
+        ]
+    )
+    let posted = (1...6).map { index in
+        Artifact(
+            id: EntityID("artifact-writeback-actionable-posted-\(index)"),
+            workspaceId: workspaceId,
+            workItemId: itemId,
+            kind: .commandOutputSummary,
+            title: "Jira write-back posted: IVAS-7202 \(index)",
+            uri: "https://jira.example.com/browse/IVAS-7202",
+            status: .verified,
+            provenance: "Jira write-back: Posted IVAS-7202 to Jira.",
+            createdAt: Date(timeIntervalSince1970: TimeInterval(10 + index)),
+            sourceRefs: [
+                SourceRef(kind: "jira-write-back", label: "posted", uri: "https://jira.example.com/browse/IVAS-7202")
+            ]
+        )
+    }
+
+    let recent = jiraTicketWriteBackHistory(artifacts: posted + [oldFailed], limit: 5)
+    let actionable = jiraTicketActionableWriteBackHistory(artifacts: posted + [oldFailed], limit: 5)
+
+    #expect(recent.allSatisfy { $0.state == "posted" })
+    #expect(!recent.contains { $0.id == oldFailed.id })
+    #expect(actionable.map(\.id) == [oldFailed.id])
+    #expect(actionable.first?.actionTitle == "Retry")
+    #expect(actionable.first?.signal == "Jira write-back: Failed IVAS-7202; retry or paste the draft manually.")
+}
+
+@Test func jiraTicketWriteBackPlanRequiresExplicitApproval() {
+    let item = WorkItem(
+        id: EntityID("jira-writeback"),
+        workspaceId: EntityID("workspace-test"),
+        title: "Post reviewed Jira update",
+        sourceType: .jira,
+        jira: JiraWorkItemFields(key: "IVAS-7200")
+    )
+    let draft = JiraTicketUpdateDraft(
+        title: "IVAS-7200 update",
+        comment: "Jira update: IVAS-7200\n\nStatus:\n- Ready",
+        statusLines: ["Ready"],
+        evidenceLines: ["Evidence captured"],
+        validationLines: ["swift test passed"],
+        blockerLines: ["None captured."],
+        nextActionLines: ["Post update"]
+    )
+
+    let readOnly = jiraTicketWriteBackPlan(for: item, draft: draft, permissionMode: .readOnly)
+    let ask = jiraTicketWriteBackPlan(for: item, draft: draft, permissionMode: .askBeforeEdit)
+    let autopilot = jiraTicketWriteBackPlan(for: item, draft: draft, permissionMode: .autopilot)
+
+    #expect(readOnly.gate == .denied)
+    #expect(readOnly.permissionDecision == .deny)
+    #expect(readOnly.denialReason?.contains("readOnly") == true)
+    #expect(ask.gate == .requiresApproval)
+    #expect(ask.permissionDecision == .ask)
+    #expect(ask.requiresExplicitApproval)
+    #expect(ask.issueKey == "IVAS-7200")
+    #expect(ask.comment == draft.comment)
+    #expect(ask.auditSummary == "Approved Jira write-back for IVAS-7200")
+    #expect(autopilot.gate == .requiresApproval)
+    #expect(autopilot.permissionDecision == .ask)
+}
+
+@Test func jiraTicketWriteBackPlanDeniesMissingIssueKey() {
+    let item = WorkItem(
+        id: EntityID("jira-writeback-missing-key"),
+        workspaceId: EntityID("workspace-test"),
+        title: "No key",
+        sourceType: .jira
+    )
+    let draft = JiraTicketUpdateDraft(
+        title: "Jira update",
+        comment: "No issue key",
+        statusLines: [],
+        evidenceLines: [],
+        validationLines: [],
+        blockerLines: [],
+        nextActionLines: []
+    )
+
+    let plan = jiraTicketWriteBackPlan(for: item, draft: draft, permissionMode: .askBeforeEdit)
+
+    #expect(plan.gate == .denied)
+    #expect(plan.denialReason == "Selected work item has no Jira issue key.")
+}
+
 @Test func jiraTicketMatchesQueryCoversOperationalFields() {
     let item = WorkItem(
         id: EntityID("jira-search"),

@@ -159,6 +159,17 @@ build_bundle() {
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>com.pikiclaw.macnative</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>pikiclaw</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleShortVersionString</key>
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
@@ -367,7 +378,11 @@ run_coalesced_build() {
   fi
 }
 
-run_coalesced_build "${ORIGINAL_ARGS[@]}"
+if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
+  run_coalesced_build "${ORIGINAL_ARGS[@]}"
+else
+  run_coalesced_build
+fi
 
 if [ "$INSTALL_APP" = "1" ]; then
   install_app

@@ -93,7 +93,8 @@ private func makeLaunchRequest(executable: URL, stdinText: String? = nil) -> Age
     let run = AgentRun(
         workspaceId: "workspace",
         agentProfileId: "agent",
-        promptSnapshot: "prompt"
+        promptSnapshot: "prompt",
+        pinnedAt: nil
     )
     return AgentLaunchRequest(
         workspacePath: executable.deletingLastPathComponent().path,

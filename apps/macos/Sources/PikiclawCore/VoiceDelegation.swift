@@ -160,8 +160,8 @@ public enum VoiceAssistantPlanner {
             return VoiceDelegationReport(
                 headline: "Completed",
                 spokenText: summary.isEmpty
-                    ? "Done. I completed \(plan.title) through Pikiclaw and saved the conversation transcript."
-                    : "Done. I completed \(plan.title) through Pikiclaw. \(summary)",
+                    ? "完成了。后台任务已经结束，我没有拿到适合朗读的摘要，你可以打开任务查看详情。"
+                    : "完成了。\(summary)",
                 tone: "done"
             )
         case .failed:
@@ -169,8 +169,8 @@ public enum VoiceAssistantPlanner {
             return VoiceDelegationReport(
                 headline: "Run failed",
                 spokenText: summary.isEmpty
-                    ? "I could not finish \(plan.title). I saved the failure output so you can inspect the blocker."
-                    : "I could not finish \(plan.title). \(summary)",
+                    ? "这次没有完成。后台输出里有技术细节，我已保留在任务里，你可以打开查看。"
+                    : "这次没有完成。\(summary)",
                 tone: "failed"
             )
         case .cancelling, .cancelled:
@@ -224,7 +224,8 @@ public enum VoiceAssistantPlanner {
         let hasSoftDelegateSignal = softDelegateSignals.contains(where: lower.contains)
         let statusSignals = [
             "status", "progress", "active task", "active tasks", "running task", "running tasks", "current task", "current tasks",
-            "进度", "状态", "怎么样了", "现在到哪", "运行情况", "当前任务", "正在工作的任务", "还在工作的任务", "当前还在工作", "还在工作"
+            "进度", "状态", "怎么样了", "现在到哪", "运行情况", "当前任务", "正在工作的任务", "还在工作的任务", "当前还在工作", "还在工作",
+            "后台任务", "任务数量", "当前有几个", "有几个任务", "多少个任务", "几个任务", "多少任务"
         ]
         if statusSignals.contains(where: lower.contains), !hasStrongDelegateSignal {
             return .status
@@ -400,11 +401,7 @@ public enum VoiceAssistantPlanner {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { line in
-                guard !line.isEmpty else { return false }
-                if line.hasPrefix("[tool]") || line.hasPrefix("[artifact]") || line.hasPrefix("[runner failed]") {
-                    return false
-                }
-                return true
+                isSpeakableTranscriptLine(line)
             }
 
         guard !cleanedLines.isEmpty else { return "" }
@@ -413,5 +410,32 @@ public enum VoiceAssistantPlanner {
             return tail
         }
         return "\(tail.prefix(220))..."
+    }
+
+    private static func isSpeakableTranscriptLine(_ line: String) -> Bool {
+        guard !line.isEmpty else { return false }
+        let lower = line.lowercased()
+        let blockedPrefixes = [
+            "[tool]", "[artifact]", "[runner failed]", "[debug]", "[trace]", "[raw]",
+            "[user voice]", "[user text]", "[assistant voice]", "[assistant text]"
+        ]
+        if blockedPrefixes.contains(where: line.hasPrefix) {
+            return false
+        }
+        let blockedFragments = [
+            " error ", "error:", "fatal:", "fatalerror", "transport channel closed",
+            "unexpectedcontenttype", "missing-content-type", "rmcp::transport",
+            "\"type\":", "\"item\":", "item.completed", "worker quit with fatal"
+        ]
+        if blockedFragments.contains(where: lower.contains) {
+            return false
+        }
+        if line.hasPrefix("{") || line.hasPrefix("}") || line.hasPrefix("\"") {
+            return false
+        }
+        if line.contains("{\"") || line.contains("\":") || line.contains("\\n") {
+            return false
+        }
+        return true
     }
 }

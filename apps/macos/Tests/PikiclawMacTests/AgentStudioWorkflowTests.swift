@@ -1,8 +1,36 @@
 import Foundation
 import Testing
+@preconcurrency import UserNotifications
 @testable import PikiclawCore
 @testable import PikiclawMac
 @testable import PikiclawRunner
+
+@MainActor
+private final class FakeNativeNotificationCenterClient: NativeNotificationCenterClient {
+    var status: UNAuthorizationStatus
+    var authorizationGrant: Bool
+    var requestedOptions: UNAuthorizationOptions?
+    var addedRequests: [UNNotificationRequest] = []
+
+    init(status: UNAuthorizationStatus, authorizationGrant: Bool = true) {
+        self.status = status
+        self.authorizationGrant = authorizationGrant
+    }
+
+    func authorizationStatus() async -> UNAuthorizationStatus {
+        status
+    }
+
+    func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
+        requestedOptions = options
+        status = authorizationGrant ? .authorized : .denied
+        return authorizationGrant
+    }
+
+    func add(_ request: UNNotificationRequest) async throws {
+        addedRequests.append(request)
+    }
+}
 
 @MainActor
 @Test func detectingAgentUpdatesCapabilityHealth() async throws {
@@ -101,6 +129,119 @@ import Testing
     #expect(capability.installState == "missing")
     #expect(capability.configState == "unknown · codex not found on PATH")
     #expect(capability.healthState == .unavailable)
+}
+
+@MainActor
+@Test func detectingReadyEnterpriseAgentEnablesProfile() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-agent-detect-ready-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let agent = AgentProfile(
+        id: "agent-claude-ready",
+        kind: .claude,
+        displayName: "Claude Code",
+        executableName: "claude",
+        isEnabled: false
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            DetectingAgentAdapter(descriptor: descriptor, detection: AgentDetection(
+                isAvailable: true,
+                executablePath: "/opt/homebrew/bin/claude",
+                authState: "configured",
+                detail: "ready"
+            ))
+        }
+    )
+    await model.reload()
+
+    let detection = try #require(await model.detectAgent(kind: .claude))
+    let snapshot = try await store.loadSnapshot()
+    let profile = try #require(snapshot.agentProfiles.first(where: { $0.kind == .claude }))
+    let capability = try #require(snapshot.capabilities.first(where: { $0.id == "capability-agent-agent-claude-ready" }))
+
+    #expect(detection.isAvailable)
+    #expect(profile.isEnabled)
+    #expect(capability.healthState == .healthy)
+    #expect(model.statusLine == "Claude Code ready and enabled")
+}
+
+@MainActor
+@Test func detectingUnauthedEnterpriseAgentKeepsProfileDisabled() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-agent-detect-unauth-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let agent = AgentProfile(
+        id: "agent-gemini-unauth",
+        kind: .gemini,
+        displayName: "Gemini CLI",
+        executableName: "gemini",
+        isEnabled: false
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            DetectingAgentAdapter(descriptor: descriptor, detection: AgentDetection(
+                isAvailable: true,
+                executablePath: "/opt/homebrew/bin/gemini",
+                authState: "unknown",
+                detail: "login required"
+            ))
+        }
+    )
+    await model.reload()
+
+    let detection = try #require(await model.detectAgent(kind: .gemini))
+    let snapshot = try await store.loadSnapshot()
+    let profile = try #require(snapshot.agentProfiles.first(where: { $0.kind == .gemini }))
+    let capability = try #require(snapshot.capabilities.first(where: { $0.id == "capability-agent-agent-gemini-unauth" }))
+
+    #expect(detection.isAvailable)
+    #expect(profile.isEnabled == false)
+    #expect(capability.healthState == .healthy)
+    #expect(model.statusLine == "Gemini CLI detected; login before enabling")
+}
+
+@Test func enterpriseAgentBestForSummaryUsesParityRows() throws {
+    let snapshot = NativeStoreSnapshot(seed: .preview())
+    let codex = try #require(snapshot.agentProfiles.first(where: { $0.kind == .codex }))
+    let gemini = try #require(snapshot.agentProfiles.first(where: { $0.kind == .gemini }))
+    let hermes = try #require(snapshot.agentProfiles.first(where: { $0.kind == .hermes }))
+
+    #expect(enterpriseAgentBestForSummary(profile: codex, snapshot: snapshot) == "Best for issue workflow, approval gate, artifacts")
+    #expect(enterpriseAgentBestForSummary(profile: gemini, snapshot: snapshot) == "Best after Detect + Login")
+    #expect(enterpriseAgentBestForSummary(profile: hermes, snapshot: snapshot) == "Best for native workspace runs")
 }
 
 @MainActor
@@ -217,6 +358,57 @@ import Testing
 
     #expect(runId == nil)
     #expect(model.statusLine == "Add a workspace before testing Codex")
+}
+
+@MainActor
+@Test func disabledAgentSmokeTestStagesDetectLoginGuidance() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-agent-smoke-disabled-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-agent-smoke-disabled",
+        name: "Disabled Agent Smoke",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-gemini-disabled-smoke",
+        kind: .gemini,
+        displayName: "Gemini CLI",
+        executableName: "gemini",
+        isEnabled: false
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    #expect(model.stageAgentSmokePrerequisite(kind: .gemini, workspaceId: workspace.id))
+    #expect(model.selectedAgentKind == .gemini)
+    #expect(model.terminalCommand == "gemini auth login")
+    #expect(model.terminalCurrentDirectory(for: workspace) == workspace.pathDisplay)
+    #expect(model.statusLine == "Gemini CLI needs Detect + Login before Test; login command staged")
+
+    let runId = await model.startAgentSmokeTest(kind: .gemini, workspaceId: workspace.id)
+    let snapshot = try await store.loadSnapshot()
+
+    #expect(runId == nil)
+    #expect(snapshot.runs.isEmpty)
+    #expect(model.terminalCommand == "gemini auth login")
+    #expect(model.statusLine == "Gemini CLI needs Detect + Login before Test; login command staged")
 }
 
 @MainActor
@@ -805,7 +997,10 @@ import Testing
         description: "Assistant prompts should carry high-value prior outputs.",
         sourceType: .jira,
         state: .active,
-        jira: JiraWorkItemFields(key: "IVAS-9100", status: "In Progress")
+        externalRefs: [
+            SourceRef(kind: "gitlab", label: "Native MR", uri: "https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/910")
+        ],
+        jira: JiraWorkItemFields(key: "IVAS-9100", url: "https://jira.example.com/browse/IVAS-9100", status: "In Progress")
     )
     let artifact = Artifact(
         id: "artifact-evidence-context",
@@ -826,12 +1021,35 @@ import Testing
         Blockers:
         - waiting for Jira write permission.
         Risk: full app smoke has not run.
+        Error: queue sync failed after Jira MCP search.
+        Process exited with code 1
+        MR: https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/910
+        Findings:
+        - [P1] Missing retry validation in RootView.swift:6519 before marking the MR ready.
+        Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing.
+        Inspect `.pikiclaw/skills/iva-logtracer/SKILL.md` before changing behavior.
+        Suggested skill command: `/logtrace env=stage conversationId=p-v-voice-123 last=24h`
+        Code refs:
+        - apps/macos/Sources/PikiclawMac/RootView.swift:6519
+        - apps/macos/Tests/PikiclawMacTests/AgentStudioWorkflowTests.swift:1119
+        Jira update:
+        Status: retry validation still missing
+        Evidence: RootView context needs handoff drafts.
+        Jira write-back: Failed IVAS-9100; retry or paste the draft manually.
+        MR review comment:
+        Ready after adding handoff draft context; residual risk is manual smoke.
+        Branch decision: Needs follow-up via Review - Read-only review.
         Open question: whether voice flow needs a manual smoke pass.
         Next action: run the focused validation and paste the result into Jira.
         Validation: git diff --check passed
         Next command: `swift test --filter ChatMessageHistoryTests`
         """,
-        createdAt: Date(timeIntervalSince1970: 20)
+        createdAt: Date(timeIntervalSince1970: 20),
+        sourceRefs: [
+            SourceRef(kind: "jira", label: "IVAS-9100", uri: "https://jira.example.com/browse/IVAS-9100"),
+            SourceRef(kind: "jira-write-back", label: "failed", uri: "https://jira.example.com/browse/IVAS-9100"),
+            SourceRef(kind: "artifact-resolution", label: "needs-follow-up", uri: "pikiclaw://runs/run-review-side-chat")
+        ]
     )
     let unrelated = Artifact(
         id: "artifact-evidence-unrelated",
@@ -918,9 +1136,60 @@ import Testing
         "Open question: whether voice flow needs a manual smoke pass.",
         "Next action: run the focused validation and paste the result into Jira."
     ])
+    #expect(summary.reviewFindings == [
+        "[P1] Missing retry validation in RootView.swift:6519 before marking the MR ready."
+    ])
+    #expect(summary.handoffDrafts == [
+        "Jira draft: Status: retry validation still missing | Evidence: RootView context needs handoff drafts.",
+        "MR draft: Ready after adding handoff draft context; residual risk is manual smoke."
+    ])
+    #expect(summary.branchDecisions == [
+        "Branch needs follow-up: Evidence: validation passed - Branch decision: Needs follow-up via Review - Read-only review."
+    ])
+    #expect(summary.reviewRefs == [
+        "Native MR (https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/910)",
+        "MR: https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/910"
+    ])
+    #expect(summary.jiraRefs == [
+        "IVAS-9100 (https://jira.example.com/browse/IVAS-9100)"
+    ])
+    #expect(summary.jiraWriteBackSignals == [
+        "Jira write-back: Failed IVAS-9100; retry or paste the draft manually."
+    ])
+    #expect(summary.codeRefs == [
+        ".pikiclaw/skills/iva-logtracer/SKILL.md",
+        "apps/macos/Sources/PikiclawMac/RootView.swift:6519",
+        "apps/macos/Tests/PikiclawMacTests/AgentStudioWorkflowTests.swift:1119"
+    ])
+    #expect(summary.skillRefs == [
+        "Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing.",
+        "/logtrace",
+        "IVA_LOGTRACER_ENV_FILE",
+        ".pikiclaw/skills/iva-logtracer/SKILL.md",
+        "/logtrace env=stage conversationId=p-v-voice-123 last=24h"
+    ])
+    #expect(summary.skillRecoveries == [
+        "Recover /logtrace: set IVA_LOGTRACER_ENV_FILE before rerun.",
+        "Inspect skill: .pikiclaw/skills/iva-logtracer/SKILL.md",
+        "Rerun: /logtrace env=stage conversationId=p-v-voice-123 last=24h"
+    ])
+    #expect(summary.failureSignals == [
+        "Error: queue sync failed after Jira MCP search.",
+        "Exit: Process exited with code 1",
+        "Failure: Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing."
+    ])
     #expect(summary.knowledgeCardCount == 1)
     #expect(summary.recentRunCount == 1)
     #expect(summary.hasContextPack)
+    #expect(assistantContextPackVisibleHighlights(summary: summary) == [
+        "Skill recovery: Recover /logtrace: set IVA_LOGTRACER_ENV_FILE before rerun.",
+        "Review: [P1] Missing retry validation in RootView.swift:6519 before marking the MR ready.",
+        "Jira write-back: Jira write-back: Failed IVAS-9100; retry or paste the draft manually."
+    ])
+    #expect(assistantContextPackVisibleHighlights(summary: summary, limit: 2) == [
+        "Skill recovery: Recover /logtrace: set IVA_LOGTRACER_ENV_FILE before rerun.",
+        "Review: [P1] Missing retry validation in RootView.swift:6519 before marking the MR ready."
+    ])
 
     #expect(model.stageAssistantPrompt(
         title: "MR Review",
@@ -932,8 +1201,18 @@ import Testing
     #expect(model.draftPrompt.contains("Relevant outputs: commandOutputSummary ready: Evidence: validation passed"))
     #expect(model.draftPrompt.contains("Decision signals: Decision: not ready to merge until retry validation is captured.; Readiness: Blocked on missing nil workspace guard. | Approval can proceed after focused validation.; Approval: add the guard before posting Jira done."))
     #expect(model.draftPrompt.contains("Actionable notes: Blocker: waiting for Jira write permission.; Risk: full app smoke has not run.; Open question: whether voice flow needs a manual smoke pass.; Next action: run the focused validation and paste the result into Jira."))
+    #expect(model.draftPrompt.contains("Review findings: [P1] Missing retry validation in RootView.swift:6519 before marking the MR ready."))
+    #expect(model.draftPrompt.contains("Handoff drafts: Jira draft: Status: retry validation still missing | Evidence: RootView context needs handoff drafts.; MR draft: Ready after adding handoff draft context; residual risk is manual smoke."))
+    #expect(model.draftPrompt.contains("Branch decisions: Branch needs follow-up: Evidence: validation passed - Branch decision: Needs follow-up via Review - Read-only review."))
+    #expect(model.draftPrompt.contains("Failure signals: Error: queue sync failed after Jira MCP search.; Exit: Process exited with code 1; Failure: Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing."))
     #expect(model.draftPrompt.contains("Validation evidence: git diff --check (passed)"))
     #expect(model.draftPrompt.contains("Artifact refs: Evidence: validation passed (pikiclaw://runs/run-evidence-context/evidence)"))
+    #expect(model.draftPrompt.contains("MR/PR refs: Native MR (https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/910); MR: https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/910"))
+    #expect(model.draftPrompt.contains("Jira refs: IVAS-9100 (https://jira.example.com/browse/IVAS-9100)"))
+    #expect(model.draftPrompt.contains("Jira write-back: Failed IVAS-9100; retry or paste the draft manually."))
+    #expect(model.draftPrompt.contains("Code refs: .pikiclaw/skills/iva-logtracer/SKILL.md; apps/macos/Sources/PikiclawMac/RootView.swift:6519; apps/macos/Tests/PikiclawMacTests/AgentStudioWorkflowTests.swift:1119"))
+    #expect(model.draftPrompt.contains("Skill refs: Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing.; /logtrace; IVA_LOGTRACER_ENV_FILE; .pikiclaw/skills/iva-logtracer/SKILL.md; /logtrace env=stage conversationId=p-v-voice-123 last=24h"))
+    #expect(model.draftPrompt.contains("Skill recovery: Recover /logtrace: set IVA_LOGTRACER_ENV_FILE before rerun.; Inspect skill: .pikiclaw/skills/iva-logtracer/SKILL.md; Rerun: /logtrace env=stage conversationId=p-v-voice-123 last=24h"))
     #expect(model.draftPrompt.contains("Pending commands: swift test --filter ChatMessageHistoryTests"))
     #expect(model.draftPrompt.contains("Knowledge cards: Evidence workflow shortcut [output,jira]: Saved outputs can drive follow-up assistant prompts."))
     #expect(model.draftPrompt.contains("Recent runs: failed run-evidence-failed: Validate saved output workflow"))
@@ -941,6 +1220,423 @@ import Testing
     #expect(!model.draftPrompt.contains("Unrelated output"))
     #expect(!model.draftPrompt.contains("Unrelated card"))
     #expect(!model.draftPrompt.contains("Should not leak run context"))
+}
+
+@MainActor
+@Test func assistantContextSummaryCarriesNativeMissionLinks() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-assistant-native-links-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-native-links",
+        name: "Native Links",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let workItem = WorkItem(
+        id: "workitem-native-links",
+        workspaceId: workspace.id,
+        title: "Review native links",
+        sourceType: .manualPrompt,
+        updatedAt: Date(timeIntervalSince1970: 100)
+    )
+    let codex = AgentProfile(id: "agent-native-link-codex", kind: .codex, displayName: "Codex", executableName: "codex")
+    let claude = AgentProfile(id: "agent-native-link-claude", kind: .claude, displayName: "Claude", executableName: "claude")
+    let gemini = AgentProfile(id: "agent-native-link-gemini", kind: .gemini, displayName: "Gemini", executableName: "gemini")
+    let codexRun = AgentRun(
+        id: "run-native-link-codex",
+        workItemId: workItem.id,
+        workspaceId: workspace.id,
+        agentProfileId: codex.id,
+        state: .completed,
+        startedAt: Date(timeIntervalSince1970: 200),
+        endedAt: Date(timeIntervalSince1970: 240),
+        sideChatRunIds: ["run-native-link-claude"],
+        promptSnapshot: "Codex maps the evidence gap"
+    )
+    let claudeRun = AgentRun(
+        id: "run-native-link-claude",
+        workItemId: workItem.id,
+        workspaceId: workspace.id,
+        agentProfileId: claude.id,
+        state: .completed,
+        startedAt: Date(timeIntervalSince1970: 300),
+        endedAt: Date(timeIntervalSince1970: 340),
+        sideChatOfRunId: codexRun.id,
+        promptSnapshot: "Claude reviews the handoff"
+    )
+    let artifact = Artifact(
+        id: "artifact-native-link-output",
+        workspaceId: workspace.id,
+        workItemId: workItem.id,
+        runId: claudeRun.id,
+        kind: .commandOutputSummary,
+        title: "Claude handoff output",
+        uri: "pikiclaw://artifacts/artifact-native-link-output",
+        status: .ready,
+        provenance: "Evidence: Claude output needs native review.",
+        createdAt: Date(timeIntervalSince1970: 360)
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [workItem],
+        runs: [codexRun, claudeRun],
+        artifacts: [artifact],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [codex, claude, gemini],
+        providerProfiles: []
+    ))
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    let summary = model.assistantLaunchContextSummary(workspaceId: workspace.id, workItemId: workItem.id)
+
+    #expect(summary.nativeLinks == [
+        "Mission latest evidence (pikiclaw://mission-control/latest-evidence/workitem-native-links)",
+        "Mission output review (pikiclaw://mission-control/output-review)",
+        "Output: Claude handoff output (pikiclaw://artifacts/artifact-native-link-output)"
+    ])
+    #expect(summary.nativeLinkCount == 3)
+    #expect(summary.hasContextPack)
+
+    #expect(model.stageAssistantPrompt(
+        title: "Context Handoff",
+        prompt: "Prepare handoff for {project}.",
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ))
+    #expect(model.draftPrompt.contains("Native links: Mission latest evidence (pikiclaw://mission-control/latest-evidence/workitem-native-links); Mission output review (pikiclaw://mission-control/output-review); Output: Claude handoff output (pikiclaw://artifacts/artifact-native-link-output)"))
+}
+
+@MainActor
+@Test func notificationFollowUpAutomationStagesNativeLinksPayload() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-notification-native-links-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-notification-native-links",
+        name: "Notification Native Links",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let workItem = WorkItem(
+        id: "workitem-notification-native-links",
+        workspaceId: workspace.id,
+        title: "Follow notification evidence",
+        sourceType: .scheduledAutomation,
+        updatedAt: Date(timeIntervalSince1970: 100)
+    )
+    let codex = AgentProfile(id: "agent-notification-codex", kind: .codex, displayName: "Codex", executableName: "codex")
+    let claude = AgentProfile(id: "agent-notification-claude", kind: .claude, displayName: "Claude", executableName: "claude")
+    let codexRun = AgentRun(
+        id: "run-notification-codex",
+        workItemId: workItem.id,
+        workspaceId: workspace.id,
+        agentProfileId: codex.id,
+        state: .completed,
+        startedAt: Date(timeIntervalSince1970: 200),
+        endedAt: Date(timeIntervalSince1970: 220),
+        sideChatRunIds: ["run-notification-claude"],
+        promptSnapshot: "Codex prepares the reminder evidence"
+    )
+    let claudeRun = AgentRun(
+        id: "run-notification-claude",
+        workItemId: workItem.id,
+        workspaceId: workspace.id,
+        agentProfileId: claude.id,
+        state: .completed,
+        startedAt: Date(timeIntervalSince1970: 260),
+        endedAt: Date(timeIntervalSince1970: 280),
+        sideChatOfRunId: codexRun.id,
+        promptSnapshot: "Claude validates the reminder evidence"
+    )
+    let artifact = Artifact(
+        id: "artifact-notification-follow-up",
+        workspaceId: workspace.id,
+        workItemId: workItem.id,
+        runId: claudeRun.id,
+        kind: .verificationResult,
+        title: "Notification follow-up output",
+        uri: "pikiclaw://artifacts/artifact-notification-follow-up",
+        status: .ready,
+        provenance: "Evidence: reminder needs a native follow-up.",
+        createdAt: Date(timeIntervalSince1970: 300)
+    )
+    let automation = Automation(
+        id: "automation-notification-follow-up",
+        workspaceId: workspace.id,
+        kind: .notificationFollowUp,
+        name: "Review notification follow-up",
+        state: .enabled,
+        scheduleDescription: "When a reminder is clicked"
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [workItem],
+        runs: [codexRun, claudeRun],
+        artifacts: [artifact],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [automation],
+        agentProfiles: [codex, claude],
+        providerProfiles: []
+    ))
+    let notificationCenter = FakeNativeNotificationCenterClient(status: .notDetermined)
+    let model = NativeAppModel(store: store, nativeNotificationCenter: notificationCenter)
+    await model.reload()
+    await model.refreshNativeNotificationReadiness()
+    #expect(model.nativeNotificationReadiness == .notDetermined)
+
+    let payload = try #require(model.notificationActionPayload(
+        for: automation,
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ))
+    #expect(payload.automationId == automation.id)
+    #expect(payload.automationName == "Review notification follow-up")
+    #expect(payload.title == "Review notification follow-up")
+    #expect(payload.body == "Open Mission latest evidence for Follow notification evidence.")
+    #expect(payload.primaryLink?.label == "Mission latest evidence")
+    #expect(payload.primaryLink?.uri == "pikiclaw://mission-control/latest-evidence/workitem-notification-native-links")
+    #expect(payload.primaryLink?.displayText == "Mission latest evidence (pikiclaw://mission-control/latest-evidence/workitem-notification-native-links)")
+    #expect(payload.links.map(\.displayText) == [
+        "Mission latest evidence (pikiclaw://mission-control/latest-evidence/workitem-notification-native-links)",
+        "Mission output review (pikiclaw://mission-control/output-review)",
+        "Output: Notification follow-up output (pikiclaw://artifacts/artifact-notification-follow-up)"
+    ])
+    let payloadPrimaryURL = try #require(payload.primaryURL)
+    #expect(payloadPrimaryURL.absoluteString == "pikiclaw://mission-control/latest-evidence/workitem-notification-native-links")
+    let notificationUserInfo = try #require(NativeNotificationBridge.userInfo(for: payload))
+    #expect(pikiclawNotificationDeepLinkURL(from: notificationUserInfo) == payloadPrimaryURL)
+    let notificationContent = try #require(NativeNotificationBridge.content(for: payload))
+    #expect(notificationContent.title == "Review notification follow-up")
+    #expect(notificationContent.body == "Open Mission latest evidence for Follow notification evidence.")
+    #expect(pikiclawNotificationDeepLinkURL(from: notificationContent.userInfo) == payloadPrimaryURL)
+    let notificationRequest = try #require(NativeNotificationBridge.request(for: payload))
+    #expect(notificationRequest.identifier == "pikiclaw.notification.automation-notification-follow-up")
+    #expect(notificationRequest.trigger == nil)
+    #expect(notificationRequest.content.title == "Review notification follow-up")
+    #expect(pikiclawNotificationDeepLinkURL(from: notificationRequest.content.userInfo) == payloadPrimaryURL)
+    let scheduleResult = await NativeNotificationBridge.enqueue(payload, center: notificationCenter)
+    #expect(scheduleResult.didEnqueue)
+    #expect(scheduleResult.readiness == .authorized)
+    #expect(scheduleResult.requestIdentifier == "pikiclaw.notification.automation-notification-follow-up")
+    #expect(scheduleResult.statusLine == "Notification scheduled: Mission latest evidence")
+    #expect(notificationCenter.requestedOptions?.contains(.alert) == true)
+    #expect(notificationCenter.requestedOptions?.contains(.sound) == true)
+    #expect(notificationCenter.requestedOptions?.contains(.badge) == true)
+    #expect(notificationCenter.addedRequests.count == 1)
+    #expect(pikiclawNotificationDeepLinkURL(from: notificationCenter.addedRequests[0].content.userInfo) == payloadPrimaryURL)
+
+    let primaryURL = try #require(model.automationPrimaryNativeURL(
+        automation,
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ))
+    #expect(primaryURL == payloadPrimaryURL)
+    let plainAutomation = Automation(
+        id: "automation-plain",
+        workspaceId: workspace.id,
+        kind: .scheduledPrompt,
+        name: "Plain automation",
+        state: .enabled
+    )
+    #expect(model.automationPrimaryNativeURL(
+        plainAutomation,
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ) == nil)
+    #expect(model.notificationActionPayload(
+        for: plainAutomation,
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ) == nil)
+
+    notificationCenter.addedRequests.removeAll()
+    #expect(await model.scheduleAutomationNotification(
+        automation,
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ))
+    #expect(model.nativeNotificationReadiness == .authorized)
+    #expect(model.statusLine == "Notification scheduled: Mission latest evidence")
+    #expect(notificationCenter.addedRequests.count == 1)
+    let plainScheduled = await model.scheduleAutomationNotification(
+        plainAutomation,
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    )
+    #expect(!plainScheduled)
+    #expect(model.statusLine == "No notification payload for Plain automation")
+
+    #expect(model.stageAutomation(automation, workspaceId: workspace.id, workItemId: workItem.id))
+    #expect(model.selectedAgentKind == .codex)
+    #expect(model.draftPrompt.contains("Run the saved automation workflow \"Review notification follow-up\""))
+    #expect(model.draftPrompt.contains("- Kind: notificationFollowUp"))
+    #expect(model.draftPrompt.contains("- State: enabled"))
+    #expect(model.draftPrompt.contains("- Schedule: When a reminder is clicked"))
+    #expect(model.draftPrompt.contains("Notification payload native links:"))
+    #expect(model.draftPrompt.contains("- Mission latest evidence (pikiclaw://mission-control/latest-evidence/workitem-notification-native-links)"))
+    #expect(model.draftPrompt.contains("- Mission output review (pikiclaw://mission-control/output-review)"))
+    #expect(model.draftPrompt.contains("- Output: Notification follow-up output (pikiclaw://artifacts/artifact-notification-follow-up)"))
+    #expect(model.draftPrompt.contains("Native links: Mission latest evidence (pikiclaw://mission-control/latest-evidence/workitem-notification-native-links); Mission output review (pikiclaw://mission-control/output-review); Output: Notification follow-up output (pikiclaw://artifacts/artifact-notification-follow-up)"))
+}
+
+@MainActor
+@Test func assistantContextSummaryPreservesNamedSkillAliasRecovery() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-assistant-skill-alias-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-assistant-skill-alias",
+        name: "Assistant Skill Alias",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let artifact = Artifact(
+        id: "artifact-assistant-skill-alias",
+        workspaceId: workspace.id,
+        kind: .commandOutputSummary,
+        title: "Skill recovery evidence",
+        uri: "pikiclaw://runs/run-assistant-skill-alias/evidence",
+        status: .ready,
+        provenance: """
+        chsql failed because CLICKHOUSE_PROFILE is missing.
+        建议技能命令：`/clickhouse show error spans for TraceId=0123456789abcdef0123456789abcdef limit=20`
+        """
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [],
+        artifacts: [artifact],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    ))
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    let summary = model.assistantLaunchContextSummary(workspaceId: workspace.id)
+
+    #expect(summary.skillRefs == [
+        "chsql failed because CLICKHOUSE_PROFILE is missing.",
+        "chsql",
+        "CLICKHOUSE_PROFILE",
+        "/clickhouse show error spans for TraceId=0123456789abcdef0123456789abcdef limit=20"
+    ])
+    #expect(summary.skillRecoveries == [
+        "Recover /clickhouse: set CLICKHOUSE_PROFILE before rerun.",
+        "Rerun: /clickhouse show error spans for TraceId=0123456789abcdef0123456789abcdef limit=20"
+    ])
+    #expect(assistantLaunchRecommendation(summary: summary, workItem: nil)?.templateId == "skill-hardening")
+}
+
+@MainActor
+@Test func assistantContextSummaryExtractsChineseBugAnalysisFromSavedArtifacts() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-assistant-chinese-bug-context-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-chinese-bug-context",
+        name: "Chinese Bug Context",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let workItem = WorkItem(
+        id: "workitem-chinese-bug-context",
+        workspaceId: workspace.id,
+        title: "IVAS-9301: 修复 Jira Start 入口",
+        sourceType: .jira,
+        state: .active,
+        jira: JiraWorkItemFields(key: "IVAS-9301", status: "In Progress")
+    )
+    let artifact = Artifact(
+        id: "artifact-chinese-bug-context",
+        workspaceId: workspace.id,
+        workItemId: workItem.id,
+        kind: .commandOutputSummary,
+        title: "中文 bug 分析",
+        uri: "pikiclaw://runs/run-chinese-bug/evidence",
+        status: .ready,
+        provenance: """
+        复现步骤：
+        - 打开 Jira ticket 后点击 Start。
+        实际结果：没有创建 ticket chat。
+        预期结果：应该进入右侧工作区并创建 run。
+        根因：detailTab 没有传入 Jira 工作区。
+        修复方案：把 detailTab 绑定到 JiraWorkQueueView。
+        决策：不能合并，缺少 focused validation。
+        下一步：运行 focused test 后再写回 Jira。
+        MR 评审意见：无阻塞问题；残余风险是手动 smoke。
+        Validation command: `swift test --package-path apps/macos --filter JiraNativeWorkflowTests`
+        """,
+        createdAt: Date(timeIntervalSince1970: 20)
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [workItem],
+        runs: [],
+        artifacts: [artifact],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [],
+        providerProfiles: []
+    ))
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    let summary = model.assistantLaunchContextSummary(workspaceId: workspace.id, workItemId: workItem.id)
+    #expect(summary.reproductionNotes == [
+        "Steps: 打开 Jira ticket 后点击 Start。",
+        "Actual: 没有创建 ticket chat。",
+        "Expected: 应该进入右侧工作区并创建 run。"
+    ])
+    #expect(summary.diagnosisNotes == [
+        "Root cause: detailTab 没有传入 Jira 工作区。",
+        "Fix path: 把 detailTab 绑定到 JiraWorkQueueView。"
+    ])
+    #expect(summary.decisionSignals == [
+        "Decision: 不能合并，缺少 focused validation。"
+    ])
+    #expect(summary.actionableNotes == [
+        "Next action: 运行 focused test 后再写回 Jira。"
+    ])
+    #expect(summary.reviewFindings == [
+        "无阻塞问题；残余风险是手动 smoke。"
+    ])
+    #expect(summary.pendingCommands == [
+        "swift test --package-path apps/macos --filter JiraNativeWorkflowTests"
+    ])
+    let recommendation = try #require(assistantLaunchRecommendation(summary: summary, workItem: workItem))
+    #expect(recommendation.templateId == "bug-analysis")
+    #expect(recommendation.reason == "Diagnosis")
+
+    #expect(model.stageAssistantPrompt(
+        title: "Bug Analysis",
+        prompt: "Analyze this bug in {project}.",
+        workspaceId: workspace.id,
+        workItemId: workItem.id
+    ))
+    #expect(model.draftPrompt.contains("Reproduction notes: Steps: 打开 Jira ticket 后点击 Start。; Actual: 没有创建 ticket chat。; Expected: 应该进入右侧工作区并创建 run。"))
+    #expect(model.draftPrompt.contains("Diagnosis notes: Root cause: detailTab 没有传入 Jira 工作区。; Fix path: 把 detailTab 绑定到 JiraWorkQueueView。"))
 }
 
 @MainActor
@@ -1164,6 +1860,8 @@ import Testing
 
     #expect(bug.prompt.contains("Output contract:"))
     #expect(bug.prompt.contains("Confirmed facts, likely seam, smallest safe fix, focused validation, and missing input"))
+    #expect(bug.prompt.contains("Generated UI contract:"))
+    #expect(bug.prompt.contains("emit a fenced `pikiclaw-ui` JSON block"))
     #expect(bug.prompt.contains("Efficiency handoff:"))
     #expect(bug.prompt.contains("ready-to-use bug handoff"))
     #expect(bug.prompt.contains("artifact title and body"))
@@ -1184,6 +1882,50 @@ import Testing
     #expect(skillTemplate.prompt.contains("knowledge-card body"))
     #expect(release.prompt.contains("checks run, result, go/no-go, blocking risks, and handoff"))
     #expect(release.prompt.contains("ready-to-use handoff"))
+}
+
+@Test func enterpriseAgentFitCardsRankBestWorkFromParityRows() throws {
+    let profiles = [
+        AgentProfile(id: "agent-codex-fit", kind: .codex, displayName: "Codex", executableName: "codex"),
+        AgentProfile(id: "agent-claude-fit", kind: .claude, displayName: "Claude", executableName: "claude"),
+        AgentProfile(id: "agent-gemini-fit", kind: .gemini, displayName: "Gemini", executableName: "gemini")
+    ]
+    let capabilities = [
+        Capability(kind: .cliTool, name: "Codex CLI", scope: .agent, trustLevel: .trusted, healthState: .healthy),
+        Capability(kind: .cliTool, name: "Claude CLI", scope: .agent, trustLevel: .trusted, healthState: .healthy),
+        Capability(kind: .cliTool, name: "Gemini CLI", scope: .agent, trustLevel: .trusted, healthState: .healthy)
+    ]
+    let snapshot = NativeStoreSnapshot(seed: NativeAppSeed(
+        projects: [],
+        workspaces: [],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: capabilities,
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: profiles,
+        providerProfiles: []
+    ))
+
+    let cards = enterpriseAgentFitCards(parityRows: AgentEnterpriseAlignment.parityRows(snapshot: snapshot))
+    let codex = try #require(cards.first { $0.agentKind == .codex })
+    let claude = try #require(cards.first { $0.agentKind == .claude })
+    let gemini = try #require(cards.first { $0.agentKind == .gemini })
+
+    #expect(cards.map(\.agentKind) == AgentEnterpriseAlignment.focusAgents)
+    #expect(codex.mode == .native)
+    #expect(codex.coverageLabel == "11/11")
+    #expect(Array(codex.bestFor.prefix(3)) == ["Jira / issue updates", "Plan and review", "Approval gates"])
+    #expect(codex.gapLabel == nil)
+    #expect(claude.mode == .native)
+    #expect(Array(claude.bestFor.prefix(3)) == ["Plan and review", "Approval gates", "Forked follow-up"])
+    #expect(claude.gapLabel == nil)
+    #expect(gemini.mode == .portable)
+    #expect(gemini.coverageLabel == "10/11")
+    #expect(Array(gemini.bestFor.prefix(3)) == ["Jira / issue updates", "Plan and review", "Approval gates"])
+    #expect(gemini.gapLabel == "Gap: Active steering")
+    #expect(gemini.nextAction.contains("steering"))
 }
 
 @Test func assistantLaunchRecommendationPrioritizesContextSignals() throws {
@@ -1208,6 +1950,7 @@ import Testing
     let validation = try #require(assistantLaunchRecommendation(summary: pendingValidation, workItem: jiraItem))
     #expect(validation.templateId == "validation")
     #expect(validation.reason == "Pending check")
+    #expect(assistantLaunchRecommendedTemplate(in: newChatAssistantQuickLaunchTemplates(), recommendation: validation)?.id == "validation")
     #expect(assistantLaunchTemplatesForContext(newChatAssistantQuickLaunchTemplates(), recommendation: validation).first?.id == "validation")
 
     let logContext = AssistantLaunchContextSummary(
@@ -1222,6 +1965,76 @@ import Testing
     )
     #expect(assistantLaunchRecommendation(summary: logContext, workItem: jiraItem)?.templateId == "log-analysis")
 
+    let traceParentContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["Trace parent: 00-4a0031017ceb19eab6d3a39468a20000-0123456789abcdef-01"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let traceParentRecommendation = try #require(assistantLaunchRecommendation(summary: traceParentContext, workItem: jiraItem))
+    #expect(traceParentRecommendation.templateId == "log-analysis")
+    #expect(traceParentRecommendation.reason == "Log lookup")
+
+    let rawTraceParentContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["00-4a0031017ceb19eab6d3a39468a20000-0123456789abcdef-01"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let rawTraceParentRecommendation = try #require(assistantLaunchRecommendation(summary: rawTraceParentContext, workItem: jiraItem))
+    #expect(rawTraceParentRecommendation.templateId == "log-analysis")
+    #expect(rawTraceParentRecommendation.reason == "Log lookup")
+
+    let spacedConversationContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["conversation id: p-v-voice-123 needs a log lookup before the Jira update."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let spacedConversationRecommendation = try #require(assistantLaunchRecommendation(summary: spacedConversationContext, workItem: jiraItem))
+    #expect(spacedConversationRecommendation.templateId == "log-analysis")
+    #expect(spacedConversationRecommendation.reason == "Log lookup")
+
+    let snakeTraceContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["trace_id=4a0031017ceb19eab6d3a39468a20000 should be checked before Jira execution."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let snakeTraceRecommendation = try #require(assistantLaunchRecommendation(summary: snakeTraceContext, workItem: jiraItem))
+    #expect(snakeTraceRecommendation.templateId == "log-analysis")
+    #expect(snakeTraceRecommendation.reason == "Log lookup")
+
+    let hyphenRequestContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["request-id req-voice-123 and turn_id turn-voice-456 need a quick log lookup."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let hyphenRequestRecommendation = try #require(assistantLaunchRecommendation(summary: hyphenRequestContext, workItem: jiraItem))
+    #expect(hyphenRequestRecommendation.templateId == "log-analysis")
+    #expect(hyphenRequestRecommendation.reason == "Log lookup")
+
     let skillContext = AssistantLaunchContextSummary(
         outputCount: 1,
         artifactRefCount: 0,
@@ -1233,6 +2046,362 @@ import Testing
         recentRunCount: 0
     )
     #expect(assistantLaunchRecommendation(summary: skillContext, workItem: jiraItem)?.templateId == "skill-hardening")
+
+    let skillRefContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        skillRefs: ["Skill /logtrace failed because IVA_LOGTRACER_ENV_FILE is missing."],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    #expect(assistantLaunchRecommendation(summary: skillRefContext, workItem: jiraItem)?.templateId == "skill-hardening")
+
+    let skillRecoveryContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        skillRecoveries: ["Recover /logtrace: set IVA_LOGTRACER_ENV_FILE before rerun."],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    let skillRecoveryRecommendation = try #require(assistantLaunchRecommendation(summary: skillRecoveryContext, workItem: jiraItem))
+    #expect(skillRecoveryRecommendation.templateId == "skill-hardening")
+    #expect(skillRecoveryRecommendation.reason == "Skill recovery")
+
+    let chineseSkillFailureContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["技能 /logtrace 执行失败：缺少 IVA_LOGTRACER_ENV_FILE，找不到环境配置。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    let chineseSkillFailureRecommendation = try #require(assistantLaunchRecommendation(summary: chineseSkillFailureContext, workItem: jiraItem))
+    #expect(chineseSkillFailureRecommendation.templateId == "skill-hardening")
+    #expect(chineseSkillFailureRecommendation.reason == "Skill signal")
+
+    let hyphenatedSkillFailureContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["iva-logtracer failed because IVA_LOGTRACER_ENV_FILE is missing."],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    let hyphenatedSkillFailureRecommendation = try #require(assistantLaunchRecommendation(summary: hyphenatedSkillFailureContext, workItem: jiraItem))
+    #expect(hyphenatedSkillFailureRecommendation.templateId == "skill-hardening")
+    #expect(hyphenatedSkillFailureRecommendation.reason == "Skill signal")
+
+    let chsqlSkillFailureContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["chsql failed because CLICKHOUSE_PROFILE is missing."],
+        knowledgeCardCount: 0,
+        recentRunCount: 0
+    )
+    let chsqlSkillFailureRecommendation = try #require(assistantLaunchRecommendation(summary: chsqlSkillFailureContext, workItem: jiraItem))
+    #expect(chsqlSkillFailureRecommendation.templateId == "skill-hardening")
+    #expect(chsqlSkillFailureRecommendation.reason == "Skill signal")
+
+    let failedWithPendingCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        failureSignals: ["Error: queue sync failed after Jira MCP search."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let failedRecommendation = try #require(assistantLaunchRecommendation(summary: failedWithPendingCommand, workItem: jiraItem))
+    #expect(failedRecommendation.templateId == "bug-analysis")
+    #expect(failedRecommendation.reason == "Failed output")
+
+    let skillContextWithLogCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["/logtrace p-v-123 --env stage"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        skillRefs: [".pikiclaw/skills/iva-logtracer/SKILL.md", "/logtrace"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let skillContextRecommendation = try #require(assistantLaunchRecommendation(summary: skillContextWithLogCommand, workItem: nil))
+    #expect(skillContextRecommendation.templateId == "skill-hardening")
+    #expect(skillContextRecommendation.reason == "Skill context")
+
+    let plainLogCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["/logtrace p-v-123 --env stage"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let logRecommendation = try #require(assistantLaunchRecommendation(summary: plainLogCommand, workItem: nil))
+    #expect(logRecommendation.templateId == "log-analysis")
+    #expect(logRecommendation.reason == "Log lookup")
+
+    let findingWithPendingCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        reviewFindings: ["[P1] Missing retry validation in RootView.swift:6519 before marking the MR ready."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let findingRecommendation = try #require(assistantLaunchRecommendation(summary: findingWithPendingCommand, workItem: jiraItem))
+    #expect(findingRecommendation.templateId == "bug-analysis")
+    #expect(findingRecommendation.reason == "Review finding")
+
+    let nonBlockingFinding = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        reviewFindings: ["[P2] Rename status label before MR approval."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let nonBlockingFindingRecommendation = try #require(assistantLaunchRecommendation(summary: nonBlockingFinding, workItem: jiraItem))
+    #expect(nonBlockingFindingRecommendation.templateId == "mr-review")
+    #expect(nonBlockingFindingRecommendation.reason == "Review findings")
+
+    let cleanReviewWithPendingCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift build --product PikiclawMac"],
+        validationEvidence: ["swift test --filter ChatMessageHistoryTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: [],
+        reviewFindings: ["No blocking findings in the follow-up context change; residual risk is manual app smoke."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let cleanReviewRecommendation = try #require(assistantLaunchRecommendation(summary: cleanReviewWithPendingCommand, workItem: jiraItem))
+    #expect(cleanReviewRecommendation.templateId == "validation")
+    #expect(cleanReviewRecommendation.reason == "Pending check")
+
+    let chineseCleanReviewWithPendingCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift build --product PikiclawMac"],
+        validationEvidence: ["swift test --filter ChatMessageHistoryTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: [],
+        reviewFindings: ["无阻塞问题；残余风险是手动 smoke。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseCleanReviewRecommendation = try #require(assistantLaunchRecommendation(summary: chineseCleanReviewWithPendingCommand, workItem: jiraItem))
+    #expect(chineseCleanReviewRecommendation.templateId == "validation")
+    #expect(chineseCleanReviewRecommendation.reason == "Pending check")
+
+    let blockedBranchDecision = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        branchDecisions: ["Branch blocked: Evidence: validation failed - Branch decision: Blocked via Review - Read-only review."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let blockedBranchRecommendation = try #require(assistantLaunchRecommendation(summary: blockedBranchDecision, workItem: jiraItem))
+    #expect(blockedBranchRecommendation.templateId == "bug-analysis")
+    #expect(blockedBranchRecommendation.reason == "Branch decision")
+
+    let jiraHandoffWithPendingCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        handoffDrafts: ["Jira draft: Status: retry validation still missing | Evidence: context needs handoff drafts."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let jiraHandoffRecommendation = try #require(assistantLaunchRecommendation(summary: jiraHandoffWithPendingCommand, workItem: nil))
+    #expect(jiraHandoffRecommendation.templateId == "jira-execution")
+    #expect(jiraHandoffRecommendation.reason == "Handoff draft")
+
+    let genericHandoffOnJiraTicket = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        handoffDrafts: ["Handoff draft: Status: ready for Jira update | Validation: focused test passed."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let genericJiraHandoffRecommendation = try #require(assistantLaunchRecommendation(summary: genericHandoffOnJiraTicket, workItem: jiraItem))
+    #expect(genericJiraHandoffRecommendation.templateId == "jira-execution")
+    #expect(genericJiraHandoffRecommendation.reason == "Handoff draft")
+
+    let reviewHandoffWithPendingCommand = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        handoffDrafts: ["MR draft: Ready after focused tests; residual risk is manual smoke."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let reviewHandoffRecommendation = try #require(assistantLaunchRecommendation(summary: reviewHandoffWithPendingCommand, workItem: nil))
+    #expect(reviewHandoffRecommendation.templateId == "mr-review")
+    #expect(reviewHandoffRecommendation.reason == "Handoff draft")
+
+    let chineseJiraHandoff = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        handoffDrafts: ["Jira 更新草稿：Status: 已完成 | Validation: focused test passed."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseJiraHandoffRecommendation = try #require(assistantLaunchRecommendation(summary: chineseJiraHandoff, workItem: nil))
+    #expect(chineseJiraHandoffRecommendation.templateId == "jira-execution")
+    #expect(chineseJiraHandoffRecommendation.reason == "Handoff draft")
+
+    let chineseReviewHandoff = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        handoffDrafts: ["MR 评审草稿：无阻塞问题；残余风险是手动 smoke。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseReviewHandoffRecommendation = try #require(assistantLaunchRecommendation(summary: chineseReviewHandoff, workItem: nil))
+    #expect(chineseReviewHandoffRecommendation.templateId == "mr-review")
+    #expect(chineseReviewHandoffRecommendation.reason == "Handoff draft")
+
+    let resolvedBranchOnJira = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        branchDecisions: ["Branch resolved: Evidence: branch review - Branch decision: Resolved via Review - Read-only review."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let resolvedJiraBranchRecommendation = try #require(assistantLaunchRecommendation(summary: resolvedBranchOnJira, workItem: jiraItem))
+    #expect(resolvedJiraBranchRecommendation.templateId == "jira-execution")
+    #expect(resolvedJiraBranchRecommendation.reason == "Branch decision")
+
+    let resolvedBranchWithoutJira = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 0,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        branchDecisions: ["Branch resolved: Evidence: branch review - Branch decision: Resolved via Review - Read-only review."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let resolvedReviewBranchRecommendation = try #require(assistantLaunchRecommendation(summary: resolvedBranchWithoutJira, workItem: nil))
+    #expect(resolvedReviewBranchRecommendation.templateId == "mr-review")
+    #expect(resolvedReviewBranchRecommendation.reason == "Branch decision")
+
+    let jiraWriteBackContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        jiraWriteBackSignals: ["Jira write-back: Failed IVAS-9300; retry or paste the draft manually."],
+        failureSignals: ["Jira write-back: Failed IVAS-9300; retry or paste the draft manually."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let jiraWriteBackRecommendation = try #require(assistantLaunchRecommendation(summary: jiraWriteBackContext, workItem: nil))
+    #expect(jiraWriteBackRecommendation.templateId == "jira-execution")
+    #expect(jiraWriteBackRecommendation.reason == "Jira write-back")
+
+    let chineseJiraWriteBackContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: ["swift test --filter AgentStudioWorkflowTests"],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        jiraWriteBackSignals: ["Jira write-back: Jira 写回失败：IVAS-9301 缺少 token，需要重试或手动粘贴草稿。"],
+        failureSignals: ["Jira 写回失败：IVAS-9301 缺少 token，需要重试或手动粘贴草稿。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseJiraWriteBackRecommendation = try #require(assistantLaunchRecommendation(summary: chineseJiraWriteBackContext, workItem: nil))
+    #expect(chineseJiraWriteBackRecommendation.templateId == "jira-execution")
+    #expect(chineseJiraWriteBackRecommendation.reason == "Jira write-back")
+
+    let postedJiraWriteBackContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: ["swift build --product PikiclawMac"],
+        validationEvidence: ["swift test --filter AgentStudioWorkflowTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: [],
+        jiraWriteBackSignals: ["Jira write-back: Posted IVAS-9300 to Jira."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let postedJiraWriteBackRecommendation = try #require(assistantLaunchRecommendation(summary: postedJiraWriteBackContext, workItem: jiraItem))
+    #expect(postedJiraWriteBackRecommendation.templateId == "validation")
+    #expect(postedJiraWriteBackRecommendation.reason == "Pending check")
+
+    let chinesePostedJiraWriteBackContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: ["swift build --product PikiclawMac"],
+        validationEvidence: ["swift test --filter AgentStudioWorkflowTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: [],
+        jiraWriteBackSignals: ["Jira write-back: Jira 写回已发布：IVAS-9301 已发布到 Jira。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chinesePostedJiraWriteBackRecommendation = try #require(assistantLaunchRecommendation(summary: chinesePostedJiraWriteBackContext, workItem: jiraItem))
+    #expect(chinesePostedJiraWriteBackRecommendation.templateId == "validation")
+    #expect(chinesePostedJiraWriteBackRecommendation.reason == "Pending check")
 
     let blockedContext = AssistantLaunchContextSummary(
         outputCount: 1,
@@ -1246,6 +2415,104 @@ import Testing
     )
     #expect(assistantLaunchRecommendation(summary: blockedContext, workItem: nil)?.templateId == "bug-analysis")
 
+    let residualRiskContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: ["swift test --filter AgentStudioWorkflowTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: ["Risk: full app smoke has not run."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let residualRiskRecommendation = try #require(assistantLaunchRecommendation(summary: residualRiskContext, workItem: nil))
+    #expect(residualRiskRecommendation.templateId == "validation")
+    #expect(residualRiskRecommendation.reason == "Validation gap")
+
+    let genericResidualRiskContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: ["swift test --filter AgentStudioWorkflowTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: ["Risk: UI polish needs product review before release."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let genericResidualRiskRecommendation = try #require(assistantLaunchRecommendation(summary: genericResidualRiskContext, workItem: nil))
+    #expect(genericResidualRiskRecommendation.templateId == "mr-review")
+    #expect(genericResidualRiskRecommendation.reason == "Review-ready context")
+
+    let blockingRiskContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["Blocking risk: retry can drop unsaved Jira draft data."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let blockingRiskRecommendation = try #require(assistantLaunchRecommendation(summary: blockingRiskContext, workItem: nil))
+    #expect(blockingRiskRecommendation.templateId == "bug-analysis")
+    #expect(blockingRiskRecommendation.reason == "Blocked output")
+
+    let chineseBlockingRiskContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["阻塞风险：Jira 草稿重试可能丢失未保存内容，必须修复后再继续。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseBlockingRiskRecommendation = try #require(assistantLaunchRecommendation(summary: chineseBlockingRiskContext, workItem: nil))
+    #expect(chineseBlockingRiskRecommendation.templateId == "bug-analysis")
+    #expect(chineseBlockingRiskRecommendation.reason == "Blocked output")
+
+    let validationGapContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["Validation gap: missing tests for the voice regression smoke."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let validationGapRecommendation = try #require(assistantLaunchRecommendation(summary: validationGapContext, workItem: nil))
+    #expect(validationGapRecommendation.templateId == "validation")
+    #expect(validationGapRecommendation.reason == "Validation gap")
+
+    let chineseValidationGapContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["验证缺口：缺少测试覆盖，voice 回归 smoke 还没跑。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseValidationGapRecommendation = try #require(assistantLaunchRecommendation(summary: chineseValidationGapContext, workItem: nil))
+    #expect(chineseValidationGapRecommendation.templateId == "validation")
+    #expect(chineseValidationGapRecommendation.reason == "Validation gap")
+
+    let missingInputContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["Missing input: reproduction steps for the native crash."],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let missingInputRecommendation = try #require(assistantLaunchRecommendation(summary: missingInputContext, workItem: nil))
+    #expect(missingInputRecommendation.templateId == "bug-analysis")
+    #expect(missingInputRecommendation.reason == "Blocked output")
+
     let reviewReady = AssistantLaunchContextSummary(
         outputCount: 1,
         artifactRefCount: 1,
@@ -1257,6 +2524,83 @@ import Testing
         recentRunCount: 1
     )
     #expect(assistantLaunchRecommendation(summary: reviewReady, workItem: nil)?.templateId == "mr-review")
+    let jiraUpdateReady = try #require(assistantLaunchRecommendation(summary: reviewReady, workItem: jiraItem))
+    #expect(jiraUpdateReady.templateId == "jira-execution")
+    #expect(jiraUpdateReady.reason == "Jira update")
+
+    let jiraLinkedContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        jiraRefs: ["IVAS-9300 (https://jira.example.com/browse/IVAS-9300)"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let jiraLinkedRecommendation = try #require(assistantLaunchRecommendation(summary: jiraLinkedContext, workItem: nil))
+    #expect(jiraLinkedRecommendation.templateId == "jira-execution")
+    #expect(jiraLinkedRecommendation.reason == "Jira context")
+
+    let jiraValidationContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: ["swift test --filter JiraNativeWorkflowTests (passed)"],
+        decisionSignals: [],
+        actionableNotes: [],
+        jiraRefs: ["IVAS-9300"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let jiraValidationRecommendation = try #require(assistantLaunchRecommendation(summary: jiraValidationContext, workItem: nil))
+    #expect(jiraValidationRecommendation.templateId == "jira-execution")
+    #expect(jiraValidationRecommendation.reason == "Jira update")
+
+    let mrLinked = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        reviewRefs: ["MR: https://gitlab.example.com/pikiclaw/pikiclaw/-/merge_requests/930"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let mrReview = try #require(assistantLaunchRecommendation(summary: mrLinked, workItem: jiraItem))
+    #expect(mrReview.templateId == "mr-review")
+    #expect(mrReview.reason == "MR/PR context")
+
+    let chineseMRContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: ["合并请求评审上下文：准备合并前需要复查最终评审评论。"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let chineseMRReview = try #require(assistantLaunchRecommendation(summary: chineseMRContext, workItem: nil))
+    #expect(chineseMRReview.templateId == "mr-review")
+    #expect(chineseMRReview.reason == "MR/PR context")
+
+    let codeLinkedContext = AssistantLaunchContextSummary(
+        outputCount: 1,
+        artifactRefCount: 1,
+        pendingCommands: [],
+        validationEvidence: [],
+        decisionSignals: [],
+        actionableNotes: [],
+        codeRefs: ["apps/macos/Sources/PikiclawMac/RootView.swift:6519"],
+        knowledgeCardCount: 0,
+        recentRunCount: 1
+    )
+    let codeReview = try #require(assistantLaunchRecommendation(summary: codeLinkedContext, workItem: nil))
+    #expect(codeReview.templateId == "mr-review")
+    #expect(codeReview.reason == "Code context")
 
     let emptyContext = AssistantLaunchContextSummary(
         outputCount: 0,

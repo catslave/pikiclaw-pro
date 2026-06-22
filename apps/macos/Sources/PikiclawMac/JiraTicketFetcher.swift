@@ -6,13 +6,79 @@ struct JiraTicketFetchResult {
     let source: String
 }
 
+enum JiraWriteBackReadinessState: String, Equatable, Sendable {
+    case ready
+    case missingConfiguration
+    case invalidBaseURL
+}
+
+struct JiraWriteBackReadiness: Equatable, Sendable {
+    var state: JiraWriteBackReadinessState
+    var title: String
+    var detail: String
+    var missingItems: [String]
+
+    var isReady: Bool {
+        state == .ready
+    }
+}
+
+struct JiraWriteBackSetupGuide: Equatable, Sendable {
+    var envFilePath: String
+    var envDirectoryPath: String
+    var revealDirectoryPath: String
+    var envDirectoryExists: Bool
+    var envFileExists: Bool
+    var summary: String
+    var template: String
+    var missingItems: [String]
+}
+
 enum JiraTicketFetcher {
     private static let defaultJiraMCPServiceURL = "http://xia01-i01-dkr01.int.rclabenv.com:8000/mcp/"
     private static let defaultJiraAssignee = "Michael Yang"
+    private static let jiraSkillRelativePath = ".pikiclaw/skills/jira/SKILL.md"
+    private static let defaultJiraEnvRelativePath = ".pikiclaw/local/jira.env"
     private static let jiraSyncFields = "summary,description,issuetype,status,assignee,reporter,fixVersions,duedate,priority,labels,updated,issuelinks,customfield_10652"
+    private static let jiraEnvironmentNames = [
+        "RC_JIRA_READ_TOKEN",
+        "RC_CONFLUENCE_READ_TOKEN",
+        "PIKICLAW_JIRA_MCP_SERVICE_URL",
+        "PIKICLAW_JIRA_BASE_URL",
+        "JIRA_BASE_URL",
+        "RC_JIRA_BASE_URL",
+        "PIKICLAW_JIRA_API_VERSION",
+        "PIKICLAW_JIRA_API_TOKEN",
+        "JIRA_API_TOKEN",
+        "PIKICLAW_JIRA_TOKEN",
+        "JIRA_TOKEN",
+        "PIKICLAW_JIRA_WRITE_TOKEN",
+        "JIRA_WRITE_TOKEN",
+        "PIKICLAW_JIRA_WRITE_EMAIL",
+        "JIRA_WRITE_EMAIL",
+        "PIKICLAW_JIRA_EMAIL",
+        "JIRA_EMAIL",
+        "RC_JIRA_EMAIL",
+        "PIKICLAW_JIRA_ASSIGNEE",
+        "RC_JIRA_ASSIGNEE",
+        "PIKICLAW_JIRA_JQL",
+        "PIKICLAW_JIRA_FALLBACK_JQL",
+        "PIKICLAW_JIRA_TICKETS_FILE",
+        "PIKICLAW_JIRA_SYNC_COMMAND"
+    ]
+    private static let jiraSkillConfigurationNames = [
+        "RC_JIRA_READ_TOKEN",
+        "RC_CONFLUENCE_READ_TOKEN",
+        "PIKICLAW_JIRA_ENV_FILE",
+        "PIKICLAW_JIRA_MCP_SERVICE_URL",
+        "PIKICLAW_JIRA_ASSIGNEE",
+        "RC_JIRA_ASSIGNEE",
+        "PIKICLAW_JIRA_JQL",
+        "PIKICLAW_JIRA_FALLBACK_JQL"
+    ]
 
-    static func fetch(scope: JiraTicketSyncScope) async throws -> JiraTicketFetchResult {
-        let environment = jiraEnvironment()
+    static func fetch(scope: JiraTicketSyncScope, workspacePath: String? = nil) async throws -> JiraTicketFetchResult {
+        let environment = jiraEnvironment(workspacePath: workspacePath)
         let baseURL = firstNonEmpty([
             environment["PIKICLAW_JIRA_BASE_URL"],
             environment["JIRA_BASE_URL"],
@@ -47,6 +113,92 @@ enum JiraTicketFetcher {
         throw JiraTicketFetchError.missingConfiguration
     }
 
+    static func postComment(issueKey: String, comment: String, workspacePath: String? = nil) async throws {
+        let environment = jiraEnvironment(workspacePath: workspacePath)
+        let request = try jiraCommentRequest(issueKey: issueKey, comment: comment, environment: environment)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let detail = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw JiraTicketFetchError.httpStatus(http.statusCode, detail)
+        }
+    }
+
+    static func writeBackReadiness(workspacePath: String? = nil, loadShellEnvironment: Bool = false) -> JiraWriteBackReadiness {
+        writeBackReadiness(environment: jiraEnvironment(
+            workspacePath: workspacePath,
+            loadShellEnvironment: loadShellEnvironment
+        ))
+    }
+
+    static func writeBackReadiness(environment: [String: String]) -> JiraWriteBackReadiness {
+        let baseURL = Self.jiraBaseURL(environment: environment)
+        let token = Self.jiraWriteBackToken(environment: environment)
+        var missing: [String] = []
+        if baseURL == nil {
+            missing.append("Jira base URL")
+        }
+        if token == nil {
+            missing.append("write-capable token")
+        }
+        if !missing.isEmpty {
+            return JiraWriteBackReadiness(
+                state: .missingConfiguration,
+                title: "Write-back setup needed",
+                detail: "Configure \(missing.joined(separator: " and ")) before posting a Jira update.",
+                missingItems: missing
+            )
+        }
+
+        guard let baseURL, Self.jiraBaseURLIsValid(baseURL) else {
+            return JiraWriteBackReadiness(
+                state: .invalidBaseURL,
+                title: "Write-back URL invalid",
+                detail: "Check PIKICLAW_JIRA_BASE_URL before posting a Jira update.",
+                missingItems: []
+            )
+        }
+
+        return JiraWriteBackReadiness(
+            state: .ready,
+            title: "Write-back ready",
+            detail: "Jira base URL and write-capable token are configured.",
+            missingItems: []
+        )
+    }
+
+    static func writeBackSetupGuide(
+        workspacePath: String?,
+        readiness: JiraWriteBackReadiness? = nil
+    ) -> JiraWriteBackSetupGuide {
+        let resolvedReadiness = readiness ?? writeBackReadiness(workspacePath: workspacePath, loadShellEnvironment: false)
+        let envFilePath = jiraEnvironmentFilePath(workspacePath: workspacePath)
+        let envURL = URL(fileURLWithPath: envFilePath)
+        let envDirectoryPath = envURL.deletingLastPathComponent().path
+        let envFileExists = fileExists(atPath: envFilePath, expectingDirectory: false)
+        let envDirectoryExists = fileExists(atPath: envDirectoryPath, expectingDirectory: true)
+        let revealDirectoryPath = existingDirectoryPath(for: envDirectoryPath)
+        let missing = resolvedReadiness.missingItems
+        let missingText = missing.isEmpty ? "All write-back keys are configured." : "Missing: \(missing.joined(separator: ", "))."
+        let template = """
+        # Pikiclaw Jira write-back settings. Keep this file private and out of git.
+        PIKICLAW_JIRA_BASE_URL=https://jira.example.com
+        PIKICLAW_JIRA_WRITE_TOKEN=
+        PIKICLAW_JIRA_WRITE_EMAIL=
+        # Optional:
+        PIKICLAW_JIRA_API_VERSION=3
+        """
+        return JiraWriteBackSetupGuide(
+            envFilePath: envFilePath,
+            envDirectoryPath: envDirectoryPath,
+            revealDirectoryPath: revealDirectoryPath,
+            envDirectoryExists: envDirectoryExists,
+            envFileExists: envFileExists,
+            summary: "\(missingText) Store secrets only in this private env file or your shell.",
+            template: template,
+            missingItems: missing
+        )
+    }
+
     static func jql(for scope: JiraTicketSyncScope, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
         if let override = environment["PIKICLAW_JIRA_JQL"], !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return override
@@ -64,19 +216,62 @@ enum JiraTicketFetcher {
         }
     }
 
-    static func jiraEnvironment(base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
-        guard mcpConfiguration(environment: base) == nil,
-              firstNonEmpty([
-                  base["PIKICLAW_JIRA_BASE_URL"],
-                  base["JIRA_BASE_URL"],
-                  base["RC_JIRA_BASE_URL"],
-                  base["PIKICLAW_JIRA_TICKETS_FILE"],
-                  base["PIKICLAW_JIRA_SYNC_COMMAND"]
-              ]) == nil else {
-            return base
+    static func jiraCommentRequest(issueKey: String, comment: String, environment: [String: String]) throws -> URLRequest {
+        let trimmedIssueKey = issueKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedIssueKey.isEmpty else {
+            throw JiraTicketFetchError.mcpFailed("Jira issue key is empty")
+        }
+        let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedComment.isEmpty else {
+            throw JiraTicketFetchError.mcpFailed("Jira comment is empty")
+        }
+        guard let baseURL = jiraBaseURL(environment: environment) else {
+            throw JiraTicketFetchError.missingConfiguration
+        }
+        let token = jiraWriteBackToken(environment: environment)
+        guard let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw JiraTicketFetchError.missingToken
         }
 
+        let version = environment["PIKICLAW_JIRA_API_VERSION"] ?? "2"
+        let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let encodedIssueKey = trimmedIssueKey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(trimmedBase)/rest/api/\(version)/issue/\(encodedIssueKey)/comment") else {
+            throw JiraTicketFetchError.invalidBaseURL(baseURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(authorizationHeader(token: token, environment: environment, writeBack: true), forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["body": trimmedComment])
+        return request
+    }
+
+    static func jiraEnvironment(
+        base: [String: String] = ProcessInfo.processInfo.environment,
+        workspacePath: String? = nil,
+        loadShellEnvironment: Bool = true
+    ) -> [String: String] {
         var environment = base
+        for (key, value) in skillJiraEnvironment(workspacePath: workspacePath) {
+            environment[key] = value
+        }
+
+        guard mcpConfiguration(environment: environment) == nil,
+              firstNonEmpty([
+                  environment["PIKICLAW_JIRA_BASE_URL"],
+                  environment["JIRA_BASE_URL"],
+                  environment["RC_JIRA_BASE_URL"],
+                  environment["PIKICLAW_JIRA_TICKETS_FILE"],
+                  environment["PIKICLAW_JIRA_SYNC_COMMAND"]
+              ]) == nil else {
+            return environment
+        }
+
+        guard loadShellEnvironment else { return environment }
+
         for (key, value) in shellJiraEnvironment() where environment[key] == nil {
             environment[key] = value
         }
@@ -188,14 +383,64 @@ enum JiraTicketFetcher {
         )
     }
 
-    private static func authorizationHeader(token: String, environment: [String: String]) -> String {
-        let email = firstNonEmpty([environment["PIKICLAW_JIRA_EMAIL"], environment["JIRA_EMAIL"], environment["RC_JIRA_EMAIL"]])
+    private static func authorizationHeader(token: String, environment: [String: String], writeBack: Bool = false) -> String {
+        let writeEmail = writeBack ? firstNonEmpty([environment["PIKICLAW_JIRA_WRITE_EMAIL"], environment["JIRA_WRITE_EMAIL"]]) : nil
+        let email = writeEmail ?? firstNonEmpty([environment["PIKICLAW_JIRA_EMAIL"], environment["JIRA_EMAIL"], environment["RC_JIRA_EMAIL"]])
         guard let email, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "Bearer \(token)"
         }
         let credential = "\(email):\(token)"
         let encoded = Data(credential.utf8).base64EncodedString()
         return "Basic \(encoded)"
+    }
+
+    private static func jiraBaseURL(environment: [String: String]) -> String? {
+        firstNonEmpty([
+            environment["PIKICLAW_JIRA_BASE_URL"],
+            environment["JIRA_BASE_URL"],
+            environment["RC_JIRA_BASE_URL"]
+        ])
+    }
+
+    private static func jiraWriteBackToken(environment: [String: String]) -> String? {
+        firstNonEmpty([
+            environment["PIKICLAW_JIRA_WRITE_TOKEN"],
+            environment["JIRA_WRITE_TOKEN"],
+            environment["PIKICLAW_JIRA_API_TOKEN"],
+            environment["JIRA_API_TOKEN"],
+            environment["PIKICLAW_JIRA_TOKEN"],
+            environment["JIRA_TOKEN"]
+        ])
+    }
+
+    private static func jiraBaseURLIsValid(_ baseURL: String) -> Bool {
+        let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: trimmedBase),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false else {
+            return false
+        }
+        return true
+    }
+
+    private static func fileExists(atPath path: String, expectingDirectory: Bool) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return false
+        }
+        return isDirectory.boolValue == expectingDirectory
+    }
+
+    private static func existingDirectoryPath(for path: String) -> String {
+        var url = URL(fileURLWithPath: path, isDirectory: true)
+        while url.path != "/" {
+            if fileExists(atPath: url.path, expectingDirectory: true) {
+                return url.path
+            }
+            url.deleteLastPathComponent()
+        }
+        return "/"
     }
 
     private static func fallbackJQL(for scope: JiraTicketSyncScope, environment: [String: String]) -> String {
@@ -393,25 +638,7 @@ enum JiraTicketFetcher {
     }
 
     private static func shellJiraEnvironment() -> [String: String] {
-        let names = [
-            "RC_JIRA_READ_TOKEN",
-            "RC_CONFLUENCE_READ_TOKEN",
-            "PIKICLAW_JIRA_MCP_SERVICE_URL",
-            "PIKICLAW_JIRA_BASE_URL",
-            "JIRA_BASE_URL",
-            "RC_JIRA_BASE_URL",
-            "PIKICLAW_JIRA_API_TOKEN",
-            "JIRA_API_TOKEN",
-            "PIKICLAW_JIRA_TOKEN",
-            "JIRA_TOKEN",
-            "PIKICLAW_JIRA_EMAIL",
-            "JIRA_EMAIL",
-            "RC_JIRA_EMAIL",
-            "PIKICLAW_JIRA_JQL",
-            "PIKICLAW_JIRA_FALLBACK_JQL",
-            "PIKICLAW_JIRA_TICKETS_FILE",
-            "PIKICLAW_JIRA_SYNC_COMMAND"
-        ]
+        let names = jiraEnvironmentNames
         let script = names.map { "printf '%s=%s\\n' '\($0)' \"${\($0)-}\"" }.joined(separator: "; ")
 
         let process = Process()
@@ -444,6 +671,109 @@ enum JiraTicketFetcher {
             }
         }
         return environment
+    }
+
+    static func skillJiraEnvironment(workspacePath: String?) -> [String: String] {
+        guard let workspacePath = workspacePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !workspacePath.isEmpty else {
+            return [:]
+        }
+        let workspaceURL = URL(fileURLWithPath: expandedPath(workspacePath), isDirectory: true)
+        let skillURL = workspaceURL.appendingPathComponent(jiraSkillRelativePath)
+        var environment = skillJiraConfiguration(from: skillURL)
+
+        let envPath = firstNonEmpty([environment["PIKICLAW_JIRA_ENV_FILE"]]) ?? defaultJiraEnvRelativePath
+        let envURL = workspaceResolvedURL(envPath, workspaceURL: workspaceURL)
+        for (key, value) in jiraEnvironmentFile(at: envURL) where environment[key] == nil {
+            environment[key] = value
+        }
+        return environment
+    }
+
+    static func jiraEnvironmentFilePath(workspacePath: String?) -> String {
+        guard let workspacePath = workspacePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !workspacePath.isEmpty else {
+            return defaultJiraEnvRelativePath
+        }
+        let workspaceURL = URL(fileURLWithPath: expandedPath(workspacePath), isDirectory: true)
+        let skillURL = workspaceURL.appendingPathComponent(jiraSkillRelativePath)
+        let skillEnvironment = skillJiraConfiguration(from: skillURL)
+        let envPath = firstNonEmpty([skillEnvironment["PIKICLAW_JIRA_ENV_FILE"]]) ?? defaultJiraEnvRelativePath
+        return workspaceResolvedURL(envPath, workspaceURL: workspaceURL).path
+    }
+
+    private static func skillJiraConfiguration(from url: URL) -> [String: String] {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            return [:]
+        }
+        var environment: [String: String] = [:]
+        for line in contents.components(separatedBy: .newlines) {
+            for name in jiraSkillConfigurationNames {
+                guard environment[name] == nil,
+                      let value = skillValue(named: name, in: line) else {
+                    continue
+                }
+                environment[name] = value
+            }
+        }
+        return environment
+    }
+
+    private static func jiraEnvironmentFile(at url: URL) -> [String: String] {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            return [:]
+        }
+        let allowedNames = Set(jiraEnvironmentNames)
+        var environment: [String: String] = [:]
+        for line in contents.components(separatedBy: .newlines) {
+            guard let assignment = environmentAssignment(in: line),
+                  allowedNames.contains(assignment.key) else {
+                continue
+            }
+            environment[assignment.key] = assignment.value
+        }
+        return environment
+    }
+
+    private static func environmentAssignment(in line: String) -> (key: String, value: String)? {
+        var trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+        if trimmed.hasPrefix("export ") {
+            trimmed = String(trimmed.dropFirst("export ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let separator = trimmed.firstIndex(of: "=") else { return nil }
+        let key = String(trimmed[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = String(trimmed[trimmed.index(after: separator)...])
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'")))
+        guard !key.isEmpty, let normalizedValue = value.nilIfEmpty else {
+            return nil
+        }
+        return (key, normalizedValue)
+    }
+
+    private static func skillValue(named name: String, in line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = [
+            "- `\(name)`:",
+            "`\(name)`:",
+            "\(name)=",
+            "\(name):"
+        ]
+        guard let prefix = prefixes.first(where: { trimmed.hasPrefix($0) }) else {
+            return nil
+        }
+        return trimmed
+            .dropFirst(prefix.count)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'")))
+            .nilIfEmpty
+    }
+
+    private static func workspaceResolvedURL(_ path: String, workspaceURL: URL) -> URL {
+        let expanded = expandedPath(path)
+        guard !expanded.hasPrefix("/") else {
+            return URL(fileURLWithPath: expanded)
+        }
+        return workspaceURL.appendingPathComponent(expanded)
     }
 
     private static func expandedPath(_ path: String) -> String {
@@ -485,7 +815,7 @@ enum JiraTicketFetchError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingConfiguration:
-            return "Set RC_JIRA_READ_TOKEN, PIKICLAW_JIRA_BASE_URL plus a Jira token, PIKICLAW_JIRA_SYNC_COMMAND, or PIKICLAW_JIRA_TICKETS_FILE."
+            return "Set RC_JIRA_READ_TOKEN in .pikiclaw/local/jira.env or shell, PIKICLAW_JIRA_BASE_URL plus a Jira token, PIKICLAW_JIRA_SYNC_COMMAND, or PIKICLAW_JIRA_TICKETS_FILE."
         case .missingToken:
             return "Set PIKICLAW_JIRA_API_TOKEN or JIRA_API_TOKEN for Jira REST sync."
         case .invalidBaseURL(let value):

@@ -5,6 +5,73 @@ public enum JiraTicketCardAction: String, Sendable {
     case start
 }
 
+public struct JiraTicketWriteBackHistoryEntry: Identifiable, Hashable, Sendable {
+    public var id: EntityID
+    public var state: String
+    public var label: String
+    public var signal: String
+    public var artifactTitle: String
+    public var artifactURI: String?
+    public var createdAt: Date
+    public var isActionable: Bool
+
+    public init(
+        id: EntityID,
+        state: String,
+        label: String,
+        signal: String,
+        artifactTitle: String,
+        artifactURI: String?,
+        createdAt: Date,
+        isActionable: Bool
+    ) {
+        self.id = id
+        self.state = state
+        self.label = label
+        self.signal = signal
+        self.artifactTitle = artifactTitle
+        self.artifactURI = artifactURI
+        self.createdAt = createdAt
+        self.isActionable = isActionable
+    }
+
+    public var actionTitle: String? {
+        switch state.lowercased() {
+        case "failed":
+            return "Retry"
+        case "manual-paste", "manual paste", "manual", "pending":
+            return "Post"
+        default:
+            return nil
+        }
+    }
+}
+
+public struct JiraTicketWriteBackAuditStep: Identifiable, Hashable, Sendable {
+    public var id: EntityID
+    public var state: String
+    public var label: String
+    public var signal: String
+    public var createdAt: Date
+    public var isActionable: Bool
+
+    public init(
+        id: EntityID,
+        state: String,
+        label: String,
+        signal: String,
+        createdAt: Date,
+        isActionable: Bool
+    ) {
+        self.id = id
+        self.state = state
+        self.label = label
+        self.signal = signal
+        self.createdAt = createdAt
+        self.isActionable = isActionable
+    }
+}
+
 public struct JiraTicketEvidenceSummary: Hashable, Sendable {
     public var outputCount: Int
     public var artifactRefCount: Int
@@ -12,6 +79,8 @@ public struct JiraTicketEvidenceSummary: Hashable, Sendable {
     public var decisionSignals: [String]
     public var actionableNotes: [String]
     public var validationSignals: [String]
+    public var writeBackState: String?
+    public var writeBackSignals: [String]
 
     public init(
         outputCount: Int,
@@ -19,7 +88,9 @@ public struct JiraTicketEvidenceSummary: Hashable, Sendable {
         pendingCommands: [String],
         decisionSignals: [String] = [],
         actionableNotes: [String] = [],
-        validationSignals: [String] = []
+        validationSignals: [String] = [],
+        writeBackState: String? = nil,
+        writeBackSignals: [String] = []
     ) {
         self.outputCount = outputCount
         self.artifactRefCount = artifactRefCount
@@ -27,6 +98,8 @@ public struct JiraTicketEvidenceSummary: Hashable, Sendable {
         self.decisionSignals = decisionSignals
         self.actionableNotes = actionableNotes
         self.validationSignals = validationSignals
+        self.writeBackState = writeBackState
+        self.writeBackSignals = writeBackSignals
     }
 
     public var artifactRefsLabel: String {
@@ -65,6 +138,18 @@ public struct JiraTicketEvidenceSummary: Hashable, Sendable {
     public var validationSignalsHelp: String? {
         validationSignals.isEmpty ? nil : validationSignals.joined(separator: "\n")
     }
+
+    public var hasWriteBackResult: Bool {
+        writeBackState != nil || !writeBackSignals.isEmpty
+    }
+
+    public var writeBackLabel: String {
+        jiraTicketWriteBackDisplayLabel(writeBackState)
+    }
+
+    public var writeBackHelp: String? {
+        writeBackSignals.isEmpty ? nil : writeBackSignals.joined(separator: "\n")
+    }
 }
 
 public func jiraTicketEvidenceSummary(artifacts: [Artifact]) -> JiraTicketEvidenceSummary {
@@ -76,13 +161,18 @@ public func jiraTicketEvidenceSummary(artifacts: [Artifact]) -> JiraTicketEviden
     let decisionSignals = dedupedJiraTicketContextValues(artifacts.flatMap(jiraTicketDecisionSignals(from:)))
     let actionableNotes = dedupedJiraTicketContextValues(artifacts.flatMap(jiraTicketActionableNotes(from:)))
     let validationSignals = dedupedJiraTicketContextValues(artifacts.flatMap(jiraTicketValidationSignals(from:)))
+    let writeBackArtifact = jiraTicketLatestWriteBackArtifact(artifacts)
+    let writeBackState = writeBackArtifact.flatMap(jiraTicketWriteBackState)
+    let writeBackSignals = writeBackArtifact.map { [jiraTicketWriteBackSignalLine($0)] } ?? []
     return JiraTicketEvidenceSummary(
         outputCount: artifacts.count,
         artifactRefCount: refs.count,
         pendingCommands: Array(commands.prefix(4)),
         decisionSignals: Array(decisionSignals.prefix(4)),
         actionableNotes: Array(actionableNotes.prefix(5)),
-        validationSignals: Array(validationSignals.prefix(4))
+        validationSignals: Array(validationSignals.prefix(4)),
+        writeBackState: writeBackState,
+        writeBackSignals: writeBackSignals
     )
 }
 
@@ -90,6 +180,64 @@ public func jiraTicketEvidenceSummary(for item: WorkItem, snapshot: NativeStoreS
     jiraTicketEvidenceSummary(
         artifacts: snapshot.artifacts.filter { $0.workItemId == item.id }
     )
+}
+
+public func jiraTicketEvidenceSummariesByWorkItemId(artifacts: [Artifact]) -> [EntityID: JiraTicketEvidenceSummary] {
+    var grouped: [EntityID: [Artifact]] = [:]
+    for artifact in artifacts {
+        guard let workItemId = artifact.workItemId else { continue }
+        grouped[workItemId, default: []].append(artifact)
+    }
+    return grouped.mapValues { artifacts in
+        jiraTicketEvidenceSummary(artifacts: artifacts)
+    }
+}
+
+public func jiraTicketLightEvidenceSummariesByWorkItemId(artifacts: [Artifact]) -> [EntityID: JiraTicketEvidenceSummary] {
+    var grouped: [EntityID: (outputs: Int, refs: Int)] = [:]
+    for artifact in artifacts {
+        guard let workItemId = artifact.workItemId else { continue }
+        var value = grouped[workItemId] ?? (outputs: 0, refs: 0)
+        value.outputs += 1
+        if !artifact.uri.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            value.refs += 1
+        }
+        grouped[workItemId] = value
+    }
+    return grouped.mapValues { value in
+        JiraTicketEvidenceSummary(
+            outputCount: value.outputs,
+            artifactRefCount: value.refs,
+            pendingCommands: []
+        )
+    }
+}
+
+public func jiraTicketWriteBackHistory(artifacts: [Artifact], limit: Int = 5) -> [JiraTicketWriteBackHistoryEntry] {
+    guard limit > 0 else { return [] }
+    return Array(jiraTicketSortedWriteBackHistory(artifacts).prefix(limit))
+}
+
+public func jiraTicketActionableWriteBackHistory(artifacts: [Artifact], limit: Int = 5) -> [JiraTicketWriteBackHistoryEntry] {
+    guard limit > 0 else { return [] }
+    return Array(jiraTicketSortedWriteBackHistory(artifacts).filter(\.isActionable).prefix(limit))
+}
+
+public func jiraTicketWriteBackAuditTimeline(artifacts: [Artifact], limit: Int = 6) -> [JiraTicketWriteBackAuditStep] {
+    guard limit > 0 else { return [] }
+    return jiraTicketSortedWriteBackHistory(artifacts)
+        .prefix(limit)
+        .reversed()
+        .map { entry in
+            JiraTicketWriteBackAuditStep(
+                id: entry.id,
+                state: entry.state,
+                label: entry.label,
+                signal: entry.signal,
+                createdAt: entry.createdAt,
+                isActionable: entry.isActionable
+            )
+        }
 }
 
 public func jiraTicketQueueItems(from workItems: [WorkItem]) -> [WorkItem] {
@@ -231,6 +379,100 @@ public struct JiraTicketUpdateDraft: Hashable, Sendable {
     }
 }
 
+public enum JiraTicketWriteBackGate: String, Hashable, Sendable, Codable {
+    case denied
+    case requiresApproval
+}
+
+public struct JiraTicketWriteBackPlan: Hashable, Sendable {
+    public var issueKey: String
+    public var title: String
+    public var comment: String
+    public var permissionMode: PermissionMode
+    public var permissionDecision: PermissionDecision
+    public var gate: JiraTicketWriteBackGate
+    public var approvalSummary: String
+    public var auditSummary: String
+    public var denialReason: String?
+
+    public init(
+        issueKey: String,
+        title: String,
+        comment: String,
+        permissionMode: PermissionMode,
+        permissionDecision: PermissionDecision,
+        gate: JiraTicketWriteBackGate,
+        approvalSummary: String,
+        auditSummary: String,
+        denialReason: String? = nil
+    ) {
+        self.issueKey = issueKey
+        self.title = title
+        self.comment = comment
+        self.permissionMode = permissionMode
+        self.permissionDecision = permissionDecision
+        self.gate = gate
+        self.approvalSummary = approvalSummary
+        self.auditSummary = auditSummary
+        self.denialReason = denialReason
+    }
+
+    public var requiresExplicitApproval: Bool {
+        gate == .requiresApproval
+    }
+}
+
+public func jiraTicketWriteBackPlan(
+    for item: WorkItem,
+    draft: JiraTicketUpdateDraft,
+    permissionMode: PermissionMode
+) -> JiraTicketWriteBackPlan {
+    let key = jiraTicketNonEmpty(item.jira?.key) ?? "Jira"
+    let decision = PermissionPolicy(mode: permissionMode).decision(for: .externalWriteback)
+    let title = "Post \(draft.title)"
+    let approvalSummary = "Post a \(draft.comment.count)-character Jira comment to \(key)."
+    let auditSummary = "Approved Jira write-back for \(key)"
+
+    guard key != "Jira" else {
+        return JiraTicketWriteBackPlan(
+            issueKey: key,
+            title: title,
+            comment: draft.comment,
+            permissionMode: permissionMode,
+            permissionDecision: decision,
+            gate: .denied,
+            approvalSummary: approvalSummary,
+            auditSummary: auditSummary,
+            denialReason: "Selected work item has no Jira issue key."
+        )
+    }
+
+    guard decision != .deny else {
+        return JiraTicketWriteBackPlan(
+            issueKey: key,
+            title: title,
+            comment: draft.comment,
+            permissionMode: permissionMode,
+            permissionDecision: decision,
+            gate: .denied,
+            approvalSummary: approvalSummary,
+            auditSummary: auditSummary,
+            denialReason: "External Jira write-back is denied in \(permissionMode.rawValue) mode."
+        )
+    }
+
+    return JiraTicketWriteBackPlan(
+        issueKey: key,
+        title: title,
+        comment: draft.comment,
+        permissionMode: permissionMode,
+        permissionDecision: decision,
+        gate: .requiresApproval,
+        approvalSummary: approvalSummary,
+        auditSummary: auditSummary
+    )
+}
+
 public func jiraTicketUpdateDraft(
     for item: WorkItem,
     snapshot: NativeStoreSnapshot,
@@ -273,12 +515,20 @@ public func jiraTicketUpdateDraft(
         evidenceLines.append("No durable outputs captured yet.")
     }
     evidenceLines.append(contentsOf: jiraTicketArtifactReferenceLines(artifacts: artifacts))
+    let branchResolutionLines = jiraTicketBranchResolutionLines(artifacts: artifacts)
+    let writeBackLines = jiraTicketWriteBackLines(artifacts: artifacts)
+    evidenceLines.append(contentsOf: branchResolutionLines.evidence)
+    evidenceLines.append(contentsOf: writeBackLines.evidence)
 
-    let validationLines = summary.validationSignals.isEmpty
-        ? ["No validation captured yet."]
-        : summary.validationSignals
+    var validationLines = summary.validationSignals
+    validationLines.append(contentsOf: branchResolutionLines.validation)
+    if validationLines.isEmpty {
+        validationLines.append("No validation captured yet.")
+    }
 
     var blockerLines = summary.actionableNotes
+    blockerLines.append(contentsOf: branchResolutionLines.blockers)
+    blockerLines.append(contentsOf: writeBackLines.blockers)
     if blockerLines.isEmpty, let latestRun, latestRun.state == .failed || latestRun.state == .waitingForUser {
         blockerLines.append("Latest run is \(latestRun.state.rawValue); inspect the run transcript before closing.")
     }
@@ -289,7 +539,9 @@ public func jiraTicketUpdateDraft(
     let nextActionLines = jiraTicketNextActionLines(
         item: item,
         summary: summary,
-        latestRun: latestRun
+        latestRun: latestRun,
+        branchResolutionLines: branchResolutionLines,
+        writeBackLines: writeBackLines
     )
 
     let comment = [
@@ -326,11 +578,185 @@ private func jiraTicketArtifactReferenceLines(artifacts: [Artifact]) -> [String]
         .map { String($0) }
 }
 
+private struct JiraTicketBranchResolutionLines {
+    var evidence: [String] = []
+    var validation: [String] = []
+    var blockers: [String] = []
+    var nextActions: [String] = []
+}
+
+private struct JiraTicketWriteBackLines {
+    var evidence: [String] = []
+    var blockers: [String] = []
+    var nextActions: [String] = []
+}
+
+private func jiraTicketBranchResolutionLines(artifacts: [Artifact]) -> JiraTicketBranchResolutionLines {
+    var lines = JiraTicketBranchResolutionLines()
+    for artifact in artifacts {
+        guard let resolution = jiraTicketArtifactResolution(artifact) else { continue }
+        let title = jiraTicketFirstLine(artifact.title, fallback: "Output")
+        let artifactRef = jiraTicketNonEmpty(artifact.uri).map { " artifact \($0)" } ?? ""
+        let branchRef = jiraTicketNonEmpty(resolution.branchURI).map { " via branch \($0)" } ?? ""
+        let decision = jiraTicketArtifactResolutionDecisionLine(artifact)
+        switch resolution.label {
+        case "resolved":
+            lines.evidence.append("Branch resolved: \(title)\(artifactRef)\(branchRef).")
+            lines.validation.append(decision ?? "Branch review resolved \(title).")
+        case "blocked":
+            lines.blockers.append(decision ?? "Branch review blocked \(title)\(artifactRef)\(branchRef).")
+            lines.nextActions.append("Resolve blocked branch for \(title)\(branchRef) before posting completion.")
+        case "needs-follow-up":
+            lines.nextActions.append(decision ?? "Follow up on branch review for \(title)\(artifactRef)\(branchRef).")
+        default:
+            continue
+        }
+    }
+    return lines
+}
+
+private func jiraTicketWriteBackLines(artifacts: [Artifact]) -> JiraTicketWriteBackLines {
+    var lines = JiraTicketWriteBackLines()
+    for artifact in artifacts {
+        guard let state = jiraTicketWriteBackState(artifact) else { continue }
+        let title = jiraTicketFirstLine(artifact.title, fallback: "Jira write-back")
+        let artifactRef = jiraTicketNonEmpty(artifact.uri).map { " artifact \($0)" } ?? ""
+        let detail = jiraTicketWriteBackDetailLine(artifact)
+        switch state {
+        case "posted":
+            lines.evidence.append(detail ?? "Jira write-back posted: \(title)\(artifactRef).")
+            lines.nextActions.append("Jira write-back already posted; only post another update if new evidence changed.")
+        case "failed":
+            lines.blockers.append(detail ?? "Jira write-back failed: \(title)\(artifactRef).")
+            lines.nextActions.append("Fix Jira write-back failure, then retry or paste the draft manually.")
+        default:
+            continue
+        }
+    }
+    return lines
+}
+
+private func jiraTicketLatestWriteBackArtifact(_ artifacts: [Artifact]) -> Artifact? {
+    artifacts
+        .filter { jiraTicketWriteBackState($0) != nil }
+        .sorted { $0.createdAt > $1.createdAt }
+        .first
+}
+
+private func jiraTicketSortedWriteBackHistory(_ artifacts: [Artifact]) -> [JiraTicketWriteBackHistoryEntry] {
+    artifacts
+        .compactMap(jiraTicketWriteBackHistoryEntry(_:))
+        .sorted { left, right in
+            if left.createdAt != right.createdAt {
+                return left.createdAt > right.createdAt
+            }
+            return left.artifactTitle < right.artifactTitle
+        }
+}
+
+private func jiraTicketWriteBackHistoryEntry(_ artifact: Artifact) -> JiraTicketWriteBackHistoryEntry? {
+    guard let state = jiraTicketWriteBackState(artifact) else { return nil }
+    return JiraTicketWriteBackHistoryEntry(
+        id: artifact.id,
+        state: state,
+        label: jiraTicketWriteBackDisplayLabel(state),
+        signal: jiraTicketWriteBackSignalLine(artifact),
+        artifactTitle: jiraTicketFirstLine(artifact.title, fallback: "Jira write-back"),
+        artifactURI: jiraTicketNonEmpty(artifact.uri),
+        createdAt: artifact.createdAt,
+        isActionable: jiraTicketWriteBackStateNeedsAction(state)
+    )
+}
+
+private func jiraTicketWriteBackSignalLine(_ artifact: Artifact) -> String {
+    if let detail = jiraTicketWriteBackDetailLine(artifact) {
+        return detail
+    }
+    let state = jiraTicketWriteBackState(artifact) ?? "unknown"
+    let title = jiraTicketFirstLine(artifact.title, fallback: "Jira write-back")
+    let artifactRef = jiraTicketNonEmpty(artifact.uri).map { " artifact \($0)" } ?? ""
+    return "Jira write-back \(state): \(title)\(artifactRef)."
+}
+
+private func jiraTicketWriteBackDisplayLabel(_ state: String?) -> String {
+    guard let state = jiraTicketNonEmpty(state) else { return "None" }
+    switch state.lowercased() {
+    case "posted":
+        return "Posted"
+    case "failed":
+        return "Failed"
+    case "manual-paste", "manual paste", "manual":
+        return "Manual paste"
+    case "pending":
+        return "Pending"
+    default:
+        return state
+    }
+}
+
+private func jiraTicketWriteBackStateNeedsAction(_ state: String) -> Bool {
+    switch state.lowercased() {
+    case "failed", "manual-paste", "manual paste", "manual", "pending":
+        return true
+    default:
+        return false
+    }
+}
+
+private func jiraTicketArtifactResolution(_ artifact: Artifact) -> (label: String, branchURI: String?)? {
+    guard let ref = artifact.sourceRefs.last(where: { $0.kind == "artifact-resolution" }),
+          let label = jiraTicketNonEmpty(ref.label) else {
+        return nil
+    }
+    return (label, ref.uri)
+}
+
+private func jiraTicketWriteBackState(_ artifact: Artifact) -> String? {
+    guard let ref = artifact.sourceRefs.last(where: { $0.kind == "jira-write-back" }),
+          let label = jiraTicketNonEmpty(ref.label) else {
+        return nil
+    }
+    return label
+}
+
+private func jiraTicketWriteBackDetailLine(_ artifact: Artifact) -> String? {
+    let line = artifact.provenance
+        .split(whereSeparator: \.isNewline)
+        .map(String.init)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .last { line in
+            line.hasPrefix("Jira write-back:")
+                || line.hasPrefix("Jira 写回")
+                || line.hasPrefix("Jira写回")
+        }
+    guard let line else { return nil }
+    if line.hasPrefix("Jira write-back:") {
+        return line
+    }
+    return "Jira write-back: \(line)"
+}
+
+private func jiraTicketArtifactResolutionDecisionLine(_ artifact: Artifact) -> String? {
+    artifact.provenance
+        .split(whereSeparator: \.isNewline)
+        .map(String.init)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .last { $0.hasPrefix("Branch decision:") }
+}
+
 private func jiraTicketNextActionLines(
     item: WorkItem,
     summary: JiraTicketEvidenceSummary,
-    latestRun: AgentRun?
+    latestRun: AgentRun?,
+    branchResolutionLines: JiraTicketBranchResolutionLines = JiraTicketBranchResolutionLines(),
+    writeBackLines: JiraTicketWriteBackLines = JiraTicketWriteBackLines()
 ) -> [String] {
+    if !writeBackLines.nextActions.isEmpty {
+        return writeBackLines.nextActions
+    }
+    if !branchResolutionLines.nextActions.isEmpty {
+        return branchResolutionLines.nextActions
+    }
     if !summary.pendingCommands.isEmpty {
         return summary.pendingCommands.map { "Run or review: \($0)" }
     }
@@ -368,6 +794,15 @@ private func jiraTicketNonEmpty(_ value: String?) -> String? {
         return nil
     }
     return trimmed
+}
+
+private func jiraTicketFirstLine(_ value: String, fallback: String) -> String {
+    value
+        .split(whereSeparator: \.isNewline)
+        .map(String.init)
+        .first
+        .flatMap(jiraTicketNonEmpty(_:))
+        ?? fallback
 }
 
 private func appendLine(_ label: String, _ value: String?, to lines: inout [String]) {

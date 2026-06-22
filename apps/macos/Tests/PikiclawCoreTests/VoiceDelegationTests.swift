@@ -127,6 +127,22 @@ import Testing
     #expect(plan.needsConfirmation == true)
 }
 
+@Test func voicePlannerTreatsTaskCountQuestionsAsStatusIntent() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "当前有几个后台任务",
+        workspace: Workspace(
+            id: "workspace",
+            name: "Pikiclaw",
+            pathDisplay: "/repo/pikiclaw",
+            trustState: .trusted
+        ),
+        preferredAgent: .codex
+    )
+
+    #expect(plan.intent == .status)
+    #expect(plan.routeSummary.contains("current"))
+}
+
 @Test func voicePlannerKeepsCapabilityQuestionsConversational() {
     let plan = VoiceAssistantPlanner.makePlan(
         utterance: "你可以做什么",
@@ -136,6 +152,21 @@ import Testing
 
     #expect(plan.intent == .converse)
     #expect(plan.needsConfirmation == true)
+}
+
+@Test func voicePlannerKeepsScreenshotCapabilityQuestionsConversational() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "你可以截图吗",
+        workspace: Workspace(
+            id: "workspace",
+            name: "Pikiclaw",
+            pathDisplay: "/repo/pikiclaw",
+            trustState: .trusted
+        ),
+        preferredAgent: .codex
+    )
+
+    #expect(plan.intent == .converse)
 }
 
 @Test func voicePlannerDelegatesActionableStateManagementRequests() {
@@ -171,7 +202,7 @@ import Testing
 
     #expect(report.headline == "Completed")
     #expect(report.tone == "done")
-    #expect(report.spokenText.contains("completed"))
+    #expect(report.spokenText.contains("完成"))
 }
 
 @Test func voiceReporterSpeaksAgentTranscriptSummary() {
@@ -202,4 +233,35 @@ import Testing
     #expect(report.spokenText.contains("自动交给 agent"))
     #expect(report.spokenText.contains("26 个 macOS 测试全部通过"))
     #expect(!report.spokenText.contains("[tool]"))
+}
+
+@Test func voiceReporterDoesNotSpeakRawTransportErrors() {
+    let plan = VoiceAssistantPlanner.makePlan(
+        utterance: "嗯",
+        workspace: Workspace(
+            id: "workspace",
+            name: "Pikiclaw",
+            pathDisplay: "/repo/pikiclaw",
+            trustState: .trusted
+        ),
+        preferredAgent: .codex
+    )
+    var run = AgentRun(
+        workspaceId: "workspace",
+        agentProfileId: "agent-codex",
+        state: .completed,
+        promptSnapshot: plan.agentPrompt
+    )
+    run.transcript = """
+    2026-06-21T12:10:24.695875Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when UnexpectedContentType(Some("missing-content-type; body: "))
+    {"type":"item.completed","item":{"id":"item_0"}}
+    """
+
+    let report = VoiceAssistantPlanner.report(for: plan, run: run)
+
+    #expect(report.spokenText.contains("完成"))
+    #expect(!report.spokenText.contains("ERROR"))
+    #expect(!report.spokenText.contains("Transport channel"))
+    #expect(!report.spokenText.contains("UnexpectedContentType"))
+    #expect(!report.spokenText.contains("item.completed"))
 }
