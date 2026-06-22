@@ -4373,6 +4373,60 @@ private func composerBuiltinCommandTint(for option: ComposerBuiltinCommandOption
     return PKTheme.primary
 }
 
+private func composerCommandCards(
+    snapshot: NativeStoreSnapshot,
+    agentKind: NativeAgentKind,
+    draftText: String,
+    limit: Int = 8
+) -> [ComposerSkillCardModel] {
+    guard composerShouldShowSkillCards(for: draftText) else {
+        return []
+    }
+
+    let prioritized = snapshot.capabilities
+        .filter { $0.kind == .skill }
+        .filter { composerSkillAvailability(for: $0, agentKind: agentKind).mode != .unsupported }
+        .sorted { lhs, rhs in
+            let leftAvailability = composerSkillAvailabilityPriority(for: lhs, agentKind: agentKind)
+            let rightAvailability = composerSkillAvailabilityPriority(for: rhs, agentKind: agentKind)
+            if leftAvailability != rightAvailability {
+                return leftAvailability < rightAvailability
+            }
+            let leftPriority = composerSkillPriority(for: lhs)
+            let rightPriority = composerSkillPriority(for: rhs)
+            if leftPriority != rightPriority {
+                return leftPriority < rightPriority
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+
+    let trimmedText = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+    let existingText = trimmedText == "/" ? "" : draftText
+    var cards: [ComposerSkillCardModel] = []
+    var seenCommands = Set<String>()
+    if trimmedText == "/" {
+        for option in composerBuiltinCommandOptions(for: agentKind) {
+            guard seenCommands.insert(option.command).inserted else { continue }
+            cards.append(ComposerSkillCardModel(
+                id: option.id,
+                title: option.title,
+                subtitle: option.subtitle,
+                symbol: option.symbol,
+                tint: composerBuiltinCommandTint(for: option, agentKind: agentKind),
+                command: option.command,
+                previewCommand: option.command
+            ))
+        }
+    }
+    for capability in prioritized {
+        let command = composerSkillCommand(for: capability)
+        guard seenCommands.insert(command).inserted else { continue }
+        cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: existingText, agentKind: agentKind))
+        if cards.count == limit { break }
+    }
+    return cards
+}
+
 func composerSkillCommand(for capability: Capability) -> String {
     let lower = capability.name.lowercased()
     if isLogTraceSkillName(lower) {
@@ -5598,52 +5652,7 @@ private struct MinimalChatComposer: View {
         guard showsSkillCards else {
             return []
         }
-        guard composerShouldShowSkillCards(for: draftText) else {
-            return []
-        }
-
-        let prioritized = snapshot.capabilities
-            .filter { $0.kind == .skill }
-            .filter { composerSkillAvailability(for: $0, agentKind: selectedAgentKind).mode != .unsupported }
-            .sorted { lhs, rhs in
-                let leftAvailability = composerSkillAvailabilityPriority(for: lhs, agentKind: selectedAgentKind)
-                let rightAvailability = composerSkillAvailabilityPriority(for: rhs, agentKind: selectedAgentKind)
-                if leftAvailability != rightAvailability {
-                    return leftAvailability < rightAvailability
-                }
-                let leftPriority = composerSkillPriority(for: lhs)
-                let rightPriority = composerSkillPriority(for: rhs)
-                if leftPriority != rightPriority {
-                    return leftPriority < rightPriority
-                }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-            }
-
-        let trimmedText = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let existingText = trimmedText == "/" ? "" : draftText
-        var cards: [ComposerSkillCardModel] = []
-        var seenCommands = Set<String>()
-        if trimmedText == "/" {
-            for option in composerBuiltinCommandOptions(for: selectedAgentKind) {
-                guard seenCommands.insert(option.command).inserted else { continue }
-                cards.append(ComposerSkillCardModel(
-                    id: option.id,
-                    title: option.title,
-                    subtitle: option.subtitle,
-                    symbol: option.symbol,
-                    tint: composerBuiltinCommandTint(for: option, agentKind: selectedAgentKind),
-                    command: option.command,
-                    previewCommand: option.command
-                ))
-            }
-        }
-        for capability in prioritized {
-            let command = composerSkillCommand(for: capability)
-            guard seenCommands.insert(command).inserted else { continue }
-            cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: existingText, agentKind: selectedAgentKind))
-            if cards.count == 8 { break }
-        }
-        return cards
+        return composerCommandCards(snapshot: snapshot, agentKind: selectedAgentKind, draftText: draftText)
     }
 
     var body: some View {
@@ -6683,7 +6692,7 @@ private struct ConversationWorkspace: View {
     }
 
     private var effectiveReplyPermissionMode: PermissionMode {
-        stagedFollowUpPermissionMode ?? run?.permissionMode ?? model.selectedPermissionMode
+        stagedFollowUpPermissionMode ?? model.selectedPermissionMode
     }
 
     private var composerContextWorkspaceId: EntityID? {
@@ -7102,6 +7111,7 @@ private struct ConversationWorkspace: View {
                 statusLine: model.statusLine,
                 isRunning: currentRunBlocksReply,
                 queuedMessages: run?.queuedMessages ?? [],
+                selectedAgentKind: conversationAgentKind,
                 accent: accent,
                 branchOptions: composerWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
                 branchStatus: composerWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
@@ -7261,7 +7271,7 @@ private struct ConversationWorkspace: View {
     private func sendReplyComposerMessage() {
         let next = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
-        let followUpPermissionMode = stagedFollowUpPermissionMode
+        let replyPermissionMode = effectiveReplyPermissionMode
         replyDraft = ""
         stagedFollowUpPermissionMode = nil
         stagedFollowUpLabel = nil
@@ -7271,7 +7281,7 @@ private struct ConversationWorkspace: View {
                 sentRunId = await model.sendMessage(
                     in: run.id,
                     message: next,
-                    permissionMode: followUpPermissionMode
+                    permissionMode: replyPermissionMode
                 )
             } else if let startConversation {
                 sentRunId = await startConversation(next)
@@ -10545,7 +10555,7 @@ private func taskCodingFollowUpAction(
         id: runFollowUpTaskCodingActionID,
         title: "Start coding",
         symbol: "hammer",
-        permissionMode: nil,
+        permissionMode: .askBeforeEdit,
         prompt: prompt
     )
 }
@@ -10579,7 +10589,7 @@ private func taskRetryCodingFollowUpAction(
         id: runFollowUpTaskRetryCodingActionID,
         title: "Retry coding",
         symbol: "arrow.clockwise",
-        permissionMode: nil,
+        permissionMode: .askBeforeEdit,
         prompt: taskStageRenderedPrompt(
             template: prompt,
             run: run,
@@ -17374,6 +17384,7 @@ private struct ConversationReplyComposer: View {
     let statusLine: String
     let isRunning: Bool
     let queuedMessages: [AgentRunQueuedMessage]
+    let selectedAgentKind: NativeAgentKind
     let accent: Color
     var branchOptions: [String] = []
     var branchStatus: String?
@@ -17398,6 +17409,7 @@ private struct ConversationReplyComposer: View {
         statusLine: String,
         isRunning: Bool,
         queuedMessages: [AgentRunQueuedMessage] = [],
+        selectedAgentKind: NativeAgentKind,
         accent: Color,
         branchOptions: [String] = [],
         branchStatus: String? = nil,
@@ -17413,6 +17425,7 @@ private struct ConversationReplyComposer: View {
         self.statusLine = statusLine
         self.isRunning = isRunning
         self.queuedMessages = queuedMessages
+        self.selectedAgentKind = selectedAgentKind
         self.accent = accent
         self.branchOptions = branchOptions
         self.branchStatus = branchStatus
@@ -17444,8 +17457,20 @@ private struct ConversationReplyComposer: View {
         return "Ask for the next action, validation, or follow-up"
     }
 
+    private var skillCards: [ComposerSkillCardModel] {
+        composerCommandCards(snapshot: snapshot, agentKind: selectedAgentKind, draftText: draftText)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            if !skillCards.isEmpty {
+                ComposerSkillCardRow(skills: skillCards) { skill in
+                    insertSkillCommand(skill.previewCommand)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+            }
+
             ZStack(alignment: .topLeading) {
                 if draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
                     Text(placeholderText)
@@ -17645,6 +17670,11 @@ private struct ConversationReplyComposer: View {
         guard !remaining.isEmpty else { return }
         let current = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         draftText = current.isEmpty ? remaining : "\(current) \(remaining)"
+    }
+
+    private func insertSkillCommand(_ command: String) {
+        draftText = command
+        refocusComposer()
     }
 
     private func sendWithAttachments() {
@@ -30261,11 +30291,11 @@ private struct RestartSettingsCard: View {
             return "\(workspaceName) has no local code changes."
         case .changes(let summary):
             return "\(summary.workspaceName) has local changes. Rebuild once when you are ready to refresh the app."
-        case .building:
-            return "Building asynchronously with the shared macOS build coordinator."
+        case .building(_, let log):
+            return log.phase
         case .built:
             return "Build finished. Restart now to install and open the rebuilt app, or keep using this app and restart later."
-        case .failed(let message, _):
+        case .failed(let message, _, _):
             return message.firstLineFallback("Native rebuild failed")
         }
     }
@@ -30274,15 +30304,24 @@ private struct RestartSettingsCard: View {
         switch rebuildStatus {
         case .changes(let summary):
             return summary
-        case .building(let summary):
+        case .building(let summary, _):
             return summary
         case .built(let summary):
             return summary
-        case .failed(_, let summary):
+        case .failed(_, let summary, _):
             return summary
         case .idle, .checking, .clean:
             return nil
         }
+    }
+
+    private var buildLog: NativeAppBuildLog? {
+        rebuildStatus.buildLog
+    }
+
+    private var failureLog: String? {
+        guard case let .failed(_, _, log) = rebuildStatus else { return nil }
+        return log?.gitTrimmed.nilIfEmpty
     }
 
     var body: some View {
@@ -30328,6 +30367,14 @@ private struct RestartSettingsCard: View {
                 .background(PKTheme.inset.opacity(0.46))
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
                 .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+
+            if let buildLog {
+                NativeBuildProgressPanel(log: buildLog, tone: tone)
+            }
+
+            if let failureLog {
+                NativeBuildFailurePanel(log: failureLog, tone: tone)
             }
 
             switch rebuildStatus {
@@ -30392,6 +30439,105 @@ private struct RestartSettingsCard: View {
         .background(PKTheme.panel.opacity(0.7))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct NativeBuildProgressPanel: View {
+    let log: NativeAppBuildLog
+    let tone: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(tone)
+                Text(log.phase)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                if let progress = log.progress {
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                        .foregroundStyle(tone)
+                }
+            }
+
+            ProgressView(value: log.progress ?? 0)
+                .progressViewStyle(.linear)
+                .tint(tone)
+                .opacity(log.progress == nil ? 0.35 : 1)
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(log.recentLines, id: \.self) { line in
+                    Text(line)
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PKTheme.inset.opacity(0.54))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(tone.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct NativeBuildFailurePanel: View {
+    let log: String
+    let tone: Color
+    @State private var copied = false
+
+    private var visibleLines: [String] {
+        Array(log.components(separatedBy: .newlines).suffix(10))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(tone)
+                Text("Build error output")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                Spacer(minLength: 0)
+                Button {
+                    copyTextToPasteboard(log)
+                    copied = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 1_300_000_000)
+                        copied = false
+                    }
+                } label: {
+                    Label(copied ? "Copied" : "Copy error", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(copied ? PKTheme.ok : PKTheme.text2)
+                }
+                .buttonStyle(.plain)
+                .help("Copy build error output")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(visibleLines.enumerated()), id: \.offset) { _, line in
+                    Text(line.isEmpty ? " " : line)
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PKTheme.inset.opacity(0.62))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(tone.opacity(0.32), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 

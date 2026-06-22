@@ -4504,9 +4504,10 @@ import Testing
     )
 
     let coding = try #require(actions.first { $0.id == "task-coding" })
-    #expect(coding.title == "Coding")
+    #expect(coding.title == "Start coding")
     #expect(coding.workflowLabel == "Coding")
     #expect(coding.detail == "Start coding")
+    #expect(coding.permissionMode == .askBeforeEdit)
     #expect(coding.prompt.contains("CUSTOM CODING IVAS-7167 IVAS-7167-support-kafka-producer-failover main main"))
     #expect(coding.prompt.contains("Implementation plan:"))
     #expect(coding.prompt.contains("- Work item: IVAS-7167: Support Kafka producer failover"))
@@ -4568,6 +4569,9 @@ import Testing
     #expect(review.permissionMode == .readOnly)
     #expect(review.prompt.contains("CUSTOM REVIEW IVAS-7167 assistant-runtime-ng"))
     #expect(review.prompt.contains("Edited a file: apps/macos/Sources/PikiclawMac/NativeAppModel.swift"))
+    let retryCoding = try #require(actions.first { $0.id == "task-retry-coding" })
+    #expect(retryCoding.title == "Retry coding")
+    #expect(retryCoding.permissionMode == .askBeforeEdit)
     #expect(actions.allSatisfy { $0.id != "task-coding" })
 }
 

@@ -341,14 +341,31 @@ struct NativeAppCodeChangeSummary: Equatable, Sendable {
     var fileCount: Int { files.count }
 }
 
+struct NativeAppBuildLog: Equatable, Sendable {
+    var text: String = ""
+    var phase: String = "Preparing build"
+    var progress: Double?
+
+    var lines: [String] {
+        text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    var recentLines: [String] {
+        Array(lines.suffix(8))
+    }
+}
+
 enum NativeAppRebuildStatus: Equatable, Sendable {
     case idle
     case checking
     case clean(workspaceName: String)
     case changes(NativeAppCodeChangeSummary)
-    case building(NativeAppCodeChangeSummary?)
+    case building(summary: NativeAppCodeChangeSummary?, log: NativeAppBuildLog)
     case built(NativeAppCodeChangeSummary?)
-    case failed(message: String, summary: NativeAppCodeChangeSummary?)
+    case failed(message: String, summary: NativeAppCodeChangeSummary?, log: String?)
 
     var isBuilding: Bool {
         if case .building = self { return true }
@@ -358,6 +375,39 @@ enum NativeAppRebuildStatus: Equatable, Sendable {
     var builtSummary: NativeAppCodeChangeSummary? {
         if case let .built(summary) = self { return summary }
         return nil
+    }
+
+    var buildLog: NativeAppBuildLog? {
+        if case let .building(_, log) = self { return log }
+        return nil
+    }
+
+    var buildLogText: String {
+        switch self {
+        case .building(_, let log):
+            return log.text
+        case .failed(_, _, let log):
+            return log ?? ""
+        default:
+            return ""
+        }
+    }
+}
+
+private final class NativeAppBuildOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = ""
+
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ chunk: String) {
+        lock.lock()
+        storage.append(chunk)
+        lock.unlock()
     }
 }
 
@@ -2150,7 +2200,7 @@ final class NativeAppModel: ObservableObject {
                 statusLine = "No native app changes"
             }
         } catch {
-            nativeAppRebuildStatus = .failed(message: error.localizedDescription, summary: nil)
+            nativeAppRebuildStatus = .failed(message: error.localizedDescription, summary: nil, log: nil)
             statusLine = "Change check failed: \(error.localizedDescription)"
         }
     }
@@ -2166,17 +2216,84 @@ final class NativeAppModel: ObservableObject {
         }
 
         let summary = try? await Self.nativeAppCodeChangeSummary(for: workspace)
-        nativeAppRebuildStatus = .building(summary)
+        nativeAppRebuildStatus = .building(summary: summary, log: NativeAppBuildLog())
         statusLine = "Rebuilding native app"
         do {
-            _ = try await Self.runNativeAppBuildScript(for: workspace, arguments: [])
+            _ = try await Self.runNativeAppBuildScript(for: workspace, arguments: []) { [weak self] chunk in
+                Task { @MainActor in
+                    self?.appendNativeAppBuildOutput(chunk, summary: summary)
+                }
+            }
             let refreshed = (try? await Self.nativeAppCodeChangeSummary(for: workspace)) ?? summary
             nativeAppRebuildStatus = .built(refreshed)
             statusLine = "Native rebuild finished - restart when ready"
         } catch {
-            nativeAppRebuildStatus = .failed(message: error.localizedDescription, summary: summary)
+            let log = nativeAppRebuildStatus.buildLogText.gitTrimmed.nilIfEmpty ?? error.localizedDescription
+            nativeAppRebuildStatus = .failed(message: error.localizedDescription, summary: summary, log: log)
             statusLine = "Native rebuild failed: \(error.localizedDescription)"
         }
+    }
+
+    private func appendNativeAppBuildOutput(_ chunk: String, summary: NativeAppCodeChangeSummary?) {
+        guard case var .building(_, log) = nativeAppRebuildStatus else { return }
+        log.text.append(chunk)
+        log = Self.nativeAppBuildLogByRefreshingProgress(log)
+        nativeAppRebuildStatus = .building(summary: summary, log: log)
+        statusLine = log.phase
+    }
+
+    nonisolated private static func nativeAppBuildLogByRefreshingProgress(_ log: NativeAppBuildLog) -> NativeAppBuildLog {
+        var next = log
+        let lines = log.lines
+        guard let latest = lines.last else {
+            next.phase = "Preparing build"
+            next.progress = nil
+            return next
+        }
+        next.phase = nativeAppBuildPhase(from: latest)
+        next.progress = nativeAppBuildProgress(from: lines)
+        return next
+    }
+
+    nonisolated private static func nativeAppBuildPhase(from line: String) -> String {
+        if line.localizedCaseInsensitiveContains("waiting to reuse") {
+            return "Waiting for shared rebuild"
+        }
+        if line.localizedCaseInsensitiveContains("vite") || line.localizedCaseInsensitiveContains("transforming") {
+            return "Building DiffViewer"
+        }
+        if line.localizedCaseInsensitiveContains("building for production") {
+            return "Building Swift release"
+        }
+        if line.localizedCaseInsensitiveContains("compiling") {
+            return line
+        }
+        if line.localizedCaseInsensitiveContains("linking") {
+            return line
+        }
+        if line.localizedCaseInsensitiveContains("built ") {
+            return "Packaging app bundle"
+        }
+        return line
+    }
+
+    nonisolated private static func nativeAppBuildProgress(from lines: [String]) -> Double? {
+        for line in lines.reversed() {
+            guard let range = line.range(of: #"^\[(\d+)/(\d+)\]"#, options: .regularExpression) else {
+                continue
+            }
+            let marker = String(line[range])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                .split(separator: "/")
+            guard marker.count == 2,
+                  let current = Double(marker[0]),
+                  let total = Double(marker[1]),
+                  total > 0 else {
+                continue
+            }
+            return min(max(current / total, 0), 1)
+        }
+        return nil
     }
 
     func installRebuiltNativeAppAndRestart(workspaceId: EntityID?) async {
@@ -6434,12 +6551,14 @@ final class NativeAppModel: ObservableObject {
 
     nonisolated private static func runNativeAppBuildScript(
         for workspace: Workspace,
-        arguments: [String]
+        arguments: [String],
+        onOutput: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
             guard let buildRoot = nativeAppBuildRoot(for: workspace.pathDisplay) else {
                 throw NativeAppBuildError.missingBuildScript
             }
+            let output = NativeAppBuildOutputCollector()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: buildRoot.scriptPath)
             process.arguments = arguments
@@ -6449,15 +6568,28 @@ final class NativeAppModel: ObservableObject {
             let outputPipe = Pipe()
             process.standardOutput = outputPipe
             process.standardError = outputPipe
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty else {
+                    return
+                }
+                output.append(chunk)
+                onOutput(chunk)
+            }
 
             try process.run()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            let output = String(data: outputData, encoding: .utf8) ?? ""
-            guard process.terminationStatus == 0 else {
-                throw NativeAppBuildError.failed(output.gitTrimmed.nilIfEmpty ?? "build-app.sh failed")
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            let remainingData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            if let remaining = String(data: remainingData, encoding: .utf8), !remaining.isEmpty {
+                output.append(remaining)
+                onOutput(remaining)
             }
-            return output
+            let outputText = output.text
+            guard process.terminationStatus == 0 else {
+                throw NativeAppBuildError.failed(outputText.gitTrimmed.nilIfEmpty ?? "build-app.sh failed")
+            }
+            return outputText
         }.value
     }
 

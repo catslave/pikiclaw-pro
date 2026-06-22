@@ -133,6 +133,9 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         await client.setNotificationHandler { method, params in
             Self.handleNotification(method: method, params: params, threadId: turnThreadId, state: turnBox, continuation: continuation)
         }
+        await client.setExitHandler {
+            turnBox.complete(success: false, error: "Codex app-server exited before the turn completed.")
+        }
 
         continuation.yield(.stateChanged(.running))
         let turnResp = await client.call(
@@ -146,13 +149,15 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
 
         if let error = CodexRPCClient.errorMessage(from: turnResp) {
             await client.setNotificationHandler(nil)
+            await client.setExitHandler(nil)
             continuation.yield(.failed(error))
             continuation.finish()
             return
         }
 
-        await turnBox.waitForCompletion(timeout: 24 * 60 * 60)
+        await turnBox.waitForCompletion()
         await client.setNotificationHandler(nil)
+        await client.setExitHandler(nil)
 
         let finalState = turnBox.withLock { $0 }
         if let error = finalState.error {
@@ -233,12 +238,13 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
             }
         case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
             break
-        case "turn/completed":
+        case "turn/completed", "turn/failed", "turn/cancelled", "turn/interrupted":
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String
             let error = turn?["error"] as? [String: Any]
             let errorMessage = error?["message"] as? String ?? error?["code"] as? String
-            state.complete(success: status == nil || status == "completed", error: errorMessage)
+            let success = method == "turn/completed" && (status == nil || status == "completed")
+            state.complete(success: success, error: errorMessage)
         default:
             break
         }
@@ -298,29 +304,18 @@ private extension LockedValue where Value == CodexRPCTurnState {
         }
     }
 
-    func waitForCompletion(timeout: TimeInterval) async {
+    func waitForCompletion() async {
         let didComplete = withLock { $0.completed || $0.error != nil }
         if didComplete { return }
 
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                await withCheckedContinuation { continuation in
-                    self.withLock { state in
-                        if state.completed || state.error != nil {
-                            continuation.resume()
-                        } else {
-                            state.continuation = continuation
-                        }
-                    }
+        await withCheckedContinuation { continuation in
+            self.withLock { state in
+                if state.completed || state.error != nil {
+                    continuation.resume()
+                } else {
+                    state.continuation = continuation
                 }
             }
-            group.addTask {
-                let delay = UInt64(max(timeout, 1) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: delay)
-                self.complete(success: false, error: "Timed out waiting for Codex turn completion.")
-            }
-            await group.next()
-            group.cancelAll()
         }
     }
 }
@@ -336,6 +331,7 @@ private final actor CodexRPCClient {
     private var nextId = 1
     private var pending: [Int: CheckedContinuation<CodexRPCResponse, Never>] = [:]
     private var notificationHandler: (@Sendable (String, [String: Any]) -> Void)?
+    private var exitHandler: (@Sendable () -> Void)?
     private var startTask: Task<Bool, Never>?
 
     init(executablePath: String, environment: [String: String]) {
@@ -355,6 +351,10 @@ private final actor CodexRPCClient {
 
     func setNotificationHandler(_ handler: (@Sendable (String, [String: Any]) -> Void)?) {
         notificationHandler = handler
+    }
+
+    func setExitHandler(_ handler: (@Sendable () -> Void)?) {
+        exitHandler = handler
     }
 
     func call(_ method: String, params: [String: Any]? = nil, timeout: TimeInterval = 30) async -> CodexRPCResponse {
@@ -392,6 +392,7 @@ private final actor CodexRPCClient {
         }
         pending.removeAll()
         notificationHandler = nil
+        exitHandler = nil
     }
 
     static func errorMessage(from response: CodexRPCResponse) -> String? {
@@ -494,7 +495,9 @@ private final actor CodexRPCClient {
             continuation.resume(returning: CodexRPCResponse(value: ["error": ["message": "Codex app-server exited."]]))
         }
         pending.removeAll()
+        exitHandler?()
         notificationHandler = nil
+        exitHandler = nil
     }
 
     private func resolvePending(id: Int, response: [String: Any]) {
