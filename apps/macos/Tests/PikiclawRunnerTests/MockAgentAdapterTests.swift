@@ -8,6 +8,7 @@ import Testing
         workspaceId: workspaceId,
         agentProfileId: EntityID("agent"),
         promptSnapshot: "test",
+        queuedMessages: [],
         pinnedAt: nil
     )
     let request = AgentLaunchRequest(workspacePath: "/tmp", prompt: "test", run: run)

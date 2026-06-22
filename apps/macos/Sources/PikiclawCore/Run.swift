@@ -53,6 +53,28 @@ public struct AgentRunMessage: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+public struct AgentRunQueuedMessage: Identifiable, Hashable, Codable, Sendable {
+    public var id: EntityID
+    public var content: String
+    public var permissionMode: PermissionMode?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: EntityID = EntityID(),
+        content: String,
+        permissionMode: PermissionMode? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.content = content
+        self.permissionMode = permissionMode
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var id: EntityID
     public var workItemId: EntityID?
@@ -71,6 +93,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var promptSnapshot: String
     public var contextRefs: [ContextRef]
     public var messages: [AgentRunMessage]
+    public var queuedMessages: [AgentRunQueuedMessage]
     public var transcript: String
     public var readAt: Date?
     public var pinnedAt: Date?
@@ -93,6 +116,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         case promptSnapshot
         case contextRefs
         case messages
+        case queuedMessages
         case transcript
         case readAt
         case pinnedAt
@@ -116,6 +140,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         promptSnapshot: String,
         contextRefs: [ContextRef] = [],
         messages: [AgentRunMessage] = [],
+        queuedMessages: [AgentRunQueuedMessage],
         transcript: String = "",
         pinnedAt: Date? = nil
     ) {
@@ -136,9 +161,55 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.promptSnapshot = promptSnapshot
         self.contextRefs = contextRefs
         self.messages = messages
+        self.queuedMessages = queuedMessages
         self.transcript = transcript
         self.readAt = nil
         self.pinnedAt = pinnedAt
+    }
+
+    public init(
+        id: EntityID = EntityID(),
+        workItemId: EntityID? = nil,
+        workspaceId: EntityID,
+        agentProfileId: EntityID,
+        teamProfileId: EntityID? = nil,
+        permissionMode: PermissionMode = .askBeforeEdit,
+        modelProfileId: EntityID? = nil,
+        state: RunState = .queued,
+        startedAt: Date? = nil,
+        endedAt: Date? = nil,
+        nativeSessionRef: String? = nil,
+        handoverFromRunId: EntityID? = nil,
+        sideChatOfRunId: EntityID? = nil,
+        sideChatRunIds: [EntityID] = [],
+        promptSnapshot: String,
+        contextRefs: [ContextRef] = [],
+        messages: [AgentRunMessage] = [],
+        transcript: String = "",
+        pinnedAt: Date? = nil
+    ) {
+        self.init(
+            id: id,
+            workItemId: workItemId,
+            workspaceId: workspaceId,
+            agentProfileId: agentProfileId,
+            teamProfileId: teamProfileId,
+            permissionMode: permissionMode,
+            modelProfileId: modelProfileId,
+            state: state,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            nativeSessionRef: nativeSessionRef,
+            handoverFromRunId: handoverFromRunId,
+            sideChatOfRunId: sideChatOfRunId,
+            sideChatRunIds: sideChatRunIds,
+            promptSnapshot: promptSnapshot,
+            contextRefs: contextRefs,
+            messages: messages,
+            queuedMessages: [],
+            transcript: transcript,
+            pinnedAt: pinnedAt
+        )
     }
 
     public init(from decoder: Decoder) throws {
@@ -160,6 +231,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.promptSnapshot = try container.decode(String.self, forKey: .promptSnapshot)
         self.contextRefs = try container.decodeIfPresent([ContextRef].self, forKey: .contextRefs) ?? []
         self.messages = try container.decodeIfPresent([AgentRunMessage].self, forKey: .messages) ?? []
+        self.queuedMessages = try container.decodeIfPresent([AgentRunQueuedMessage].self, forKey: .queuedMessages) ?? []
         self.transcript = try container.decodeIfPresent(String.self, forKey: .transcript) ?? ""
         self.readAt = try container.decodeIfPresent(Date.self, forKey: .readAt)
         self.pinnedAt = try container.decodeIfPresent(Date.self, forKey: .pinnedAt)

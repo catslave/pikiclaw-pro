@@ -2704,6 +2704,78 @@ private final class FakeNativeNotificationCenterClient: NativeNotificationCenter
     #expect(composerSkillDraft(command: clickhouseCommand, existingText: "check IVAS-1234") == "/clickhouse check IVAS-1234")
 }
 
+@Test func composerSkillCardsShowForBareSlash() {
+    #expect(composerShouldShowSkillCards(for: ""))
+    #expect(composerShouldShowSkillCards(for: "   "))
+    #expect(composerShouldShowSkillCards(for: "/"))
+    #expect(composerShouldShowSkillCards(for: " / "))
+    #expect(!composerShouldShowSkillCards(for: "/log"))
+    #expect(!composerShouldShowSkillCards(for: "trace lookup"))
+}
+
+@Test func composerBuiltinCommandsFollowSelectedAgentCapabilities() {
+    let codexCommands = composerBuiltinCommandOptions(for: .codex).map(\.command)
+    #expect(codexCommands.contains("/goal "))
+    #expect(codexCommands.contains("/goal pause"))
+    #expect(codexCommands.contains("/goal resume"))
+    #expect(codexCommands.contains("/goal clear"))
+    #expect(codexCommands.contains("/plan "))
+
+    let claudeCommands = composerBuiltinCommandOptions(for: .claude).map(\.command)
+    #expect(claudeCommands.contains("/goal "))
+    #expect(claudeCommands.contains("/goal clear"))
+    #expect(claudeCommands.contains("/plan "))
+    #expect(!claudeCommands.contains("/goal pause"))
+    #expect(!claudeCommands.contains("/goal resume"))
+
+    let hermesCommands = composerBuiltinCommandOptions(for: .hermes).map(\.command)
+    #expect(hermesCommands.contains("/goal "))
+    #expect(hermesCommands.contains("/goal pause"))
+    #expect(hermesCommands.contains("/goal resume"))
+    #expect(!hermesCommands.contains("/plan "))
+
+    #expect(composerBuiltinCommandOptions(for: .customCLI).isEmpty)
+}
+
+@Test func composerSkillAvailabilityFollowsSelectedAgent() {
+    let readyWorkspaceSkill = Capability(
+        kind: .skill,
+        name: "IVA Log Tracer",
+        scope: .workspace,
+        installState: "installed",
+        configState: "ready",
+        trustLevel: .trusted,
+        healthState: .healthy
+    )
+    let agentSkill = Capability(
+        kind: .skill,
+        name: "Codex Review",
+        scope: .agent,
+        installState: "installed",
+        configState: "ready",
+        trustLevel: .trusted,
+        healthState: .healthy
+    )
+    let needsSetupSkill = Capability(
+        kind: .skill,
+        name: "ClickHouse Query",
+        scope: .workspace,
+        installState: "installed",
+        configState: "requires clickhouse-lab MCP",
+        trustLevel: .trusted,
+        healthState: .needsConfiguration
+    )
+
+    #expect(composerSkillAvailability(for: readyWorkspaceSkill, agentKind: .codex).mode == .portable)
+    #expect(composerSkillAvailability(for: agentSkill, agentKind: .codex).mode == .native)
+    #expect(composerSkillAvailability(for: needsSetupSkill, agentKind: .codex).mode == .needsSetup)
+    #expect(composerSkillAvailability(for: readyWorkspaceSkill, agentKind: .customCLI).mode == .unsupported)
+    #expect(
+        composerSkillAvailabilityPriority(for: readyWorkspaceSkill, agentKind: .codex)
+            < composerSkillAvailabilityPriority(for: needsSetupSkill, agentKind: .codex)
+    )
+}
+
 @Test func composerSkillCardsHideAfterUserStartsTyping() {
     #expect(composerShouldShowSkillCards(for: ""))
     #expect(composerShouldShowSkillCards(for: "  \n  "))

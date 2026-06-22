@@ -105,6 +105,7 @@ private func launchRequest(permissionMode: PermissionMode = .askBeforeEdit) -> A
         agentProfileId: "agent",
         permissionMode: permissionMode,
         promptSnapshot: "hello",
+        queuedMessages: [],
         pinnedAt: nil
     )
     return AgentLaunchRequest(workspacePath: "/tmp/project", prompt: "hello", run: run)

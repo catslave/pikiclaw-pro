@@ -8,6 +8,7 @@ APP="$PRODUCTS/Pikiclaw.app"
 APP_BUNDLE_NAME="Pikiclaw.app"
 INSTALL_DIR="/Applications"
 INSTALL_APP=0
+INSTALL_BUILT_APP=0
 OPEN_APP=0
 SIGN_IDENTITY="${PIKICLAW_CODESIGN_IDENTITY:--}"
 CONTENTS="$APP/Contents"
@@ -39,6 +40,8 @@ Builds the macOS native Pikiclaw app into apps/macos/Products/Pikiclaw.app.
 
 Options:
   --install              Copy the built app to /Applications/Pikiclaw.app.
+  --install-built        Install the existing Products/Pikiclaw.app without
+                         running a rebuild. Use after a successful rebuild.
   --open                 Open the app after building. With --install, opens the
                          /Applications copy; otherwise opens the Products copy.
   --install-dir <dir>    Install directory for --install. Defaults to /Applications.
@@ -56,6 +59,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --install)
       INSTALL_APP=1
+      ;;
+    --install-built)
+      INSTALL_BUILT_APP=1
       ;;
     --open)
       OPEN_APP=1
@@ -378,13 +384,19 @@ run_coalesced_build() {
   fi
 }
 
-if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
-  run_coalesced_build "${ORIGINAL_ARGS[@]}"
-else
-  run_coalesced_build
+if [ "$INSTALL_BUILT_APP" != "1" ]; then
+  if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
+    run_coalesced_build "${ORIGINAL_ARGS[@]}"
+  else
+    run_coalesced_build
+  fi
 fi
 
-if [ "$INSTALL_APP" = "1" ]; then
+if [ "$INSTALL_APP" = "1" ] || [ "$INSTALL_BUILT_APP" = "1" ]; then
+  if [ ! -d "$APP" ]; then
+    echo "Built app not found at $APP. Run build-app.sh first." >&2
+    exit 1
+  fi
   install_app
 elif [ "$OPEN_APP" = "1" ]; then
   open "$APP"

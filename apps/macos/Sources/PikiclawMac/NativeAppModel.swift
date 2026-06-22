@@ -331,6 +331,36 @@ private struct NativeBranchLookupResult: Sendable {
     let branches: [String]
 }
 
+struct NativeAppCodeChangeSummary: Equatable, Sendable {
+    var workspaceId: EntityID
+    var workspaceName: String
+    var rootPath: String
+    var branch: String?
+    var files: [String]
+
+    var fileCount: Int { files.count }
+}
+
+enum NativeAppRebuildStatus: Equatable, Sendable {
+    case idle
+    case checking
+    case clean(workspaceName: String)
+    case changes(NativeAppCodeChangeSummary)
+    case building(NativeAppCodeChangeSummary?)
+    case built(NativeAppCodeChangeSummary?)
+    case failed(message: String, summary: NativeAppCodeChangeSummary?)
+
+    var isBuilding: Bool {
+        if case .building = self { return true }
+        return false
+    }
+
+    var builtSummary: NativeAppCodeChangeSummary? {
+        if case let .built(summary) = self { return summary }
+        return nil
+    }
+}
+
 @MainActor
 final class NativeAppModel: ObservableObject {
     @Published var snapshot = NativeStoreSnapshot(seed: .preview())
@@ -350,6 +380,7 @@ final class NativeAppModel: ObservableObject {
     @Published var jiraSyncIsRunning = false
     @Published var jiraWriteBackIsPosting = false
     @Published var nativeNotificationReadiness: NativeNotificationReadiness = .unknown
+    @Published var nativeAppRebuildStatus: NativeAppRebuildStatus = .idle
 
     private let store: JSONNativeStore
     private let agentAdapterFactory: @Sendable (AgentDescriptor) -> any AgentAdapter
@@ -2096,6 +2127,75 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    func refreshNativeAppCodeChanges(workspaceId: EntityID?) async {
+        guard !nativeAppRebuildStatus.isBuilding else { return }
+        guard let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first else {
+            nativeAppRebuildStatus = .idle
+            return
+        }
+        nativeAppRebuildStatus = .checking
+        do {
+            if let summary = try await Self.nativeAppCodeChangeSummary(for: workspace) {
+                nativeAppRebuildStatus = .changes(summary)
+                statusLine = "\(summary.fileCount) changed file(s) ready to rebuild"
+            } else {
+                nativeAppRebuildStatus = .clean(workspaceName: workspace.name)
+                statusLine = "No native app changes"
+            }
+        } catch {
+            nativeAppRebuildStatus = .failed(message: error.localizedDescription, summary: nil)
+            statusLine = "Change check failed: \(error.localizedDescription)"
+        }
+    }
+
+    func rebuildNativeApp(workspaceId: EntityID?) async {
+        guard !nativeAppRebuildStatus.isBuilding else {
+            statusLine = "Native rebuild already running"
+            return
+        }
+        guard let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first else {
+            statusLine = "Add a workspace first"
+            return
+        }
+
+        let summary = try? await Self.nativeAppCodeChangeSummary(for: workspace)
+        nativeAppRebuildStatus = .building(summary)
+        statusLine = "Rebuilding native app"
+        do {
+            _ = try await Self.runNativeAppBuildScript(for: workspace, arguments: [])
+            let refreshed = (try? await Self.nativeAppCodeChangeSummary(for: workspace)) ?? summary
+            nativeAppRebuildStatus = .built(refreshed)
+            statusLine = "Native rebuild finished - restart when ready"
+        } catch {
+            nativeAppRebuildStatus = .failed(message: error.localizedDescription, summary: summary)
+            statusLine = "Native rebuild failed: \(error.localizedDescription)"
+        }
+    }
+
+    func installRebuiltNativeAppAndRestart(workspaceId: EntityID?) async {
+        guard !restartBlockedByActiveRun else {
+            statusLine = "Restart blocked while a run is active"
+            return
+        }
+        guard let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first else {
+            statusLine = "Add a workspace first"
+            return
+        }
+        statusLine = "Installing rebuilt app and restarting"
+        do {
+            _ = try await Self.runNativeAppBuildScript(for: workspace, arguments: ["--install-built", "--open"])
+        } catch {
+            statusLine = "Install rebuilt app failed: \(error.localizedDescription)"
+        }
+    }
+
+    func deferNativeAppRestart() {
+        if case let .built(summary) = nativeAppRebuildStatus {
+            nativeAppRebuildStatus = summary.map(NativeAppRebuildStatus.changes) ?? .idle
+        }
+        statusLine = "Restart deferred"
+    }
+
     @discardableResult
     func createWorkItem(title: String? = nil, workspaceId: EntityID? = nil) async -> EntityID? {
         let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first
@@ -2178,7 +2278,21 @@ final class NativeAppModel: ObservableObject {
             }
             switch run.state {
             case .queued, .starting, .running, .cancelling:
-                statusLine = "Current chat is still running"
+                run.queuedMessages.append(AgentRunQueuedMessage(
+                    content: prompt,
+                    permissionMode: permissionMode
+                ))
+                try await store.saveRun(run)
+                try await store.appendAuditEvent(AuditEvent(
+                    kind: .runStateChange,
+                    actor: "runner",
+                    summary: "Queued follow-up message",
+                    runId: run.id,
+                    workItemId: run.workItemId,
+                    workspaceId: run.workspaceId
+                ))
+                publishRunLocally(run, preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id)
+                statusLine = "\(run.queuedMessages.count) message(s) queued"
                 return runId
             case .waitingForUser, .completed, .failed, .cancelled, .stale, .draft:
                 break
@@ -2233,6 +2347,55 @@ final class NativeAppModel: ObservableObject {
         } catch {
             statusLine = "Send failed: \(error.localizedDescription)"
             return nil
+        }
+    }
+
+    func editQueuedMessage(
+        in runId: EntityID,
+        messageId: EntityID,
+        content: String
+    ) async {
+        let prompt = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            await deleteQueuedMessage(in: runId, messageId: messageId)
+            return
+        }
+
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }),
+                  let index = run.queuedMessages.firstIndex(where: { $0.id == messageId }) else {
+                statusLine = "Queued message not found"
+                return
+            }
+            run.queuedMessages[index].content = prompt
+            run.queuedMessages[index].updatedAt = Date()
+            try await store.saveRun(run)
+            publishRunLocally(run, preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id)
+            statusLine = "Queued message updated"
+        } catch {
+            statusLine = "Update queued message failed: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteQueuedMessage(in runId: EntityID, messageId: EntityID) async {
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }) else {
+                statusLine = "Chat not found"
+                return
+            }
+            let originalCount = run.queuedMessages.count
+            run.queuedMessages.removeAll { $0.id == messageId }
+            guard run.queuedMessages.count != originalCount else {
+                statusLine = "Queued message not found"
+                return
+            }
+            try await store.saveRun(run)
+            publishRunLocally(run, preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id)
+            statusLine = run.queuedMessages.isEmpty ? "Queue cleared" : "\(run.queuedMessages.count) message(s) queued"
+        } catch {
+            statusLine = "Delete queued message failed: \(error.localizedDescription)"
         }
     }
 
@@ -2659,8 +2822,9 @@ final class NativeAppModel: ObservableObject {
                 run.startedAt = Date()
             }
             statusLine = "Launching \(profile.displayName)"
-            try await store.saveRun(run)
-            publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
+            let launchingRun = await runWithLatestQueuedMessages(run)
+            try await store.saveRun(launchingRun)
+            publishRunLocally(launchingRun, preserveActiveRunId: preserveActiveRunId)
 
             let descriptor = Self.agentDescriptor(for: profile)
             let adapter = agentAdapterFactory(descriptor)
@@ -2690,8 +2854,9 @@ final class NativeAppModel: ObservableObject {
                     now: now,
                     lastOutputFlushAt: lastOutputFlushAt
                 ) {
-                    try await store.saveRun(run)
-                    publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
+                    let visibleRun = await runWithLatestQueuedMessages(run)
+                    try await store.saveRun(visibleRun)
+                    publishRunLocally(visibleRun, preserveActiveRunId: preserveActiveRunId)
                     hasDeferredRunFlush = false
                     if event.isOutput || hasDeferredOutputFlush {
                         lastOutputFlushAt = now
@@ -2703,15 +2868,17 @@ final class NativeAppModel: ObservableObject {
                 }
             }
             if hasDeferredRunFlush {
-                try await store.saveRun(run)
-                publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
+                let visibleRun = await runWithLatestQueuedMessages(run)
+                try await store.saveRun(visibleRun)
+                publishRunLocally(visibleRun, preserveActiveRunId: preserveActiveRunId)
             }
         } catch {
             run.state = .failed
             run.endedAt = Date()
             run.transcript += "\n[runner failed] \(error.localizedDescription)\n"
-            try? await store.saveRun(run)
-            publishRunLocally(run, preserveActiveRunId: preserveActiveRunId)
+            let visibleRun = await runWithLatestQueuedMessages(run)
+            try? await store.saveRun(visibleRun)
+            publishRunLocally(visibleRun, preserveActiveRunId: preserveActiveRunId)
             statusLine = "Run failed: \(error.localizedDescription)"
         }
 
@@ -2725,7 +2892,86 @@ final class NativeAppModel: ObservableObject {
         if let preserveActiveRunId {
             activeRunId = preserveActiveRunId
         }
+        if let drainedRunId = await launchNextQueuedMessageIfAvailable(
+            runId: run.id,
+            preserveActiveRunId: preserveActiveRunId
+        ) {
+            return drainedRunId
+        }
         return run.id
+    }
+
+    private func runWithLatestQueuedMessages(_ run: AgentRun) async -> AgentRun {
+        guard let latest = try? await store.loadSnapshot(),
+              let existing = latest.runs.first(where: { $0.id == run.id }),
+              existing.queuedMessages != run.queuedMessages else {
+            return run
+        }
+        var next = run
+        next.queuedMessages = existing.queuedMessages
+        return next
+    }
+
+    @discardableResult
+    private func launchNextQueuedMessageIfAvailable(
+        runId: EntityID,
+        preserveActiveRunId: EntityID?
+    ) async -> EntityID? {
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }),
+                  !Self.isActiveExecutionState(run.state),
+                  !run.queuedMessages.isEmpty else {
+                return nil
+            }
+            guard let workspace = latest.workspaces.first(where: { $0.id == run.workspaceId }) else {
+                statusLine = "Queued message blocked: workspace missing"
+                return nil
+            }
+            guard let profile = latest.agentProfiles.first(where: { $0.id == run.agentProfileId }) else {
+                statusLine = "Queued message blocked: agent profile missing"
+                return nil
+            }
+            guard profile.isEnabled else {
+                statusLine = "\(profile.displayName) is disabled. Queued message is still waiting."
+                return nil
+            }
+
+            let queued = run.queuedMessages.removeFirst()
+            let preservedActiveRunId = preserveActiveRunId ?? activeRunId ?? run.sideChatOfRunId ?? run.id
+            run.messages = Self.appendingCurrentChatTurnMessages(
+                to: run.messages,
+                prompt: run.promptSnapshot,
+                transcript: run.transcript,
+                state: run.state,
+                createdAt: run.endedAt ?? Date()
+            )
+            run.promptSnapshot = queued.content
+            run.transcript = ""
+            if let permissionMode = queued.permissionMode {
+                run.permissionMode = permissionMode
+            }
+            run.state = .queued
+            run.startedAt = Date()
+            run.endedAt = nil
+
+            try await store.saveRun(run)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .runStateChange,
+                actor: "runner",
+                summary: "Started queued follow-up message",
+                runId: run.id,
+                workItemId: run.workItemId,
+                workspaceId: workspace.id
+            ))
+            publishRunLocally(run, preserveActiveRunId: preservedActiveRunId)
+            activeRunId = preservedActiveRunId
+            statusLine = "Starting queued message"
+            return await launchAgentRun(run, profile: profile, workspace: workspace, preserveActiveRunId: preservedActiveRunId)
+        } catch {
+            statusLine = "Queued message failed: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     private func autoCaptureRunEvidenceIfNeeded(for run: AgentRun) async {
@@ -6122,6 +6368,92 @@ final class NativeAppModel: ObservableObject {
         return output
     }
 
+    nonisolated private static func nativeAppCodeChangeSummary(for workspace: Workspace) async throws -> NativeAppCodeChangeSummary? {
+        try await Task.detached(priority: .userInitiated) {
+            let root = nativeAppBuildRoot(for: workspace.pathDisplay)?.rootPath ?? workspace.pathDisplay
+            let status = try gitOutput(["status", "--short"], in: root)
+            let files = status
+                .split(whereSeparator: \.isNewline)
+                .compactMap { line -> String? in
+                    let text = String(line)
+                    guard text.count >= 4 else { return nil }
+                    let pathStart = text.index(text.startIndex, offsetBy: 3)
+                    let rawPath = String(text[pathStart...]).gitTrimmed
+                    let path = rawPath.components(separatedBy: " -> ").last?.gitTrimmed ?? rawPath
+                    guard !path.isEmpty else { return nil }
+                    return path
+                }
+            guard !files.isEmpty else { return nil }
+            let branch = try? gitOutput(["branch", "--show-current"], in: root).gitTrimmed.nilIfEmpty
+            return NativeAppCodeChangeSummary(
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                rootPath: root,
+                branch: branch,
+                files: Array(files.prefix(12))
+            )
+        }.value
+    }
+
+    nonisolated private static func runNativeAppBuildScript(
+        for workspace: Workspace,
+        arguments: [String]
+    ) async throws -> String {
+        try await Task.detached(priority: .userInitiated) {
+            guard let buildRoot = nativeAppBuildRoot(for: workspace.pathDisplay) else {
+                throw NativeAppBuildError.missingBuildScript
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: buildRoot.scriptPath)
+            process.arguments = arguments
+            process.currentDirectoryURL = URL(fileURLWithPath: buildRoot.rootPath, isDirectory: true)
+            process.environment = terminalExecutionEnvironment()
+
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = outputPipe
+
+            try process.run()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let output = String(data: outputData, encoding: .utf8) ?? ""
+            guard process.terminationStatus == 0 else {
+                throw NativeAppBuildError.failed(output.gitTrimmed.nilIfEmpty ?? "build-app.sh failed")
+            }
+            return output
+        }.value
+    }
+
+    nonisolated private static func nativeAppBuildRoot(for path: String) -> (rootPath: String, scriptPath: String)? {
+        var current = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        for _ in 0..<6 {
+            let repoScript = current
+                .appendingPathComponent("apps", isDirectory: true)
+                .appendingPathComponent("macos", isDirectory: true)
+                .appendingPathComponent("scripts", isDirectory: true)
+                .appendingPathComponent("build-app.sh")
+            if FileManager.default.isExecutableFile(atPath: repoScript.path) {
+                return (current.path, repoScript.path)
+            }
+
+            let packageScript = current
+                .appendingPathComponent("scripts", isDirectory: true)
+                .appendingPathComponent("build-app.sh")
+            let packageFile = current.appendingPathComponent("Package.swift").path
+            if FileManager.default.isExecutableFile(atPath: packageScript.path),
+               FileManager.default.fileExists(atPath: packageFile) {
+                return (current.path, packageScript.path)
+            }
+
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            if parent.path == current.path {
+                break
+            }
+            current = parent
+        }
+        return nil
+    }
+
     nonisolated private static func shellCommandOutput(_ command: String, in path: String) throws -> NativeTerminalCommandResult {
         let workingDirectoryMarker = "__PIKICLAW_TERMINAL_CWD__"
         let wrappedCommand = """
@@ -6389,6 +6721,20 @@ private enum NativeRestartError: LocalizedError {
         switch self {
         case .missingExecutable:
             return "Current executable could not be found."
+        }
+    }
+}
+
+private enum NativeAppBuildError: LocalizedError {
+    case missingBuildScript
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingBuildScript:
+            return "Native app build script was not found for this workspace."
+        case .failed(let output):
+            return output
         }
     }
 }

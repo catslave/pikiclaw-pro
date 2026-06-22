@@ -94,6 +94,7 @@ private func makeLaunchRequest(executable: URL, stdinText: String? = nil) -> Age
         workspaceId: "workspace",
         agentProfileId: "agent",
         promptSnapshot: "prompt",
+        queuedMessages: [],
         pinnedAt: nil
     )
     return AgentLaunchRequest(

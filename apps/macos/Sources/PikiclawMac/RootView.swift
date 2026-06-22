@@ -518,7 +518,6 @@ struct RootView: View {
                 model: model,
                 statusLine: model.statusLine,
                 restartBlocked: model.restartBlockedByActiveRun,
-                restart: { model.restartApplication() },
                 refresh: {
                     Task { await model.reload() }
                 }
@@ -3069,7 +3068,6 @@ private struct NewChatLauncher: View {
     var commandFocused: FocusState<Bool>.Binding
     @ObservedObject var model: NativeAppModel
     let openTerminal: () -> Void
-    let send: () -> Void
 
     private var selectedWorkspace: Workspace? {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
@@ -4162,15 +4160,38 @@ private struct ComposerSkillCardModel: Identifiable {
     let tint: Color
     let command: String
     let previewCommand: String
+    let modeLabel: String?
 
-    init(capability: Capability, index: Int, existingText: String) {
+    init(
+        id: EntityID,
+        title: String,
+        subtitle: String,
+        symbol: String,
+        tint: Color,
+        command: String,
+        previewCommand: String,
+        modeLabel: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.symbol = symbol
+        self.tint = tint
+        self.command = command
+        self.previewCommand = previewCommand
+        self.modeLabel = modeLabel
+    }
+
+    init(capability: Capability, index: Int, existingText: String, agentKind: NativeAgentKind) {
+        let availability = composerSkillAvailability(for: capability, agentKind: agentKind)
         id = capability.id
         title = capability.name
-        subtitle = composerSkillSubtitle(for: capability)
+        subtitle = composerSkillSubtitle(for: capability, availability: availability)
         symbol = composerSkillSymbol(for: capability)
-        tint = composerSkillTint(for: capability, index: index)
+        tint = composerSkillTint(for: capability, availability: availability, index: index)
         command = composerSkillCommand(for: capability)
         previewCommand = composerSkillPreviewCommand(for: capability, existingText: existingText)
+        modeLabel = availability.mode.label
     }
 }
 
@@ -4219,6 +4240,12 @@ private struct ComposerSkillCard: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
+                    if let modeLabel = skill.modeLabel {
+                        Spacer(minLength: 2)
+                        Text(modeLabel)
+                            .font(.system(size: 8, weight: .heavy))
+                            .lineLimit(1)
+                    }
                 }
                 .foregroundStyle(skill.tint)
                 .padding(.horizontal, 8)
@@ -4257,24 +4284,24 @@ private struct ComposerSkillCard: View {
     }
 }
 
-private func composerSkillSubtitle(for capability: Capability) -> String {
+private func composerSkillSubtitle(for capability: Capability, availability: ComposerSkillAvailability) -> String {
     let lower = capability.name.lowercased()
+    if availability.mode == .needsSetup || availability.mode == .unsupported {
+        return availability.detail.capitalized
+    }
     if isLogTraceSkillName(lower) {
-        return "Trace logs by conversationId"
+        return "Trace logs · \(availability.detail)"
     }
     if isReviewSkillName(lower) {
-        return "Review code or MR changes"
+        return "Review code · \(availability.detail)"
     }
     if lower.contains("clickhouse") || lower.contains("ch sql") {
-        return "Query project data"
+        return "Query project data · \(availability.detail)"
     }
     if lower.contains("superpower") {
-        return "Use the Superpowers workflow"
+        return "Superpowers workflow · \(availability.detail)"
     }
-    if capability.configState != "ready" && capability.configState != "unknown" {
-        return capability.configState.capitalized
-    }
-    return "Run this project skill"
+    return availability.detail
 }
 
 private func composerSkillSymbol(for capability: Capability) -> String {
@@ -4294,7 +4321,13 @@ private func composerSkillSymbol(for capability: Capability) -> String {
     return "sparkles"
 }
 
-private func composerSkillTint(for capability: Capability, index: Int) -> Color {
+private func composerSkillTint(for capability: Capability, availability: ComposerSkillAvailability, index: Int) -> Color {
+    if availability.mode == .needsSetup {
+        return PKTheme.warn
+    }
+    if availability.mode == .unsupported {
+        return PKTheme.text4
+    }
     let lower = capability.name.lowercased()
     if isLogTraceSkillName(lower) {
         return PKTheme.primary
@@ -4314,6 +4347,13 @@ private func composerSkillTint(for capability: Capability, index: Int) -> Color 
         Color(red: 0.82, green: 0.94, blue: 0.70)
     ]
     return palette[index % palette.count]
+}
+
+private func composerBuiltinCommandTint(for option: ComposerBuiltinCommandOption, agentKind: NativeAgentKind) -> Color {
+    if option.command.hasPrefix("/goal") {
+        return agentTint(agentKind)
+    }
+    return PKTheme.primary
 }
 
 func composerSkillCommand(for capability: Capability) -> String {
@@ -5411,7 +5451,8 @@ private func composerSkillPriority(for capability: Capability) -> Int {
 }
 
 func composerShouldShowSkillCards(for text: String) -> Bool {
-    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty || trimmed == "/"
 }
 
 private func isLogTraceSkillName(_ lowercasedName: String) -> Bool {
@@ -5467,6 +5508,8 @@ private struct MinimalChatComposer: View {
     @State private var imageAttachments: [ComposerImageAttachment] = []
     @State private var referenceAttachments: [ComposerReferenceAttachment] = []
     @State private var attachmentError: String?
+    @State private var editingQueuedMessageId: EntityID?
+    @State private var editingQueuedMessageText = ""
 
     init(
         snapshot: NativeStoreSnapshot,
@@ -5544,7 +5587,13 @@ private struct MinimalChatComposer: View {
 
         let prioritized = snapshot.capabilities
             .filter { $0.kind == .skill }
+            .filter { composerSkillAvailability(for: $0, agentKind: selectedAgentKind).mode != .unsupported }
             .sorted { lhs, rhs in
+                let leftAvailability = composerSkillAvailabilityPriority(for: lhs, agentKind: selectedAgentKind)
+                let rightAvailability = composerSkillAvailabilityPriority(for: rhs, agentKind: selectedAgentKind)
+                if leftAvailability != rightAvailability {
+                    return leftAvailability < rightAvailability
+                }
                 let leftPriority = composerSkillPriority(for: lhs)
                 let rightPriority = composerSkillPriority(for: rhs)
                 if leftPriority != rightPriority {
@@ -5553,13 +5602,29 @@ private struct MinimalChatComposer: View {
                 return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
             }
 
+        let trimmedText = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let existingText = trimmedText == "/" ? "" : draftText
         var cards: [ComposerSkillCardModel] = []
         var seenCommands = Set<String>()
+        if trimmedText == "/" {
+            for option in composerBuiltinCommandOptions(for: selectedAgentKind) {
+                guard seenCommands.insert(option.command).inserted else { continue }
+                cards.append(ComposerSkillCardModel(
+                    id: option.id,
+                    title: option.title,
+                    subtitle: option.subtitle,
+                    symbol: option.symbol,
+                    tint: composerBuiltinCommandTint(for: option, agentKind: selectedAgentKind),
+                    command: option.command,
+                    previewCommand: option.command
+                ))
+            }
+        }
         for capability in prioritized {
             let command = composerSkillCommand(for: capability)
             guard seenCommands.insert(command).inserted else { continue }
-            cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: ""))
-            if cards.count == 4 { break }
+            cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: existingText, agentKind: selectedAgentKind))
+            if cards.count == 8 { break }
         }
         return cards
     }
@@ -6642,7 +6707,7 @@ private struct ConversationWorkspace: View {
 
     var body: some View {
         HStack(spacing: 0) {
-        VStack(spacing: 0) {
+            VStack(spacing: 0) {
             HStack(spacing: 12) {
                 if immersive {
                     Image(systemName: agentSymbol(conversationAgentKind))
@@ -6678,19 +6743,7 @@ private struct ConversationWorkspace: View {
                     if let paneLabel {
                         StatusPill(text: paneLabel, color: accent)
                     }
-                    if shouldShowCodeChangesEntry {
-                        CodeChangesTitleButton(
-                            snapshot: codeChangesSnapshot,
-                            isOpen: codeReviewOpen,
-                            accent: accent,
-                            pendingComments: codeReviewComments.count
-                        ) {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                codeReviewOpen.toggle()
-                            }
-                            refreshCodeChanges(force: true)
-                        }
-                    }
+                    codeChangesHeaderEntry
                     StatusPill(text: run?.state.rawValue ?? "draft", color: runStateColor(run?.state))
                     if let newSideChat {
                         ComposerIconButton(symbol: "rectangle.split.2x1", title: "Add Inline Chat", action: newSideChat)
@@ -6728,34 +6781,6 @@ private struct ConversationWorkspace: View {
                 .fill(PKTheme.edge.opacity(0.72))
                 .frame(height: 1)
 
-            if codeReviewOpen {
-                NativeCodeReviewModePane(
-                    snapshot: codeChangesSnapshot,
-                    isLoading: codeChangesLoading,
-                    error: codeChangesError,
-                    selectedScope: $selectedCodeReviewScope,
-                    selectedPath: $selectedCodeChangePath,
-                    comments: $codeReviewComments,
-                    accent: accent,
-                    refresh: {
-                        refreshCodeChanges(force: true)
-                    },
-                    close: {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            codeReviewOpen = false
-                        }
-                    },
-                    send: sendCodeReviewComments
-                )
-                .padding(.horizontal, immersive ? 22 : 18)
-                .padding(.vertical, 12)
-                .transition(.move(edge: .top).combined(with: .opacity))
-
-                Rectangle()
-                    .fill(PKTheme.edge.opacity(0.62))
-                    .frame(height: 1)
-            }
-
             if terminalOpen {
                 ContextTerminalPane(
                     selectedWorkspace: selectedWorkspace,
@@ -6776,138 +6801,24 @@ private struct ConversationWorkspace: View {
                     .frame(height: 1)
             }
 
-            ScrollViewReader { reader in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        if let run {
-                            ForEach(run.messages) { message in
-                                ConversationHistoryMessageRow(
-                                    message: message,
-                                    userSubtitle: selectedWorkspace?.name ?? "Project",
-                                    assistantTitle: agentLabel,
-                                    trailing: true,
-                                    accent: accent,
-                                    onSendReviewComments: sendReviewComments(_:)
-                                )
-                                .equatable()
-                            }
-
-                            ConversationMessageBubble(
-                                title: "You",
-                                subtitle: selectedWorkspace?.name ?? "Project",
-                                text: run.promptSnapshot,
-                                createdAt: run.startedAt,
-                                symbol: "person.crop.circle",
-                                accent: accent,
-                                trailing: true,
-                                onRerun: { Task { await model.rerunChat(runId: run.id) } }
-                            )
-
-                            AssistantResponseCard(
-                                title: agentLabel,
-                                text: assistantText,
-                                createdAt: run.endedAt ?? run.startedAt,
-                                startedAt: run.startedAt,
-                                endedAt: run.endedAt,
-                                state: run.state,
-                                isRunning: currentRunBlocksReply,
-                                accent: accent,
-                                runId: run.id,
-                                focusedGeneratedUIAction: focusedGeneratedUIAction,
-                                followUpActions: activeRunFollowUpActions,
-                                onRerun: { Task { await model.rerunChat(runId: run.id) } },
-                                onFollowUp: stageFollowUp(_:),
-                                onFollowUpSideChat: startFollowUpSideChat.map { starter in
-                                    { action in starter(run, action) }
-                                },
-                                onSaveEvidence: saveEvidenceAction,
-                                outputs: conversationOutputs,
-                                selectedOutputArtifactId: selectedOutputArtifactId,
-                                onSendReviewComments: sendReviewComments(_:),
-                                onOpenOutput: openOutputPane(_:)
-                            )
-                            .id("assistant-output")
-                        } else if !model.draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            ConversationMessageBubble(
-                                title: "You",
-                                subtitle: selectedWorkspace?.name ?? "Project",
-                                text: model.draftPrompt,
-                                createdAt: nil,
-                                symbol: "person.crop.circle",
-                                accent: accent,
-                                trailing: true,
-                                onRerun: nil
-                            )
-                            .id("assistant-output")
-                        } else {
-                            Color.clear
-                                .frame(height: 1)
-                                .id("assistant-output")
-                        }
-                    }
-                    .padding(immersive ? 24 : 20)
+            if codeReviewOpen {
+                codeReviewModeSection
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else {
+                ScrollViewReader { reader in
+                    conversationHistoryScroll(reader: reader)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onAppear {
-                    reader.scrollTo("assistant-output", anchor: .bottom)
-                    scrollToFocusedGeneratedUIAction(reader)
-                }
-                .onChange(of: focusedGeneratedUIAction) { _, _ in
-                    scrollToFocusedGeneratedUIAction(reader)
-                }
+                .transition(.opacity)
             }
 
-            if let preComposerContent {
+            if let preComposerContent, !codeReviewOpen {
                 preComposerContent
                     .padding(.horizontal, immersive ? 18 : 16)
                     .padding(.top, immersive ? 14 : 12)
             }
 
-            ConversationReplyComposer(
-                snapshot: snapshot,
-                selectedWorkspaceId: $selectedWorkspaceId,
-                contextWorkspaceId: composerContextWorkspaceId,
-                text: $replyDraft,
-                statusLine: model.statusLine,
-                isRunning: currentRunBlocksReply,
-                accent: accent,
-                branchOptions: composerWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
-                branchStatus: composerWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
-                switchBranch: { branch in
-                    Task { await model.switchBranch(branch, workspace: composerWorkspace) }
-                }
-            ) {
-                let next = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !next.isEmpty else { return }
-                let followUpPermissionMode = stagedFollowUpPermissionMode
-                replyDraft = ""
-                stagedFollowUpPermissionMode = nil
-                stagedFollowUpLabel = nil
-                Task {
-                    let sentRunId: EntityID?
-                    if let run, !shouldStartNewConversationForSelectedWorkspace {
-                        sentRunId = await model.sendMessage(
-                            in: run.id,
-                            message: next,
-                            permissionMode: followUpPermissionMode
-                        )
-                    } else if let startConversation {
-                        sentRunId = await startConversation(next)
-                    } else {
-                        model.draftPrompt = next
-                        sentRunId = await model.startChat(
-                            workspaceId: selectedWorkspaceId,
-                            targetWorkItemId: selectedWorkItemId
-                        )
-                    }
-                    if let sentRunId,
-                       let sentRun = model.snapshot.runs.first(where: { $0.id == sentRunId }) {
-                        selectedWorkItemId = sentRun.workItemId
-                        selectedWorkspaceId = sentRun.workspaceId
-                    }
-                }
-            }
-            .padding(immersive ? 18 : 16)
+            bottomComposerSection
+                .padding(immersive ? 18 : 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -6937,7 +6848,6 @@ private struct ConversationWorkspace: View {
             )
             .frame(width: immersive ? 336 : 360)
             .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
         }
         .onChange(of: replyDraft) { _, newValue in
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -7045,6 +6955,176 @@ private struct ConversationWorkspace: View {
         )
     }
 
+    private func conversationHistoryScroll(reader: ScrollViewProxy) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                conversationHistoryContent
+            }
+            .padding(immersive ? 24 : 20)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            reader.scrollTo("assistant-output", anchor: .bottom)
+            scrollToFocusedGeneratedUIAction(reader)
+        }
+        .onChange(of: focusedGeneratedUIAction) { _, _ in
+            scrollToFocusedGeneratedUIAction(reader)
+        }
+    }
+
+    @ViewBuilder
+    private var conversationHistoryContent: some View {
+        if let run {
+            ForEach(run.messages) { message in
+                ConversationHistoryMessageRow(
+                    message: message,
+                    userSubtitle: selectedWorkspace?.name ?? "Project",
+                    assistantTitle: agentLabel,
+                    trailing: true,
+                    accent: accent,
+                    onSendReviewComments: sendReviewComments(_:)
+                )
+                .equatable()
+            }
+
+            ConversationMessageBubble(
+                title: "You",
+                subtitle: selectedWorkspace?.name ?? "Project",
+                text: run.promptSnapshot,
+                createdAt: run.startedAt,
+                symbol: "person.crop.circle",
+                accent: accent,
+                trailing: true,
+                onRerun: { Task { await model.rerunChat(runId: run.id) } }
+            )
+
+            AssistantResponseCard(
+                title: agentLabel,
+                text: assistantText,
+                createdAt: run.endedAt ?? run.startedAt,
+                startedAt: run.startedAt,
+                endedAt: run.endedAt,
+                state: run.state,
+                isRunning: currentRunBlocksReply,
+                accent: accent,
+                runId: run.id,
+                focusedGeneratedUIAction: focusedGeneratedUIAction,
+                followUpActions: activeRunFollowUpActions,
+                onRerun: { Task { await model.rerunChat(runId: run.id) } },
+                onFollowUp: stageFollowUp(_:),
+                onFollowUpSideChat: startFollowUpSideChat.map { starter in
+                    { action in starter(run, action) }
+                },
+                onSaveEvidence: saveEvidenceAction,
+                outputs: conversationOutputs,
+                selectedOutputArtifactId: selectedOutputArtifactId,
+                onSendReviewComments: sendReviewComments(_:),
+                onOpenOutput: openOutputPane(_:)
+            )
+            .id("assistant-output")
+        } else if !model.draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            ConversationMessageBubble(
+                title: "You",
+                subtitle: selectedWorkspace?.name ?? "Project",
+                text: model.draftPrompt,
+                createdAt: nil,
+                symbol: "person.crop.circle",
+                accent: accent,
+                trailing: true,
+                onRerun: nil
+            )
+            .id("assistant-output")
+        } else {
+            Color.clear
+                .frame(height: 1)
+                .id("assistant-output")
+        }
+    }
+
+    @ViewBuilder
+    private var codeChangesHeaderEntry: some View {
+        if shouldShowCodeChangesEntry {
+            CodeChangesTitleButton(
+                snapshot: codeChangesSnapshot,
+                isOpen: codeReviewOpen,
+                accent: accent,
+                pendingComments: codeReviewComments.count
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    codeReviewOpen.toggle()
+                }
+                refreshCodeChanges(force: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bottomComposerSection: some View {
+        if codeReviewOpen {
+            NativeCodeReviewComposer(
+                comments: $codeReviewComments,
+                accent: accent,
+                sendReview: sendCodeReviewComments,
+                noApproval: sendCodeReviewNoApproval,
+                cancel: cancelCodeReviewMode
+            )
+        } else {
+            ConversationReplyComposer(
+                snapshot: snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                contextWorkspaceId: composerContextWorkspaceId,
+                text: $replyDraft,
+                statusLine: model.statusLine,
+                isRunning: currentRunBlocksReply,
+                queuedMessages: run?.queuedMessages ?? [],
+                accent: accent,
+                branchOptions: composerWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
+                branchStatus: composerWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
+                switchBranch: { branch in
+                    Task { await model.switchBranch(branch, workspace: composerWorkspace) }
+                },
+                editQueuedMessage: { messageId, content in
+                    guard let run else { return }
+                    Task { await model.editQueuedMessage(in: run.id, messageId: messageId, content: content) }
+                },
+                deleteQueuedMessage: { messageId in
+                    guard let run else { return }
+                    Task { await model.deleteQueuedMessage(in: run.id, messageId: messageId) }
+                }
+            ) {
+                sendReplyComposerMessage()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var codeReviewModeSection: some View {
+        if codeReviewOpen {
+            NativeCodeReviewModePane(
+                snapshot: codeChangesSnapshot,
+                isLoading: codeChangesLoading,
+                error: codeChangesError,
+                selectedScope: $selectedCodeReviewScope,
+                selectedPath: $selectedCodeChangePath,
+                comments: $codeReviewComments,
+                accent: accent,
+                openExternal: { destination in
+                    nativeCodeReviewOpenExternal(
+                        destination,
+                        rootPath: codeChangesSnapshot?.rootPath ?? conversationWorkspace?.pathDisplay,
+                        selectedPath: selectedCodeChangePath
+                    )
+                },
+                refresh: {
+                    refreshCodeChanges(force: true)
+                },
+                close: closeCodeReviewMode
+            )
+            .padding(immersive ? 22 : 18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+
     private var shouldShowCodeChangesEntry: Bool {
         if codeChangesSnapshot?.hasChanges == true { return true }
         return activeRunFollowUpActions.contains { $0.id == runFollowUpTaskReviewActionID }
@@ -7095,12 +7175,69 @@ private struct ConversationWorkspace: View {
             comments: codeReviewComments
         )
         codeReviewComments.removeAll()
+        closeCodeReviewMode()
         Task {
             _ = await model.sendMessage(
                 in: run.id,
                 message: prompt,
                 permissionMode: .readOnly
             )
+        }
+    }
+
+    private func sendCodeReviewNoApproval() {
+        guard let run else { return }
+        codeReviewComments.removeAll()
+        closeCodeReviewMode()
+        Task {
+            _ = await model.sendMessage(
+                in: run.id,
+                message: "Reviewed changes. No blocking comments.",
+                permissionMode: .readOnly
+            )
+        }
+    }
+
+    private func closeCodeReviewMode() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            codeReviewOpen = false
+        }
+    }
+
+    private func cancelCodeReviewMode() {
+        codeReviewComments.removeAll()
+        closeCodeReviewMode()
+    }
+
+    private func sendReplyComposerMessage() {
+        let next = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !next.isEmpty else { return }
+        let followUpPermissionMode = stagedFollowUpPermissionMode
+        replyDraft = ""
+        stagedFollowUpPermissionMode = nil
+        stagedFollowUpLabel = nil
+        Task {
+            let sentRunId: EntityID?
+            if let run, !shouldStartNewConversationForSelectedWorkspace {
+                sentRunId = await model.sendMessage(
+                    in: run.id,
+                    message: next,
+                    permissionMode: followUpPermissionMode
+                )
+            } else if let startConversation {
+                sentRunId = await startConversation(next)
+            } else {
+                model.draftPrompt = next
+                sentRunId = await model.startChat(
+                    workspaceId: selectedWorkspaceId,
+                    targetWorkItemId: selectedWorkItemId
+                )
+            }
+            if let sentRunId,
+               let sentRun = model.snapshot.runs.first(where: { $0.id == sentRunId }) {
+                selectedWorkItemId = sentRun.workItemId
+                selectedWorkspaceId = sentRun.workspaceId
+            }
         }
     }
 
@@ -7233,6 +7370,39 @@ private enum NativeCodeReviewScope: String, CaseIterable, Identifiable, Hashable
         case .branch: return "Branch"
         case .workingTree: return "Working tree"
         case .lastTurn: return "Last turn"
+        }
+    }
+}
+
+private enum NativeCodeReviewExternalDestination: String, CaseIterable, Identifiable {
+    case cursor
+    case finder
+    case terminal
+    case iTerm2
+    case warp
+    case intelliJ
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cursor: return "Cursor"
+        case .finder: return "Finder"
+        case .terminal: return "Terminal"
+        case .iTerm2: return "iTerm2"
+        case .warp: return "Warp"
+        case .intelliJ: return "IntelliJ IDEA"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .cursor: return "cube.box"
+        case .finder: return "face.smiling"
+        case .terminal: return "terminal"
+        case .iTerm2: return "terminal.fill"
+        case .warp: return "rectangle.2.swap"
+        case .intelliJ: return "hammer"
         }
     }
 }
@@ -7375,6 +7545,7 @@ private struct NativeCodeReviewModePane: View {
     @Binding var selectedPath: String?
     @Binding var comments: [NativeCodeReviewComment]
     let accent: Color
+    let openExternal: (NativeCodeReviewExternalDestination) -> Void
     let refresh: () -> Void
     let close: () -> Void
     let send: () -> Void
@@ -7408,9 +7579,16 @@ private struct NativeCodeReviewModePane: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                NativeCodeReviewScopePicker(
+                    snapshot: snapshot,
+                    selectedScope: $selectedScope,
+                    selectedPath: $selectedPath,
+                    accent: accent
+                )
                 if comments.count > 0 {
                     StatusPill(text: "\(comments.count) pending", color: accent)
                 }
+                NativeCodeReviewOpenExternalMenu(accent: accent, open: openExternal)
                 ComposerIconButton(symbol: "arrow.clockwise", title: "Refresh changes", action: refresh)
                 ComposerIconButton(symbol: "xmark", title: "Close review mode", action: close)
             }
@@ -7429,31 +7607,18 @@ private struct NativeCodeReviewModePane: View {
             } else if snapshot?.hasChanges != true {
                 NativeCodeReviewEmptyState(title: "No code changes", subtitle: "This workspace has no visible git changes yet.", accent: accent)
             } else if visibleChanges.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    NativeCodeReviewScopePicker(
-                        snapshot: snapshot,
-                        selectedScope: $selectedScope,
-                        selectedPath: $selectedPath,
-                        accent: accent
-                    )
-                    NativeCodeReviewEmptyState(
-                        title: "\(selectedScope.title) has no files",
-                        subtitle: selectedScope == .lastTurn
-                            ? "The latest assistant turn did not name changed files, or those files are not in the current git diff."
-                            : "No files match this change scope.",
-                        accent: accent
-                    )
-                }
-            } else {
-                NativeCodeReviewScopePicker(
-                    snapshot: snapshot,
-                    selectedScope: $selectedScope,
-                    selectedPath: $selectedPath,
+                NativeCodeReviewEmptyState(
+                    title: "\(selectedScope.title) has no files",
+                    subtitle: selectedScope == .lastTurn
+                        ? "The latest assistant turn did not name changed files, or those files are not in the current git diff."
+                        : "No files match this change scope.",
                     accent: accent
                 )
+            } else {
                 HStack(spacing: 10) {
                     NativeCodeChangeTree(
                         changes: visibleChanges,
+                        comments: comments,
                         selectedPath: $selectedPath,
                         accent: accent
                     )
@@ -7463,21 +7628,15 @@ private struct NativeCodeReviewModePane: View {
                         accent: accent
                     )
                 }
-                .frame(minHeight: 300, maxHeight: 460)
-
-                if !comments.isEmpty {
-                    NativeCodeReviewCommentQueue(
-                        comments: $comments,
-                        accent: accent,
-                        send: send
-                    )
-                }
+                .frame(minHeight: 520, maxHeight: .infinity)
             }
         }
         .padding(12)
-        .background(PKTheme.panelAlt.opacity(0.60))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(PKTheme.panelAlt.opacity(0.96))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.24), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(color: Color.black.opacity(0.24), radius: 22, y: 12)
     }
 
     private var headerSubtitle: String {
@@ -7491,6 +7650,40 @@ private struct NativeCodeReviewModePane: View {
     }
 }
 
+private struct NativeCodeReviewOpenExternalMenu: View {
+    let accent: Color
+    let open: (NativeCodeReviewExternalDestination) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(NativeCodeReviewExternalDestination.allCases) { destination in
+                Button {
+                    open(destination)
+                } label: {
+                    Label(destination.title, systemImage: destination.symbol)
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "cube.box")
+                    .font(.system(size: 10.5, weight: .bold))
+                Text("Open in")
+                    .font(.system(size: 11, weight: .bold))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .heavy))
+            }
+            .foregroundStyle(accent)
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .background(PKTheme.control.opacity(0.72))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.24), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .menuStyle(.borderlessButton)
+        .help("Open this workspace in an external app")
+    }
+}
+
 private struct NativeCodeReviewScopePicker: View {
     let snapshot: NativeCodeChangesSnapshot?
     @Binding var selectedScope: NativeCodeReviewScope
@@ -7498,36 +7691,44 @@ private struct NativeCodeReviewScopePicker: View {
     let accent: Color
 
     var body: some View {
-        HStack(spacing: 6) {
+        Menu {
             ForEach(NativeCodeReviewScope.allCases) { scope in
                 Button {
                     selectedScope = scope
                     selectedPath = snapshot?.changes(in: scope).first?.path
                 } label: {
-                    HStack(spacing: 5) {
-                        Text(scope.title)
-                            .font(.system(size: 10.5, weight: .bold))
-                        CountBadge(value: snapshot?.count(in: scope) ?? 0)
-                    }
-                    .foregroundStyle(selectedScope == scope ? PKTheme.primaryText : accent)
-                    .padding(.horizontal, 8)
-                    .frame(height: 26)
-                    .background(selectedScope == scope ? accent : accent.opacity(0.08))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(selectedScope == scope ? 0.42 : 0.20), lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    Label("\(scope.title)  \(snapshot?.count(in: scope) ?? 0)", systemImage: selectedScope == scope ? "checkmark" : "circle")
                 }
-                .buttonStyle(.plain)
-                .help(nativeCodeReviewScopeHelp(scope))
             }
-            Spacer(minLength: 0)
+        } label: {
+            HStack(spacing: 7) {
+                Text(selectedScope.title)
+                    .font(.system(size: 11, weight: .bold))
+                CountBadge(value: snapshot?.count(in: selectedScope) ?? 0)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .heavy))
+            }
+            .foregroundStyle(accent)
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .background(PKTheme.control.opacity(0.72))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.24), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
         }
+        .menuStyle(.borderlessButton)
+        .help(nativeCodeReviewScopeHelp(selectedScope))
     }
 }
 
 private struct NativeCodeChangeTree: View {
     let changes: [NativeCodeChange]
+    let comments: [NativeCodeReviewComment]
     @Binding var selectedPath: String?
     let accent: Color
+
+    private var roots: [NativeCodeChangeTreeNode] {
+        nativeCodeChangeTreeNodes(changes)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -7539,26 +7740,133 @@ private struct NativeCodeChangeTree: View {
                 Spacer(minLength: 0)
             }
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 5) {
-                    ForEach(changes) { change in
-                        NativeCodeChangeRow(
-                            change: change,
-                            selected: selectedPath == change.path,
-                            accent: accent
-                        ) {
-                            selectedPath = change.path
-                        }
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    ForEach(roots) { node in
+                        NativeCodeChangeTreeNodeRow(
+                            node: node,
+                            comments: comments,
+                            selectedPath: $selectedPath,
+                            accent: accent,
+                            depth: 0
+                        )
                     }
                 }
                 .padding(.vertical, 1)
             }
         }
         .padding(10)
-        .frame(width: 240)
+        .frame(width: 300)
         .frame(maxHeight: .infinity)
         .background(PKTheme.inset.opacity(0.58))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct NativeCodeChangeTreeNode: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let path: String
+    let children: [NativeCodeChangeTreeNode]
+    let change: NativeCodeChange?
+
+    var isFile: Bool {
+        change != nil
+    }
+}
+
+private struct NativeCodeChangeTreeNodeRow: View {
+    let node: NativeCodeChangeTreeNode
+    let comments: [NativeCodeReviewComment]
+    @Binding var selectedPath: String?
+    let accent: Color
+    let depth: Int
+    @State private var expanded = true
+
+    private var hasComment: Bool {
+        guard let path = node.change?.path else { return false }
+        return comments.contains { $0.filePath == path }
+    }
+
+    var body: some View {
+        if let change = node.change {
+            Button {
+                selectedPath = change.path
+            } label: {
+                HStack(spacing: 7) {
+                    Spacer()
+                        .frame(width: CGFloat(depth) * 13)
+                    Text(change.badge)
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .foregroundStyle(selectedPath == change.path ? PKTheme.primaryText : accent)
+                        .frame(width: 22, height: 18)
+                        .background(selectedPath == change.path ? accent : accent.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(node.name)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(selectedPath == change.path ? PKTheme.text : PKTheme.text2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text("\(change.statusLabel) · +\(change.additions) -\(change.deletions)")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(PKTheme.text4)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    if hasComment {
+                        Image(systemName: "text.bubble.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(accent)
+                    }
+                }
+                .padding(.horizontal, 7)
+                .frame(height: 38)
+                .background(selectedPath == change.path ? accent.opacity(0.13) : PKTheme.control.opacity(0.24))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(selectedPath == change.path ? accent.opacity(0.36) : PKTheme.edge.opacity(0.64), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+        } else {
+            VStack(alignment: .leading, spacing: 3) {
+                Button {
+                    expanded.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Spacer()
+                            .frame(width: CGFloat(depth) * 13)
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .heavy))
+                            .foregroundStyle(PKTheme.text4)
+                            .frame(width: 10)
+                        Image(systemName: "folder")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(accent.opacity(0.82))
+                        Text(node.name)
+                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 7)
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if expanded {
+                    ForEach(node.children) { child in
+                        NativeCodeChangeTreeNodeRow(
+                            node: child,
+                            comments: comments,
+                            selectedPath: $selectedPath,
+                            accent: accent,
+                            depth: depth + 1
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -7636,8 +7944,9 @@ private struct NativeCodeDiffView: View {
                                 line: line,
                                 lineNumber: index + 1,
                                 filePath: change?.path ?? "",
+                                comments: comments,
                                 accent: accent,
-                                addComment: addComment(_:lineNumber:filePath:)
+                                addComment: addComment(_:lineNumber:filePath:note:)
                             )
                         }
                     }
@@ -7655,12 +7964,13 @@ private struct NativeCodeDiffView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func addComment(_ quote: String, lineNumber: Int, filePath: String) {
+    private func addComment(_ quote: String, lineNumber: Int, filePath: String, note: String) {
         guard !filePath.isEmpty else { return }
         comments.append(NativeCodeReviewComment(
             filePath: filePath,
             line: lineNumber,
-            quote: quote.gitTrimmed
+            quote: quote.gitTrimmed,
+            note: note
         ))
     }
 }
@@ -7669,8 +7979,16 @@ private struct NativeCodeDiffLineRow: View {
     let line: String
     let lineNumber: Int
     let filePath: String
+    let comments: [NativeCodeReviewComment]
     let accent: Color
-    let addComment: (String, Int, String) -> Void
+    let addComment: (String, Int, String, String) -> Void
+    @State private var hovering = false
+    @State private var editing = false
+    @State private var draft = ""
+
+    private var hasComment: Bool {
+        comments.contains { $0.filePath == filePath && $0.line == lineNumber }
+    }
 
     private var tone: Color {
         if line.hasPrefix("+"), !line.hasPrefix("+++") { return PKTheme.ok }
@@ -7687,32 +8005,202 @@ private struct NativeCodeDiffLineRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 7) {
-            Button {
-                addComment(line, lineNumber, filePath)
-            } label: {
-                Image(systemName: "plus.bubble")
-                    .font(.system(size: 9, weight: .bold))
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(accent.opacity(line.gitTrimmed.isEmpty ? 0.28 : 0.82))
-            .disabled(line.gitTrimmed.isEmpty)
-            .help("Add review comment")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 7) {
+                ZStack {
+                    if hasComment {
+                        Image(systemName: "text.bubble.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(accent)
+                    } else if hovering || editing {
+                        Button {
+                            editing = true
+                        } label: {
+                            Image(systemName: "plus.bubble")
+                                .font(.system(size: 9, weight: .bold))
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(accent.opacity(line.gitTrimmed.isEmpty ? 0.28 : 0.82))
+                        .disabled(line.gitTrimmed.isEmpty)
+                        .help("Add review comment")
+                    }
+                }
+                .frame(width: 20, height: 20)
 
-            Text("\(lineNumber)")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(PKTheme.text4)
-                .frame(width: 34, alignment: .trailing)
-            Text(line.isEmpty ? " " : line)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(tone)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: true, vertical: false)
+                Text("\(lineNumber)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(PKTheme.text4)
+                    .frame(width: 34, alignment: .trailing)
+                Text(line.isEmpty ? " " : line)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(tone)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.vertical, 2)
+            .padding(.horizontal, 6)
+            .background((hovering && !editing) ? accent.opacity(0.06) : background)
+
+            if editing {
+                HStack(spacing: 8) {
+                    Spacer()
+                        .frame(width: 61)
+                    TextField("Add review comment", text: $draft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .padding(7)
+                        .frame(width: 360)
+                        .background(PKTheme.inset.opacity(0.82))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(accent.opacity(0.28), lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    Button("Add") {
+                        let note = draft.gitTrimmed
+                        addCommentWithNote(note)
+                    }
+                    .font(.system(size: 10.5, weight: .bold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(accent)
+                    Button("Cancel") {
+                        draft = ""
+                        editing = false
+                    }
+                    .font(.system(size: 10.5, weight: .bold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(PKTheme.text4)
+                }
+                .padding(.vertical, 5)
+                .background(accent.opacity(0.06))
+            }
         }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 6)
-        .background(background)
+        .onHover { hovering = $0 }
+    }
+
+    private func addCommentWithNote(_ note: String) {
+        addComment(line, lineNumber, filePath, note)
+        draft = ""
+        editing = false
+    }
+}
+
+private struct NativeCodeReviewComposer: View {
+    @Binding var comments: [NativeCodeReviewComment]
+    let accent: Color
+    let sendReview: () -> Void
+    let noApproval: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(accent)
+                    .frame(width: 26, height: 26)
+                    .background(accent.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(comments.isEmpty ? "Review ready" : "\(comments.count) comments queued")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text(comments.isEmpty ? "Send a no-blocking review or add line comments in the diff." : "These comments will be sent as one review message.")
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                Button("Cancel review", action: cancel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(PKTheme.text3)
+
+                Button("No approval", action: noApproval)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(accent)
+
+                Button(action: sendReview) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("Send review")
+                            .font(.system(size: 11.5, weight: .bold))
+                    }
+                    .foregroundStyle(comments.isEmpty ? PKTheme.text4 : PKTheme.primaryText)
+                    .padding(.horizontal, 11)
+                    .frame(height: 30)
+                    .background(comments.isEmpty ? PKTheme.control.opacity(0.72) : accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .disabled(comments.isEmpty)
+                .help("Send queued line comments to this chat")
+            }
+
+            if !comments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach($comments) { $comment in
+                            NativeCodeReviewQueuedCommentChip(
+                                comment: $comment,
+                                accent: accent,
+                                remove: {
+                                    comments.removeAll { $0.id == comment.id }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(PKTheme.control.opacity(0.52))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct NativeCodeReviewQueuedCommentChip: View {
+    @Binding var comment: NativeCodeReviewComment
+    let accent: Color
+    let remove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(comment.line.map { "\(comment.filePath):\($0)" } ?? comment.filePath)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button(action: remove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(PKTheme.text4)
+                }
+                .buttonStyle(.plain)
+            }
+            Text(comment.quote.firstLineFallback("Selected diff line"))
+                .font(.caption2)
+                .foregroundStyle(PKTheme.text4)
+                .lineLimit(1)
+            TextField("Review comment", text: $comment.note)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .padding(6)
+                .background(PKTheme.inset.opacity(0.66))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(8)
+        .frame(width: 260)
+        .background(PKTheme.surfaceRaised.opacity(0.32))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -7877,6 +8365,68 @@ private func nativeCodeReviewScopeHelp(_ scope: NativeCodeReviewScope) -> String
         return "Show staged, unstaged, and untracked files"
     case .lastTurn:
         return "Show files named by the latest assistant turn"
+    }
+}
+
+private func nativeCodeReviewOpenExternal(
+    _ destination: NativeCodeReviewExternalDestination,
+    rootPath: String?,
+    selectedPath: String?
+) {
+    guard let rootPath = rootPath?.gitTrimmed.nilIfEmpty else { return }
+    let rootURL = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
+    let selectedURL = nativeCodeReviewSelectedFileURL(rootURL: rootURL, selectedPath: selectedPath)
+    let targetURL = selectedURL ?? rootURL
+
+    switch destination {
+    case .cursor:
+        nativeCodeReviewOpenCursor(target: targetURL)
+    case .finder:
+        if let selectedURL, FileManager.default.fileExists(atPath: selectedURL.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([selectedURL])
+        } else {
+            NSWorkspace.shared.open(rootURL)
+        }
+    case .terminal:
+        nativeCodeReviewOpenApplication("Terminal", target: rootURL)
+    case .iTerm2:
+        nativeCodeReviewOpenApplication("iTerm", target: rootURL)
+    case .warp:
+        nativeCodeReviewOpenApplication("Warp", target: rootURL)
+    case .intelliJ:
+        nativeCodeReviewOpenApplication("IntelliJ IDEA", target: targetURL)
+    }
+}
+
+private func nativeCodeReviewOpenCursor(target: URL) {
+    let script = "if command -v cursor >/dev/null 2>&1; then cursor \"$1\"; else open -a Cursor \"$1\"; fi"
+    if !nativeCodeReviewRunDetached("/bin/zsh", arguments: ["-lc", script, "native-code-review-open", target.path]) {
+        nativeCodeReviewOpenApplication("Cursor", target: target)
+    }
+}
+
+private func nativeCodeReviewSelectedFileURL(rootURL: URL, selectedPath: String?) -> URL? {
+    guard let selectedPath = selectedPath?.gitTrimmed.nilIfEmpty else { return nil }
+    let relativePath = selectedPath.hasPrefix("/") ? String(selectedPath.drop { $0 == "/" }) : selectedPath
+    return rootURL.appendingPathComponent(relativePath)
+}
+
+private func nativeCodeReviewOpenApplication(_ applicationName: String, target: URL) {
+    if !nativeCodeReviewRunDetached("/usr/bin/open", arguments: ["-a", applicationName, target.path]) {
+        NSWorkspace.shared.open(target)
+    }
+}
+
+@discardableResult
+private func nativeCodeReviewRunDetached(_ executable: String, arguments: [String]) -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    do {
+        try process.run()
+        return true
+    } catch {
+        return false
     }
 }
 
@@ -8065,6 +8615,52 @@ private func nativeCodeReviewNormalizedLastTurnRefs(_ refs: [String], rootPath: 
 private func nativeCodeReviewRefs(_ refs: [String], include path: String) -> Bool {
     refs.contains { ref in
         ref == path || ref.hasSuffix("/\(path)") || path.hasSuffix("/\(ref)")
+    }
+}
+
+private func nativeCodeChangeTreeNodes(_ changes: [NativeCodeChange]) -> [NativeCodeChangeTreeNode] {
+    nativeCodeChangeTreeNodes(changes, prefix: "")
+}
+
+private func nativeCodeChangeTreeNodes(
+    _ changes: [NativeCodeChange],
+    prefix: String
+) -> [NativeCodeChangeTreeNode] {
+    var fileNodes: [NativeCodeChangeTreeNode] = []
+    var grouped: [String: [NativeCodeChange]] = [:]
+
+    for change in changes {
+        let relative = prefix.isEmpty
+            ? change.path
+            : String(change.path.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let parts = relative.split(separator: "/", maxSplits: 1).map(String.init)
+        guard let head = parts.first, !head.isEmpty else { continue }
+        if parts.count == 1 {
+            fileNodes.append(NativeCodeChangeTreeNode(
+                id: change.path,
+                name: head,
+                path: change.path,
+                children: [],
+                change: change
+            ))
+        } else {
+            grouped[head, default: []].append(change)
+        }
+    }
+
+    let folderNodes = grouped.keys.sorted().map { name in
+        let path = prefix.isEmpty ? name : "\(prefix)/\(name)"
+        return NativeCodeChangeTreeNode(
+            id: path,
+            name: name,
+            path: path,
+            children: nativeCodeChangeTreeNodes(grouped[name] ?? [], prefix: path),
+            change: nil
+        )
+    }
+
+    return folderNodes + fileNodes.sorted { lhs, rhs in
+        lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 }
 
@@ -15828,6 +16424,124 @@ private struct AgentThinkingState: View {
     }
 }
 
+private struct ComposerQueuedMessageStrip: View {
+    let messages: [AgentRunQueuedMessage]
+    let accent: Color
+    @Binding var editingMessageId: EntityID?
+    @Binding var editingText: String
+    let save: (EntityID, String) -> Void
+    let delete: (EntityID) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(accent)
+                Text("Next queue")
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundStyle(PKTheme.text3)
+                CountBadge(value: messages.count)
+                Spacer(minLength: 0)
+            }
+
+            VStack(spacing: 5) {
+                ForEach(messages) { message in
+                    row(for: message)
+                }
+            }
+        }
+        .padding(8)
+        .background(PKTheme.inset.opacity(0.48))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func row(for message: AgentRunQueuedMessage) -> some View {
+        let isEditing = editingMessageId == message.id
+        HStack(spacing: 7) {
+            Text("#\(queuePosition(for: message))")
+                .font(.system(size: 9, weight: .heavy, design: .monospaced))
+                .foregroundStyle(accent)
+                .frame(width: 24, alignment: .leading)
+
+            if isEditing {
+                TextField("Queued message", text: $editingText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(PKTheme.text)
+                    .padding(.horizontal, 7)
+                    .frame(height: 26)
+                    .background(PKTheme.control.opacity(0.68))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Text(message.content.firstLineFallback("Queued message"))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if isEditing {
+                ComposerQueueIconButton(symbol: "checkmark", title: "Save queued message", accent: accent) {
+                    save(message.id, editingText)
+                    editingMessageId = nil
+                    editingText = ""
+                }
+                ComposerQueueIconButton(symbol: "xmark", title: "Cancel edit", accent: PKTheme.text3) {
+                    editingMessageId = nil
+                    editingText = ""
+                }
+            } else {
+                ComposerQueueIconButton(symbol: "pencil", title: "Edit queued message", accent: accent) {
+                    editingMessageId = message.id
+                    editingText = message.content
+                }
+                ComposerQueueIconButton(symbol: "xmark", title: "Delete queued message", accent: PKTheme.text3) {
+                    delete(message.id)
+                    if editingMessageId == message.id {
+                        editingMessageId = nil
+                        editingText = ""
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 7)
+        .frame(height: 32)
+        .background(PKTheme.control.opacity(isEditing ? 0.58 : 0.34))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.62), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func queuePosition(for message: AgentRunQueuedMessage) -> Int {
+        (messages.firstIndex(where: { $0.id == message.id }) ?? 0) + 1
+    }
+}
+
+private struct ComposerQueueIconButton: View {
+    let symbol: String
+    let title: String
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(accent)
+                .frame(width: 24, height: 24)
+                .background(accent.opacity(0.10))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(accent.opacity(0.20), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+}
+
 private struct ConversationReplyComposer: View {
     let snapshot: NativeStoreSnapshot
     @Binding var selectedWorkspaceId: EntityID?
@@ -15835,10 +16549,13 @@ private struct ConversationReplyComposer: View {
     @Binding var text: String
     let statusLine: String
     let isRunning: Bool
+    let queuedMessages: [AgentRunQueuedMessage]
     let accent: Color
     var branchOptions: [String] = []
     var branchStatus: String?
     var switchBranch: (String) -> Void = { _ in }
+    var editQueuedMessage: (EntityID, String) -> Void = { _, _ in }
+    var deleteQueuedMessage: (EntityID) -> Void = { _ in }
     let send: () -> Void
     @FocusState private var focused: Bool
     @State private var editorFocused = false
@@ -15846,6 +16563,8 @@ private struct ConversationReplyComposer: View {
     @State private var imageAttachments: [ComposerImageAttachment] = []
     @State private var referenceAttachments: [ComposerReferenceAttachment] = []
     @State private var attachmentError: String?
+    @State private var editingQueuedMessageId: EntityID?
+    @State private var editingQueuedMessageText = ""
 
     init(
         snapshot: NativeStoreSnapshot,
@@ -15854,10 +16573,13 @@ private struct ConversationReplyComposer: View {
         text: Binding<String>,
         statusLine: String,
         isRunning: Bool,
+        queuedMessages: [AgentRunQueuedMessage] = [],
         accent: Color,
         branchOptions: [String] = [],
         branchStatus: String? = nil,
         switchBranch: @escaping (String) -> Void = { _ in },
+        editQueuedMessage: @escaping (EntityID, String) -> Void = { _, _ in },
+        deleteQueuedMessage: @escaping (EntityID) -> Void = { _ in },
         send: @escaping () -> Void
     ) {
         self.snapshot = snapshot
@@ -15866,20 +16588,21 @@ private struct ConversationReplyComposer: View {
         self._text = text
         self.statusLine = statusLine
         self.isRunning = isRunning
+        self.queuedMessages = queuedMessages
         self.accent = accent
         self.branchOptions = branchOptions
         self.branchStatus = branchStatus
         self.switchBranch = switchBranch
+        self.editQueuedMessage = editQueuedMessage
+        self.deleteQueuedMessage = deleteQueuedMessage
         self.send = send
         self._draftText = State(initialValue: text.wrappedValue)
     }
 
     private var canSend: Bool {
-        !isRunning && (
-            !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || !imageAttachments.isEmpty
-                || !referenceAttachments.isEmpty
-        )
+        !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !imageAttachments.isEmpty
+            || !referenceAttachments.isEmpty
     }
 
     private var composerFocused: Bool {
@@ -15892,7 +16615,7 @@ private struct ConversationReplyComposer: View {
 
     private var placeholderText: String {
         if isRunning {
-            return "Agent is working..."
+            return "Queue the next message while the agent is working"
         }
         return "Ask for the next action, validation, or follow-up"
     }
@@ -15955,6 +16678,19 @@ private struct ConversationReplyComposer: View {
                 .padding(.bottom, 8)
             }
 
+            if !queuedMessages.isEmpty {
+                ComposerQueuedMessageStrip(
+                    messages: queuedMessages,
+                    accent: accent,
+                    editingMessageId: $editingQueuedMessageId,
+                    editingText: $editingQueuedMessageText,
+                    save: editQueuedMessage,
+                    delete: deleteQueuedMessage
+                )
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+            }
+
             HStack(spacing: 7) {
                 if let contextWorkspaceId {
                     ProjectContextChip(
@@ -15983,7 +16719,7 @@ private struct ConversationReplyComposer: View {
                 }
 
                 if isRunning {
-                    StatusPill(text: "RUNNING", color: PKTheme.warn)
+                    StatusPill(text: queuedMessages.isEmpty ? "RUNNING" : "\(queuedMessages.count) QUEUED", color: PKTheme.warn)
                 } else if referenceAttachments.isEmpty && imageAttachments.isEmpty && draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     StatusPill(text: "READY", color: PKTheme.ok)
                 } else if !referenceAttachments.isEmpty {
@@ -16004,7 +16740,7 @@ private struct ConversationReplyComposer: View {
                     addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
                 }
                 Button(action: sendWithAttachments) {
-                    Image(systemName: isRunning ? "hourglass" : "arrow.up")
+                    Image(systemName: isRunning ? "text.badge.plus" : "arrow.up")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
                         .frame(width: 30, height: 30)
@@ -16014,7 +16750,7 @@ private struct ConversationReplyComposer: View {
                 .buttonStyle(.plain)
                 .disabled(!canSend)
                 .keyboardShortcut(.return, modifiers: .command)
-                .help(isRunning ? "Running" : "Send follow-up")
+                .help(isRunning ? "Queue next message" : "Send follow-up")
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 8)
@@ -28181,7 +28917,6 @@ private struct SystemSurfacePage: View {
     @ObservedObject var model: NativeAppModel
     let statusLine: String
     let restartBlocked: Bool
-    let restart: () -> Void
     let refresh: () -> Void
 
     private var themePreference: Binding<PKThemePreference> {
@@ -28189,6 +28924,10 @@ private struct SystemSurfacePage: View {
             get: { PKThemePreference(rawValue: themePreferenceRaw) ?? .dark },
             set: { themePreferenceRaw = $0.rawValue }
         )
+    }
+
+    private var selectedWorkspace: Workspace? {
+        snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
     }
 
     var body: some View {
@@ -28231,7 +28970,20 @@ private struct SystemSurfacePage: View {
                     RestartSettingsCard(
                         statusLine: statusLine,
                         blocked: restartBlocked,
-                        restart: restart
+                        workspace: selectedWorkspace,
+                        rebuildStatus: model.nativeAppRebuildStatus,
+                        refreshChanges: {
+                            Task { await model.refreshNativeAppCodeChanges(workspaceId: selectedWorkspaceId) }
+                        },
+                        rebuild: {
+                            Task { await model.rebuildNativeApp(workspaceId: selectedWorkspaceId) }
+                        },
+                        restartNow: {
+                            Task { await model.installRebuiltNativeAppAndRestart(workspaceId: selectedWorkspaceId) }
+                        },
+                        later: {
+                            model.deferNativeAppRestart()
+                        }
                     )
                     ForEach(snapshot.providerProfiles) { profile in
                         SurfaceCard(symbol: "key", title: profile.displayName, subtitle: profile.defaultModel ?? profile.kind.rawValue, badge: profile.healthState.rawValue)
@@ -28243,10 +28995,27 @@ private struct SystemSurfacePage: View {
             }
         } actions: {
             if route == .settings {
-                SecondaryButton(title: restartBlocked ? "Busy" : "Restart", systemImage: "arrow.clockwise", action: restart)
-                    .disabled(restartBlocked)
+                let builtReady = model.nativeAppRebuildStatus.builtSummary != nil
+                SecondaryButton(title: builtReady ? "Restart now" : model.nativeAppRebuildStatus.isBuilding ? "Building" : "Rebuild", systemImage: builtReady ? "arrow.clockwise" : "hammer") {
+                    if builtReady {
+                        Task { await model.installRebuiltNativeAppAndRestart(workspaceId: selectedWorkspaceId) }
+                    } else {
+                        Task { await model.rebuildNativeApp(workspaceId: selectedWorkspaceId) }
+                    }
+                }
+                .disabled(restartBlocked || model.nativeAppRebuildStatus.isBuilding)
             } else {
                 SecondaryButton(title: "Refresh", systemImage: "arrow.clockwise", action: refresh)
+            }
+        }
+        .onAppear {
+            if route == .settings {
+                Task { await model.refreshNativeAppCodeChanges(workspaceId: selectedWorkspaceId) }
+            }
+        }
+        .onChange(of: selectedWorkspaceId) { _, _ in
+            if route == .settings {
+                Task { await model.refreshNativeAppCodeChanges(workspaceId: selectedWorkspaceId) }
             }
         }
     }
@@ -28482,49 +29251,200 @@ private struct WorkflowSettingsPromptEditor: View {
 private struct RestartSettingsCard: View {
     let statusLine: String
     let blocked: Bool
-    let restart: () -> Void
+    let workspace: Workspace?
+    let rebuildStatus: NativeAppRebuildStatus
+    let refreshChanges: () -> Void
+    let rebuild: () -> Void
+    let restartNow: () -> Void
+    let later: () -> Void
+
+    private var tone: Color {
+        switch rebuildStatus {
+        case .failed:
+            return PKTheme.err
+        case .building:
+            return PKTheme.warn
+        case .built, .changes:
+            return PKTheme.primary
+        case .clean:
+            return PKTheme.ok
+        case .checking, .idle:
+            return PKTheme.text3
+        }
+    }
+
+    private var statusText: String {
+        if blocked { return "Busy" }
+        switch rebuildStatus {
+        case .idle:
+            return "Ready"
+        case .checking:
+            return "Checking"
+        case .clean:
+            return "Current"
+        case .changes(let summary):
+            return "\(summary.fileCount) changed"
+        case .building:
+            return "Building"
+        case .built:
+            return "Built"
+        case .failed:
+            return "Failed"
+        }
+    }
+
+    private var title: String {
+        switch rebuildStatus {
+        case .built:
+            return "Restart available"
+        case .building:
+            return "Rebuilding native app"
+        case .changes:
+            return "Rebuild available"
+        default:
+            return "Native app"
+        }
+    }
+
+    private var detail: String {
+        if blocked { return "Finish the active run before restarting Pikiclaw." }
+        switch rebuildStatus {
+        case .idle:
+            return "Check for changed files before rebuilding."
+        case .checking:
+            return "Checking the selected workspace for changed files."
+        case .clean(let workspaceName):
+            return "\(workspaceName) has no local code changes."
+        case .changes(let summary):
+            return "\(summary.workspaceName) has local changes. Rebuild once when you are ready to refresh the app."
+        case .building:
+            return "Building asynchronously with the shared macOS build coordinator."
+        case .built:
+            return "Build finished. Restart now to install and open the rebuilt app, or keep using this app and restart later."
+        case .failed(let message, _):
+            return message.firstLineFallback("Native rebuild failed")
+        }
+    }
+
+    private var changeSummary: NativeAppCodeChangeSummary? {
+        switch rebuildStatus {
+        case .changes(let summary):
+            return summary
+        case .building(let summary):
+            return summary
+        case .built(let summary):
+            return summary
+        case .failed(_, let summary):
+            return summary
+        case .idle, .checking, .clean:
+            return nil
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Image(systemName: "arrow.clockwise.circle")
-                    .foregroundStyle(blocked ? PKTheme.warn : PKTheme.primary)
+                Image(systemName: rebuildStatus.isBuilding ? "hammer.circle" : "arrow.clockwise.circle")
+                    .foregroundStyle(blocked ? PKTheme.warn : tone)
                     .frame(width: 34, height: 34)
-                    .background((blocked ? PKTheme.warn : PKTheme.primary).opacity(0.12))
+                    .background((blocked ? PKTheme.warn : tone).opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 Spacer()
-                StatusPill(text: blocked ? "Busy" : "Ready", color: blocked ? PKTheme.warn : PKTheme.primary)
+                StatusPill(text: statusText, color: blocked ? PKTheme.warn : tone)
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Restart")
+                Text(title)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(PKTheme.text)
-                Text(blocked ? "Finish the active run before restarting Pikiclaw." : statusLine)
+                Text(detail)
                     .font(.system(size: 13))
                     .foregroundStyle(PKTheme.text3)
-                    .lineLimit(2)
+                    .lineLimit(3)
             }
 
-            Button(action: restart) {
-                Label(blocked ? "Run active" : "Restart Pikiclaw", systemImage: "arrow.clockwise")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(blocked ? PKTheme.text4 : PKTheme.primaryText)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 32)
-                    .background(blocked ? PKTheme.control.opacity(0.72) : PKTheme.primary)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7)
-                            .stroke(blocked ? PKTheme.edge : PKTheme.primary.opacity(0.92), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+            if let changeSummary {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(changeSummary.branch ?? "working tree")
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(tone)
+                        CountBadge(value: changeSummary.fileCount)
+                    }
+                    ForEach(Array(changeSummary.files.prefix(4)), id: \.self) { file in
+                        Text(file)
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(PKTheme.inset.opacity(0.46))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
             }
-            .buttonStyle(.plain)
-            .disabled(blocked)
-            .help(blocked ? "Restart is available after active runs finish." : "Restart Pikiclaw")
+
+            switch rebuildStatus {
+            case .built:
+                HStack(spacing: 8) {
+                    Button(action: restartNow) {
+                        Label(blocked ? "Run active" : "Restart now", systemImage: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(blocked ? PKTheme.text4 : PKTheme.primaryText)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 32)
+                            .background(blocked ? PKTheme.control.opacity(0.72) : PKTheme.primary)
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(blocked ? PKTheme.edge : PKTheme.primary.opacity(0.92), lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(blocked)
+
+                    Button(action: later) {
+                        Text("Later")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text2)
+                            .frame(width: 78, height: 32)
+                            .background(PKTheme.control.opacity(0.72))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                }
+            default:
+                HStack(spacing: 8) {
+                    Button(action: rebuild) {
+                        Label(rebuildStatus.isBuilding ? "Building" : "Rebuild", systemImage: "hammer")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(rebuildStatus.isBuilding ? PKTheme.text4 : PKTheme.primaryText)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 32)
+                            .background(rebuildStatus.isBuilding ? PKTheme.control.opacity(0.72) : PKTheme.primary)
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(rebuildStatus.isBuilding ? PKTheme.edge : PKTheme.primary.opacity(0.92), lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(rebuildStatus.isBuilding || workspace == nil)
+
+                    Button(action: refreshChanges) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(PKTheme.text2)
+                            .frame(width: 34, height: 32)
+                            .background(PKTheme.control.opacity(0.72))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(rebuildStatus.isBuilding || workspace == nil)
+                    .help("Refresh changed files")
+                }
+            }
         }
         .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
         .background(PKTheme.panel.opacity(0.7))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))

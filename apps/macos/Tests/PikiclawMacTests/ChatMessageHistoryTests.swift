@@ -395,6 +395,148 @@ import Testing
 }
 
 @MainActor
+@Test func sendingMessageWhileRunIsActiveQueuesNextTurn() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-queue-active-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-chat-queue-active",
+        name: "Chat Queue Active",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-chat-queue-active",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let run = AgentRun(
+        id: "run-chat-queue-active",
+        workspaceId: workspace.id,
+        agentProfileId: agent.id,
+        state: .running,
+        startedAt: Date(timeIntervalSince1970: 10),
+        promptSnapshot: "first question",
+        transcript: "working\n"
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [run],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    let sentRunId = try #require(await model.sendMessage(
+        in: run.id,
+        message: "second question",
+        permissionMode: .readOnly
+    ))
+
+    #expect(sentRunId == run.id)
+    let updated = try #require((try await store.loadSnapshot()).runs.first(where: { $0.id == run.id }))
+    #expect(updated.promptSnapshot == "first question")
+    #expect(updated.transcript == "working\n")
+    #expect(updated.queuedMessages.count == 1)
+    #expect(updated.queuedMessages.first?.content == "second question")
+    #expect(updated.queuedMessages.first?.permissionMode == .readOnly)
+    #expect(model.statusLine == "1 message(s) queued")
+}
+
+@MainActor
+@Test func queuedChatMessageStartsAfterActiveRunCompletes() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-queue-drain-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-chat-queue-drain",
+        name: "Chat Queue Drain",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-chat-queue-drain",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let item = WorkItem(
+        id: "workitem-chat-queue-drain",
+        workspaceId: workspace.id,
+        title: "Queued chat",
+        description: "first question",
+        sourceType: .manualPrompt,
+        state: .active
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let probe = StreamingRunProbe()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            StreamingRunProbeAdapter(descriptor: descriptor, probe: probe)
+        }
+    )
+    await model.reload()
+
+    let task = Task { @MainActor in
+        await model.run(workItemId: item.id)
+    }
+    await probe.waitForFirstOutput()
+    let activeRun = try #require(model.snapshot.runs.first(where: { $0.workItemId == item.id }))
+
+    _ = try #require(await model.sendMessage(
+        in: activeRun.id,
+        message: "second question",
+        permissionMode: .readOnly
+    ))
+    let queued = try #require((try await store.loadSnapshot()).runs.first(where: { $0.id == activeRun.id }))
+    #expect(queued.queuedMessages.map(\.content) == ["second question"])
+
+    probe.finish(exitCode: 0)
+    await probe.waitForOutputCount(2)
+    probe.finish(exitCode: 0)
+
+    let drainedRunId = try #require(await task.value)
+    #expect(drainedRunId == activeRun.id)
+    let final = try #require((try await store.loadSnapshot()).runs.first(where: { $0.id == activeRun.id }))
+    #expect(final.state == .completed)
+    #expect(final.promptSnapshot == "second question")
+    #expect(final.permissionMode == .readOnly)
+    #expect(final.queuedMessages.isEmpty)
+    #expect(final.messages.first?.role == .user)
+    #expect(final.messages.first?.content == "first question")
+    #expect(final.messages.dropFirst().first?.role == .assistant)
+    #expect(final.messages.dropFirst().first?.content.contains("first token") == true)
+}
+
+@MainActor
 @Test func rerunningChatPreservesPreviousAttemptInHistory() async throws {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-chat-rerun-\(UUID().uuidString)", isDirectory: true)

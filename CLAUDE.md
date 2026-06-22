@@ -147,6 +147,12 @@ also needs to be installed and launched. The script coalesces concurrent rebuild
 requests so several chats can share one SwiftPM build instead of queueing on the
 same `apps/macos/.build` lock.
 
+For routine Codex chats that edit macOS native code, do not perform a full
+app rebuild/restart after every change. Finish the code change and run focused
+validation only; the macOS app exposes the changed files and lets the user start
+one coalesced async rebuild. After that rebuild finishes, the app asks whether
+to install/restart now or later.
+
 ## Notes
 
 - Persistent config is `~/.pikiclaw/setting.json`
