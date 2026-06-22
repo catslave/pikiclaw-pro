@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$ROOT/../.." && pwd)"
 PRODUCTS="$ROOT/Products"
 APP="$PRODUCTS/Pikiclaw.app"
 APP_BUNDLE_NAME="Pikiclaw.app"
@@ -140,6 +141,9 @@ install_app() {
 
 build_bundle() {
   cd "$ROOT" || return $?
+  if [[ -f "$REPO_ROOT/package.json" ]]; then
+    (cd "$REPO_ROOT" && npm run build:macos-diff-viewer) || return $?
+  fi
   swift build -c release || return $?
 
   rm -rf "$APP" || return $?
@@ -224,6 +228,10 @@ PLIST
     cp "$ICON_BUILD/icon_512.png" "$ICONSET/icon_512x512.png" || return $?
     cp "$ICON_BUILD/icon_1024.png" "$ICONSET/icon_512x512@2x.png" || return $?
     iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns" || return $?
+  fi
+
+  if [[ -d "$ROOT/Resources/DiffViewer" ]]; then
+    /usr/bin/ditto "$ROOT/Resources/DiffViewer" "$RESOURCES/DiffViewer" || return $?
   fi
 
   chmod +x "$MACOS/Pikiclaw" || return $?

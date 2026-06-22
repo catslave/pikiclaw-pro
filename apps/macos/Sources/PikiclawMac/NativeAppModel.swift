@@ -384,6 +384,7 @@ final class NativeAppModel: ObservableObject {
 
     private let store: JSONNativeStore
     private let agentAdapterFactory: @Sendable (AgentDescriptor) -> any AgentAdapter
+    private let agentConnectionPool: AgentConnectionPool
     private let nativeNotificationCenter: any NativeNotificationCenterClient
     private var didRecoverPersistedActiveRuns = false
     private var lastStagedAssistantPrompt: String?
@@ -396,12 +397,17 @@ final class NativeAppModel: ObservableObject {
     init(
         store: JSONNativeStore? = nil,
         agentAdapterFactory: @escaping @Sendable (AgentDescriptor) -> any AgentAdapter = { descriptor in
-            ProcessAgentAdapter(descriptor: descriptor)
+            if descriptor.kind == .codex {
+                return CodexRPCAgentAdapter(descriptor: descriptor)
+            }
+            return ProcessAgentAdapter(descriptor: descriptor)
         },
+        agentConnectionPool: AgentConnectionPool = .shared,
         nativeNotificationCenter: any NativeNotificationCenterClient = SystemNativeNotificationCenterClient()
     ) {
         self.store = store ?? JSONNativeStore()
         self.agentAdapterFactory = agentAdapterFactory
+        self.agentConnectionPool = agentConnectionPool
         self.nativeNotificationCenter = nativeNotificationCenter
         Task {
             await recoverPersistedActiveRunsOnLaunch()
@@ -2129,8 +2135,9 @@ final class NativeAppModel: ObservableObject {
 
     func refreshNativeAppCodeChanges(workspaceId: EntityID?) async {
         guard !nativeAppRebuildStatus.isBuilding else { return }
-        guard let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first else {
+        guard let workspace = nativeAppBuildWorkspace(preferredWorkspaceId: workspaceId) else {
             nativeAppRebuildStatus = .idle
+            statusLine = "Add the Pikiclaw workspace before rebuilding"
             return
         }
         nativeAppRebuildStatus = .checking
@@ -2153,8 +2160,8 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Native rebuild already running"
             return
         }
-        guard let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first else {
-            statusLine = "Add a workspace first"
+        guard let workspace = nativeAppBuildWorkspace(preferredWorkspaceId: workspaceId) else {
+            statusLine = "Add the Pikiclaw workspace before rebuilding"
             return
         }
 
@@ -2173,18 +2180,25 @@ final class NativeAppModel: ObservableObject {
     }
 
     func installRebuiltNativeAppAndRestart(workspaceId: EntityID?) async {
+        guard !Self.restartInFlight else {
+            statusLine = "Restart already in progress"
+            return
+        }
         guard !restartBlockedByActiveRun else {
             statusLine = "Restart blocked while a run is active"
             return
         }
-        guard let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first else {
-            statusLine = "Add a workspace first"
+        guard let workspace = nativeAppBuildWorkspace(preferredWorkspaceId: workspaceId) else {
+            statusLine = "Add the Pikiclaw workspace before restarting"
             return
         }
         statusLine = "Installing rebuilt app and restarting"
         do {
-            _ = try await Self.runNativeAppBuildScript(for: workspace, arguments: ["--install-built", "--open"])
+            Self.restartInFlight = true
+            try Self.launchDetachedNativeAppInstaller(for: workspace)
+            NSApp.terminate(nil)
         } catch {
+            Self.restartInFlight = false
             statusLine = "Install rebuilt app failed: \(error.localizedDescription)"
         }
     }
@@ -2842,11 +2856,23 @@ final class NativeAppModel: ObservableObject {
                 request.stdinText = launchPrompt
             }
             request.arguments = arguments(for: profile.kind, request: request)
+            let connectionKey = AgentConnectionKey(
+                agentId: descriptor.id,
+                agentKind: descriptor.kind,
+                executableName: descriptor.executableName,
+                workspacePath: workspace.pathDisplay,
+                runId: run.id
+            )
+            let eventStream = await agentConnectionPool.start(
+                request,
+                adapter: adapter,
+                key: connectionKey
+            )
 
             var lastOutputFlushAt = Date.distantPast
             var hasDeferredRunFlush = false
             var hasDeferredOutputFlush = false
-            for try await event in adapter.start(request) {
+            for try await event in eventStream {
                 apply(event, to: &run)
                 let now = Date()
                 if Self.shouldFlushRunEventForUI(
@@ -3787,6 +3813,17 @@ final class NativeAppModel: ObservableObject {
             return snapshot.workspaces.first(where: { $0.id == id })
         }
         return snapshot.workspaces.first
+    }
+
+    private func nativeAppBuildWorkspace(preferredWorkspaceId: EntityID?) -> Workspace? {
+        let preferred = selectedWorkspace(id: preferredWorkspaceId)
+        if let preferred,
+           Self.nativeAppBuildRoot(for: preferred.pathDisplay) != nil {
+            return preferred
+        }
+        return snapshot.workspaces.first { workspace in
+            Self.nativeAppBuildRoot(for: workspace.pathDisplay) != nil
+        }
     }
 
     private func selectedWorkItem(id: EntityID?, workspaceId: EntityID?) -> WorkItem? {
@@ -6452,6 +6489,24 @@ final class NativeAppModel: ObservableObject {
             current = parent
         }
         return nil
+    }
+
+    nonisolated private static func launchDetachedNativeAppInstaller(for workspace: Workspace) throws {
+        guard let buildRoot = nativeAppBuildRoot(for: workspace.pathDisplay) else {
+            throw NativeAppBuildError.missingBuildScript
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [
+            "-c",
+            "sleep 0.6; exec \"$0\" --install-built --open",
+            buildRoot.scriptPath
+        ]
+        process.currentDirectoryURL = URL(fileURLWithPath: buildRoot.rootPath, isDirectory: true)
+        process.environment = terminalExecutionEnvironment()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
     }
 
     nonisolated private static func shellCommandOutput(_ command: String, in path: String) throws -> NativeTerminalCommandResult {

@@ -30,14 +30,19 @@ public struct WorkspaceWorkflowConfig: Hashable, Codable, Sendable {
     public static let defaultCodingPromptTemplate = """
     Start the Coding action for {ticket}.
 
-    Use the confirmed task-chat output below as the implementation plan. Work in workspace `{workspace}`. Suggested branch: `{suggestedBranch}`. Preferred base branch: `{baseBranch}`. Current branch: `{currentBranch}`.
+    Use the confirmed Solution Output checkpoint below as the implementation plan. Work in workspace `{workspace}`. Suggested branch: `{suggestedBranch}`. Preferred base branch: `{baseBranch}`. Current branch: `{currentBranch}`.
 
-    Before editing, verify whether the current branch is suitable. If a new branch or base branch needs confirmation, ask with the exact suggested branch and base branch choices first. Once the branch boundary is clear, implement the smallest code change that satisfies the plan, keep edits focused, and run the narrowest useful validation.
+    Do not restart requirement discovery or re-litigate the solution unless the checkpoint is missing, contradicted, or unsafe. Before editing, verify whether the current branch is suitable. If a new branch or base branch needs confirmation, ask with the exact suggested branch and base branch choices first. Once the branch boundary is clear, implement the smallest code change that satisfies the plan, keep edits focused, and run the narrowest useful validation.
+
+    Output formatting:
+    - Use Markdown structure for final answers.
+    - Wrap multi-line shell commands, commit instructions, logs, and file lists in fenced code blocks with an appropriate language such as ```bash or ```text.
+    - Use inline code only for short commands, filenames, branch names, and identifiers.
 
     Ticket:
     {title}
 
-    Confirmed output:
+    Solution Output checkpoint:
     {output}
 
     Context:
@@ -48,6 +53,11 @@ public struct WorkspaceWorkflowConfig: Hashable, Codable, Sendable {
     Review the completed coding work for {ticket}.
 
     Explain the changed code files, what changed in each file, why the change was needed, and which validation was run or still missing. Use a review stance: call out bugs, regressions, risky behavior, and missing tests before summary. Do not edit files during this review pass.
+
+    Output formatting:
+    - Use Markdown structure for final answers.
+    - Wrap multi-line shell commands, commit instructions, logs, and file lists in fenced code blocks with an appropriate language such as ```bash or ```text.
+    - Use inline code only for short commands, filenames, branch names, and identifiers.
 
     Ticket:
     {title}

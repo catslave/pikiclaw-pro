@@ -391,12 +391,14 @@ import Testing
     #expect(!brief.contains("Duplicate Jira"))
     #expect(brief.contains("- Brief includes the Jira key"))
     #expect(brief.contains("Execution Contract:"))
-    #expect(brief.contains("Ticket boundary, Implementation seam, Change plan, Validation, Jira update, and Durable outputs"))
+    #expect(brief.contains("Solution Output checkpoint"))
+    #expect(brief.contains("Ticket boundary, Implementation seam, Change plan, Validation plan, Jira update draft, and Durable outputs"))
+    #expect(brief.contains("Do not edit code during this requirement-confirmation pass"))
     #expect(brief.contains("do not mix in unrelated work items"))
     #expect(brief.contains("Preserve Artifact refs as Evidence"))
     #expect(brief.contains("Pending commands as candidate Validation or Next action"))
     #expect(brief.contains("paste-ready comment"))
-    #expect(brief.contains("run focused validation"))
+    #expect(brief.contains("Coding starts only from the follow-up Coding action"))
 }
 
 @Test func jiraTicketUpdateDraftBuildsPasteReadyCommentFromEvidence() {

@@ -2,6 +2,7 @@ import AppKit
 import PikiclawCore
 import SwiftUI
 import UniformTypeIdentifiers
+import WebKit
 
 enum NativeRoute: String, CaseIterable, Identifiable {
     case chat
@@ -24,11 +25,11 @@ enum NativeRoute: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static let primary: [NativeRoute] = [
-        .chat, .terminal, .projects, .workItems, .workPlan, .notes, .memory, .workflows,
+        .chat, .terminal, .projects, .workItems, .workPlan, .notes, .memory, .workflows, .settings,
     ]
 
     static let system: [NativeRoute] = [
-        .missionControl, .channels, .agents, .assistants, .team, .extensions, .settings,
+        .missionControl, .channels, .agents, .assistants, .team, .extensions,
     ]
 
     var title: String {
@@ -3106,7 +3107,7 @@ private struct NewChatLauncher: View {
     }
 
     private func launcherStageContent() -> some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 30) {
             NewChatHero(
                 snapshot: snapshot,
                 selectedWorkspaceId: selectedWorkspaceId,
@@ -3303,7 +3304,7 @@ private struct NewChatHero: View {
     let isRunning: Bool
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             Image(systemName: agentSymbol(selectedAgentKind))
                 .font(.system(size: 19, weight: .bold))
                 .foregroundStyle(PKTheme.primaryText)
@@ -3318,7 +3319,7 @@ private struct NewChatHero: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .shadow(color: accent.opacity(0.26), radius: 18, x: 0, y: 8)
 
-            VStack(spacing: 6) {
+            VStack(spacing: 8) {
                 Text(timeGreetingTitle)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(accent)
@@ -3339,7 +3340,7 @@ private struct NewChatHero: View {
                     .minimumScaleFactor(0.82)
             }
         }
-        .frame(maxWidth: 640)
+        .frame(maxWidth: 760)
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
@@ -3434,15 +3435,16 @@ private struct NewChatCategoryStrip: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
+            HStack(spacing: 14) {
                 ForEach(quickActions(for: mode)) { action in
                     NewChatCategoryButton(action: action, apply: apply)
+                        .frame(maxWidth: .infinity)
                 }
             }
-            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: 980)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                HStack(spacing: 12) {
                     ForEach(quickActions(for: mode)) { action in
                         NewChatCategoryButton(action: action, apply: apply)
                     }
@@ -3451,6 +3453,7 @@ private struct NewChatCategoryStrip: View {
                 .padding(.vertical, 1)
             }
         }
+        .padding(.top, 2)
         .frame(maxWidth: .infinity, alignment: .center)
     }
 }
@@ -3458,6 +3461,7 @@ private struct NewChatCategoryStrip: View {
 private struct NewChatCategoryButton: View {
     let action: NewChatQuickAction
     let apply: (NewChatQuickAction) -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button {
@@ -3465,19 +3469,25 @@ private struct NewChatCategoryButton: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: action.symbol)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Text(action.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
             }
-            .foregroundStyle(PKTheme.text2)
-            .padding(.horizontal, 13)
-            .frame(height: 34)
-            .background(PKTheme.surfaceRaised.opacity(0.82))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+            .foregroundStyle(hovering ? PKTheme.text : PKTheme.text2)
+            .padding(.horizontal, 18)
+            .frame(minWidth: 162)
+            .frame(height: 42)
+            .frame(maxWidth: .infinity)
+            .background(PKTheme.surfaceRaised.opacity(hovering ? 0.96 : 0.82))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(hovering ? PKTheme.edgeStrong.opacity(0.74) : PKTheme.edge, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .shadow(color: PKTheme.primary.opacity(hovering ? 0.10 : 0), radius: hovering ? 10 : 0, y: hovering ? 6 : 0)
+            .offset(y: hovering ? -1 : 0)
         }
         .buttonStyle(.plain)
+        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: hovering)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -3769,6 +3779,7 @@ private struct JiraTicketListRow: View {
     let select: () -> Void
     let attach: () -> Void
     let start: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -3847,9 +3858,14 @@ private struct JiraTicketListRow: View {
             }
         }
         .padding(10)
-        .background(selected ? PKTheme.primary.opacity(0.13) : PKTheme.surfaceRaised.opacity(0.58))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.primary.opacity(0.50) : PKTheme.edge, lineWidth: 1))
+        .background(selected ? tint.opacity(0.14) : hovering ? tint.opacity(0.09) : PKTheme.surfaceRaised.opacity(0.58))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? tint.opacity(0.58) : hovering ? tint.opacity(0.44) : PKTheme.edge, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(color: tint.opacity(hovering ? 0.16 : 0), radius: hovering ? 12 : 0, y: hovering ? 7 : 0)
+        .offset(y: hovering ? -1 : 0)
+        .brightness(hovering ? 0.018 : 0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: hovering)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -6804,12 +6820,17 @@ private struct ConversationWorkspace: View {
 
             if codeReviewOpen {
                 codeReviewModeSection
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    ))
+                    .zIndex(2)
             } else {
                 ScrollViewReader { reader in
                     conversationHistoryScroll(reader: reader)
                 }
                 .transition(.opacity)
+                .zIndex(0)
             }
 
             if let preComposerContent, !codeReviewOpen {
@@ -6822,6 +6843,7 @@ private struct ConversationWorkspace: View {
                 .padding(immersive ? 18 : 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.interactiveSpring(response: 0.26, dampingFraction: 0.88), value: codeReviewOpen)
 
         if let selectedOutputArtifactForSidePane {
             Divider()
@@ -7052,7 +7074,7 @@ private struct ConversationWorkspace: View {
                 accent: accent,
                 pendingComments: codeReviewComments.count
             ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.88)) {
                     codeReviewOpen.toggle()
                 }
                 refreshCodeChanges(force: true)
@@ -7066,6 +7088,7 @@ private struct ConversationWorkspace: View {
             NativeCodeReviewComposer(
                 comments: $codeReviewComments,
                 accent: accent,
+                explainChanges: explainCodeChanges,
                 sendReview: sendCodeReviewComments,
                 noApproval: sendCodeReviewNoApproval,
                 cancel: cancelCodeReviewMode
@@ -7195,6 +7218,22 @@ private struct ConversationWorkspace: View {
         }
     }
 
+    private func explainCodeChanges() {
+        guard let run else { return }
+        let prompt = nativeCodeExplainPrompt(
+            title: runTitle,
+            snapshot: codeChangesSnapshot
+        )
+        closeCodeReviewMode()
+        Task {
+            _ = await model.sendMessage(
+                in: run.id,
+                message: prompt,
+                permissionMode: .readOnly
+            )
+        }
+    }
+
     private func sendCodeReviewNoApproval() {
         guard let run else { return }
         codeReviewComments.removeAll()
@@ -7209,7 +7248,7 @@ private struct ConversationWorkspace: View {
     }
 
     private func closeCodeReviewMode() {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.88)) {
             codeReviewOpen = false
         }
     }
@@ -7287,7 +7326,7 @@ private struct ConversationWorkspace: View {
             focusedGeneratedUIAction = nil
         }
         if action.id == runFollowUpTaskReviewActionID {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.88)) {
                 codeReviewOpen = true
             }
             refreshCodeChanges(force: true)
@@ -7572,74 +7611,8 @@ private struct NativeCodeReviewModePane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.seal")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(PKTheme.primaryText)
-                    .frame(width: 26, height: 26)
-                    .background(accent)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Code review")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(PKTheme.text)
-                    Text(headerSubtitle)
-                        .font(.caption2)
-                        .foregroundStyle(PKTheme.text3)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                NativeCodeReviewScopePicker(
-                    snapshot: snapshot,
-                    selectedScope: $selectedScope,
-                    selectedPath: $selectedPath,
-                    accent: accent
-                )
-                if comments.count > 0 {
-                    StatusPill(text: "\(comments.count) pending", color: accent)
-                }
-                NativeCodeReviewOpenExternalMenu(accent: accent, open: openExternal)
-                ComposerIconButton(symbol: "arrow.clockwise", title: "Refresh changes", action: refresh)
-                ComposerIconButton(symbol: "xmark", title: "Close review mode", action: close)
-            }
-
-            if let error {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(PKTheme.err)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(PKTheme.err.opacity(0.08))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.err.opacity(0.22), lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else if isLoading && snapshot == nil {
-                NativeCodeReviewEmptyState(title: "Loading changes", subtitle: "Reading git status and diff for this workspace.", accent: accent)
-            } else if snapshot?.hasChanges != true {
-                NativeCodeReviewEmptyState(title: "No code changes", subtitle: "This workspace has no visible git changes yet.", accent: accent)
-            } else if visibleChanges.isEmpty {
-                NativeCodeReviewEmptyState(
-                    title: "\(selectedScope.title) has no files",
-                    subtitle: selectedScope == .lastTurn
-                        ? "The latest assistant turn did not name changed files, or those files are not in the current git diff."
-                        : "No files match this change scope.",
-                    accent: accent
-                )
-            } else {
-                HStack(spacing: 10) {
-                    NativeCodeChangeTree(
-                        changes: visibleChanges,
-                        comments: comments,
-                        selectedPath: $selectedPath,
-                        accent: accent
-                    )
-                    NativeCodeDiffView(
-                        change: selectedChange,
-                        comments: $comments,
-                        accent: accent
-                    )
-                }
-                .frame(minHeight: 520, maxHeight: .infinity)
-            }
+            header
+            content
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -7647,6 +7620,88 @@ private struct NativeCodeReviewModePane: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.24), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(color: Color.black.opacity(0.24), radius: 22, y: 12)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.seal")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 26, height: 26)
+                .background(accent)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Code review")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                Text(headerSubtitle)
+                    .font(.caption2)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            NativeCodeReviewScopePicker(
+                snapshot: snapshot,
+                selectedScope: $selectedScope,
+                selectedPath: $selectedPath,
+                accent: accent
+            )
+            if comments.count > 0 {
+                StatusPill(text: "\(comments.count) pending", color: accent)
+            }
+            NativeCodeReviewOpenExternalMenu(accent: accent, open: openExternal)
+            ComposerIconButton(symbol: "arrow.clockwise", title: "Refresh changes", action: refresh)
+            ComposerIconButton(symbol: "xmark", title: "Close review mode", action: close)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let error {
+            errorState(error)
+        } else if isLoading && snapshot == nil {
+            NativeCodeReviewEmptyState(title: "Loading changes", subtitle: "Reading git status and diff for this workspace.", accent: accent)
+        } else if snapshot?.hasChanges != true {
+            NativeCodeReviewEmptyState(title: "No code changes", subtitle: "This workspace has no visible git changes yet.", accent: accent)
+        } else if visibleChanges.isEmpty {
+            NativeCodeReviewEmptyState(
+                title: "\(selectedScope.title) has no files",
+                subtitle: selectedScope == .lastTurn
+                    ? "The latest assistant turn did not name changed files, or those files are not in the current git diff."
+                    : "No files match this change scope.",
+                accent: accent
+            )
+        } else {
+            diffWorkspace
+        }
+    }
+
+    private func errorState(_ message: String) -> some View {
+        Text(message)
+            .font(.caption)
+            .foregroundStyle(PKTheme.err)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PKTheme.err.opacity(0.08))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.err.opacity(0.22), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var diffWorkspace: some View {
+        HStack(spacing: 10) {
+            NativeCodeChangeTree(
+                changes: visibleChanges,
+                comments: comments,
+                selectedPath: $selectedPath,
+                accent: accent
+            )
+            NativeCodeDiffView(
+                change: selectedChange,
+                comments: $comments,
+                accent: accent
+            )
+        }
+        .frame(minHeight: 520, maxHeight: .infinity)
     }
 
     private var headerSubtitle: String {
@@ -7941,28 +7996,13 @@ private struct NativeCodeDiffView: View {
                     StatusPill(text: "+\(change.additions) -\(change.deletions)", color: accent)
                 }
             }
-            ScrollView([.vertical, .horizontal]) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if let change, diffLines.isEmpty {
-                        Text(change.badge == "??" ? "Untracked file. Add it to git to show a full diff here." : "No textual diff available for this file.")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(PKTheme.text3)
-                            .padding(12)
-                    } else {
-                        ForEach(Array(diffLines.enumerated()), id: \.offset) { index, line in
-                            NativeCodeDiffLineRow(
-                                line: line,
-                                lineNumber: index + 1,
-                                filePath: change?.path ?? "",
-                                comments: comments,
-                                accent: accent,
-                                addComment: addComment(_:lineNumber:filePath:note:)
-                            )
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            NativeReactDiffView(
+                diffText: change?.diff ?? "",
+                fallbackLines: diffLines,
+                fallbackEmptyText: diffEmptyText,
+                filePath: change?.path ?? "",
+                onAddComment: addComment(_:lineNumber:filePath:note:)
+            )
             .background(PKTheme.inset.opacity(0.72))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.78), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -7982,6 +8022,233 @@ private struct NativeCodeDiffView: View {
             quote: quote.gitTrimmed,
             note: note
         ))
+    }
+
+    private var diffEmptyText: String {
+        guard let change else { return "No diff selected." }
+        return change.badge == "??"
+            ? "Untracked file. Add it to git to show a full diff here."
+            : "No textual diff available for this file."
+    }
+}
+
+private struct NativeReactDiffView: View {
+    let diffText: String
+    let fallbackLines: [String]
+    let fallbackEmptyText: String
+    let filePath: String
+    let onAddComment: (String, Int, String, String) -> Void
+
+    private var viewerURL: URL? {
+        if let resourceURL = Bundle.main.resourceURL?.appendingPathComponent("DiffViewer/index.html"),
+           FileManager.default.fileExists(atPath: resourceURL.path) {
+            return resourceURL
+        }
+
+        let devURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/DiffViewer/index.html")
+        if FileManager.default.fileExists(atPath: devURL.path) {
+            return devURL
+        }
+
+        return nil
+    }
+
+    var body: some View {
+        if let viewerURL {
+            NativeReactDiffWebView(
+                indexURL: viewerURL,
+                diffText: diffText,
+                filePath: filePath,
+                onAddComment: onAddComment
+            )
+        } else {
+            NativeSelectableDiffTextView(
+                lines: fallbackLines,
+                emptyText: fallbackEmptyText
+            )
+        }
+    }
+}
+
+private struct NativeReactDiffWebView: NSViewRepresentable {
+    let indexURL: URL
+    let diffText: String
+    let filePath: String
+    let onAddComment: (String, Int, String, String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(context.coordinator, name: "pikiclawDiffComment")
+        configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.loadFileURL(indexURL, allowingReadAccessTo: indexURL.deletingLastPathComponent())
+        context.coordinator.pendingDiffText = diffText
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.pendingDiffText = diffText
+        context.coordinator.render(diffText, in: webView)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var parent: NativeReactDiffWebView
+        var loaded = false
+        var pendingDiffText = ""
+        private var lastRenderedDiffText: String?
+
+        init(parent: NativeReactDiffWebView) {
+            self.parent = parent
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            loaded = true
+            render(pendingDiffText, in: webView)
+        }
+
+        func render(_ diffText: String, in webView: WKWebView) {
+            guard loaded, lastRenderedDiffText != diffText else { return }
+            lastRenderedDiffText = diffText
+            let payload: [String: Any] = [
+                "diffText": diffText,
+                "viewType": "unified"
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window.PikiclawDiffViewer?.render(\(json));")
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "pikiclawDiffComment",
+                  let payload = message.body as? [String: Any],
+                  !parent.filePath.isEmpty else {
+                return
+            }
+            let quote = (payload["quote"] as? String ?? "").gitTrimmed
+            guard !quote.isEmpty else { return }
+            let lineNumbers = payload["lineNumbers"] as? [Int] ?? []
+            let lineNumber = lineNumbers.first ?? payload["lineNumber"] as? Int ?? 0
+            let note = (payload["note"] as? String ?? "").gitTrimmed
+            parent.onAddComment(quote, max(lineNumber, 1), parent.filePath, note)
+        }
+    }
+}
+
+private struct NativeSelectableDiffTextView: NSViewRepresentable {
+    let lines: [String]
+    let emptyText: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.allowsUndo = false
+        textView.drawsBackground = true
+        textView.backgroundColor = NSColor(calibratedRed: 0.16, green: 0.17, blue: 0.19, alpha: 0.88)
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = NSColor(calibratedWhite: 0.74, alpha: 1)
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        textView.autoresizingMask = [.width]
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        let next = attributedDiff()
+        if textView.textStorage?.string != next.string {
+            textView.textStorage?.setAttributedString(next)
+        }
+    }
+
+    private func attributedDiff() -> NSAttributedString {
+        let renderedLines = lines.isEmpty ? [emptyText] : lines
+        let digitCount = max(2, String(renderedLines.count).count)
+        let output = NSMutableAttributedString()
+        for (index, line) in renderedLines.enumerated() {
+            let row = "\(String(format: "%\(digitCount)d", index + 1)) \(line)"
+            output.append(attributedLine(row, rawLine: line, empty: lines.isEmpty))
+            if index < renderedLines.count - 1 {
+                output.append(NSAttributedString(string: "\n", attributes: baseAttributes()))
+            }
+        }
+        return output
+    }
+
+    private func attributedLine(_ row: String, rawLine: String, empty: Bool) -> NSAttributedString {
+        var attributes = baseAttributes()
+        if !empty {
+            attributes[.foregroundColor] = foregroundColor(for: rawLine)
+            if let background = backgroundColor(for: rawLine) {
+                attributes[.backgroundColor] = background
+            }
+        }
+        return NSAttributedString(string: row, attributes: attributes)
+    }
+
+    private func baseAttributes() -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byClipping
+        paragraph.minimumLineHeight = 18
+        paragraph.maximumLineHeight = 18
+        return [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor(calibratedWhite: 0.72, alpha: 1),
+            .paragraphStyle: paragraph
+        ]
+    }
+
+    private func foregroundColor(for line: String) -> NSColor {
+        if line.hasPrefix("+"), !line.hasPrefix("+++") {
+            return NSColor(calibratedRed: 0.16, green: 0.92, blue: 0.66, alpha: 1)
+        }
+        if line.hasPrefix("-"), !line.hasPrefix("---") {
+            return NSColor(calibratedRed: 0.96, green: 0.42, blue: 0.42, alpha: 1)
+        }
+        if line.hasPrefix("@@") {
+            return NSColor(calibratedRed: 0.50, green: 0.82, blue: 0.76, alpha: 1)
+        }
+        return NSColor(calibratedWhite: 0.72, alpha: 1)
+    }
+
+    private func backgroundColor(for line: String) -> NSColor? {
+        if line.hasPrefix("+"), !line.hasPrefix("+++") {
+            return NSColor(calibratedRed: 0.11, green: 0.34, blue: 0.27, alpha: 0.44)
+        }
+        if line.hasPrefix("-"), !line.hasPrefix("---") {
+            return NSColor(calibratedRed: 0.35, green: 0.13, blue: 0.15, alpha: 0.44)
+        }
+        if line.hasPrefix("@@") {
+            return NSColor(calibratedRed: 0.24, green: 0.32, blue: 0.35, alpha: 0.72)
+        }
+        return nil
     }
 }
 
@@ -8096,6 +8363,7 @@ private struct NativeCodeDiffLineRow: View {
 private struct NativeCodeReviewComposer: View {
     @Binding var comments: [NativeCodeReviewComment]
     let accent: Color
+    let explainChanges: () -> Void
     let sendReview: () -> Void
     let noApproval: () -> Void
     let cancel: () -> Void
@@ -8131,6 +8399,12 @@ private struct NativeCodeReviewComposer: View {
                     .font(.system(size: 11, weight: .semibold))
                     .buttonStyle(.borderless)
                     .foregroundStyle(accent)
+
+                Button("Explain changes", action: explainChanges)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(accent)
+                    .help("Ask the agent to explain what changed, why, and what to review")
 
                 Button(action: sendReview) {
                     HStack(spacing: 6) {
@@ -8353,6 +8627,43 @@ private func nativeCodeReviewPrompt(
     \(commentLines)
 
     Return findings first, ordered by severity, with file/line evidence when available. Then list open questions, verification gaps, and whether the change is ready or needs fixes. Do not edit files in this review turn unless I explicitly ask for fixes.
+    """
+}
+
+private func nativeCodeExplainPrompt(
+    title: String,
+    snapshot: NativeCodeChangesSnapshot?
+) -> String {
+    let changeSummary: String
+    if let snapshot, snapshot.hasChanges {
+        let files = snapshot.changes
+            .prefix(20)
+            .map { "- \($0.path) [\($0.badge)] +\($0.additions) -\($0.deletions)" }
+            .joined(separator: "\n")
+        changeSummary = """
+        Code changes:
+        Branch: \(snapshot.branch ?? "unknown")
+        Summary: \(snapshot.shortstat ?? snapshot.compactLabel)
+        Files:
+        \(files)
+        """
+    } else {
+        changeSummary = "Code changes: no current git changes snapshot was available."
+    }
+
+    return """
+    Explain the current code changes for \(title).
+
+    \(changeSummary)
+
+    Please guide me through the diff as a reviewer:
+    1. Summarize the user-facing or system behavior this change is trying to achieve.
+    2. Group the changed files by purpose, and explain what each group changed.
+    3. Explain why the main implementation choices make sense, including important tradeoffs.
+    4. Point out the highest-risk areas I should inspect in the diff.
+    5. List the validation I should expect or run before approving.
+
+    This is an explanation turn, not an approval. Do not edit files, do not post to Jira, and do not send a review verdict unless I ask for that separately.
     """
 }
 
@@ -8970,13 +9281,7 @@ private struct ConversationInlineOutputReviewPane: View {
     @State private var draftInlineReviewComment = ""
 
     private var markdownText: String {
-        let fallback = artifact.provenance.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let fileURL = artifactReviewLocalFileURL(artifact),
-              let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            return fallback
-        }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? fallback : trimmed
+        artifactReviewMarkdownText(artifact)
     }
 
     var body: some View {
@@ -9005,51 +9310,47 @@ private struct ConversationInlineOutputReviewPane: View {
                 EmptyMiniState(title: "No preview text", subtitle: artifact.uri.isEmpty ? "This output has no markdown preview." : artifact.uri)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
-                ScrollView {
-                    ZStack(alignment: .topLeading) {
-                        MarkdownOutputReviewTextView(
-                            markdown: markdownText,
-                            selectedText: $selectedReviewQuote,
-                            selectedAnchor: $selectedReviewAnchor,
-                            onAddComment: beginInlineReviewComment(_:)
+                ZStack(alignment: .topLeading) {
+                    MarkdownWebReviewView(
+                        markdown: markdownText,
+                        selectedText: $selectedReviewQuote,
+                        selectedAnchor: $selectedReviewAnchor,
+                        onAddComment: beginInlineReviewComment(_:)
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 360)
+
+                    if !selectedReviewQuote.isEmpty,
+                       activeReviewQuote.isEmpty,
+                       let selectedReviewAnchor {
+                        Button {
+                            beginInlineReviewComment(selectedReviewQuote)
+                        } label: {
+                            Image(systemName: "text.bubble")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(PKTheme.primaryText)
+                                .frame(width: 28, height: 28)
+                                .background(accent)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.58), lineWidth: 1))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 6)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Comment on selection")
+                        .position(reviewCommentButtonPosition(for: selectedReviewAnchor))
+                    }
+
+                    if !activeReviewQuote.isEmpty {
+                        InlineOutputCommentComposer(
+                            quote: activeReviewQuote,
+                            note: $draftInlineReviewComment,
+                            accent: accent,
+                            confirm: commitInlineReviewComment,
+                            cancel: cancelInlineReviewComment
                         )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(12)
-
-                        if !selectedReviewQuote.isEmpty,
-                           activeReviewQuote.isEmpty,
-                           let selectedReviewAnchor {
-                            Button {
-                                beginInlineReviewComment(selectedReviewQuote)
-                            } label: {
-                                Image(systemName: "text.bubble")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(PKTheme.primaryText)
-                                    .frame(width: 28, height: 28)
-                                    .background(accent)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.58), lineWidth: 1))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 6)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Comment on selection")
-                            .position(reviewCommentButtonPosition(for: selectedReviewAnchor))
-                        }
-
-                        if !activeReviewQuote.isEmpty {
-                            InlineOutputCommentComposer(
-                                quote: activeReviewQuote,
-                                note: $draftInlineReviewComment,
-                                accent: accent,
-                                confirm: commitInlineReviewComment,
-                                cancel: cancelInlineReviewComment
-                            )
-                            .frame(width: 330)
-                            .position(reviewCommentComposerPosition())
-                            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
-                            .zIndex(4)
-                        }
+                        .frame(width: 330)
+                        .position(reviewCommentComposerPosition())
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
+                        .zIndex(4)
                     }
                 }
                 .frame(maxHeight: 360)
@@ -9090,9 +9391,11 @@ private struct ConversationInlineOutputReviewPane: View {
 
     private func reviewCommentButtonPosition(for rect: CGRect) -> CGPoint {
         let contentInset: CGFloat = 12
+        let isMultiLineSelection = rect.height > 28 || rect.width < 8
+        let anchorX = isMultiLineSelection ? rect.minX : rect.maxX
         return CGPoint(
-            x: min(max(rect.maxX + contentInset + 28, 42), 714),
-            y: max(rect.maxY + contentInset + 28, 42)
+            x: min(max(anchorX + contentInset + 28, 42), 714),
+            y: max(rect.minY + contentInset + 18, 42)
         )
     }
 
@@ -9164,14 +9467,13 @@ private struct ConversationOutputReviewPane: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if !provenance.isEmpty {
-                        MarkdownOutputReviewTextView(
+                        MarkdownWebReviewView(
                             markdown: provenance,
                             selectedText: $selectedReviewQuote,
                             onAddComment: nil
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(12)
+                        .frame(height: 360)
                         .background(PKTheme.inset.opacity(0.72))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -9662,6 +9964,10 @@ private func runFollowUpDetail(id: String, permissionMode: PermissionMode?) -> S
     switch id {
     case runFollowUpTaskCodingActionID:
         return "Start coding"
+    case runFollowUpTaskRetryCodingActionID:
+        return "Retry coding"
+    case runFollowUpTaskReviseSolutionActionID:
+        return "Revise solution"
     case runFollowUpTaskReviewActionID:
         return "Explain changes"
     case "bug-analysis":
@@ -9699,8 +10005,10 @@ private func runFollowUpWorkflowLabel(
     generatedUIRole: RunFollowUpGeneratedUIRole?
 ) -> String {
     switch id {
-    case runFollowUpTaskCodingActionID:
+    case runFollowUpTaskCodingActionID, runFollowUpTaskRetryCodingActionID:
         return "Coding"
+    case runFollowUpTaskReviseSolutionActionID:
+        return "Solution"
     case runFollowUpTaskReviewActionID:
         return "Review"
     case "bug-analysis":
@@ -9754,7 +10062,11 @@ private func runFollowUpWorkflowSummary(
 ) -> String {
     switch id {
     case runFollowUpTaskCodingActionID:
-        return "Implement from confirmed task output and workspace branch rules"
+        return "Implement from confirmed solution output and workspace branch rules"
+    case runFollowUpTaskRetryCodingActionID:
+        return "Redo only the coding phase from the confirmed solution"
+    case runFollowUpTaskReviseSolutionActionID:
+        return "Update the solution checkpoint before coding"
     case runFollowUpTaskReviewActionID:
         return "Explain changed files, rationale, validation, and risks"
     case "bug-analysis":
@@ -9965,13 +10277,22 @@ private func runFollowUpOutputContract(for actionId: String, generatedUIRole: Ru
     }
 
     switch actionId {
-    case runFollowUpTaskCodingActionID:
+    case runFollowUpTaskCodingActionID, runFollowUpTaskRetryCodingActionID:
         return """
         Output contract:
         - Return a final implementation summary outside the thinking/tool details.
-        - Include changed files, what changed, why it satisfies the confirmed task output, and validation evidence.
+        - Include changed files, what changed, why it satisfies the confirmed Solution Output, and validation evidence.
+        - Do not restart requirement discovery unless the Solution Output is missing, contradicted, or unsafe.
         - If branch creation or base-branch choice is not clear, ask for that choice before editing.
         - Keep the next action explicit: Review when code changed, or the single blocker when coding cannot proceed.
+        """
+    case runFollowUpTaskReviseSolutionActionID:
+        return """
+        Output contract:
+        - Return a revised Solution Output checkpoint outside the thinking/tool details.
+        - Include sections: ticket boundary, confirmed requirement, implementation seam, change plan, validation plan, Jira update draft, and unresolved questions.
+        - Do not edit code, create branches, commit, push, update Jira, or run destructive commands in this solution pass.
+        - Keep the next action explicit: Coding when the solution is ready, or the single missing input when it is not ready.
         """
     case runFollowUpTaskReviewActionID:
         return """
@@ -10075,10 +10396,14 @@ private func runFollowUpPermissionGuard(for mode: PermissionMode?) -> String? {
 }
 
 private let runFollowUpTaskCodingActionID = "task-coding"
+private let runFollowUpTaskRetryCodingActionID = "task-retry-coding"
+private let runFollowUpTaskReviseSolutionActionID = "task-revise-solution"
 private let runFollowUpTaskReviewActionID = "task-review"
 
 func runFollowUpActionIsPrimaryStage(_ action: RunFollowUpAction) -> Bool {
-    action.id == runFollowUpTaskCodingActionID || action.id == runFollowUpTaskReviewActionID
+    action.id == runFollowUpTaskCodingActionID
+        || action.id == runFollowUpTaskRetryCodingActionID
+        || action.id == runFollowUpTaskReviewActionID
 }
 
 func runFollowUpActionStartsImmediately(_ action: RunFollowUpAction) -> Bool {
@@ -10105,12 +10430,26 @@ private func taskStageFollowUpActions(
                 workspace: workspace,
                 output: output,
                 context: context
+            ),
+            taskRetryCodingFollowUpAction(
+                run: run,
+                workItem: workItem,
+                workspace: workspace,
+                output: output,
+                context: context
             )
         ]
     }
     if taskStageOutputLooksReadyForCoding(run: run, workItem: workItem, output: output) {
         return [
             taskCodingFollowUpAction(
+                run: run,
+                workItem: workItem,
+                workspace: workspace,
+                output: output,
+                context: context
+            ),
+            taskReviseSolutionFollowUpAction(
                 run: run,
                 workItem: workItem,
                 workspace: workspace,
@@ -10137,6 +10476,8 @@ private func taskStageOutputLooksReadyForCoding(
     if !runFollowUpMissingInputRequests(from: text).isEmpty { return false }
     let lower = text.lowercased()
     let hasPlanningSignal = [
+        "solution output",
+        "solution checkpoint",
         "implementation plan",
         "proposed fix",
         "recommended fix",
@@ -10202,10 +10543,85 @@ private func taskCodingFollowUpAction(
     )
     return RunFollowUpAction(
         id: runFollowUpTaskCodingActionID,
-        title: "Coding",
+        title: "Start coding",
         symbol: "hammer",
         permissionMode: nil,
         prompt: prompt
+    )
+}
+
+private func taskRetryCodingFollowUpAction(
+    run: AgentRun,
+    workItem: WorkItem,
+    workspace: Workspace,
+    output: String,
+    context: String
+) -> RunFollowUpAction {
+    let basePrompt = taskStageRenderedPrompt(
+        template: taskStageWorkflowConfig(workspace).codingPromptTemplate,
+        run: run,
+        workItem: workItem,
+        workspace: workspace,
+        output: output,
+        context: context
+    )
+    let prompt = """
+    Retry the Coding phase for {ticket}.
+
+    Use the latest confirmed Solution Output checkpoint in this ticket chat as the source of truth. The text below is the previous coding attempt or latest coding-stage output; use it only to avoid repeating mistakes and to preserve useful validation evidence. Do not redo requirement discovery unless the Solution Output is missing, contradicted, or unsafe.
+
+    Previous coding-stage output:
+    {output}
+
+    \(basePrompt)
+    """
+    return RunFollowUpAction(
+        id: runFollowUpTaskRetryCodingActionID,
+        title: "Retry coding",
+        symbol: "arrow.clockwise",
+        permissionMode: nil,
+        prompt: taskStageRenderedPrompt(
+            template: prompt,
+            run: run,
+            workItem: workItem,
+            workspace: workspace,
+            output: output,
+            context: context
+        )
+    )
+}
+
+private func taskReviseSolutionFollowUpAction(
+    run: AgentRun,
+    workItem: WorkItem,
+    workspace: Workspace,
+    output: String,
+    context: String
+) -> RunFollowUpAction {
+    let prompt = """
+    Revise the Solution Output checkpoint for {ticket}.
+
+    Use the ticket context, current discussion, and any user feedback in the input. Do not start coding in this pass. If the user's dissatisfaction or missing constraint is unclear, ask only for that missing feedback.
+
+    Current solution or latest output:
+    {output}
+
+    Context:
+    {context}
+    """
+    return RunFollowUpAction(
+        id: runFollowUpTaskReviseSolutionActionID,
+        title: "Revise solution",
+        symbol: "arrow.triangle.2.circlepath",
+        permissionMode: .readOnly,
+        prompt: taskStageRenderedPrompt(
+            template: prompt,
+            run: run,
+            workItem: workItem,
+            workspace: workspace,
+            output: output,
+            context: context
+        )
     )
 }
 
@@ -10254,7 +10670,7 @@ private func taskStageRenderedPrompt(
         ticketKey: ticketKey,
         title: workItem.title
     )
-    return template
+    let rendered = template
         .replacingOccurrences(of: "{ticket}", with: ticketKey)
         .replacingOccurrences(of: "{ticketKey}", with: ticketKey)
         .replacingOccurrences(of: "{title}", with: workItem.title)
@@ -10266,6 +10682,21 @@ private func taskStageRenderedPrompt(
         .replacingOccurrences(of: "{output}", with: output)
         .replacingOccurrences(of: "{context}", with: context)
         .gitTrimmed
+    return taskStagePromptWithFormattingGuidance(rendered)
+}
+
+private let taskStageMarkdownFormattingGuidance = """
+Output formatting:
+- Use Markdown structure for final answers.
+- Wrap multi-line shell commands, commit instructions, logs, and file lists in fenced code blocks with an appropriate language such as ```bash or ```text.
+- Use inline code only for short commands, filenames, branch names, and identifiers.
+"""
+
+private func taskStagePromptWithFormattingGuidance(_ prompt: String) -> String {
+    guard !prompt.localizedCaseInsensitiveContains("Output formatting:") else {
+        return prompt
+    }
+    return "\(prompt)\n\n\(taskStageMarkdownFormattingGuidance)".gitTrimmed
 }
 
 private func taskStageSuggestedBranch(pattern: String, ticketKey: String, title: String) -> String {
@@ -15638,9 +16069,11 @@ private struct AssistantResponseCard: View {
 
     private func reviewCommentButtonPosition(for rect: CGRect) -> CGPoint {
         let contentInset: CGFloat = 14
+        let isMultiLineSelection = rect.height > 28 || rect.width < 8
+        let anchorX = isMultiLineSelection ? rect.minX : rect.maxX
         return CGPoint(
-            x: min(max(rect.maxX + contentInset + 28, 42), 714),
-            y: max(rect.maxY + contentInset + 28, 42)
+            x: min(max(anchorX + contentInset + 28, 42), 714),
+            y: max(rect.minY + contentInset + 18, 42)
         )
     }
 
@@ -16187,6 +16620,7 @@ private struct AgentResponsePresentation {
         case .running: return "Waiting for the agent to emit text, tool events, or a final answer."
         case .waitingForUser: return "The agent needs your input before it can continue."
         case .cancelling: return "Stopping the active run."
+        case .completed: return finalText.isEmpty ? "The run is finished, but it did not emit a final assistant message." : "Review the final response and run details."
         case .failed: return finalText.isEmpty ? "The run ended before producing a final response." : "Review the final response and run details."
         default: return text.isEmpty ? "No response text has been emitted yet." : "Preparing the response."
         }
@@ -16243,13 +16677,45 @@ private struct AgentExecutionProgressCard: View {
     let presentation: AgentResponsePresentation
     let accent: Color
 
+    private var stateSymbol: String {
+        switch presentation.state {
+        case .completed:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        case .cancelled, .stale:
+            return "xmark.circle.fill"
+        default:
+            return "circle.dotted"
+        }
+    }
+
+    private var stateColor: Color {
+        switch presentation.state {
+        case .completed:
+            return PKTheme.ok
+        case .failed:
+            return PKTheme.err
+        case .cancelled, .stale:
+            return PKTheme.text4
+        default:
+            return accent
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 11) {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(accent)
-                    .opacity(presentation.isActive ? 1 : 0.45)
+                if presentation.isActive {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(accent)
+                } else {
+                    Image(systemName: stateSymbol)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(stateColor)
+                        .frame(width: 16, height: 16)
+                }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(presentation.phaseTitle)
                         .font(.system(size: 13, weight: .semibold))
@@ -16262,20 +16728,22 @@ private struct AgentExecutionProgressCard: View {
                 Spacer()
             }
 
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(PKTheme.control.opacity(0.75))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(accent.opacity(0.82))
-                        .frame(width: max(6, proxy.size.width * presentation.progress))
+            if presentation.isActive {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(PKTheme.control.opacity(0.75))
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(accent.opacity(0.82))
+                            .frame(width: max(6, proxy.size.width * presentation.progress))
+                    }
                 }
+                .frame(height: 6)
             }
-            .frame(height: 6)
         }
         .padding(14)
         .background(PKTheme.inset.opacity(0.78))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.20), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke((presentation.isActive ? accent : stateColor).opacity(0.20), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -24245,6 +24713,7 @@ private struct JiraWorkspaceTicketRow: View {
     let selected: Bool
     let evidenceSummary: JiraTicketEvidenceSummary
     let action: () -> Void
+    @State private var hovering = false
 
     private var tint: Color {
         switch item.state {
@@ -24298,11 +24767,16 @@ private struct JiraWorkspaceTicketRow: View {
             }
             .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? PKTheme.primary.opacity(0.13) : PKTheme.surfaceRaised.opacity(0.54))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.primary.opacity(0.50) : PKTheme.edge, lineWidth: 1))
+            .background(selected ? tint.opacity(0.14) : hovering ? tint.opacity(0.09) : PKTheme.surfaceRaised.opacity(0.54))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? tint.opacity(0.58) : hovering ? tint.opacity(0.44) : PKTheme.edge, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .shadow(color: tint.opacity(hovering ? 0.16 : 0), radius: hovering ? 12 : 0, y: hovering ? 7 : 0)
+            .offset(y: hovering ? -1 : 0)
+            .brightness(hovering ? 0.018 : 0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.78), value: hovering)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -29202,8 +29676,49 @@ private struct AgentStudioField: View {
     }
 }
 
+private enum NativeSettingsSection: String, CaseIterable, Identifiable {
+    case general
+    case workflow
+    case providers
+    case permissions
+    case nativeApp
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .workflow: "Workflow Rules"
+        case .providers: "Providers"
+        case .permissions: "Permissions"
+        case .nativeApp: "Native App"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .general: "Appearance and focus mode"
+        case .workflow: "Branch and prompt defaults"
+        case .providers: "Model profile health"
+        case .permissions: "Runner policy defaults"
+        case .nativeApp: "Rebuild and restart"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "paintbrush"
+        case .workflow: "point.3.connected.trianglepath.dotted"
+        case .providers: "key"
+        case .permissions: "shield"
+        case .nativeApp: "hammer"
+        }
+    }
+}
+
 private struct SystemSurfacePage: View {
     @AppStorage(PKThemePreference.storageKey) private var themePreferenceRaw = PKThemePreference.dark.rawValue
+    @State private var settingsSection: NativeSettingsSection = .general
 
     let route: NativeRoute
     let snapshot: NativeStoreSnapshot
@@ -29226,65 +29741,42 @@ private struct SystemSurfacePage: View {
 
     var body: some View {
         PageFrame(route: route) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 12)], spacing: 12) {
-                switch route {
-                case .channels:
-                    SurfaceCard(symbol: "bubble.left.and.bubble.right", title: "Telegram", subtitle: "IM terminal configured through channel credentials.", badge: "Terminal")
-                    SurfaceCard(symbol: "message", title: "Feishu", subtitle: "Enterprise channel remains physically isolated.", badge: "Terminal")
-                    SurfaceCard(symbol: "ellipsis.bubble", title: "Dashboard", subtitle: "Native and web dashboard share orchestrator concepts.", badge: "Native")
-                case .agents:
-                    ForEach(snapshot.agentProfiles) { agent in
-                        SurfaceCard(symbol: agentSymbol(agent.kind), title: agent.displayName, subtitle: agent.executableName, badge: agent.isEnabled ? "Ready" : "Off")
-                    }
-                case .assistants:
-                    SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "MR Review Assistant", subtitle: "Review merge requests and attach repo evidence.", badge: "Default")
-                    SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "Log Analysis Assistant", subtitle: "Trace logs, session IDs, and runtime failures.", badge: "Ops")
-                    SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "Bug Analysis Assistant", subtitle: "Analyze rough bug reports and build reproduction plans.", badge: "QA")
-                case .team:
-                    SurfaceCard(symbol: "person.2", title: "Chief of Staff", subtitle: "Synthesize git, Jira, sandbox, and session state.", badge: "Coordinator")
-                    SurfaceCard(symbol: "arrow.triangle.branch", title: "Handoff", subtitle: "Move a run from one target to another with context.", badge: "Planned")
-                case .extensions:
-                    ForEach(snapshot.capabilities) { capability in
-                        SurfaceCard(symbol: "puzzlepiece.extension", title: capability.name, subtitle: "\(capability.kind.rawValue) · \(capability.configState)", badge: capability.healthState.rawValue)
-                    }
-                case .settings:
-                    AppearanceSettingsCard(selection: themePreference)
-                    WorkspaceWorkflowSettingsCard(
-                        snapshot: snapshot,
-                        selectedWorkspaceId: $selectedWorkspaceId,
-                        save: { workspaceId, config in
-                            Task {
-                                await model.updateWorkspaceWorkflowConfig(
-                                    workspaceId: workspaceId,
-                                    config: config
-                                )
-                            }
+            if route == .settings {
+                SettingsWorkbench(
+                    section: $settingsSection,
+                    snapshot: snapshot,
+                    selectedWorkspaceId: $selectedWorkspaceId,
+                    themePreference: themePreference,
+                    model: model,
+                    statusLine: statusLine,
+                    restartBlocked: restartBlocked,
+                    selectedWorkspace: selectedWorkspace
+                )
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 12)], spacing: 12) {
+                    switch route {
+                    case .channels:
+                        SurfaceCard(symbol: "bubble.left.and.bubble.right", title: "Telegram", subtitle: "IM terminal configured through channel credentials.", badge: "Terminal")
+                        SurfaceCard(symbol: "message", title: "Feishu", subtitle: "Enterprise channel remains physically isolated.", badge: "Terminal")
+                        SurfaceCard(symbol: "ellipsis.bubble", title: "Dashboard", subtitle: "Native and web dashboard share orchestrator concepts.", badge: "Native")
+                    case .agents:
+                        ForEach(snapshot.agentProfiles) { agent in
+                            SurfaceCard(symbol: agentSymbol(agent.kind), title: agent.displayName, subtitle: agent.executableName, badge: agent.isEnabled ? "Ready" : "Off")
                         }
-                    )
-                    RestartSettingsCard(
-                        statusLine: statusLine,
-                        blocked: restartBlocked,
-                        workspace: selectedWorkspace,
-                        rebuildStatus: model.nativeAppRebuildStatus,
-                        refreshChanges: {
-                            Task { await model.refreshNativeAppCodeChanges(workspaceId: selectedWorkspaceId) }
-                        },
-                        rebuild: {
-                            Task { await model.rebuildNativeApp(workspaceId: selectedWorkspaceId) }
-                        },
-                        restartNow: {
-                            Task { await model.installRebuiltNativeAppAndRestart(workspaceId: selectedWorkspaceId) }
-                        },
-                        later: {
-                            model.deferNativeAppRestart()
+                    case .assistants:
+                        SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "MR Review Assistant", subtitle: "Review merge requests and attach repo evidence.", badge: "Default")
+                        SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "Log Analysis Assistant", subtitle: "Trace logs, session IDs, and runtime failures.", badge: "Ops")
+                        SurfaceCard(symbol: "person.crop.circle.badge.plus", title: "Bug Analysis Assistant", subtitle: "Analyze rough bug reports and build reproduction plans.", badge: "QA")
+                    case .team:
+                        SurfaceCard(symbol: "person.2", title: "Chief of Staff", subtitle: "Synthesize git, Jira, sandbox, and session state.", badge: "Coordinator")
+                        SurfaceCard(symbol: "arrow.triangle.branch", title: "Handoff", subtitle: "Move a run from one target to another with context.", badge: "Planned")
+                    case .extensions:
+                        ForEach(snapshot.capabilities) { capability in
+                            SurfaceCard(symbol: "puzzlepiece.extension", title: capability.name, subtitle: "\(capability.kind.rawValue) · \(capability.configState)", badge: capability.healthState.rawValue)
                         }
-                    )
-                    ForEach(snapshot.providerProfiles) { profile in
-                        SurfaceCard(symbol: "key", title: profile.displayName, subtitle: profile.defaultModel ?? profile.kind.rawValue, badge: profile.healthState.rawValue)
+                    default:
+                        EmptyView()
                     }
-                    SurfaceCard(symbol: "shield", title: "Permissions", subtitle: "Read, Ask, and Autopilot policies are enforced before runner launch.", badge: "Native")
-                default:
-                    EmptyView()
                 }
             }
         } actions: {
@@ -29312,6 +29804,164 @@ private struct SystemSurfacePage: View {
                 Task { await model.refreshNativeAppCodeChanges(workspaceId: selectedWorkspaceId) }
             }
         }
+    }
+}
+
+private struct SettingsWorkbench: View {
+    @Binding var section: NativeSettingsSection
+    let snapshot: NativeStoreSnapshot
+    @Binding var selectedWorkspaceId: EntityID?
+    @Binding var themePreference: PKThemePreference
+    @ObservedObject var model: NativeAppModel
+    let statusLine: String
+    let restartBlocked: Bool
+    let selectedWorkspace: Workspace?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(NativeSettingsSection.allCases) { item in
+                    SettingsSectionRow(
+                        section: item,
+                        selected: section == item
+                    ) {
+                        section = item
+                    }
+                }
+            }
+            .frame(width: 228)
+            .padding(10)
+            .background(PKTheme.panel.opacity(0.56))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    settingsSectionHeader
+                    sectionContent
+                }
+                .frame(maxWidth: 760, alignment: .topLeading)
+                .padding(.bottom, 10)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var settingsSectionHeader: some View {
+        HStack(spacing: 11) {
+            Image(systemName: section.symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(PKTheme.primary)
+                .frame(width: 36, height: 36)
+                .background(PKTheme.primary.opacity(0.11))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(section.title)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                Text(section.subtitle)
+                    .font(.system(size: 13))
+                    .foregroundStyle(PKTheme.text3)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, 2)
+    }
+
+    @ViewBuilder
+    private var sectionContent: some View {
+        switch section {
+        case .general:
+            AppearanceSettingsCard(selection: $themePreference)
+        case .workflow:
+            WorkspaceWorkflowSettingsCard(
+                snapshot: snapshot,
+                selectedWorkspaceId: $selectedWorkspaceId,
+                save: { workspaceId, config in
+                    Task {
+                        await model.updateWorkspaceWorkflowConfig(
+                            workspaceId: workspaceId,
+                            config: config
+                        )
+                    }
+                }
+            )
+        case .providers:
+            if snapshot.providerProfiles.isEmpty {
+                EmptyMiniState(title: "No providers", subtitle: "Add a provider profile before launching model-backed agents.")
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 12)], spacing: 12) {
+                    ForEach(snapshot.providerProfiles) { profile in
+                        SurfaceCard(
+                            symbol: "key",
+                            title: profile.displayName,
+                            subtitle: profile.defaultModel ?? profile.kind.rawValue,
+                            badge: profile.healthState.rawValue
+                        )
+                    }
+                }
+            }
+        case .permissions:
+            SurfaceCard(
+                symbol: "shield",
+                title: "Permissions",
+                subtitle: "Read, Ask, and Autopilot policies are enforced before runner launch.",
+                badge: "Native"
+            )
+        case .nativeApp:
+            RestartSettingsCard(
+                statusLine: statusLine,
+                blocked: restartBlocked,
+                workspace: selectedWorkspace,
+                rebuildStatus: model.nativeAppRebuildStatus,
+                refreshChanges: {
+                    Task { await model.refreshNativeAppCodeChanges(workspaceId: selectedWorkspaceId) }
+                },
+                rebuild: {
+                    Task { await model.rebuildNativeApp(workspaceId: selectedWorkspaceId) }
+                },
+                restartNow: {
+                    Task { await model.installRebuiltNativeAppAndRestart(workspaceId: selectedWorkspaceId) }
+                },
+                later: {
+                    model.deferNativeAppRestart()
+                }
+            )
+        }
+    }
+}
+
+private struct SettingsSectionRow: View {
+    let section: NativeSettingsSection
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(section.title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(selected ? PKTheme.text : PKTheme.text3)
+                        .lineLimit(1)
+                    Text(section.subtitle)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 46)
+            .foregroundStyle(selected ? PKTheme.primary : PKTheme.text4)
+            .background(selected ? PKTheme.surfaceHover.opacity(0.78) : .clear)
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? PKTheme.primary.opacity(0.28) : .clear, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
     }
 }
 

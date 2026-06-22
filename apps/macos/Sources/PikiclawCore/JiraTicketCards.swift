@@ -341,13 +341,14 @@ public func jiraTicketAgentBrief(for item: WorkItem, workspace: Workspace? = nil
 
     lines.append("")
     lines.append("Execution Contract:")
-    lines.append("- Return sections: Ticket boundary, Implementation seam, Change plan, Validation, Jira update, and Durable outputs.")
+    lines.append("- First return a Solution Output checkpoint with sections: Ticket boundary, Implementation seam, Change plan, Validation plan, Jira update draft, and Durable outputs.")
+    lines.append("- Do not edit code during this requirement-confirmation pass unless the user explicitly starts the Coding action.")
     lines.append("- Keep acceptance criteria and source evidence tied to this ticket; do not mix in unrelated work items.")
     lines.append("- Preserve Artifact refs as Evidence and treat Pending commands as candidate Validation or Next action until they are run.")
-    lines.append("- Include exact validation commands or checks, and separate confirmed facts from guesses.")
+    lines.append("- Include exact validation commands or checks to run during Coding, and separate confirmed facts from guesses.")
     lines.append("- Do not claim Jira was updated unless an external write actually succeeded; otherwise provide a paste-ready comment.")
     lines.append("")
-    lines.append("Please inspect the repo, implement the smallest safe change, run focused validation, and summarize the result.")
+    lines.append("Please inspect the ticket and repo enough to confirm the requirement, then produce the Solution Output checkpoint. Coding starts only from the follow-up Coding action.")
     return lines.joined(separator: "\n")
 }
 

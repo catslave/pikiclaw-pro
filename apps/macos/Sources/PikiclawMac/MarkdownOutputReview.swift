@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import WebKit
 
 struct ChatOutputReviewComment: Identifiable, Equatable {
     var id: UUID
@@ -99,6 +100,269 @@ struct MarkdownOutputReviewTextView: NSViewRepresentable {
             parent.selectedAnchor?.wrappedValue = textView.reviewSelectionRect()
         }
     }
+}
+
+struct MarkdownWebReviewView: NSViewRepresentable {
+    let markdown: String
+    @Binding var selectedText: String
+    var selectedAnchor: Binding<CGRect?>? = nil
+    var onAddComment: ((String) -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let contentController = WKUserContentController()
+        contentController.add(context.coordinator, name: "pikiclawSelection")
+
+        let config = WKWebViewConfiguration()
+        config.userContentController = contentController
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.allowsMagnification = false
+        webView.customUserAgent = "PikiclawMac MarkdownReview"
+        webView.loadHTMLString(markdownWebReviewHTML(markdown: markdown), baseURL: nil)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.parent = self
+        if context.coordinator.renderedMarkdown != markdown {
+            context.coordinator.renderedMarkdown = markdown
+            webView.loadHTMLString(markdownWebReviewHTML(markdown: markdown), baseURL: nil)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var parent: MarkdownWebReviewView
+        var renderedMarkdown = ""
+
+        init(parent: MarkdownWebReviewView) {
+            self.parent = parent
+            self.renderedMarkdown = parent.markdown
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "pikiclawSelection",
+                  let payload = message.body as? [String: Any] else {
+                return
+            }
+            let text = (payload["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            parent.selectedText = text
+            if let rectPayload = payload["rect"] as? [String: Any],
+               let x = rectPayload["x"] as? Double,
+               let y = rectPayload["y"] as? Double,
+               let width = rectPayload["width"] as? Double,
+               let height = rectPayload["height"] as? Double {
+                parent.selectedAnchor?.wrappedValue = CGRect(x: x, y: y, width: width, height: height)
+            } else {
+                parent.selectedAnchor?.wrappedValue = nil
+            }
+        }
+    }
+}
+
+private func markdownWebReviewHTML(markdown: String) -> String {
+    let payload = markdownWebJSONLiteral(markdown)
+    return """
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js"></script>
+      <style>
+        :root {
+          color-scheme: dark;
+          --text: rgba(234, 238, 238, 0.92);
+          --muted: rgba(192, 199, 199, 0.68);
+          --edge: rgba(133, 214, 199, 0.18);
+          --panel: rgba(255, 255, 255, 0.045);
+          --code: rgba(255, 255, 255, 0.08);
+          --accent: rgb(127, 211, 196);
+        }
+        html, body {
+          margin: 0;
+          padding: 0;
+          background: transparent;
+          color: var(--text);
+          font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+          line-height: 1.55;
+          overflow: auto;
+          -webkit-font-smoothing: antialiased;
+        }
+        body { padding: 14px; box-sizing: border-box; }
+        #content { max-width: 100%; }
+        h1, h2, h3, h4 {
+          color: rgba(246, 249, 249, 0.96);
+          line-height: 1.22;
+          margin: 1.1em 0 0.45em;
+          font-weight: 700;
+        }
+        h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }
+        h1 { font-size: 22px; }
+        h2 { font-size: 18px; }
+        h3 { font-size: 15px; }
+        p { margin: 0.55em 0; }
+        ul, ol { padding-left: 1.45em; margin: 0.55em 0; }
+        li { margin: 0.25em 0; }
+        blockquote {
+          margin: 0.75em 0;
+          padding: 0.15em 0 0.15em 0.85em;
+          border-left: 3px solid var(--accent);
+          color: var(--muted);
+          background: rgba(127, 211, 196, 0.055);
+        }
+        code {
+          font: 12.5px "SF Mono", ui-monospace, Menlo, monospace;
+          background: var(--code);
+          border: 1px solid rgba(255, 255, 255, 0.055);
+          border-radius: 5px;
+          padding: 0.1em 0.34em;
+        }
+        pre {
+          margin: 0.75em 0;
+          padding: 12px;
+          background: rgba(5, 8, 9, 0.62);
+          border: 1px solid var(--edge);
+          border-radius: 8px;
+          overflow: auto;
+        }
+        pre code {
+          padding: 0;
+          border: 0;
+          background: transparent;
+          white-space: pre;
+        }
+        table {
+          border-collapse: collapse;
+          width: 100%;
+          margin: 0.85em 0;
+          overflow: hidden;
+          border-radius: 8px;
+        }
+        th, td {
+          border: 1px solid var(--edge);
+          padding: 7px 9px;
+          text-align: left;
+          vertical-align: top;
+        }
+        th {
+          background: rgba(127, 211, 196, 0.10);
+          color: rgba(246, 249, 249, 0.94);
+          font-weight: 700;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        hr { border: 0; border-top: 1px solid var(--edge); margin: 1em 0; }
+        .mermaid {
+          margin: 0.9em 0;
+          padding: 12px;
+          border-radius: 8px;
+          background: rgba(255,255,255,0.04);
+          border: 1px solid var(--edge);
+          overflow: auto;
+        }
+        .missing-plugin {
+          color: var(--muted);
+          border: 1px dashed var(--edge);
+          border-radius: 8px;
+          padding: 10px;
+          background: rgba(255,255,255,0.035);
+        }
+        ::selection {
+          background: rgba(127, 211, 196, 0.34);
+          color: white;
+        }
+      </style>
+    </head>
+    <body>
+      <main id="content"></main>
+      <script>
+        const source = \(payload);
+        function escapeHtml(value) {
+          return value.replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+          }[ch]));
+        }
+        function fallbackMarkdown(value) {
+          return '<pre><code>' + escapeHtml(value) + '</code></pre>';
+        }
+        function render() {
+          const container = document.getElementById('content');
+          if (window.markdownit) {
+            const md = window.markdownit({
+              html: false,
+              linkify: true,
+              typographer: true,
+              breaks: false
+            });
+            const defaultFence = md.renderer.rules.fence;
+            md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+              const token = tokens[idx];
+              const info = (token.info || '').trim().split(/\\s+/)[0].toLowerCase();
+              if (info === 'mermaid') {
+                return '<div class="mermaid">' + escapeHtml(token.content) + '</div>';
+              }
+              return defaultFence(tokens, idx, options, env, self);
+            };
+            container.innerHTML = md.render(source);
+          } else {
+            container.innerHTML = '<div class="missing-plugin">Markdown renderer did not load. Showing raw markdown.</div>' + fallbackMarkdown(source);
+          }
+          if (window.mermaid) {
+            window.mermaid.initialize({
+              startOnLoad: false,
+              theme: 'dark',
+              securityLevel: 'strict',
+              fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif'
+            });
+            window.mermaid.run({ querySelector: '.mermaid' }).catch(() => {});
+          }
+        }
+        function publishSelection() {
+          const selection = window.getSelection();
+          const text = selection ? selection.toString().trim() : '';
+          if (!text || !selection.rangeCount) {
+            window.webkit.messageHandlers.pikiclawSelection.postMessage({ text: '', rect: null });
+            return;
+          }
+          const range = selection.getRangeAt(0);
+          const rects = Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0);
+          const isMultiLine = rects.length > 1;
+          const rect = isMultiLine ? rects[0] : range.getBoundingClientRect();
+          window.webkit.messageHandlers.pikiclawSelection.postMessage({
+            text,
+            rect: {
+              x: rect.left,
+              y: rect.top,
+              width: isMultiLine ? 0 : rect.width,
+              height: rect.height
+            }
+          });
+        }
+        document.addEventListener('selectionchange', () => window.setTimeout(publishSelection, 0));
+        document.addEventListener('mouseup', publishSelection);
+        document.addEventListener('keyup', publishSelection);
+        render();
+      </script>
+    </body>
+    </html>
+    """
+}
+
+private func markdownWebJSONLiteral(_ value: String) -> String {
+    guard let data = try? JSONSerialization.data(withJSONObject: [value], options: []),
+          var encoded = String(data: data, encoding: .utf8) else {
+        return "\"\""
+    }
+    encoded.removeFirst()
+    encoded.removeLast()
+    return encoded
 }
 
 final class MarkdownReviewNSTextView: NSTextView {
@@ -207,26 +471,32 @@ private struct NativeMarkdownReviewRenderer {
         let output = NSMutableAttributedString()
         var isInCodeBlock = false
         let lines = markdown.components(separatedBy: .newlines)
+        var index = lines.startIndex
 
-        for rawLine in lines {
+        while index < lines.endIndex {
+            let rawLine = lines[index]
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("```") {
                 isInCodeBlock.toggle()
+                index = lines.index(after: index)
                 continue
             }
 
             if isInCodeBlock {
                 appendLine(rawLine.isEmpty ? " " : rawLine, to: output, attributes: codeBlockAttributes)
+                index = lines.index(after: index)
                 continue
             }
 
             if line.isEmpty {
                 output.append(NSAttributedString(string: "\n"))
+                index = lines.index(after: index)
                 continue
             }
 
             if let heading = markdownHeading(line) {
                 appendLine(heading.text, to: output, attributes: headingAttributes(level: heading.level))
+                index = lines.index(after: index)
                 continue
             }
 
@@ -234,6 +504,7 @@ private struct NativeMarkdownReviewRenderer {
                 output.append(NSAttributedString(string: "• ", attributes: bodyAttributes))
                 appendInline(listText, to: output, baseAttributes: bodyAttributes)
                 output.append(NSAttributedString(string: "\n"))
+                index = lines.index(after: index)
                 continue
             }
 
@@ -241,11 +512,32 @@ private struct NativeMarkdownReviewRenderer {
                 output.append(NSAttributedString(string: "\(ordered.number). ", attributes: bodyAttributes))
                 appendInline(ordered.text, to: output, baseAttributes: bodyAttributes)
                 output.append(NSAttributedString(string: "\n"))
+                index = lines.index(after: index)
+                continue
+            }
+
+            if markdownShellCommandLine(line) {
+                var blockEnd = lines.index(after: index)
+                var previousContinues = line.hasSuffix("\\")
+                while blockEnd < lines.endIndex {
+                    let nextLine = lines[blockEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !nextLine.isEmpty,
+                          previousContinues || markdownShellCommandLine(nextLine) || markdownShellContinuationLine(nextLine) else {
+                        break
+                    }
+                    previousContinues = nextLine.hasSuffix("\\")
+                    blockEnd = lines.index(after: blockEnd)
+                }
+                for codeIndex in index..<blockEnd {
+                    appendLine(lines[codeIndex].isEmpty ? " " : lines[codeIndex], to: output, attributes: codeBlockAttributes)
+                }
+                index = blockEnd
                 continue
             }
 
             appendInline(line, to: output, baseAttributes: bodyAttributes)
             output.append(NSAttributedString(string: "\n"))
+            index = lines.index(after: index)
         }
 
         return output.trimmedTrailingWhitespaceAndNewlines()
@@ -368,6 +660,25 @@ private struct NativeMarkdownReviewRenderer {
         let textStart = line.index(after: dot)
         guard textStart < line.endIndex, line[textStart] == " " else { return nil }
         return (number, String(line[line.index(after: textStart)...]))
+    }
+
+    private func markdownShellCommandLine(_ line: String) -> Bool {
+        let commandPrefixes = [
+            "./", "git ", "npm ", "pnpm ", "yarn ", "npx ", "swift ", "xcodebuild ",
+            "python ", "python3 ", "node ", "bun ", "cargo ", "go ", "make ",
+            "docker ", "kubectl ", "mvn ", "gradle ", "./gradlew ", "rg ", "sed ",
+            "awk ", "cat ", "ls ", "cd ", "mkdir ", "cp ", "rm ", "chmod ", "curl ",
+            "jq ", "brew "
+        ]
+        return commandPrefixes.contains { line.hasPrefix($0) }
+            || line.range(of: #"^[A-Z_][A-Z0-9_]*=.+"#, options: .regularExpression) != nil
+    }
+
+    private func markdownShellContinuationLine(_ line: String) -> Bool {
+        guard line.hasSuffix("\\") else { return false }
+        let withoutSlash = line.dropLast().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !withoutSlash.isEmpty, !withoutSlash.contains(" ") else { return false }
+        return withoutSlash.contains("/") || withoutSlash.hasPrefix(".")
     }
 }
 

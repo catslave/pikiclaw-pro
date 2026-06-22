@@ -317,6 +317,28 @@ import Testing
     #expect(!rendered.string.contains("**"))
 }
 
+@Test func nativeMarkdownReviewAttributedStringPromotesBareShellBlocks() {
+    let markdown = """
+    建议先提交:
+    git add \\
+    .trellis/spec/backend/quality-guidelines.md \\
+    src/main/kotlin/com/example/IvarProperties.kt
+    git commit -m "IVAS-7167 Add Kafka history producer fallback"
+    提交前建议再跑检查。
+    """
+
+    let rendered = nativeMarkdownReviewAttributedString(markdown)
+    let commandRange = (rendered.string as NSString).range(of: "git add")
+    let proseRange = (rendered.string as NSString).range(of: "建议先提交")
+    let commandFont = rendered.attribute(.font, at: commandRange.location, effectiveRange: nil) as? NSFont
+    let proseFont = rendered.attribute(.font, at: proseRange.location, effectiveRange: nil) as? NSFont
+
+    #expect(rendered.string.contains("git commit -m"))
+    #expect(rendered.string.contains("src/main/kotlin/com/example/IvarProperties.kt"))
+    #expect(commandFont?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
+    #expect(proseFont?.fontDescriptor.symbolicTraits.contains(.monoSpace) == false)
+}
+
 @Test func chatOutputReviewPromptCombinesMultipleInlineComments() {
     let prompt = chatOutputReviewPrompt(
         outputTitle: "Kafka fallback plan",

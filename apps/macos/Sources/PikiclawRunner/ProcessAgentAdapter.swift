@@ -46,8 +46,16 @@ public struct ProcessAgentAdapter: AgentAdapter {
             let stdin = Pipe()
             process.standardInput = stdin
 
+            let didEmitRunning = LockedValue(false)
             let emitData: @Sendable (Data) -> Void = { data in
                 guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+                if didEmitRunning.withLock({ value in
+                    guard !value else { return false }
+                    value = true
+                    return true
+                }) {
+                    continuation.yield(.stateChanged(.running))
+                }
                 continuation.yield(.output(text))
             }
 
@@ -64,7 +72,6 @@ public struct ProcessAgentAdapter: AgentAdapter {
             do {
                 continuation.yield(.stateChanged(.starting))
                 try process.run()
-                continuation.yield(.stateChanged(.running))
                 if let stdinText = request.stdinText {
                     if let data = stdinText.data(using: .utf8) {
                         stdin.fileHandleForWriting.write(data)
@@ -80,7 +87,24 @@ public struct ProcessAgentAdapter: AgentAdapter {
     }
 }
 
+final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
+    }
+}
+
 enum NativeExecutableResolver {
+    private static let executableCache = LockedValue<[String: String]>([:])
+
     static func executionEnvironment(
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         requestEnvironment: [String: String] = [:],
@@ -96,13 +120,25 @@ enum NativeExecutableResolver {
             return FileManager.default.isExecutableFile(atPath: name) ? name : nil
         }
         let pathValue = environment["PATH"] ?? expandedPath(from: nil, homeDirectory: environment["HOME"] ?? NSHomeDirectory())
+        let cacheKey = "\(name)|\(pathValue)"
+        if let cached = executableCache.withLock({ $0[cacheKey] }) {
+            if FileManager.default.isExecutableFile(atPath: cached) {
+                return cached
+            }
+            executableCache.withLock { $0.removeValue(forKey: cacheKey) }
+        }
         for directory in pathValue.split(separator: ":") {
             let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent(name).path
             if FileManager.default.isExecutableFile(atPath: candidate) {
+                executableCache.withLock { $0[cacheKey] = candidate }
                 return candidate
             }
         }
-        return resolveWithLoginShell(name)
+        let resolved = resolveWithLoginShell(name)
+        if let resolved {
+            executableCache.withLock { $0[cacheKey] = resolved }
+        }
+        return resolved
     }
 
     static func environmentIncludingExecutableDirectory(_ executablePath: String, environment: [String: String]) -> [String: String] {

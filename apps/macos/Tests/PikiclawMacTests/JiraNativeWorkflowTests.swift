@@ -56,10 +56,11 @@ import Testing
     #expect(model.draftPrompt.contains("Path: \(workspace?.pathDisplay ?? "")"))
     #expect(model.draftPrompt.contains("Acceptance Criteria:"))
     #expect(model.draftPrompt.contains("Execution Contract:"))
-    #expect(model.draftPrompt.contains("Ticket boundary, Implementation seam, Change plan, Validation, Jira update, and Durable outputs"))
+    #expect(model.draftPrompt.contains("Solution Output checkpoint"))
+    #expect(model.draftPrompt.contains("Ticket boundary, Implementation seam, Change plan, Validation plan, Jira update draft, and Durable outputs"))
     #expect(model.draftPrompt.contains("paste-ready comment"))
     #expect(model.draftPrompt.contains("Run the implementation or investigation from this Work Item"))
-    #expect(model.draftPrompt.contains("implement the smallest safe change"))
+    #expect(model.draftPrompt.contains("Coding starts only from the follow-up Coding action"))
 
     let firstJiraPrompt = model.draftPrompt
     #expect(model.stageJiraTicketForChat(workItemId: selected, userInput: firstJiraPrompt) == selected)
@@ -492,7 +493,8 @@ import Testing
     #expect(run.promptSnapshot.contains("Acceptance Criteria:"))
     #expect(run.promptSnapshot.contains("Agent receives a complete ticket brief"))
     #expect(run.promptSnapshot.contains("Execution Contract:"))
-    #expect(run.promptSnapshot.contains("Ticket boundary, Implementation seam, Change plan, Validation, Jira update, and Durable outputs"))
+    #expect(run.promptSnapshot.contains("Solution Output checkpoint"))
+    #expect(run.promptSnapshot.contains("Ticket boundary, Implementation seam, Change plan, Validation plan, Jira update draft, and Durable outputs"))
     #expect(run.promptSnapshot.contains("do not mix in unrelated work items"))
     #expect(run.promptSnapshot.contains("Preserve Artifact refs as Evidence"))
     #expect(run.promptSnapshot.contains("Relevant outputs: commandOutputSummary ready: Prior Jira diagnosis"))
