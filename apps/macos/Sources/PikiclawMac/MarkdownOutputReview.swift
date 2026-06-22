@@ -48,6 +48,7 @@ private func markdownQuoteBlock(_ text: String) -> String {
 struct MarkdownOutputReviewTextView: NSViewRepresentable {
     let markdown: String
     @Binding var selectedText: String
+    var selectedAnchor: Binding<CGRect?>? = nil
     var fontSize: CGFloat = 13
     var onAddComment: ((String) -> Void)?
 
@@ -95,6 +96,7 @@ struct MarkdownOutputReviewTextView: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? MarkdownReviewNSTextView else { return }
             parent.selectedText = textView.reviewSelectedText()
+            parent.selectedAnchor?.wrappedValue = textView.reviewSelectionRect()
         }
     }
 }
@@ -144,6 +146,22 @@ final class MarkdownReviewNSTextView: NSTextView {
             return ""
         }
         return String(string[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func reviewSelectionRect() -> CGRect? {
+        let range = selectedRange()
+        guard range.length > 0,
+              let layoutManager,
+              let textContainer else {
+            return nil
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return nil }
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        rect.origin.x += textContainerOrigin.x
+        rect.origin.y += textContainerOrigin.y
+        return rect
     }
 
     @objc private func addSelectedTextComment() {

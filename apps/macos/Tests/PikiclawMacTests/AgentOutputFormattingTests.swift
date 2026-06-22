@@ -171,7 +171,7 @@ import Testing
     #expect(preview.showsThinkingTimeline == false)
 }
 
-@Test func agentResponsePresentationGroupsToolCallsInsideRunningThinking() {
+@Test func agentResponsePresentationHidesToolCallsInsideRunningThinking() {
     let output = """
     Thinking: 我先确认 workspace。
     Tool: git status --short
@@ -182,14 +182,13 @@ import Testing
     let preview = agentResponsePresentationPreview(text: output, state: .running, isRunning: true)
 
     #expect(preview.visibleThinkingItems == [
-        AgentResponsePresentationPreviewItem(title: "Thinking", detail: "我先确认 workspace。"),
-        AgentResponsePresentationPreviewItem(title: "Running tool", detail: "git status --short"),
-        AgentResponsePresentationPreviewItem(title: "Ran a command", detail: "git status --short"),
-        AgentResponsePresentationPreviewItem(title: "Tool output", detail: "[7 output lines]")
+        AgentResponsePresentationPreviewItem(title: "Thinking", detail: "我先确认 workspace。")
     ])
+    #expect(preview.toolItems.count == 3)
     #expect(preview.showsThinkingTimeline)
     #expect(preview.startsThinkingTimelineExpanded)
-    #expect(preview.activitySummary == "1 call · 1 completed · 1 output")
+    #expect(preview.activitySummary == "1 thinking")
+    #expect(preview.toolSummary == "1 call · 1 completed · 1 output")
 }
 
 @Test func agentResponsePresentationShowsRunningReadableTextInsideThinking() {

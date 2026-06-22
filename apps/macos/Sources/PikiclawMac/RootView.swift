@@ -3068,6 +3068,7 @@ private struct NewChatLauncher: View {
     var commandFocused: FocusState<Bool>.Binding
     @ObservedObject var model: NativeAppModel
     let openTerminal: () -> Void
+    let send: () -> Void
 
     private var selectedWorkspace: Workspace? {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
@@ -6822,13 +6823,13 @@ private struct ConversationWorkspace: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-        if let selectedOutputArtifact {
+        if let selectedOutputArtifactForSidePane {
             Divider()
                 .overlay(PKTheme.edge)
             ConversationOutputReviewPane(
-                artifact: selectedOutputArtifact,
-                sourceRun: artifactSourceRun(selectedOutputArtifact, snapshot: snapshot),
-                workItem: artifactWorkItem(selectedOutputArtifact, snapshot: snapshot) ?? conversationWorkItem,
+                artifact: selectedOutputArtifactForSidePane,
+                sourceRun: artifactSourceRun(selectedOutputArtifactForSidePane, snapshot: snapshot),
+                workItem: artifactWorkItem(selectedOutputArtifactForSidePane, snapshot: snapshot) ?? conversationWorkItem,
                 accent: accent,
                 close: {
                     withAnimation(.easeInOut(duration: 0.16)) {
@@ -6837,17 +6838,18 @@ private struct ConversationWorkspace: View {
                 },
                 copySummary: {
                     copyTextToPasteboard(artifactClipboardSummary(
-                        artifact: selectedOutputArtifact,
-                        run: artifactSourceRun(selectedOutputArtifact, snapshot: snapshot),
-                        workItem: artifactWorkItem(selectedOutputArtifact, snapshot: snapshot) ?? conversationWorkItem
+                        artifact: selectedOutputArtifactForSidePane,
+                        run: artifactSourceRun(selectedOutputArtifactForSidePane, snapshot: snapshot),
+                        workItem: artifactWorkItem(selectedOutputArtifactForSidePane, snapshot: snapshot) ?? conversationWorkItem
                     ))
                 },
                 saveKnowledge: {
-                    saveOutputKnowledge(selectedOutputArtifact)
+                    saveOutputKnowledge(selectedOutputArtifactForSidePane)
                 }
             )
             .frame(width: immersive ? 336 : 360)
             .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
         }
         .onChange(of: replyDraft) { _, newValue in
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -7118,7 +7120,8 @@ private struct ConversationWorkspace: View {
                 refresh: {
                     refreshCodeChanges(force: true)
                 },
-                close: closeCodeReviewMode
+                close: closeCodeReviewMode,
+                send: sendCodeReviewComments
             )
             .padding(immersive ? 22 : 18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -7133,6 +7136,12 @@ private struct ConversationWorkspace: View {
     private var selectedOutputArtifact: Artifact? {
         guard let selectedOutputArtifactId else { return nil }
         return snapshot.artifacts.first { $0.id == selectedOutputArtifactId }
+    }
+
+    private var selectedOutputArtifactForSidePane: Artifact? {
+        guard let selectedOutputArtifact else { return nil }
+        let conversationOutputIds = Set(conversationOutputs.map(\.id))
+        return conversationOutputIds.contains(selectedOutputArtifact.id) ? nil : selectedOutputArtifact
     }
 
     private var saveEvidenceAction: (() -> Void)? {
@@ -7151,19 +7160,20 @@ private struct ConversationWorkspace: View {
 
     private func openOutputPane(_ artifact: Artifact) {
         withAnimation(.easeInOut(duration: 0.16)) {
-            selectedOutputArtifactId = artifact.id
+            selectedOutputArtifactId = selectedOutputArtifactId == artifact.id ? nil : artifact.id
         }
     }
 
     private func sendReviewComments(_ prompt: String) {
-        guard let run else { return }
-        Task {
-            _ = await model.sendMessage(
-                in: run.id,
-                message: prompt,
-                permissionMode: effectiveReplyPermissionMode
-            )
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            replyDraft = trimmed
+        } else {
+            replyDraft += "\n\n\(trimmed)"
         }
+        stagedFollowUpPermissionMode = effectiveReplyPermissionMode
+        model.statusLine = "Comment added to input"
     }
 
     private func sendCodeReviewComments() {
@@ -8844,6 +8854,8 @@ private struct ConversationOutputSection: View {
 private struct ConversationOutputCardStack: View {
     let artifacts: [Artifact]
     let selectedArtifactId: EntityID?
+    let accent: Color
+    let sendReviewComments: (String) -> Void
     let open: (Artifact) -> Void
 
     private var visibleArtifacts: [Artifact] {
@@ -8853,11 +8865,23 @@ private struct ConversationOutputCardStack: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(visibleArtifacts) { artifact in
-                ConversationOutputCard(
-                    artifact: artifact,
-                    selected: selectedArtifactId == artifact.id,
-                    open: { open(artifact) }
-                )
+                let selected = selectedArtifactId == artifact.id
+                VStack(alignment: .leading, spacing: 8) {
+                    ConversationOutputCard(
+                        artifact: artifact,
+                        selected: selected,
+                        open: { open(artifact) }
+                    )
+                    if selected {
+                        ConversationInlineOutputReviewPane(
+                            artifact: artifact,
+                            accent: accent,
+                            close: { open(artifact) },
+                            sendReviewComments: sendReviewComments
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
             }
             if artifacts.count > visibleArtifacts.count {
                 Text("+\(artifacts.count - visibleArtifacts.count) more output\(artifacts.count - visibleArtifacts.count == 1 ? "" : "s")")
@@ -8912,9 +8936,9 @@ private struct ConversationOutputCard: View {
                 Spacer(minLength: 0)
 
                 HStack(spacing: 6) {
-                    Text("Open")
+                    Text(selected ? "Reviewing" : "Review")
                         .font(.system(size: 12, weight: .semibold))
-                    Image(systemName: "chevron.right")
+                    Image(systemName: selected ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .bold))
                 }
                 .foregroundStyle(selected ? PKTheme.primaryText : statusColor)
@@ -8931,7 +8955,156 @@ private struct ConversationOutputCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
-        .help("Open \(title) in the output pane")
+        .help("Review \(title) in this chat")
+    }
+}
+
+private struct ConversationInlineOutputReviewPane: View {
+    let artifact: Artifact
+    let accent: Color
+    let close: () -> Void
+    let sendReviewComments: (String) -> Void
+    @State private var selectedReviewQuote = ""
+    @State private var selectedReviewAnchor: CGRect?
+    @State private var activeReviewQuote = ""
+    @State private var draftInlineReviewComment = ""
+
+    private var markdownText: String {
+        let fallback = artifact.provenance.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let fileURL = artifactReviewLocalFileURL(artifact),
+              let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            return fallback
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 26, height: 26)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Review Output")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(PKTheme.text2)
+                    Text(artifact.title.firstLineFallback("Output"))
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                ComposerIconButton(symbol: "xmark", title: "Close Review", action: close)
+            }
+
+            if markdownText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                EmptyMiniState(title: "No preview text", subtitle: artifact.uri.isEmpty ? "This output has no markdown preview." : artifact.uri)
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            } else {
+                ScrollView {
+                    ZStack(alignment: .topLeading) {
+                        MarkdownOutputReviewTextView(
+                            markdown: markdownText,
+                            selectedText: $selectedReviewQuote,
+                            selectedAnchor: $selectedReviewAnchor,
+                            onAddComment: beginInlineReviewComment(_:)
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+
+                        if !selectedReviewQuote.isEmpty,
+                           activeReviewQuote.isEmpty,
+                           let selectedReviewAnchor {
+                            Button {
+                                beginInlineReviewComment(selectedReviewQuote)
+                            } label: {
+                                Image(systemName: "text.bubble")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(PKTheme.primaryText)
+                                    .frame(width: 28, height: 28)
+                                    .background(accent)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.58), lineWidth: 1))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 6)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Comment on selection")
+                            .position(reviewCommentButtonPosition(for: selectedReviewAnchor))
+                        }
+
+                        if !activeReviewQuote.isEmpty {
+                            InlineOutputCommentComposer(
+                                quote: activeReviewQuote,
+                                note: $draftInlineReviewComment,
+                                accent: accent,
+                                confirm: commitInlineReviewComment,
+                                cancel: cancelInlineReviewComment
+                            )
+                            .frame(width: 330)
+                            .position(reviewCommentComposerPosition())
+                            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
+                            .zIndex(4)
+                        }
+                    }
+                }
+                .frame(maxHeight: 360)
+                .background(PKTheme.inset.opacity(0.72))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PKTheme.panelAlt.opacity(0.52))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(accent.opacity(0.28), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func beginInlineReviewComment(_ quote: String) {
+        let trimmed = quote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        activeReviewQuote = trimmed
+        draftInlineReviewComment = ""
+    }
+
+    private func commitInlineReviewComment() {
+        let comment = ChatOutputReviewComment(
+            quote: activeReviewQuote,
+            note: draftInlineReviewComment.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        sendReviewComments(chatOutputReviewPrompt(outputTitle: artifact.title, comments: [comment]))
+        cancelInlineReviewComment()
+    }
+
+    private func cancelInlineReviewComment() {
+        activeReviewQuote = ""
+        draftInlineReviewComment = ""
+        selectedReviewQuote = ""
+        selectedReviewAnchor = nil
+    }
+
+    private func reviewCommentButtonPosition(for rect: CGRect) -> CGPoint {
+        let contentInset: CGFloat = 12
+        return CGPoint(
+            x: min(max(rect.maxX + contentInset + 28, 42), 714),
+            y: max(rect.maxY + contentInset + 28, 42)
+        )
+    }
+
+    private func reviewCommentComposerPosition() -> CGPoint {
+        guard let rect = selectedReviewAnchor else {
+            return CGPoint(x: 190, y: 120)
+        }
+        let contentInset: CGFloat = 12
+        return CGPoint(
+            x: min(max(rect.midX + contentInset + 20, 180), 590),
+            y: max(rect.maxY + contentInset + 104, 118)
+        )
     }
 }
 
@@ -15159,6 +15332,9 @@ private struct AssistantResponseCard: View {
 
     @State private var copied = false
     @State private var selectedReviewQuote = ""
+    @State private var selectedReviewAnchor: CGRect?
+    @State private var activeReviewQuote = ""
+    @State private var draftInlineReviewComment = ""
     @State private var reviewComments: [ChatOutputReviewComment] = []
 
     private var cleanedText: String {
@@ -15199,172 +15375,257 @@ private struct AssistantResponseCard: View {
 
     var body: some View {
         HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 9) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(PKTheme.primaryText)
-                        .frame(width: 30, height: 30)
-                        .background(accent)
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(PKTheme.text)
-                        if isRunning, startedAt != nil {
-                            TimelineView(.periodic(from: Date(), by: 1)) { timeline in
-                                Text(agentOutputSubtitle(
-                                    state: state,
-                                    isRunning: isRunning,
-                                    durationText: agentRunDurationText(
-                                        startedAt: startedAt,
-                                        endedAt: endedAt,
-                                        now: timeline.date
-                                    )
-                                ))
-                                    .font(.caption2)
-                                    .foregroundStyle(PKTheme.text3)
-                            }
-                        } else {
-                            Text(agentOutputSubtitle(
-                                state: state,
-                                isRunning: isRunning,
-                                durationText: agentRunDurationText(
-                                    startedAt: startedAt,
-                                    endedAt: endedAt
-                                )
-                            ))
-                            .font(.caption2)
-                            .foregroundStyle(PKTheme.text3)
-                        }
-                    }
-                    Spacer()
-                    StatusPill(text: runStateDisplayLabel(state), color: runStateColor(state))
-                }
-
-                if presentation.showsFinalResponse {
-                    MarkdownOutputReviewTextView(
-                        markdown: presentation.finalText,
-                        selectedText: $selectedReviewQuote,
-                        onAddComment: reviewCommentHandler
-                    )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(14)
-                        .background(PKTheme.inset.opacity(0.78))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-
-                if onSendReviewComments != nil,
-                   presentation.showsFinalResponse,
-                   (!selectedReviewQuote.isEmpty || !reviewComments.isEmpty) {
-                    ChatOutputReviewCommentPanel(
-                        selectedQuote: selectedReviewQuote,
-                        comments: $reviewComments,
-                        accent: accent,
-                        addSelection: {
-                            addReviewComment(selectedReviewQuote)
-                        },
-                        send: sendReviewComments
-                    )
-                }
-
-                if !outputs.isEmpty {
-                    ConversationOutputCardStack(
-                        artifacts: outputs,
-                        selectedArtifactId: selectedOutputArtifactId,
-                        open: { artifact in
-                            onOpenOutput?(artifact)
-                        }
-                    )
-                }
-
-                if presentation.showsThinkingTimeline {
-                    AgentActivityTimeline(
-                        title: "Thinking",
-                        items: presentation.visibleThinkingItems,
-                        accent: accent,
-                        startsExpanded: presentation.startsThinkingTimelineExpanded,
-                        collapsedSummary: presentation.activitySummary
-                    )
-                }
-
-                if !presentation.showsThinkingTimeline && !presentation.showsFinalResponse {
-                    AgentExecutionProgressCard(
-                        presentation: presentation,
-                        accent: accent
-                    )
-                }
-
-                if showsOutputReview {
-                    AgentOutputReviewStrip(
-                        presentation: presentation,
-                        followUpCount: followUpActions.count,
-                        canSaveEvidence: onSaveEvidence != nil,
-                        accent: accent
-                    )
-                }
-
-                if showsGenerativeUIRail {
-                    GenerativeUIRail(
-                        items: visibleGenerativeItems,
-                        actions: generatedFollowUpActions,
-                        accent: accent,
-                        runId: runId,
-                        focusedGeneratedUIAction: focusedGeneratedUIAction,
-                        select: onFollowUp,
-                        startSideChat: onFollowUpSideChat
-                    )
-                }
-
-                if !standardFollowUpActions.isEmpty, let onFollowUp {
-                    RunFollowUpActionRow(
-                        actions: standardFollowUpActions,
-                        accent: accent,
-                        select: onFollowUp,
-                        startSideChat: onFollowUpSideChat
-                    )
-                }
-
-                MessageActionRow(
-                    createdAt: createdAt,
-                    copied: copied,
-                    alignTrailing: false,
-                    canRerun: onRerun != nil,
-                    rerunAccent: runRetryActionColor(state),
-                    onCopy: {
-                        copyTextToPasteboard(cleanedText.isEmpty ? text : cleanedText)
-                        copied = true
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 1_300_000_000)
-                            copied = false
-                        }
-                    },
-                    onRerun: onRerun,
-                    onSaveEvidence: nil
-                )
-            }
-            .frame(maxWidth: 760, alignment: .leading)
-            .padding(14)
-            .background {
-                PKTheme.panelAlt
-                    .opacity(0.42)
-            }
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            responseContent
 
             Spacer(minLength: 72)
         }
     }
 
+    private var responseContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            responseHeader
+            finalResponseSection
+            outputAndProgressSections
+            followUpSections
+            messageActions
+        }
+        .frame(maxWidth: 760, alignment: .leading)
+        .padding(14)
+        .background {
+            PKTheme.panelAlt
+                .opacity(0.42)
+        }
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var responseHeader: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 30, height: 30)
+                .background(accent)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                responseSubtitle
+            }
+            Spacer()
+            StatusPill(text: runStateDisplayLabel(state), color: runStateColor(state))
+        }
+    }
+
+    @ViewBuilder
+    private var responseSubtitle: some View {
+        if isRunning, startedAt != nil {
+            TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+                Text(agentOutputSubtitle(
+                    state: state,
+                    isRunning: isRunning,
+                    durationText: agentRunDurationText(
+                        startedAt: startedAt,
+                        endedAt: endedAt,
+                        now: timeline.date
+                    )
+                ))
+                .font(.caption2)
+                .foregroundStyle(PKTheme.text3)
+            }
+        } else {
+            Text(agentOutputSubtitle(
+                state: state,
+                isRunning: isRunning,
+                durationText: agentRunDurationText(
+                    startedAt: startedAt,
+                    endedAt: endedAt
+                )
+            ))
+            .font(.caption2)
+            .foregroundStyle(PKTheme.text3)
+        }
+    }
+
+    @ViewBuilder
+    private var finalResponseSection: some View {
+        if presentation.showsFinalResponse {
+            ZStack(alignment: .topLeading) {
+                MarkdownOutputReviewTextView(
+                    markdown: presentation.finalText,
+                    selectedText: $selectedReviewQuote,
+                    selectedAnchor: $selectedReviewAnchor,
+                    onAddComment: reviewCommentHandler
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(14)
+                .background(PKTheme.inset.opacity(0.78))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                selectionCommentButton
+                activeInlineCommentComposer
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectionCommentButton: some View {
+        if onSendReviewComments != nil,
+           !selectedReviewQuote.isEmpty,
+           activeReviewQuote.isEmpty,
+           let selectedReviewAnchor {
+            Button {
+                beginInlineReviewComment(selectedReviewQuote)
+            } label: {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 28, height: 28)
+                    .background(accent)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.58), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 6)
+            }
+            .buttonStyle(.plain)
+            .help("Comment on selection")
+            .position(reviewCommentButtonPosition(for: selectedReviewAnchor))
+        }
+    }
+
+    @ViewBuilder
+    private var activeInlineCommentComposer: some View {
+        if onSendReviewComments != nil,
+           !activeReviewQuote.isEmpty {
+            InlineOutputCommentComposer(
+                quote: activeReviewQuote,
+                note: $draftInlineReviewComment,
+                accent: accent,
+                confirm: commitInlineReviewComment,
+                cancel: cancelInlineReviewComment
+            )
+            .frame(width: 330)
+            .position(reviewCommentComposerPosition())
+            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
+            .zIndex(4)
+        }
+    }
+
+    @ViewBuilder
+    private var outputAndProgressSections: some View {
+        if !outputs.isEmpty {
+            ConversationOutputCardStack(
+                artifacts: outputs,
+                selectedArtifactId: selectedOutputArtifactId,
+                accent: accent,
+                sendReviewComments: { prompt in
+                    onSendReviewComments?(prompt)
+                },
+                open: { artifact in
+                    onOpenOutput?(artifact)
+                }
+            )
+        }
+
+        if presentation.showsThinkingTimeline {
+            AgentActivityTimeline(
+                title: "Thinking",
+                items: presentation.visibleThinkingItems,
+                accent: accent,
+                startsExpanded: presentation.startsThinkingTimelineExpanded,
+                collapsedSummary: presentation.activitySummary
+            )
+        }
+
+        if !presentation.showsThinkingTimeline && !presentation.showsFinalResponse {
+            AgentExecutionProgressCard(
+                presentation: presentation,
+                accent: accent
+            )
+        }
+
+        if showsOutputReview {
+            AgentOutputReviewStrip(
+                presentation: presentation,
+                followUpCount: followUpActions.count,
+                canSaveEvidence: onSaveEvidence != nil,
+                accent: accent
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var followUpSections: some View {
+        if showsGenerativeUIRail {
+            GenerativeUIRail(
+                items: visibleGenerativeItems,
+                actions: generatedFollowUpActions,
+                accent: accent,
+                runId: runId,
+                focusedGeneratedUIAction: focusedGeneratedUIAction,
+                select: onFollowUp,
+                startSideChat: onFollowUpSideChat
+            )
+        }
+
+        if !standardFollowUpActions.isEmpty, let onFollowUp {
+            RunFollowUpActionRow(
+                actions: standardFollowUpActions,
+                accent: accent,
+                select: onFollowUp,
+                startSideChat: onFollowUpSideChat
+            )
+        }
+    }
+
+    private var messageActions: some View {
+        MessageActionRow(
+            createdAt: createdAt,
+            copied: copied,
+            alignTrailing: false,
+            canRerun: onRerun != nil,
+            rerunAccent: runRetryActionColor(state),
+            onCopy: {
+                copyTextToPasteboard(cleanedText.isEmpty ? text : cleanedText)
+                copied = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_300_000_000)
+                    copied = false
+                }
+            },
+            onRerun: onRerun,
+            onSaveEvidence: nil
+        )
+    }
+
     private func addReviewComment(_ quote: String) {
+        beginInlineReviewComment(quote)
+    }
+
+    private func beginInlineReviewComment(_ quote: String) {
         let trimmed = quote.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if !reviewComments.contains(where: { $0.quote == trimmed && $0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            reviewComments.append(ChatOutputReviewComment(quote: trimmed))
-        }
+        activeReviewQuote = trimmed
+        draftInlineReviewComment = ""
+    }
+
+    private func commitInlineReviewComment() {
+        let comment = ChatOutputReviewComment(
+            quote: activeReviewQuote,
+            note: draftInlineReviewComment.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        let prompt = chatOutputReviewPrompt(outputTitle: title, comments: [comment])
+        onSendReviewComments?(prompt)
+        cancelInlineReviewComment()
+    }
+
+    private func cancelInlineReviewComment() {
+        activeReviewQuote = ""
+        draftInlineReviewComment = ""
         selectedReviewQuote = ""
+        selectedReviewAnchor = nil
     }
 
     private func sendReviewComments() {
@@ -15372,7 +15633,102 @@ private struct AssistantResponseCard: View {
         let prompt = chatOutputReviewPrompt(outputTitle: title, comments: reviewComments)
         onSendReviewComments?(prompt)
         reviewComments.removeAll()
-        selectedReviewQuote = ""
+        cancelInlineReviewComment()
+    }
+
+    private func reviewCommentButtonPosition(for rect: CGRect) -> CGPoint {
+        let contentInset: CGFloat = 14
+        return CGPoint(
+            x: min(max(rect.maxX + contentInset + 28, 42), 714),
+            y: max(rect.maxY + contentInset + 28, 42)
+        )
+    }
+
+    private func reviewCommentComposerPosition() -> CGPoint {
+        guard let rect = selectedReviewAnchor else {
+            return CGPoint(x: 190, y: 120)
+        }
+        let contentInset: CGFloat = 14
+        return CGPoint(
+            x: min(max(rect.midX + contentInset + 20, 180), 590),
+            y: max(rect.maxY + contentInset + 104, 118)
+        )
+    }
+}
+
+private struct InlineOutputCommentComposer: View {
+    let quote: String
+    @Binding var note: String
+    let accent: Color
+    let confirm: () -> Void
+    let cancel: () -> Void
+    @FocusState private var isNoteFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 24, height: 24)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                Text("Comment")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                Spacer(minLength: 0)
+                Button(action: cancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(PKTheme.text4)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel comment")
+            }
+
+            Text(quote.firstLineFallback("Selected output"))
+                .font(.caption)
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(2)
+                .padding(7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(accent.opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.22), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            TextEditor(text: $note)
+                .font(.system(size: 12))
+                .foregroundStyle(PKTheme.text2)
+                .frame(height: 62)
+                .focused($isNoteFocused)
+                .scrollContentBackground(.hidden)
+                .background(PKTheme.inset.opacity(0.76))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(PKTheme.text3)
+                Button("Add to input", action: confirm)
+                    .font(.system(size: 11, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(accent)
+            }
+        }
+        .padding(10)
+        .background(PKTheme.panelAlt.opacity(0.98))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.28), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(color: Color.black.opacity(0.24), radius: 18, x: 0, y: 10)
+        .onAppear {
+            DispatchQueue.main.async {
+                isNoteFocused = true
+            }
+        }
     }
 }
 
@@ -15709,7 +16065,7 @@ private struct AgentResponsePresentation {
 
     var visibleThinkingItems: [AgentActivityItem] {
         guard isActive else { return [] }
-        var items = activityItems
+        var items = thinkingItems
         if let readableItem = runningReadableThinkingItem,
            !items.contains(where: { $0.kind == .thinking && $0.detail == readableItem.detail }) {
             items.append(readableItem)
@@ -23414,19 +23770,12 @@ private struct WorkItemsPage: View {
                         selectedWorkspaceId: $selectedWorkspaceId,
                         selectedRunId: $selectedJiraRunId,
                         model: model,
-                        isRunning: model.isRunning,
                         isSyncing: model.jiraSyncIsRunning,
-                        isPostingUpdate: model.jiraWriteBackIsPosting,
                         writeBackReadiness: selectedJiraWriteBackReadiness,
                         writeBackSetupGuide: selectedJiraWriteBackSetupGuide,
                         sync: syncJira,
-                        start: startSelectedTicket,
-                        copyBrief: copySelectedJiraBrief,
-                        copyUpdate: copySelectedJiraUpdate,
-                        postUpdate: reviewSelectedJiraWriteBack,
                         copyWriteBackSetup: copySelectedJiraWriteBackSetup,
                         revealWriteBackSetup: revealSelectedJiraWriteBackSetup,
-                        openJira: openSelectedJiraTicket,
                         openChat: {
                             if let selectedJiraItem {
                                 selectedWorkItemId = selectedJiraItem.id
@@ -23492,7 +23841,7 @@ private struct WorkItemsPage: View {
 
     private var jiraSyncSummary: String {
         let sync = snapshot.jiraSync ?? JiraSyncState()
-        if model.jiraSyncIsRunning { return "Syncing current sprint" }
+        if model.jiraSyncIsRunning { return "Refreshing current sprint" }
         if sync.status == .failed, let error = sync.lastError {
             return error
         }
@@ -23964,19 +24313,12 @@ private struct JiraTicketChatWorkbench: View {
     @Binding var selectedWorkspaceId: EntityID?
     @Binding var selectedRunId: EntityID?
     @ObservedObject var model: NativeAppModel
-    let isRunning: Bool
     let isSyncing: Bool
-    let isPostingUpdate: Bool
     let writeBackReadiness: JiraWriteBackReadiness
     let writeBackSetupGuide: JiraWriteBackSetupGuide
     let sync: () -> Void
-    let start: () -> Void
-    let copyBrief: () -> Void
-    let copyUpdate: () -> Void
-    let postUpdate: () -> Void
     let copyWriteBackSetup: () -> Void
     let revealWriteBackSetup: () -> Void
-    let openJira: () -> Void
     let openChat: () -> Void
     let openRunInChat: (AgentRun) -> Void
     let copyOutput: (Artifact) -> Void
@@ -23993,19 +24335,12 @@ private struct JiraTicketChatWorkbench: View {
         selectedWorkspaceId: Binding<EntityID?>,
         selectedRunId: Binding<EntityID?>,
         model: NativeAppModel,
-        isRunning: Bool,
         isSyncing: Bool,
-        isPostingUpdate: Bool,
         writeBackReadiness: JiraWriteBackReadiness,
         writeBackSetupGuide: JiraWriteBackSetupGuide,
         sync: @escaping () -> Void,
-        start: @escaping () -> Void,
-        copyBrief: @escaping () -> Void,
-        copyUpdate: @escaping () -> Void,
-        postUpdate: @escaping () -> Void,
         copyWriteBackSetup: @escaping () -> Void,
         revealWriteBackSetup: @escaping () -> Void,
-        openJira: @escaping () -> Void,
         openChat: @escaping () -> Void,
         openRunInChat: @escaping (AgentRun) -> Void,
         copyOutput: @escaping (Artifact) -> Void,
@@ -24020,19 +24355,12 @@ private struct JiraTicketChatWorkbench: View {
         self._selectedWorkspaceId = selectedWorkspaceId
         self._selectedRunId = selectedRunId
         self._model = ObservedObject(wrappedValue: model)
-        self.isRunning = isRunning
         self.isSyncing = isSyncing
-        self.isPostingUpdate = isPostingUpdate
         self.writeBackReadiness = writeBackReadiness
         self.writeBackSetupGuide = writeBackSetupGuide
         self.sync = sync
-        self.start = start
-        self.copyBrief = copyBrief
-        self.copyUpdate = copyUpdate
-        self.postUpdate = postUpdate
         self.copyWriteBackSetup = copyWriteBackSetup
         self.revealWriteBackSetup = revealWriteBackSetup
-        self.openJira = openJira
         self.openChat = openChat
         self.openRunInChat = openRunInChat
         self.copyOutput = copyOutput
@@ -24183,45 +24511,11 @@ private struct JiraTicketChatWorkbench: View {
 
                     ComposerIconButton(
                         symbol: "arrow.clockwise",
-                        title: "Sync Jira",
-                        help: "Refresh this ticket from Jira and update local ticket data.",
+                        title: "Refresh Jira",
+                        help: "Pull latest ticket fields from Jira. This does not change Jira status.",
                         action: sync
                     )
                         .disabled(isSyncing)
-                    ComposerIconButton(
-                        symbol: "doc.on.doc",
-                        title: "Copy Brief",
-                        help: "Copy a compact ticket brief for sharing or pasting into chat.",
-                        action: copyBrief
-                    )
-                    ComposerIconButton(
-                        symbol: "text.bubble",
-                        title: "Copy Update",
-                        help: "Copy a Jira-ready progress update based on the current ticket work.",
-                        action: copyUpdate
-                    )
-                    ComposerIconButton(
-                        symbol: isPostingUpdate ? "paperplane.fill" : "paperplane",
-                        title: "Post Update",
-                        help: "Post the prepared progress update back to Jira.",
-                        action: postUpdate
-                    )
-                        .disabled(isPostingUpdate)
-                    if item.jira?.url?.isEmpty == false {
-                        ComposerIconButton(
-                            symbol: "arrow.up.right.square",
-                            title: "Open Jira",
-                            help: "Open this ticket in Jira.",
-                            action: openJira
-                        )
-                    }
-                    PrimaryButton(
-                        title: isRunning ? "Running" : "Start",
-                        systemImage: "play.fill",
-                        help: isRunning ? "This ticket chat is already running." : "Start working on this Jira ticket in the selected workspace.",
-                        action: start
-                    )
-                        .disabled(isRunning)
                 }
                 .fixedSize(horizontal: true, vertical: false)
             }
@@ -32461,6 +32755,30 @@ func artifactURIKind(_ artifact: Artifact) -> String {
     if value.hasPrefix("http://") || value.hasPrefix("https://") { return "Link" }
     if value.hasPrefix("/") || value.hasPrefix("~") { return "File" }
     return value.isEmpty ? "No URI" : "URI"
+}
+
+func artifactReviewMarkdownText(_ artifact: Artifact) -> String {
+    let fallback = artifact.provenance.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let fileURL = artifactReviewLocalFileURL(artifact) else {
+        return fallback
+    }
+    guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+        return fallback
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? fallback : trimmed
+}
+
+private func artifactReviewLocalFileURL(_ artifact: Artifact) -> URL? {
+    let rawURI = artifact.uri.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rawURI.isEmpty else { return nil }
+    if let url = URL(string: rawURI), url.isFileURL {
+        return url
+    }
+    if rawURI.hasPrefix("/") || rawURI.hasPrefix("~") {
+        return URL(fileURLWithPath: (rawURI as NSString).expandingTildeInPath)
+    }
+    return nil
 }
 
 func openArtifactURI(_ artifact: Artifact) {

@@ -1054,7 +1054,7 @@ final class NativeAppModel: ObservableObject {
         let projectId = snapshot.projects.first(where: { $0.workspaceIds.contains(workspace.id) })?.id
 
         jiraSyncIsRunning = true
-        statusLine = "Syncing Jira \(scope.title.lowercased()) tickets"
+        statusLine = "Refreshing Jira \(scope.title.lowercased()) tickets"
         do {
             var syncing = try await store.loadSnapshot()
             syncing.jiraSync = JiraSyncState(
@@ -1080,7 +1080,7 @@ final class NativeAppModel: ObservableObject {
             try await store.replaceSnapshot(next)
             snapshot = next
             jiraSyncIsRunning = false
-            statusLine = "Jira synced \(summary.ticketCount) ticket(s): \(summary.created) new, \(summary.updated) updated"
+            statusLine = "Jira refreshed \(summary.ticketCount) ticket(s): \(summary.created) new, \(summary.updated) locally"
             return summary.selectedWorkItemId
         } catch {
             var failed = (try? await store.loadSnapshot()) ?? snapshot
