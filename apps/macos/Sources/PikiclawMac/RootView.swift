@@ -1678,13 +1678,14 @@ private struct ChatHomeView: View {
     private var workspaceSection: some View {
         ZStack {
             workspaceContent
+                .padding(.leading, nativeChatWorkspaceLeadingGutter)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onDrop(of: [UTType.plainText], isTargeted: $temporaryPaneDropTargeted, perform: handleTemporaryPaneDrop)
         .overlay(alignment: .topLeading) {
             if showsAgentHistory && !chatHistoryVisible {
                 ChatHistoryRevealButton(action: showChatHistory)
-                    .padding(.leading, 10)
+                    .padding(.leading, nativeChatWorkspaceLeadingGutter + 10)
                     .padding(.top, 10)
             }
         }
@@ -2683,6 +2684,7 @@ private struct NativeResizableSplitDivider: View {
     }
 }
 
+private let nativeChatWorkspaceLeadingGutter: CGFloat = 18
 private let nativeMaxVisibleChatPanes = 4
 private let nativeMaxVisibleSidePanes = nativeMaxVisibleChatPanes - 1
 private let nativeMaxMultiChatPanesPerScreen = 4
@@ -5428,6 +5430,11 @@ func userPromptImageAttachments(in text: String) -> [UserPromptImageAttachment] 
 
 func userPromptTextWithoutImageAttachments(_ text: String) -> String {
     userPromptDisplayParts(from: text).body
+}
+
+func userPromptBubbleDisplayText(_ text: String) -> String {
+    let displayText = friendlyUserPromptDisplay(text)
+    return displayText.isEmpty ? "..." : displayText
 }
 
 private func userPromptDisplayParts(from text: String) -> (body: String, images: [UserPromptImageAttachment]) {
@@ -17173,20 +17180,14 @@ private struct ConversationMessageBubble: View {
                 imagePreviewStrip
             }
         } else {
-            let displayText = friendlyUserPromptDisplay(text)
+            let displayText = userPromptBubbleDisplayText(text)
             VStack(alignment: .leading, spacing: 10) {
-                if displayText.isEmpty && imageAttachments.isEmpty {
-                    Text("...")
-                        .font(.system(size: 14))
-                        .foregroundStyle(PKTheme.text2)
-                } else if !displayText.isEmpty {
-                    Text(displayText)
-                        .font(.system(size: 14))
-                        .lineSpacing(3)
-                        .foregroundStyle(PKTheme.text2)
-                        .textSelection(.enabled)
-                        .multilineTextAlignment(.leading)
-                }
+                Text(displayText)
+                    .font(.system(size: 14))
+                    .lineSpacing(3)
+                    .foregroundStyle(PKTheme.text2)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.leading)
                 imagePreviewStrip
             }
         }
@@ -19378,16 +19379,21 @@ private struct AgentLiveTranscriptParagraphText: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                let isActivity = agentLiveTranscriptParagraphIsActivityLine(paragraph)
                 Text(paragraph)
-                    .font(.system(size: 13))
+                    .font(isActivity ? .system(size: 12, weight: .medium) : .system(size: 13))
                     .lineSpacing(3)
-                    .foregroundStyle(PKTheme.text2)
+                    .foregroundStyle(isActivity ? PKTheme.text4 : PKTheme.text2)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
+
+func agentLiveTranscriptParagraphIsActivityLine(_ text: String) -> Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Activity:")
 }
 
 private struct GenerativeUIItem: Hashable {
@@ -20980,8 +20986,10 @@ private struct RecentChatList: View {
 
 private func runStateColor(_ state: RunState?) -> Color {
     switch state {
-    case .running, .completed: PKTheme.ok
-    case .waitingForUser, .queued, .starting: PKTheme.warn
+    case .running: PKTheme.primary
+    case .completed: PKTheme.ok
+    case .waitingForUser: PKTheme.warn
+    case .queued, .starting: PKTheme.primary
     case .stale: PKTheme.warn
     case .failed, .cancelled: PKTheme.err
     case .draft: PKTheme.primary
@@ -37141,7 +37149,8 @@ private func sourceLabel(_ source: WorkItemSourceType) -> String {
 
 private func statusColor(_ state: WorkItemState) -> Color {
     switch state {
-    case .active, .done: PKTheme.ok
+    case .active: PKTheme.primary
+    case .done: PKTheme.ok
     case .blocked, .review: PKTheme.warn
     case .cancelled: PKTheme.err
     default: PKTheme.text3

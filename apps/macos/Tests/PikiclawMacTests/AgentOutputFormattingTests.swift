@@ -151,6 +151,17 @@ import Testing
     #expect(friendlyUserPromptDisplay(raw) == "请看这两张截图。")
 }
 
+@Test func userPromptBubbleDisplayTextUsesPlaceholderForImageOnlyPrompt() {
+    let raw = """
+    Attached images for the agent:
+    - pasted-image-1782972067347.png: /Users/michael.yang/Library/Application Support/PikiclawMacNative/ComposerAttachments/pasted-image-1782972067347.png
+    """
+
+    #expect(friendlyUserPromptDisplay(raw) == "")
+    #expect(userPromptBubbleDisplayText(raw) == "...")
+    #expect(userPromptImageAttachments(in: raw).map(\.name) == ["pasted-image-1782972067347.png"])
+}
+
 @Test func userPromptImageAttachmentsParseAttachedImageRefs() {
     let raw = """
     请看截图。
@@ -354,6 +365,13 @@ import Testing
             """
         )
     ])
+}
+
+@Test func liveTranscriptActivityParagraphsUseActivityTone() {
+    #expect(agentLiveTranscriptParagraphIsActivityLine("Activity: 1 call · 1 completed"))
+    #expect(agentLiveTranscriptParagraphIsActivityLine("  Activity: 1 output  "))
+    #expect(agentLiveTranscriptParagraphIsActivityLine("我先确认 workspace。") == false)
+    #expect(agentLiveTranscriptParagraphIsActivityLine("Thinking: 我先确认 workspace。") == false)
 }
 
 @Test func assistantResponseVisibleOutputsHidesPriorEvidenceWhileRunIsActive() {
