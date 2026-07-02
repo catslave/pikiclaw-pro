@@ -6,8 +6,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  getProjectSkillPaths,
   listSkills,
+  resolveSkillDefinitionFile,
   stageSessionFiles,
   ensureManagedSession,
   findPikiclawSession,
@@ -31,6 +31,7 @@ import {
   type SessionProjectContextRef,
 } from '../agent/index.js';
 import { normalizeSessionContextSources } from '../agent/context-sources.js';
+import { buildSkillCommandName } from '../bot/menu.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { isLogTraceSlash, runLogTraceSkill, stripLogTraceSlash } from '../platform/logtrace.js';
 import { runtime } from './runtime.js';
@@ -138,22 +139,19 @@ function buildPlanImplementPrompt(input: string): string {
 function resolveSkillFromPrompt(workdir: string, prompt: string): { resolvedPrompt: string; skillName: string } | null {
   const trimmed = prompt.trim();
   if (!trimmed.startsWith('/')) return null;
-  // Extract command name and args: "/skill-name some args" → name="skill-name", args="some args"
+  // Extract command name and args: "/skill-name some args" or "/sk_skill_name some args".
   const match = trimmed.match(/^\/([^\s]+)(?:\s+(.*))?$/s);
   if (!match) return null;
-  const name = match[1];
+  const name = match[1].trim().toLowerCase();
   const args = (match[2] || '').trim();
 
   const { skills } = listSkills(workdir);
-  // Match by exact skill name (case-insensitive)
-  const skill = skills.find(s => s.name.toLowerCase() === name.toLowerCase());
+  const skill = skills.find(s => s.name.toLowerCase() === name || buildSkillCommandName(s.name) === name);
   if (!skill) return null;
 
   const extra = args ? ` Additional context: ${args}` : '';
   const workdirHint = `[Project directory: ${workdir}]\n\n`;
-  const paths = getProjectSkillPaths(workdir, skill.name);
-  const skillFile = paths.claudeSkillFile || paths.sharedSkillFile || paths.agentsSkillFile;
-  const targetPath = skillFile || `${workdir}/.pikiclaw/skills/${skill.name}/SKILL.md`;
+  const targetPath = resolveSkillDefinitionFile(workdir, skill);
   const resolvedPrompt = `${workdirHint}Read the skill definition at \`${targetPath}\` and execute the instructions defined there.${extra}`;
   return { resolvedPrompt, skillName: skill.name };
 }

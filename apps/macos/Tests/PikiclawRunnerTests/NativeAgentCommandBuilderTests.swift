@@ -17,6 +17,21 @@ import Testing
     ])
 }
 
+@Test func codexArgumentsAskBeforeEditAllowsApprovalRequests() {
+    let request = launchRequest(permissionMode: .askBeforeEdit)
+    let args = NativeAgentCommandBuilder.codexArguments(for: request)
+
+    #expect(args == [
+        "--ask-for-approval", "on-request",
+        "exec",
+        "--json",
+        "--color", "never",
+        "--sandbox", "workspace-write",
+        "-C", "/tmp/project",
+        "-"
+    ])
+}
+
 @Test func codexArgumentsResumeNativeSessionWhenAvailable() {
     var request = launchRequest(permissionMode: .readOnly)
     request.run.nativeSessionRef = "019eed67-c4fb-7812-8584-84500b29fd4a"

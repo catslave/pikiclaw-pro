@@ -46,6 +46,8 @@ public struct AgentLaunchRequest: Hashable, Codable, Sendable {
     public var environment: [String: String]
     public var arguments: [String]
     public var stdinText: String?
+    public var mcpRequirements: [String]
+    public var skillName: String?
 
     public init(
         workspacePath: String,
@@ -53,7 +55,9 @@ public struct AgentLaunchRequest: Hashable, Codable, Sendable {
         run: AgentRun,
         environment: [String: String] = [:],
         arguments: [String] = [],
-        stdinText: String? = nil
+        stdinText: String? = nil,
+        mcpRequirements: [String] = [],
+        skillName: String? = nil
     ) {
         self.workspacePath = workspacePath
         self.prompt = prompt
@@ -61,11 +65,14 @@ public struct AgentLaunchRequest: Hashable, Codable, Sendable {
         self.environment = environment
         self.arguments = arguments
         self.stdinText = stdinText
+        self.mcpRequirements = mcpRequirements
+        self.skillName = skillName
     }
 }
 
 public enum RunnerEvent: Hashable, Codable, Sendable {
     case stateChanged(RunState)
+    case activity(Date)
     case output(String)
     case toolCallStarted(String)
     case artifactCreated(EntityID)
@@ -85,7 +92,7 @@ public enum NativeAgentCommandBuilder {
         if let nativeSessionRef = request.run.nativeSessionRef?.trimmingCharacters(in: .whitespacesAndNewlines),
            !nativeSessionRef.isEmpty {
             return [
-                "--ask-for-approval", "never",
+                "--ask-for-approval", codexApprovalPolicy(for: request.run.permissionMode),
                 "--sandbox", codexSandbox(for: request.run.permissionMode),
                 "-C", request.workspacePath,
                 "exec",
@@ -97,7 +104,7 @@ public enum NativeAgentCommandBuilder {
         }
 
         return [
-            "--ask-for-approval", "never",
+            "--ask-for-approval", codexApprovalPolicy(for: request.run.permissionMode),
             "exec",
             "--json",
             "--color", "never",
@@ -193,6 +200,15 @@ public enum NativeAgentCommandBuilder {
             return "workspace-write"
         case .autopilot:
             return "danger-full-access"
+        }
+    }
+
+    private static func codexApprovalPolicy(for mode: PermissionMode) -> String {
+        switch mode {
+        case .readOnly, .autopilot:
+            return "never"
+        case .askBeforeEdit:
+            return "on-request"
         }
     }
 

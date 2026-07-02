@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import type { Bot, ChatId, Agent, SessionInfo, SessionRuntime, ChatState, StreamResult } from './bot.js';
 import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
 import {
-  getProjectSkillPaths, normalizeClaudeModelId, sessionListDisplayTitle,
+  normalizeClaudeModelId, resolveSkillDefinitionFile, sessionListDisplayTitle,
   listAllMcpExtensions, listSkills as listAllSkills,
   getDriverCapabilities, readSessionPlan, writeSessionPlan, clearSessionPlan,
   createSessionPlanView,
@@ -739,11 +739,6 @@ export function getHostDataSync(bot: Bot): HostData {
 
 export { SKILL_CMD_PREFIX, indexSkillsByCommand };
 
-function relSkillPath(workdir: string, filePath: string): string {
-  const relative = path.relative(workdir, filePath).replace(/\\/g, '/');
-  return relative && !relative.startsWith('..') ? relative : filePath;
-}
-
 export function resolveSkillPrompt(bot: Bot, chatId: ChatId, cmd: string, args: string): { prompt: string; skillName: string } | null {
   const wd = bot.chatWorkdir(chatId);
   const skills = bot.fetchSkills(wd).skills;
@@ -752,15 +747,8 @@ export function resolveSkillPrompt(bot: Bot, chatId: ChatId, cmd: string, args: 
   const extra = args.trim();
   const suffix = extra ? ` Additional context: ${extra}` : '';
   const workdirHint = `[Project directory: ${wd}]\n\n`;
-  let prompt: string;
-  const paths = getProjectSkillPaths(wd, skill.name);
-  const skillFile = paths.claudeSkillFile || paths.sharedSkillFile || paths.agentsSkillFile;
-  if (skillFile) {
-    prompt = `${workdirHint}Read the skill definition at \`${skillFile}\` and execute the instructions defined there.${suffix}`;
-  } else {
-    const fallbackPath = `${wd}/.pikiclaw/skills/${skill.name}/SKILL.md`;
-    prompt = `${workdirHint}Read the skill definition at \`${fallbackPath}\` and execute the instructions defined there.${suffix}`;
-  }
+  const skillFile = resolveSkillDefinitionFile(wd, skill);
+  const prompt = `${workdirHint}Read the skill definition at \`${skillFile}\` and execute the instructions defined there.${suffix}`;
   return { prompt, skillName: skill.name };
 }
 

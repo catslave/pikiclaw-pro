@@ -278,6 +278,18 @@ export function getProjectSkillPaths(workdir: string, skillName: string): Projec
   };
 }
 
+export function resolveSkillDefinitionFile(
+  workdir: string,
+  skill: Pick<SkillInfo, 'name' | 'path'>,
+): string {
+  const paths = getProjectSkillPaths(workdir, skill.name);
+  return paths.claudeSkillFile
+    || paths.sharedSkillFile
+    || paths.agentsSkillFile
+    || skill.path
+    || path.join(workdir, '.pikiclaw', 'skills', skill.name, 'SKILL.md');
+}
+
 // Matches the canonical prompt produced by `resolveSkillPrompt` (bot/commands)
 // and `resolveSkillFromPrompt` (dashboard/session-control). Both build the same
 // shape: `[Project directory: <wd>]\n\nRead the skill definition at \`<path>\`

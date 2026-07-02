@@ -5,26 +5,26 @@ import Testing
 @testable import PikiclawRunner
 
 @MainActor
-@Test func nativeModelMarksPersistedActiveVoiceRunsStaleOnLaunch() async throws {
+@Test func nativeModelRecoversPersistedActiveVoiceRunsOnLaunch() async throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("pikiclaw-voice-stale-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("pikiclaw-voice-recover-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
 
     let workspace = Workspace(
-        id: "workspace-voice-stale",
-        name: "Voice Stale",
+        id: "workspace-voice-recover",
+        name: "Voice Recover",
         pathDisplay: dir.path,
         trustState: .trusted
     )
     let codex = AgentProfile(
-        id: "agent-codex-stale",
+        id: "agent-codex-recover",
         kind: .codex,
         displayName: "Codex",
         executableName: "codex",
         isEnabled: true
     )
-    let staleCandidate = AgentRun(
+    let interruptedRun = AgentRun(
         id: "run-voice-orphan",
         workspaceId: workspace.id,
         agentProfileId: codex.id,
@@ -37,7 +37,7 @@ import Testing
         projects: [],
         workspaces: [workspace],
         workItems: [],
-        runs: [staleCandidate],
+        runs: [interruptedRun],
         artifacts: [],
         capabilities: [],
         knowledgeCards: [],
@@ -46,15 +46,30 @@ import Testing
         providerProfiles: []
     )
     let store = JSONNativeStore(fileURL: dir.appendingPathComponent("state.json"), seed: seed)
-    let model = NativeAppModel(store: store)
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            MockAgentAdapter(descriptor: descriptor, output: ["Recovered voice request.\n"])
+        },
+        recoversPersistedRunsOnLaunch: true
+    )
 
-    await model.reload()
+    var snapshot = try await store.loadSnapshot()
+    for _ in 0..<50 {
+        snapshot = try await store.loadSnapshot()
+        if snapshot.runs.first(where: { $0.id == interruptedRun.id })?.state == .completed,
+           model.restartBlockedByActiveRun == false {
+            break
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
 
-    let snapshot = try await store.loadSnapshot()
-    let recoveredRun = try #require(snapshot.runs.first(where: { $0.id == staleCandidate.id }))
-    #expect(recoveredRun.state == .stale)
+    let recoveredRun = try #require(snapshot.runs.first(where: { $0.id == interruptedRun.id }))
+    #expect(recoveredRun.state == .completed)
     #expect(recoveredRun.endedAt != nil)
-    #expect(recoveredRun.transcript.contains("Marked stale because Pikiclaw restarted"))
+    #expect(recoveredRun.transcript.contains("Recovering after Pikiclaw restarted"))
+    #expect(recoveredRun.transcript.contains("Recovered voice request."))
+    #expect(!recoveredRun.transcript.contains("Marked stale because Pikiclaw restarted"))
     #expect(model.restartBlockedByActiveRun == false)
 }
 

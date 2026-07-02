@@ -128,13 +128,37 @@ enum NativeRoute: String, CaseIterable, Identifiable {
 }
 
 let nativeInitialRouteEnvironmentKey = "PIKICLAW_MAC_NATIVE_START_ROUTE"
+let nativeLastRouteStorageKey = "pikiclaw.native.lastRoute.v1"
+let nativeLastWorkspaceIdStorageKey = "pikiclaw.native.lastWorkspaceId.v1"
+let nativeLastWorkItemIdStorageKey = "pikiclaw.native.lastWorkItemId.v1"
 
-func nativeInitialRoute(environment: [String: String] = ProcessInfo.processInfo.environment) -> NativeRoute {
+func nativeInitialRoute(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    persistedRoute: String? = nil
+) -> NativeRoute {
     guard let rawRoute = environment[nativeInitialRouteEnvironmentKey],
           let route = NativeRoute.matching(rawRoute) else {
-        return .chat
+        return persistedRoute.flatMap(NativeRoute.matching) ?? .chat
     }
     return route
+}
+
+func nativeInitialRouteFromStorage(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    userDefaults: UserDefaults = .standard
+) -> NativeRoute {
+    nativeInitialRoute(
+        environment: environment,
+        persistedRoute: userDefaults.string(forKey: nativeLastRouteStorageKey)
+    )
+}
+
+func nativeInitialEntityID(_ rawValue: String?) -> EntityID? {
+    guard let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !trimmed.isEmpty else {
+        return nil
+    }
+    return EntityID(trimmed)
 }
 
 func nativeDeferredRouteCommitTarget(requested: NativeRoute, dockRoute: NativeRoute) -> NativeRoute? {
@@ -174,17 +198,21 @@ private let composerPasteCommandTypes: [UTType] = [
 
 struct RootView: View {
     @AppStorage(PKThemePreference.storageKey) private var themePreferenceRaw = PKThemePreference.dark.rawValue
-    @StateObject private var model = NativeAppModel()
-    @State private var route: NativeRoute = nativeInitialRoute()
-    @State private var dockRoute: NativeRoute = nativeInitialRoute()
-    @State private var selectedWorkspaceId: EntityID? = "workspace-pikiclaw"
-    @State private var selectedWorkItemId: EntityID? = "workitem-native-v2"
+    @AppStorage(nativeLastRouteStorageKey) private var persistedRouteRaw = ""
+    @AppStorage(nativeLastWorkspaceIdStorageKey) private var persistedWorkspaceIdRaw = ""
+    @AppStorage(nativeLastWorkItemIdStorageKey) private var persistedWorkItemIdRaw = ""
+    @StateObject private var model = NativeAppModel(recoversPersistedRunsOnLaunch: true)
+    @State private var route: NativeRoute = nativeInitialRouteFromStorage()
+    @State private var dockRoute: NativeRoute = nativeInitialRouteFromStorage()
+    @State private var selectedWorkspaceId: EntityID? = nativeInitialEntityID(UserDefaults.standard.string(forKey: nativeLastWorkspaceIdStorageKey))
+    @State private var selectedWorkItemId: EntityID? = nativeInitialEntityID(UserDefaults.standard.string(forKey: nativeLastWorkItemIdStorageKey))
     @State private var detailTab: DetailTab = .activity
     @State private var commandQuery = ""
     @State private var assistantDockOpen = false
     @State private var voiceOverlayOpen = false
     @State private var voiceOverlayAutoStart = false
     @State private var agentChatHistoryMode = false
+    @State private var isComposingNewChat = false
     @State private var jiraQueueFocused = false
     @State private var focusedMissionLaneLabel: String?
     @State private var focusedGeneratedUIAction: GeneratedUIActionFocus?
@@ -210,6 +238,9 @@ struct RootView: View {
     var body: some View {
         rootContent
             .preferredColorScheme(themePreference.colorScheme)
+            .task {
+                await stalledRunRecoveryLoop()
+            }
             .onReceive(NotificationCenter.default.publisher(for: .pikiclawNewChat)) { _ in
                 openNewChat()
             }
@@ -287,6 +318,15 @@ struct RootView: View {
                     }
                 )
             )
+            .onChange(of: route) { _, next in
+                persistedRouteRaw = next.rawValue
+            }
+            .onChange(of: selectedWorkspaceId) { _, next in
+                persistedWorkspaceIdRaw = next?.rawValue ?? ""
+            }
+            .onChange(of: selectedWorkItemId) { _, next in
+                persistedWorkItemIdRaw = next?.rawValue ?? ""
+            }
     }
 
     private var rootContent: AnyView {
@@ -303,8 +343,8 @@ struct RootView: View {
                         isRunning: model.isRunning,
                         open: { openVoiceAssistant(autoStart: true) }
                     )
-                    .padding(.trailing, 22)
-                    .padding(.bottom, 22)
+                    .padding(.trailing, 0)
+                    .padding(.bottom, 96)
                     .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
                 }
             }
@@ -394,6 +434,7 @@ struct RootView: View {
         focusedGeneratedUIAction = nil
         model.selectedAgentKind = kind
         setRouteResponsively(.chat)
+        isComposingNewChat = true
         model.prepareNewChat()
         Task { await model.refreshBranches(for: selectedWorkspace) }
         commandFocused = true
@@ -412,6 +453,7 @@ struct RootView: View {
                 assistantDockOpen: $assistantDockOpen,
                 model: model,
                 showsAgentHistory: agentChatHistoryMode,
+                isComposingNewChat: $isComposingNewChat,
                 focusedGeneratedUIAction: $focusedGeneratedUIAction,
                 navigate: navigate
             )
@@ -676,10 +718,22 @@ struct RootView: View {
         setRouteImmediately(.chat)
         jiraQueueFocused = false
         agentChatHistoryMode = false
+        isComposingNewChat = true
         focusedGeneratedUIAction = nil
         model.prepareNewChat()
         Task<Void, Never> { await model.refreshBranches(for: selectedWorkspace) }
         commandFocused = true
+    }
+
+    private func stalledRunRecoveryLoop() async {
+        while !Task.isCancelled {
+            await model.reconcileStalledActiveRuns()
+            do {
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+            } catch {
+                return
+            }
+        }
     }
 
     private func openVoiceAssistant(autoStart: Bool = true) {
@@ -1150,16 +1204,16 @@ private struct ProjectDockTile: View {
                         .lineLimit(1)
                 }
                 .frame(width: 54, height: 52)
-                .foregroundStyle(isJiraSelected ? PKTheme.primaryText : isSyncingJira ? PKTheme.ok : jiraCount > 0 ? PKTheme.primary : PKTheme.text3)
-                .background(isJiraSelected ? PKTheme.primary : PKTheme.panel.opacity(0.46))
+                .foregroundStyle(isJiraSelected ? PKTheme.jiraText : isSyncingJira ? PKTheme.ok : jiraCount > 0 ? PKTheme.jira : PKTheme.text3)
+                .background(isJiraSelected ? PKTheme.jira : PKTheme.panel.opacity(0.46))
                 .overlay(
                     RoundedRectangle(cornerRadius: 11)
-                        .stroke(isJiraSelected ? PKTheme.primary.opacity(0.95) : isSyncingJira ? PKTheme.ok.opacity(0.42) : jiraCount > 0 ? PKTheme.primary.opacity(0.34) : PKTheme.edge, lineWidth: 1)
+                        .stroke(isJiraSelected ? PKTheme.jira.opacity(0.95) : isSyncingJira ? PKTheme.ok.opacity(0.42) : jiraCount > 0 ? PKTheme.jira.opacity(0.42) : PKTheme.edge, lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 11))
                 .overlay(alignment: .topTrailing) {
                     if jiraCount > 0 {
-                        DockBadge(text: jiraCount > 9 ? "9+" : "\(jiraCount)", color: PKTheme.primary)
+                        DockBadge(text: jiraCount > 9 ? "9+" : "\(jiraCount)", color: PKTheme.jira)
                             .offset(x: 7, y: -6)
                     }
                 }
@@ -1171,7 +1225,7 @@ private struct ProjectDockTile: View {
                     NotificationCenter.default.post(name: .pikiclawSyncJiraCurrentSprint, object: nil)
                 }
             }
-            .dockHoverLift(accent: isSyncingJira ? PKTheme.ok : PKTheme.primary, cornerRadius: 11, isActive: isJiraSelected || isSyncingJira || jiraCount > 0)
+            .dockHoverLift(accent: isSyncingJira ? PKTheme.ok : PKTheme.jira, cornerRadius: 11, isActive: isJiraSelected || isSyncingJira || jiraCount > 0)
             .help(isSyncingJira ? "Syncing Jira current sprint" : jiraCount > 0 ? "\(jiraCount) Jira ticket(s)" : "Open Jira")
         }
     }
@@ -1194,24 +1248,47 @@ private struct VoiceLensLauncher: View {
         isHovering || isRunning || runState == .waitingForUser
     }
 
+    private var isExpanded: Bool {
+        isHovering
+    }
+
     var body: some View {
         Button(action: open) {
-            ZStack {
-                VoiceLauncherBloom(color: tint, isLive: isAttending, isHovering: isHovering)
-                    .frame(width: 74, height: 74)
+            ZStack(alignment: .trailing) {
+                if isExpanded {
+                    ZStack {
+                        VoiceLauncherBloom(color: tint, isLive: isAttending, isHovering: isHovering)
+                            .frame(width: 74, height: 74)
 
-                Circle()
-                    .stroke(Color.white.opacity(isHovering ? 0.30 : 0.18), lineWidth: 1)
-                    .frame(width: 58, height: 58)
+                        Circle()
+                            .stroke(Color.white.opacity(isHovering ? 0.30 : 0.18), lineWidth: 1)
+                            .frame(width: 58, height: 58)
 
-                Image(systemName: isRunning ? "waveform.path.ecg" : "waveform")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.94))
-                    .shadow(color: tint.opacity(0.60), radius: 9, y: 3)
+                        Image(systemName: isRunning ? "waveform.path.ecg" : "waveform")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.94))
+                            .shadow(color: tint.opacity(0.60), radius: 9, y: 3)
+                    }
+                    .frame(width: 78, height: 78)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                } else {
+                    Capsule()
+                        .fill(tint.opacity(0.30))
+                        .frame(width: 18, height: 58)
+                        .overlay(alignment: .leading) {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(Color.white.opacity(0.78))
+                                .offset(x: 4)
+                        }
+                        .overlay(Capsule().stroke(tint.opacity(0.50), lineWidth: 1))
+                        .shadow(color: tint.opacity(0.18), radius: 10, y: 6)
+                        .transition(.opacity)
+                }
             }
-            .frame(width: 78, height: 78)
-            .contentShape(Circle())
-            .scaleEffect(isHovering ? 1.06 : 1)
+            .frame(width: isExpanded ? 92 : 24, height: 86, alignment: .trailing)
+            .contentShape(Rectangle())
+            .scaleEffect(isExpanded && isHovering ? 1.04 : 1)
             .shadow(color: tint.opacity(isAttending ? 0.42 : 0.24), radius: isAttending ? 26 : 18, y: 12)
         }
         .buttonStyle(.plain)
@@ -1527,6 +1604,7 @@ private struct ChatHomeView: View {
     @Binding var assistantDockOpen: Bool
     @ObservedObject var model: NativeAppModel
     let showsAgentHistory: Bool
+    @Binding var isComposingNewChat: Bool
     @Binding var focusedGeneratedUIAction: GeneratedUIActionFocus?
     let navigate: (NativeRoute) -> Void
     @AppStorage("PikiclawMac.chatHistoryVisible") private var chatHistoryVisible = true
@@ -1540,13 +1618,22 @@ private struct ChatHomeView: View {
         snapshot.workspaces.first(where: { $0.id == selectedWorkspaceId }) ?? snapshot.workspaces.first
     }
 
-    private var activeRun: AgentRun? {
+    private var activeRunFromModel: AgentRun? {
         guard let activeRunId = model.activeRunId else { return nil }
         return snapshot.runs.first(where: { $0.id == activeRunId })
     }
 
     private var selectedWorkItem: WorkItem? {
         snapshot.workItems.first(where: { $0.id == selectedWorkItemId })
+    }
+
+    private var activeRun: AgentRun? {
+        nativeEffectiveActiveRun(
+            activeRun: activeRunFromModel,
+            selectedWorkItem: selectedWorkItem,
+            runs: snapshot.runs,
+            prefersExplicitActiveRun: !temporaryPaneRunIds.isEmpty
+        )
     }
 
     var body: some View {
@@ -1612,7 +1699,7 @@ private struct ChatHomeView: View {
 
     @ViewBuilder
     private var workspaceContent: some View {
-        if model.activeRunId != nil {
+        if !isComposingNewChat && activeRun != nil {
             NativeMultiChatWorkspace(
                 activeRun: activeRun,
                 snapshot: snapshot,
@@ -1667,6 +1754,7 @@ private struct ChatHomeView: View {
 
     private func selectHistoryRun(_ run: AgentRun) {
         resetTemporaryPanes()
+        isComposingNewChat = false
         model.activeRunId = run.id
         focusedGeneratedUIAction = nil
         focusedSideRunId = nil
@@ -1677,6 +1765,7 @@ private struct ChatHomeView: View {
 
     private func selectHistorySideRun(_ parent: AgentRun, _ child: AgentRun) {
         resetTemporaryPanes()
+        isComposingNewChat = false
         model.activeRunId = parent.id
         focusedGeneratedUIAction = nil
         focusedSideRunId = child.id
@@ -1689,6 +1778,7 @@ private struct ChatHomeView: View {
 
     private func startNewChatFromChatHome() {
         resetTemporaryPanes()
+        isComposingNewChat = true
         model.prepareNewChat()
         focusedGeneratedUIAction = nil
         focusedSideRunId = nil
@@ -1791,9 +1881,15 @@ private struct ChatHomeView: View {
             if let runId = await model.startChat(
                 workspaceId: selectedWorkspaceId,
                 targetWorkItemId: selectedWorkItemId
-            ),
-               let run = model.snapshot.runs.first(where: { $0.id == runId }) {
-                selectedWorkItemId = run.workItemId
+            ) {
+                isComposingNewChat = false
+                focusedGeneratedUIAction = nil
+                focusedSideRunId = nil
+                model.activeRunId = runId
+                if let run = model.snapshot.runs.first(where: { $0.id == runId }) {
+                    selectedWorkspaceId = run.workspaceId
+                    selectedWorkItemId = run.workItemId
+                }
             }
         }
     }
@@ -1853,6 +1949,7 @@ private struct ChatHomeView: View {
 
     private func openTemporaryPane(_ run: AgentRun) {
         focusedGeneratedUIAction = nil
+        isComposingNewChat = false
         guard let activeRun = activeRun else {
             model.activeRunId = run.id
             selectedWorkspaceId = run.workspaceId
@@ -1933,6 +2030,10 @@ private struct NativeMultiChatWorkspace: View {
     let focusTemporaryPane: (AgentRun) -> Void
     let closeTemporaryPane: (AgentRun) -> Void
     let openWorkItem: () -> Void
+    @State private var sessionSideChatOpen = false
+    @State private var sessionSideChatDraft = ""
+    @State private var sessionSideChatStarting = false
+    @State private var sessionSideChatWidth: CGFloat = nativeSessionSideChatDefaultWidth
 
     private var parentRun: AgentRun? {
         guard let activeRun else { return nil }
@@ -1975,15 +2076,58 @@ private struct NativeMultiChatWorkspace: View {
     }
 
     private var showsAddSideChatTile: Bool {
-        !panes.contains { $0.role == .temporary } && panes.count < nativeMaxVisibleChatPanes
+        nativeShouldShowAddSideChatTile(
+            paneCount: panes.count,
+            hasTemporaryPane: panes.contains { $0.role == .temporary }
+        )
     }
 
     var body: some View {
-        if panes.count <= 1 {
-            singlePaneWorkspace
-        } else {
-            multiPaneWorkspace
+        HStack(spacing: 0) {
+            Group {
+                if panes.count <= 1 {
+                    singlePaneWorkspace
+                } else {
+                    multiPaneWorkspace
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if sessionSideChatOpen, let parentRun {
+                NativeResizableSplitDivider(
+                    accent: agentTint(agentKind(for: parentRun, snapshot: snapshot)),
+                    width: $sessionSideChatWidth
+                )
+                .transition(.opacity)
+
+                SessionSideChatDraftPanel(
+                    parentRun: parentRun,
+                    workspace: workspace,
+                    sideRuns: sideRuns,
+                    selectedSideRunId: nativeEffectiveFocusedSideRunId(
+                        activeRun: activeRun,
+                        focusedSideRunId: focusedSideRunId
+                    ),
+                    accent: agentTint(agentKind(for: parentRun, snapshot: snapshot)),
+                    draft: $sessionSideChatDraft,
+                    isStarting: sessionSideChatStarting,
+                    selectSideChat: { child in
+                        focusSessionSideChat(parent: parentRun, child: child)
+                    },
+                    newDraft: {
+                        sessionSideChatDraft = ""
+                    },
+                    close: closeSessionSideChatDraft,
+                    send: { sendSessionSideChat(parent: parentRun) }
+                )
+                .frame(width: sessionSideChatWidth)
+                .padding(.vertical, 18)
+                .padding(.trailing, 18)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(10)
+            }
         }
+        .animation(.interactiveSpring(response: 0.26, dampingFraction: 0.88), value: sessionSideChatOpen)
     }
 
     private var singlePaneWorkspace: some View {
@@ -1998,6 +2142,7 @@ private struct NativeMultiChatWorkspace: View {
             immersive: true,
             fullBleed: true,
             newChat: newChat,
+            newSessionSideChat: parentRun.map { _ in { openSessionSideChatDraft() } },
             newSideChat: parentRun.map { parent in { addInlineSideChat(parent) } },
             startFollowUpSideChat: { parent, action in
                 startFollowUpSideChat(parent: parent, action: action)
@@ -2059,7 +2204,8 @@ private struct NativeMultiChatWorkspace: View {
             immersive: true,
             paneLabel: paneLabel(for: pane),
             newChat: newChat,
-            newSideChat: nil,
+            newSessionSideChat: pane.role == .primary ? { openSessionSideChatDraft() } : nil,
+            newSideChat: pane.role == .primary && panes.count < nativeMaxVisibleChatPanes ? { addInlineSideChat(run) } : nil,
             startFollowUpSideChat: { parent, action in
                 startFollowUpSideChat(parent: parent, action: action)
             },
@@ -2179,12 +2325,376 @@ private struct NativeMultiChatWorkspace: View {
         }
     }
 
+    private func focusSessionSideChat(parent: AgentRun, child: AgentRun) {
+        focusedTemporaryPaneRunId = nil
+        focusedSideRunId = child.id
+        hiddenSideRunIds.remove(child.id)
+        trimVisibleFollowUpSideRuns(parentId: parent.id, keeping: child.id)
+        selectedWorkspaceId = child.workspaceId
+        selectedWorkItemId = child.workItemId
+        Task { await model.markChatRead(runId: child.id) }
+    }
+
+    private func openSessionSideChatDraft() {
+        sessionSideChatDraft = ""
+        withAnimation(.interactiveSpring(response: 0.26, dampingFraction: 0.88)) {
+            sessionSideChatOpen = true
+        }
+    }
+
+    private func closeSessionSideChatDraft() {
+        guard !sessionSideChatStarting else { return }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            sessionSideChatOpen = false
+        }
+        sessionSideChatDraft = ""
+    }
+
+    private func sendSessionSideChat(parent: AgentRun) {
+        let prompt = sessionSideChatDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !sessionSideChatStarting else { return }
+        sessionSideChatStarting = true
+        Task {
+            let childId = await model.startFollowUpSideChat(
+                parentRunId: parent.id,
+                prompt: prompt,
+                permissionMode: parent.permissionMode,
+                followUpLabel: "Session side chat"
+            )
+            await MainActor.run {
+                sessionSideChatStarting = false
+                if let childId {
+                    if let child = model.snapshot.runs.first(where: { $0.id == childId }) {
+                        focusSessionSideChat(parent: parent, child: child)
+                    }
+                    sessionSideChatDraft = ""
+                }
+            }
+        }
+    }
+
+}
+
+private struct SessionSideChatDraftPanel: View {
+    let parentRun: AgentRun
+    let workspace: Workspace?
+    let sideRuns: [AgentRun]
+    let selectedSideRunId: EntityID?
+    let accent: Color
+    @Binding var draft: String
+    let isStarting: Bool
+    let selectSideChat: (AgentRun) -> Void
+    let newDraft: () -> Void
+    let close: () -> Void
+    let send: () -> Void
+    @FocusState private var focused: Bool
+
+    private var trimmedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSend: Bool {
+        !isStarting && !trimmedDraft.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+
+            contextCard
+                .padding(.horizontal, 16)
+                .padding(.bottom, 14)
+
+            sideChatList
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 16)
+
+            bottomComposer
+                .padding(16)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(
+            LinearGradient(
+                colors: [
+                    PKTheme.panel.opacity(0.96),
+                    PKTheme.surface.opacity(0.94),
+                    accent.opacity(0.10)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(accent.opacity(0.30), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: Color.black.opacity(0.30), radius: 28, y: 18)
+        .onAppear {
+            focused = true
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 11) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 36, height: 36)
+                .background(accent)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Side Chats")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                Text(parentRun.promptSnapshot.firstLineFallback("Current session"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HeaderIconButton(symbol: "xmark", title: "Close Side Chats", action: close)
+        }
+    }
+
+    private var contextCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(workspace?.name ?? "Current workspace", systemImage: "folder")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Text("Create a focused side chat with this session attached, or switch between existing side chats.")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(PKTheme.text3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(accent.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(accent.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+
+    private var sideChatList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("Chats")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+                    .textCase(.uppercase)
+                Text("\(sideRuns.count)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+                    .padding(.horizontal, 7)
+                    .frame(height: 22)
+                    .background(PKTheme.control.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                Spacer(minLength: 0)
+                Button(action: {
+                    newDraft()
+                    focused = true
+                }) {
+                    Label("New", systemImage: "plus")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(accent)
+                        .padding(.horizontal, 9)
+                        .frame(height: 28)
+                        .background(accent.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Create another side chat")
+            }
+
+            if sideRuns.isEmpty {
+                EmptyMiniState(title: "No side chats yet", subtitle: "Ask below to create the first one.")
+                    .padding(.top, 2)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(sideRuns) { run in
+                            SessionSideChatListRow(
+                                run: run,
+                                accent: accent,
+                                selected: selectedSideRunId == run.id,
+                                action: { selectSideChat(run) }
+                            )
+                        }
+                    }
+                    .padding(.bottom, 8)
+                }
+            }
+        }
+    }
+
+    private var bottomComposer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                if trimmedDraft.isEmpty {
+                    Text("Ask a side question...")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(PKTheme.text4)
+                        .padding(.top, 13)
+                        .padding(.leading, 12)
+                        .allowsHitTesting(false)
+                }
+                NativeSendingTextEditor(
+                    text: $draft,
+                    focused: $focused,
+                    fontSize: 13,
+                    lineSpacing: 2,
+                    textContainerInset: NSSize(width: 0, height: 5),
+                    onSend: {
+                        if canSend {
+                            send()
+                        }
+                    }
+                )
+                .padding(10)
+            }
+            .frame(minHeight: 86, maxHeight: 120)
+            .background(PKTheme.panel.opacity(0.72))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(focused ? accent.opacity(0.62) : PKTheme.edgeStrong.opacity(0.42), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            HStack(spacing: 10) {
+                Button("Close", action: close)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text3)
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .background(PKTheme.control.opacity(0.72))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .disabled(isStarting)
+
+                Spacer(minLength: 0)
+
+                Button(action: send) {
+                    Label(isStarting ? "Starting" : "Start Side Chat", systemImage: isStarting ? "hourglass" : "arrow.up.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
+                        .padding(.horizontal, 13)
+                        .frame(height: 34)
+                        .background(canSend ? accent : PKTheme.control.opacity(0.78))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("Create a side chat from the current session")
+            }
+        }
+    }
+}
+
+private struct SessionSideChatListRow: View {
+    let run: AgentRun
+    let accent: Color
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: selected ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(selected ? PKTheme.primaryText : accent)
+                    .frame(width: 30, height: 30)
+                    .background(selected ? accent : accent.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        Text(sideChatPaneLabel(for: run))
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(selected ? accent : PKTheme.text)
+                            .lineLimit(1)
+                        StatusPill(text: run.state.rawValue, color: runStateColor(run.state))
+                    }
+                    Text(run.promptSnapshot.firstLineFallback("Side chat"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(accent)
+                        .padding(.top, 3)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? accent.opacity(0.13) : PKTheme.panel.opacity(0.42))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? accent.opacity(0.48) : PKTheme.edge.opacity(0.58), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .help("Open this side chat")
+    }
+}
+
+private struct NativeResizableSplitDivider: View {
+    let accent: Color
+    @Binding var width: CGFloat
+    @State private var isHovering = false
+    @State private var dragStartWidth: CGFloat?
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 12)
+            .overlay {
+                Rectangle()
+                    .fill(isHovering ? accent.opacity(0.68) : PKTheme.edge.opacity(0.92))
+                    .frame(width: isHovering ? 2 : 1)
+                    .shadow(color: isHovering ? accent.opacity(0.24) : .clear, radius: 8)
+            }
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                isHovering = hovering
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let start = dragStartWidth ?? width
+                        dragStartWidth = start
+                        width = nativeClampedSessionSideChatWidth(start - value.translation.width)
+                    }
+                    .onEnded { _ in
+                        dragStartWidth = nil
+                    }
+            )
+            .help("Drag to resize side chat")
+    }
 }
 
 private let nativeMaxVisibleChatPanes = 4
 private let nativeMaxVisibleSidePanes = nativeMaxVisibleChatPanes - 1
 private let nativeMaxMultiChatPanesPerScreen = 4
 private let nativeMultiChatGridSpacing: CGFloat = 12
+private let nativeFullscreenConversationContentMaxWidth: CGFloat = 1180
+private let nativeSessionSideChatDefaultWidth: CGFloat = 380
+private let nativeSessionSideChatMinWidth: CGFloat = 320
+private let nativeSessionSideChatMaxWidth: CGFloat = 560
+
+private func nativeClampedSessionSideChatWidth(_ width: CGFloat) -> CGFloat {
+    min(max(width, nativeSessionSideChatMinWidth), nativeSessionSideChatMaxWidth)
+}
 
 enum NativeMultiChatPaneRole: Equatable {
     case primary
@@ -2205,6 +2715,10 @@ func nativeMultiChatGridColumnCount(for paneCount: Int) -> Int {
 
 func nativeMultiChatGridRowsPerScreen(for paneCount: Int) -> Int {
     paneCount <= 2 ? 1 : 2
+}
+
+func nativeShouldShowAddSideChatTile(paneCount: Int, hasTemporaryPane: Bool) -> Bool {
+    !hasTemporaryPane && paneCount >= 3 && paneCount < nativeMaxVisibleChatPanes
 }
 
 func nativeMultiChatPaneHeight(containerHeight: CGFloat, paneCount: Int, spacing: CGFloat = nativeMultiChatGridSpacing) -> CGFloat {
@@ -2228,6 +2742,39 @@ func nativeEffectiveFocusedSideRunId(activeRun: AgentRun?, focusedSideRunId: Ent
         return nil
     }
     return activeRun?.id
+}
+
+func nativeEffectiveActiveRun(
+    activeRun: AgentRun?,
+    selectedWorkItem: WorkItem?,
+    runs: [AgentRun],
+    prefersExplicitActiveRun: Bool = false
+) -> AgentRun? {
+    if prefersExplicitActiveRun, let activeRun {
+        return activeRun
+    }
+
+    guard let selectedWorkItem else {
+        return activeRun
+    }
+
+    if let activeRun, activeRun.workItemId == selectedWorkItem.id {
+        return activeRun
+    }
+
+    if let currentRunId = selectedWorkItem.currentRunId,
+       let currentRun = runs.first(where: { $0.id == currentRunId }) {
+        return currentRun
+    }
+
+    let workItemRuns = runs.filter { $0.workItemId == selectedWorkItem.id }
+    return workItemRuns.max { left, right in
+        nativeRunActivityDate(left) < nativeRunActivityDate(right)
+    } ?? activeRun
+}
+
+private func nativeRunActivityDate(_ run: AgentRun) -> Date {
+    run.lastActivityAt ?? run.endedAt ?? run.startedAt ?? .distantPast
 }
 
 func nativeVisibleMultiChatRuns(
@@ -2804,41 +3351,32 @@ private struct ChatHistoryGroupRow: View {
         let childSelected = selectedChildId == child.id
         let childHovering = hoveredChildId == child.id
         let childVisible = visibleChildIds.contains(child.id)
-        return HStack(spacing: 7) {
-            Image(systemName: "text.bubble")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(childSelected || childVisible || childHovering ? PKTheme.primary : PKTheme.primary.opacity(0.72))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(child.promptSnapshot.firstLineFallback("Side chat"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(childSelected || childVisible || childHovering ? PKTheme.text : PKTheme.text2)
-                    .lineLimit(1)
-                Text(child.state.rawValue)
-                    .font(.caption2)
-                    .foregroundStyle(PKTheme.text3)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if child.isCompletedUnread {
-                StatusPill(text: "unread", color: PKTheme.primary)
-            }
-            if childVisible {
-                Image(systemName: "rectangle.split.2x1")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(PKTheme.primary.opacity(childSelected ? 0.96 : 0.82))
-                    .frame(width: 22, height: 20)
-                    .background(PKTheme.primary.opacity(0.10))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.primary.opacity(0.20), lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .help("Shown in layout")
-            }
-            RowIconButton(symbol: "arrow.up.right.square", help: "Detach Chat") {
-                detachSideChat(child, true)
-            }
-        }
+        let isActive = childSelected || childVisible || childHovering
+        let iconColor = isActive ? PKTheme.primary : PKTheme.primary.opacity(0.72)
+        let titleColor = isActive ? PKTheme.text : PKTheme.text2
+        let backgroundColor = childRowBackgroundColor(
+            selected: childSelected,
+            visible: childVisible,
+            hovering: childHovering
+        )
+        let borderColor = childRowBorderColor(
+            selected: childSelected,
+            visible: childVisible,
+            hovering: childHovering
+        )
+        return ChatHistoryChildRowContent(
+            child: child,
+            iconColor: iconColor,
+            titleColor: titleColor,
+            isVisibleInLayout: childVisible,
+            showsControls: childHovering || childSelected || childVisible,
+            isSelected: childSelected,
+            detach: { detachSideChat(child, true) },
+            delete: { delete(child) }
+        )
         .padding(7)
-        .background(childSelected ? PKTheme.primary.opacity(0.13) : childVisible ? PKTheme.primary.opacity(0.07) : childHovering ? PKTheme.panelAlt.opacity(0.55) : PKTheme.panel.opacity(0.35))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(childSelected ? PKTheme.primary.opacity(0.42) : childVisible ? PKTheme.primary.opacity(0.26) : childHovering ? PKTheme.primary.opacity(0.24) : PKTheme.edge.opacity(0.65), lineWidth: 1))
+        .background(backgroundColor)
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(borderColor, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .shadow(color: childHovering ? PKTheme.primary.opacity(0.08) : Color.clear, radius: childHovering ? 8 : 0, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 7))
@@ -2851,11 +3389,106 @@ private struct ChatHistoryGroupRow: View {
             }
         }
         .onDrag { nativeRunDragProvider(child.id) }
+        .contextMenu {
+            Button("Detach Chat", systemImage: "arrow.up.right.square") { detachSideChat(child, true) }
+            Button("Open in New Window", systemImage: "rectangle.on.rectangle") { openInNewWindow(child) }
+            Button("Delete Side Chat", systemImage: "trash", role: .destructive) { delete(child) }
+        }
         .animation(.easeInOut(duration: 0.14), value: childSelected)
+    }
+
+    private func childRowBackgroundColor(selected: Bool, visible: Bool, hovering: Bool) -> Color {
+        if selected { return PKTheme.primary.opacity(0.13) }
+        if visible { return PKTheme.primary.opacity(0.07) }
+        if hovering { return PKTheme.panelAlt.opacity(0.55) }
+        return PKTheme.panel.opacity(0.35)
+    }
+
+    private func childRowBorderColor(selected: Bool, visible: Bool, hovering: Bool) -> Color {
+        if selected { return PKTheme.primary.opacity(0.42) }
+        if visible { return PKTheme.primary.opacity(0.26) }
+        if hovering { return PKTheme.primary.opacity(0.24) }
+        return PKTheme.edge.opacity(0.65)
+    }
+
+    private func childVisibleLayoutBadge(selected: Bool) -> some View {
+        Image(systemName: "rectangle.split.2x1")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(PKTheme.primary.opacity(selected ? 0.96 : 0.82))
+            .frame(width: 22, height: 20)
+            .background(PKTheme.primary.opacity(0.10))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.primary.opacity(0.20), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .help("Shown in layout")
+    }
+
+    @ViewBuilder
+    private func childRowControls(_ child: AgentRun, isVisible: Bool) -> some View {
+        if isVisible {
+            RowIconButton(symbol: "arrow.up.right.square", help: "Detach Chat") {
+                detachSideChat(child, true)
+            }
+            RowIconButton(symbol: "trash", help: "Delete Side Chat", tint: PKTheme.err) {
+                delete(child)
+            }
+        }
     }
 
     private func groupSourceRun(_ runId: EntityID) -> AgentRun? {
         allRuns.first(where: { $0.id == runId })
+    }
+}
+
+private struct ChatHistoryChildRowContent: View {
+    let child: AgentRun
+    let iconColor: Color
+    let titleColor: Color
+    let isVisibleInLayout: Bool
+    let showsControls: Bool
+    let isSelected: Bool
+    let detach: () -> Void
+    let delete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(iconColor)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(child.promptSnapshot.firstLineFallback("Side chat"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(titleColor)
+                    .lineLimit(1)
+                Text(child.state.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if child.isCompletedUnread {
+                StatusPill(text: "unread", color: PKTheme.primary)
+            }
+            if isVisibleInLayout {
+                visibleLayoutBadge
+            }
+            if showsControls {
+                RowIconButton(symbol: "arrow.up.right.square", help: "Detach Chat", action: detach)
+                RowIconButton(symbol: "trash", help: "Delete Side Chat", tint: PKTheme.err, action: delete)
+            }
+        }
+    }
+
+    private var visibleLayoutBadge: some View {
+        Image(systemName: "rectangle.split.2x1")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(PKTheme.primary.opacity(isSelected ? 0.96 : 0.82))
+            .frame(width: 22, height: 20)
+            .background(PKTheme.primary.opacity(0.10))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.primary.opacity(0.20), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .help("Shown in layout")
     }
 }
 
@@ -2871,7 +3504,7 @@ private struct ChatHistoryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .top, spacing: 8) {
-                Text(run.promptSnapshot.firstLineFallback("Conversation"))
+                Text(composerPromptDisplayTitle(for: run.promptSnapshot))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(PKTheme.text)
                     .lineLimit(2)
@@ -2964,7 +3597,7 @@ private final class DetachedChatWindowRegistry {
             backing: .buffered,
             defer: false
         )
-        window.title = run.promptSnapshot.firstLineFallback("Chat")
+        window.title = composerPromptDisplayTitle(for: run.promptSnapshot, fallback: "Chat")
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 760, height: 520)
         window.contentView = NSHostingView(rootView: rootView)
@@ -2999,7 +3632,7 @@ private struct DetachedChatWindowView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(run.promptSnapshot.firstLineFallback("Chat"))
+                        Text(composerPromptDisplayTitle(for: run.promptSnapshot, fallback: "Chat"))
                             .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(PKTheme.text)
                             .lineLimit(1)
@@ -3018,7 +3651,7 @@ private struct DetachedChatWindowView: View {
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
-                        ForEach(run.messages) { message in
+                        ForEach(composerVisibleHistoryMessages(for: run)) { message in
                             ConversationHistoryMessageRow(
                                 message: message,
                                 userSubtitle: workspace?.name ?? "Project",
@@ -3029,13 +3662,13 @@ private struct DetachedChatWindowView: View {
                             .equatable()
                         }
 
-                        ConversationMessageBubble(
-                            title: "You",
-                            subtitle: workspace?.name ?? "Project",
-                            text: run.promptSnapshot,
-                            createdAt: run.startedAt,
-                            symbol: "person.crop.circle",
-                            accent: accent,
+                            ConversationMessageBubble(
+                                title: "You",
+                                subtitle: workspace?.name ?? "Project",
+                                text: run.promptSnapshot,
+                                createdAt: run.startedAt,
+                                symbol: "person.crop.circle",
+                                accent: accent,
                             trailing: true
                         )
 
@@ -3045,6 +3678,7 @@ private struct DetachedChatWindowView: View {
                             createdAt: run.endedAt ?? run.startedAt,
                             startedAt: run.startedAt,
                             endedAt: run.endedAt,
+                            lastActivityAt: run.lastActivityAt,
                             state: run.state,
                             isRunning: run.state == .running,
                             accent: accent
@@ -3107,7 +3741,7 @@ private struct NewChatLauncher: View {
     }
 
     private func launcherStageContent() -> some View {
-        VStack(spacing: 30) {
+        VStack(spacing: 24) {
             NewChatHero(
                 snapshot: snapshot,
                 selectedWorkspaceId: selectedWorkspaceId,
@@ -3115,7 +3749,11 @@ private struct NewChatLauncher: View {
                 isRunning: model.isRunning
             )
 
-            NewChatCategoryStrip(mode: .engineering) { action in
+            NewChatCategoryStrip(
+                mode: .engineering,
+                snapshot: snapshot,
+                selectedWorkspaceId: selectedWorkspaceId
+            ) { action in
                 applyPrompt(action.prompt)
             }
 
@@ -3127,7 +3765,7 @@ private struct NewChatLauncher: View {
                 placeholder: "Ask \(agentShortLabel(model.selectedAgentKind)) what you need...",
                 focused: commandFocused,
                 selectedAgentKind: model.selectedAgentKind,
-                isRunning: model.isRunning,
+                isRunning: false,
                 branchOptions: selectedWorkspace.map { model.branchOptionsByWorkspace[$0.id] ?? [] } ?? [],
                 branchStatus: selectedWorkspace.flatMap { model.branchStatusByWorkspace[$0.id] },
                 openTerminal: openTerminal,
@@ -3321,7 +3959,7 @@ private struct NewChatHero: View {
 
             VStack(spacing: 8) {
                 Text(timeGreetingTitle)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 21, weight: .semibold))
                     .foregroundStyle(accent)
                     .lineLimit(1)
 
@@ -3431,12 +4069,18 @@ private enum NewChatMode: String, CaseIterable, Identifiable {
 
 private struct NewChatCategoryStrip: View {
     let mode: NewChatMode
+    let snapshot: NativeStoreSnapshot
+    let selectedWorkspaceId: EntityID?
     let apply: (NewChatQuickAction) -> Void
+
+    private var actions: [NewChatQuickAction] {
+        quickActions(for: mode, snapshot: snapshot, selectedWorkspaceId: selectedWorkspaceId)
+    }
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 14) {
-                ForEach(quickActions(for: mode)) { action in
+                ForEach(actions) { action in
                     NewChatCategoryButton(action: action, apply: apply)
                         .frame(maxWidth: .infinity)
                 }
@@ -3445,7 +4089,7 @@ private struct NewChatCategoryStrip: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(quickActions(for: mode)) { action in
+                    ForEach(actions) { action in
                         NewChatCategoryButton(action: action, apply: apply)
                     }
                 }
@@ -3986,7 +4630,31 @@ private struct NewChatQuickAction: Identifiable {
     }
 }
 
-private func quickActions(for mode: NewChatMode) -> [NewChatQuickAction] {
+private func quickActions(
+    for mode: NewChatMode,
+    snapshot: NativeStoreSnapshot,
+    selectedWorkspaceId: EntityID?
+) -> [NewChatQuickAction] {
+    let defaults = defaultQuickActions(for: mode)
+    let dynamic = dynamicQuickActions(
+        for: mode,
+        snapshot: snapshot,
+        selectedWorkspaceId: selectedWorkspaceId
+    )
+
+    guard !dynamic.isEmpty else { return defaults }
+
+    var seen = Set<String>()
+    let merged = (dynamic + defaults).filter { action in
+        let key = action.title.lowercased()
+        guard !seen.contains(key) else { return false }
+        seen.insert(key)
+        return true
+    }
+    return Array(merged.prefix(4))
+}
+
+private func defaultQuickActions(for mode: NewChatMode) -> [NewChatQuickAction] {
     switch mode {
     case .daily:
         return [
@@ -4009,6 +4677,171 @@ private func quickActions(for mode: NewChatMode) -> [NewChatQuickAction] {
             NewChatQuickAction(symbol: "paintbrush", title: "Visual Pass", prompt: "Do a visual pass on {project}: spacing, hierarchy, copy, interaction states, and anything that feels unfinished."),
             NewChatQuickAction(symbol: "text.bubble", title: "Copy Rewrite", prompt: "Rewrite the visible copy in {project} to be concise, confident, and useful without explaining the UI.")
         ]
+    }
+}
+
+private struct NewChatHistorySignal {
+    let key: String
+    let score: Int
+    let recentAt: Date
+}
+
+private func dynamicQuickActions(
+    for mode: NewChatMode,
+    snapshot: NativeStoreSnapshot,
+    selectedWorkspaceId: EntityID?
+) -> [NewChatQuickAction] {
+    guard let workspaceId = selectedWorkspaceId ?? snapshot.workspaces.first?.id else {
+        return []
+    }
+
+    let runSignals = snapshot.runs
+        .filter { $0.workspaceId == workspaceId }
+        .sorted { ($0.endedAt ?? $0.startedAt ?? .distantPast) > ($1.endedAt ?? $1.startedAt ?? .distantPast) }
+        .prefix(48)
+        .flatMap { run -> [NewChatHistorySignal] in
+            let text = [
+                run.promptSnapshot,
+                run.contextRefs.map(\.label).joined(separator: " "),
+                run.messages.suffix(4).map(\.content).joined(separator: " "),
+                String(run.transcript.prefix(1200))
+            ]
+            .joined(separator: " ")
+            return historySignals(from: text, recentAt: run.endedAt ?? run.startedAt ?? .distantPast)
+        }
+
+    let workItemSignals = snapshot.workItems
+        .filter { $0.workspaceId == workspaceId && $0.state != .archived && $0.state != .cancelled }
+        .sorted { $0.updatedAt > $1.updatedAt }
+        .prefix(36)
+        .flatMap { item -> [NewChatHistorySignal] in
+            let text = [
+                item.title,
+                item.description,
+                item.sourceType.rawValue,
+                item.jira?.key ?? "",
+                item.acceptanceCriteria.joined(separator: " "),
+                item.externalRefs.map(\.label).joined(separator: " ")
+            ]
+            .joined(separator: " ")
+            return historySignals(from: text, recentAt: item.updatedAt)
+        }
+
+    let rankedKeys = rankedHistoryKeys(Array(runSignals) + Array(workItemSignals), mode: mode)
+    return rankedKeys.compactMap { dynamicAction(for: $0, mode: mode) }
+}
+
+private func rankedHistoryKeys(_ signals: [NewChatHistorySignal], mode: NewChatMode) -> [String] {
+    guard !signals.isEmpty else { return [] }
+
+    var scores: [String: (score: Int, recentAt: Date)] = [:]
+    for signal in signals {
+        let current = scores[signal.key] ?? (0, .distantPast)
+        scores[signal.key] = (
+            current.score + signal.score + historyModeBoost(for: signal.key, mode: mode),
+            max(current.recentAt, signal.recentAt)
+        )
+    }
+
+    return scores
+        .sorted { left, right in
+            if left.value.score == right.value.score {
+                return left.value.recentAt > right.value.recentAt
+            }
+            return left.value.score > right.value.score
+        }
+        .map(\.key)
+}
+
+private func historySignals(from text: String, recentAt: Date) -> [NewChatHistorySignal] {
+    let normalized = text.lowercased()
+    guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return []
+    }
+
+    let specs: [(key: String, score: Int, tokens: [String])] = [
+        ("jira", 4, ["jira", "ivas-", "ticket", "issue", "work item", "in progress", "blocked"]),
+        ("codeReview", 4, ["code review", "/sk_code_review", "review diff", "merge request", "pull request", " mr ", "mycr", "diff"]),
+        ("debug", 3, ["bug", "triage", "debug", "reproduce", "failed", "failure", "timeout", "stuck", "卡顿", "延迟"]),
+        ("logs", 3, ["log", "trace", "logtrace", "sessionid", "conversationid", "kibana", "grafana", "clickhouse"]),
+        ("macUI", 3, ["mac native", "macos", "chat window", "input", "menu", "hover", "layout", "分屏", "鼠标", "样式"]),
+        ("outputReview", 3, ["output", "markdown", "review output", "comment", "memory", "mermaid", "artifact"]),
+        ("validation", 2, ["build", "test", "validate", "verify", "release", "install", "rebuild", "ship"]),
+        ("planning", 2, ["plan", "方案", "design", "spec", "proposal", "next action", "todo"])
+    ]
+
+    return specs.compactMap { spec in
+        let hits = spec.tokens.reduce(0) { count, token in
+            normalized.contains(token) ? count + 1 : count
+        }
+        guard hits > 0 else { return nil }
+        return NewChatHistorySignal(key: spec.key, score: spec.score + hits, recentAt: recentAt)
+    }
+}
+
+private func historyModeBoost(for key: String, mode: NewChatMode) -> Int {
+    switch mode {
+    case .daily:
+        return ["jira", "planning", "logs"].contains(key) ? 2 : 0
+    case .engineering:
+        return ["codeReview", "debug", "validation", "logs", "jira"].contains(key) ? 2 : 0
+    case .creative:
+        return ["macUI", "outputReview", "planning"].contains(key) ? 2 : 0
+    }
+}
+
+private func dynamicAction(for key: String, mode: NewChatMode) -> NewChatQuickAction? {
+    switch key {
+    case "jira":
+        return NewChatQuickAction(
+            symbol: "checklist",
+            title: "Jira Work",
+            prompt: "Continue the recurring Jira/task workflow in {project}. Use recent chats and current work items to pick the most relevant ticket, summarize state, and propose the next concrete action."
+        )
+    case "codeReview":
+        return NewChatQuickAction(
+            symbol: "text.magnifyingglass",
+            title: "Code Review",
+            prompt: "Continue the recurring code review work in {project}. Use recent chats and workspace context to identify the likely MR, diff, or review target, then run the appropriate review path or ask for the missing target."
+        )
+    case "debug":
+        return NewChatQuickAction(
+            symbol: "ladybug",
+            title: "Bug Triage",
+            prompt: "Trace the recently discussed issue in {project}. Reuse the relevant chat history, locate the likely cause, and propose the smallest verified fix."
+        )
+    case "logs":
+        return NewChatQuickAction(
+            symbol: "waveform.path.ecg",
+            title: "Log Trace",
+            prompt: "Continue the recurring log/debug investigation in {project}. Use recent identifiers, tickets, or context from workspace history, then trace evidence and summarize what changed."
+        )
+    case "macUI":
+        return NewChatQuickAction(
+            symbol: "macwindow",
+            title: "Mac UI Pass",
+            prompt: "Continue the recent macOS native UI work in {project}. Focus on the workflow and interaction details discussed in recent chats, then make the narrowest useful improvement."
+        )
+    case "outputReview":
+        return NewChatQuickAction(
+            symbol: "doc.richtext",
+            title: "Output Review",
+            prompt: "Review the recent output, markdown, memory, or artifact workflow in {project}. Use workspace history to identify the relevant output and improve how it is reviewed or reused."
+        )
+    case "validation":
+        return NewChatQuickAction(
+            symbol: "checkmark.seal",
+            title: "Verify Changes",
+            prompt: "Verify the recent work in {project}. Choose the narrowest useful checks from workspace history and report remaining risk without starting a full rebuild unless requested."
+        )
+    case "planning":
+        return NewChatQuickAction(
+            symbol: "calendar.badge.clock",
+            title: mode == .creative ? "Design Plan" : "Next Plan",
+            prompt: "Use recent workspace chat history in {project} to organize the next practical plan: goal, likely files or surfaces, risks, and the first action for {agent}."
+        )
+    default:
+        return nil
     }
 }
 
@@ -4169,7 +5002,7 @@ private func templates(for mode: NewChatMode) -> [NewChatTemplate] {
     }
 }
 
-private struct ComposerSkillCardModel: Identifiable {
+struct ComposerSkillCardModel: Identifiable {
     let id: EntityID
     let title: String
     let subtitle: String
@@ -4217,61 +5050,79 @@ private struct ComposerSkillCardRow: View {
     let select: (ComposerSkillCardModel) -> Void
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
-                ForEach(skills) { skill in
-                    ComposerSkillCard(skill: skill) {
-                        select(skill)
-                    }
-                }
+                Text("Skills")
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundStyle(PKTheme.text4)
+                    .textCase(.uppercase)
+                Rectangle()
+                    .fill(PKTheme.edge.opacity(0.45))
+                    .frame(height: 1)
             }
-            .fixedSize(horizontal: true, vertical: false)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
                     ForEach(skills) { skill in
                         ComposerSkillCard(skill: skill) {
                             select(skill)
                         }
                     }
                 }
-                .padding(.horizontal, 2)
-                .padding(.vertical, 1)
+                .fixedSize(horizontal: true, vertical: false)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(skills) { skill in
+                            ComposerSkillCard(skill: skill) {
+                                select(skill)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    .padding(.vertical, 2)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.top, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 private struct ComposerSkillCard: View {
     let skill: ComposerSkillCardModel
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
                     Image(systemName: skill.symbol)
-                        .font(.system(size: 10.5, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 18, height: 18)
+                        .background(skill.tint.opacity(0.16))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
                     Text(skill.title)
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
+                    Spacer(minLength: 2)
                     if let modeLabel = skill.modeLabel {
-                        Spacer(minLength: 2)
                         Text(modeLabel)
                             .font(.system(size: 8, weight: .heavy))
                             .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .frame(height: 17)
+                            .background(skill.tint.opacity(0.14))
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
                     }
                 }
                 .foregroundStyle(skill.tint)
-                .padding(.horizontal, 8)
-                .frame(height: 22)
-                .background(skill.tint.opacity(0.16))
-                .clipShape(RoundedRectangle(cornerRadius: 5))
 
                 Text(skill.subtitle)
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(PKTheme.text3)
                     .lineLimit(1)
 
@@ -4281,24 +5132,487 @@ private struct ComposerSkillCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .padding(10)
-            .frame(width: 208, height: 82, alignment: .leading)
+            .padding(11)
+            .frame(width: 214, height: 86, alignment: .leading)
             .background(
-                LinearGradient(
-                    colors: [
-                        skill.tint.opacity(0.11),
-                        PKTheme.surfaceRaised.opacity(0.62)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+                ZStack {
+                    PKTheme.surfaceRaised.opacity(0.72)
+                    LinearGradient(
+                        colors: [
+                            skill.tint.opacity(hovering ? 0.25 : 0.17),
+                            skill.tint.opacity(hovering ? 0.08 : 0.04),
+                            Color.black.opacity(0.10)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                }
             )
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(skill.tint.opacity(0.18), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(skill.tint.opacity(hovering ? 0.86 : 0.64))
+                    .frame(height: 2)
+            }
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(skill.tint.opacity(hovering ? 0.52 : 0.28), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .shadow(color: skill.tint.opacity(hovering ? 0.20 : 0.08), radius: hovering ? 16 : 8, x: 0, y: 7)
+            .scaleEffect(hovering ? 1.015 : 1)
         }
         .buttonStyle(.plain)
         .help(skill.previewCommand)
+        .onHover { hovering = $0 }
     }
+}
+
+private struct ComposerSlashCommandList: View {
+    let commands: [ComposerSkillCardModel]
+    let select: (ComposerSkillCardModel) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(commands) { command in
+                Button {
+                    select(command)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: command.symbol)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(command.tint)
+                            .frame(width: 18)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 6) {
+                                Text(command.command.trimmingCharacters(in: .whitespacesAndNewlines))
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(PKTheme.text)
+                                    .lineLimit(1)
+                                if let modeLabel = command.modeLabel {
+                                    Text(modeLabel)
+                                        .font(.system(size: 8, weight: .heavy))
+                                        .foregroundStyle(command.tint)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Text(command.subtitle)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(PKTheme.text3)
+                                .lineLimit(1)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(height: 38)
+                    .background(PKTheme.control.opacity(0.42))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(command.tint.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help(command.previewCommand)
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(PKTheme.surfaceRaised.opacity(0.96))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(PKTheme.edgeStrong.opacity(0.68), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .shadow(color: Color.black.opacity(0.18), radius: 14, x: 0, y: 8)
+    }
+}
+
+private struct ComposerSelectedSkillChip: View {
+    let command: String
+    let accent: Color
+    var remove: (() -> Void)?
+
+    private var title: String {
+        composerSkillDisplayTitle(for: command)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(accent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(1)
+                Text("Skill")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                    .lineLimit(1)
+            }
+            if let remove {
+                Button(action: remove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(PKTheme.text3)
+                        .frame(width: 18, height: 18)
+                        .background(PKTheme.control.opacity(0.72))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .help("Remove skill")
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(accent.opacity(0.13))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.28), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct ComposerContextTokenLane: View {
+    let skillCommand: String?
+    let references: [ComposerReferenceAttachment]
+    let images: [ComposerImageAttachment]
+    let accent: Color
+    var removeSkill: () -> Void
+    var removeReference: (ComposerReferenceAttachment) -> Void
+    var removeImage: (ComposerImageAttachment) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if let skillCommand {
+                    ComposerSelectedSkillChip(command: skillCommand, accent: accent, remove: removeSkill)
+                }
+                ForEach(references) { reference in
+                    ComposerInlineReferenceChip(reference: reference, accent: accent) {
+                        removeReference(reference)
+                    }
+                }
+                ForEach(images) { image in
+                    ComposerInlineImageChip(attachment: image, accent: accent) {
+                        removeImage(image)
+                    }
+                }
+            }
+            .padding(.vertical, 1)
+        }
+    }
+}
+
+private struct ComposerInlineReferenceChip: View {
+    let reference: ComposerReferenceAttachment
+    let accent: Color
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: reference.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(accent)
+                .frame(width: 26, height: 26)
+                .background(accent.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(reference.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(reference.subtitle)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(PKTheme.text4)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: 150, alignment: .leading)
+            Button(action: remove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 42)
+        .background(PKTheme.panelAlt.opacity(0.52))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help(reference.value)
+    }
+}
+
+private struct ComposerInlineImageChip: View {
+    let attachment: ComposerImageAttachment
+    let accent: Color
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "photo")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(accent)
+                .frame(width: 26, height: 26)
+                .background(accent.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(attachment.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Image")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(PKTheme.text4)
+            }
+            .frame(maxWidth: 120, alignment: .leading)
+            Button(action: remove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 42)
+        .background(PKTheme.panelAlt.opacity(0.52))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help(attachment.url.path)
+    }
+}
+
+private struct ComposerInlineErrorBanner: View {
+    let message: String
+    let clear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(PKTheme.warn)
+            Text(message)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(PKTheme.text3)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            Button(action: clear) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(PKTheme.text3)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(PKTheme.warn.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.warn.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct SkillPromptDisplay {
+    var command: String
+    var body: String
+    var references: [ComposerReferenceAttachment] = []
+}
+
+struct UserPromptImageAttachment: Identifiable, Hashable {
+    var name: String
+    var url: URL
+
+    var id: String {
+        "\(name)|\(url.path)"
+    }
+}
+
+private let userPromptAttachedImagesHeader = "Attached images for the agent:"
+
+func userPromptImageAttachments(in text: String) -> [UserPromptImageAttachment] {
+    userPromptDisplayParts(from: text).images
+}
+
+func userPromptTextWithoutImageAttachments(_ text: String) -> String {
+    userPromptDisplayParts(from: text).body
+}
+
+private func userPromptDisplayParts(from text: String) -> (body: String, images: [UserPromptImageAttachment]) {
+    let lines = text.components(separatedBy: .newlines)
+    var bodyLines: [String] = []
+    var images: [UserPromptImageAttachment] = []
+    var inAttachmentSection = false
+
+    for line in lines {
+        let trimmed = line.gitTrimmed
+        if trimmed.localizedCaseInsensitiveCompare(userPromptAttachedImagesHeader) == .orderedSame {
+            inAttachmentSection = true
+            continue
+        }
+
+        if inAttachmentSection {
+            if let attachment = userPromptImageAttachment(from: trimmed) {
+                images.append(attachment)
+                continue
+            }
+            if trimmed.isEmpty || trimmed.hasPrefix("-") {
+                continue
+            }
+            inAttachmentSection = false
+        }
+
+        bodyLines.append(line)
+    }
+
+    return (
+        bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines),
+        images
+    )
+}
+
+private func userPromptImageAttachment(from line: String) -> UserPromptImageAttachment? {
+    let trimmed = line.gitTrimmed
+    guard trimmed.hasPrefix("-") else { return nil }
+
+    let item = String(trimmed.dropFirst()).gitTrimmed
+    guard let separator = item.range(of: ": ") else { return nil }
+
+    let name = String(item[..<separator.lowerBound]).gitTrimmed
+    let rawPath = String(item[separator.upperBound...]).gitTrimmed
+    guard !name.isEmpty, !rawPath.isEmpty else { return nil }
+
+    if rawPath.hasPrefix("file://"), let url = URL(string: rawPath) {
+        return UserPromptImageAttachment(name: name, url: url)
+    }
+
+    return UserPromptImageAttachment(
+        name: name,
+        url: URL(fileURLWithPath: (rawPath as NSString).expandingTildeInPath)
+    )
+}
+
+private func composerSkillPromptDisplay(for text: String) -> SkillPromptDisplay? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return nil }
+    let lines = trimmed.components(separatedBy: .newlines)
+    guard let first = lines.first?.gitTrimmed,
+          let commandPart = first.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first.map(String.init),
+          composerLooksLikeSkillCommand(commandPart) else {
+        return nil
+    }
+    let inlineArguments = String(first.dropFirst(commandPart.count)).gitTrimmed
+    let remaining = lines.dropFirst().joined(separator: "\n").gitTrimmed
+    let body = [inlineArguments, remaining]
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n")
+    let displayBody = composerSkillDisplayBody(from: body)
+    return SkillPromptDisplay(command: commandPart, body: displayBody.body, references: displayBody.references)
+}
+
+private func composerSkillDisplayBody(from body: String) -> (body: String, references: [ComposerReferenceAttachment]) {
+    let lines = body.components(separatedBy: .newlines)
+    var bodyLines: [String] = []
+    var references: [ComposerReferenceAttachment] = []
+    var inReferenceSection = false
+    var inAttachmentSection = false
+
+    for line in lines {
+        let trimmed = line.gitTrimmed
+        if trimmed.localizedCaseInsensitiveCompare("References for the agent:") == .orderedSame {
+            inReferenceSection = true
+            inAttachmentSection = false
+            continue
+        }
+        if trimmed.localizedCaseInsensitiveCompare("Attached images for the agent:") == .orderedSame {
+            inReferenceSection = false
+            inAttachmentSection = true
+            continue
+        }
+
+        if inReferenceSection {
+            if let reference = composerSkillReference(from: trimmed) {
+                references.append(reference)
+            } else if !trimmed.isEmpty, !trimmed.hasPrefix("-") {
+                inReferenceSection = false
+                bodyLines.append(line)
+            }
+            continue
+        }
+
+        if inAttachmentSection {
+            continue
+        }
+
+        bodyLines.append(line)
+    }
+
+    return (
+        body: bodyLines.joined(separator: "\n").gitTrimmed,
+        references: composerMergedReferenceAttachments(existing: [], newReferences: references)
+    )
+}
+
+private func composerSkillReference(from line: String) -> ComposerReferenceAttachment? {
+    let value = line.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-")))
+    let lower = value.lowercased()
+    let kind: ComposerReferenceKind
+    let remainder: String
+    if lower.hasPrefix("web:") {
+        kind = .web
+        remainder = String(value.dropFirst(4)).gitTrimmed
+    } else if lower.hasPrefix("file:") {
+        kind = .file
+        remainder = String(value.dropFirst(5)).gitTrimmed
+    } else {
+        return nil
+    }
+
+    let rawValue: String
+    if let separator = remainder.range(of: ": ", options: .backwards) {
+        rawValue = String(remainder[separator.upperBound...]).gitTrimmed
+    } else {
+        rawValue = remainder
+    }
+    guard !rawValue.isEmpty else { return nil }
+    return ComposerReferenceAttachment(kind: kind, value: rawValue)
+}
+
+private func composerLooksLikeSkillCommand(_ value: String) -> Bool {
+    let trimmed = value.gitTrimmed.lowercased()
+    return trimmed.hasPrefix("/sk_")
+        || trimmed.hasPrefix("/logtrace")
+        || trimmed.hasPrefix("/clickhouse")
+}
+
+private func composerSkillDisplayTitle(for command: String) -> String {
+    let first = command.gitTrimmed.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).first.map(String.init) ?? command.gitTrimmed
+    if first.hasPrefix("/sk_") {
+        return String(first.dropFirst(4))
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { token in
+                token.prefix(1).uppercased() + String(token.dropFirst())
+            }
+            .joined(separator: " ")
+    }
+    if first.hasPrefix("/") {
+        return String(first.dropFirst())
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
+    }
+    return first
+}
+
+private func composerPromptDisplayTitle(for text: String, fallback: String = "Conversation") -> String {
+    if let display = composerSkillPromptDisplay(for: text) {
+        return composerSkillDisplayTitle(for: display.command)
+    }
+    return text.firstLineFallback(fallback)
+}
+
+private func composerVisibleHistoryMessages(for run: AgentRun) -> [AgentRunMessage] {
+    var messages = run.messages
+    let currentPrompt = run.promptSnapshot.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let last = messages.last,
+       last.role == .user,
+       last.content.trimmingCharacters(in: .whitespacesAndNewlines) == currentPrompt {
+        messages.removeLast()
+    }
+    return messages
 }
 
 private func composerSkillSubtitle(for capability: Capability, availability: ComposerSkillAvailability) -> String {
@@ -4373,16 +5687,18 @@ private func composerBuiltinCommandTint(for option: ComposerBuiltinCommandOption
     return PKTheme.primary
 }
 
-private func composerCommandCards(
+func composerCommandCards(
     snapshot: NativeStoreSnapshot,
     agentKind: NativeAgentKind,
     draftText: String,
     limit: Int = 8
 ) -> [ComposerSkillCardModel] {
-    guard composerShouldShowSkillCards(for: draftText) else {
+    guard composerShouldShowSkillCards(for: draftText) || composerShouldShowSlashCommandList(for: draftText) else {
         return []
     }
 
+    let slashQuery = composerSlashCommandQuery(for: draftText)
+    let existingText = slashQuery == nil ? draftText : ""
     let prioritized = snapshot.capabilities
         .filter { $0.kind == .skill }
         .filter { composerSkillAvailability(for: $0, agentKind: agentKind).mode != .unsupported }
@@ -4400,12 +5716,14 @@ private func composerCommandCards(
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
 
-    let trimmedText = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-    let existingText = trimmedText == "/" ? "" : draftText
     var cards: [ComposerSkillCardModel] = []
     var seenCommands = Set<String>()
-    if trimmedText == "/" {
+    if slashQuery != nil {
         for option in composerBuiltinCommandOptions(for: agentKind) {
+            guard composerSlashQueryMatches(
+                slashQuery,
+                fields: [option.command, option.title, option.subtitle]
+            ) else { continue }
             guard seenCommands.insert(option.command).inserted else { continue }
             cards.append(ComposerSkillCardModel(
                 id: option.id,
@@ -4420,11 +5738,55 @@ private func composerCommandCards(
     }
     for capability in prioritized {
         let command = composerSkillCommand(for: capability)
+        guard composerSlashQueryMatches(
+            slashQuery,
+            fields: [
+                command,
+                composerSkillSearchAlias(for: command),
+                capability.name
+            ]
+        ) else { continue }
         guard seenCommands.insert(command).inserted else { continue }
         cards.append(ComposerSkillCardModel(capability: capability, index: cards.count, existingText: existingText, agentKind: agentKind))
         if cards.count == limit { break }
     }
     return cards
+}
+
+private func composerSlashCommandQuery(for text: String) -> String? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return nil }
+    return String(trimmed.dropFirst()).gitTrimmed
+}
+
+private func composerSlashQueryMatches(_ query: String?, fields: [String]) -> Bool {
+    guard let query else { return true }
+    let normalizedQuery = composerNormalizeSlashSearchText(query)
+    guard !normalizedQuery.isEmpty else { return true }
+    return fields.contains { field in
+        composerNormalizeSlashSearchText(field).contains(normalizedQuery)
+    }
+}
+
+private func composerSkillSearchAlias(for command: String) -> String {
+    let trimmed = command.gitTrimmed
+    if trimmed.hasPrefix("/sk_") {
+        return String(trimmed.dropFirst(4)).replacingOccurrences(of: "_", with: " ")
+    }
+    if trimmed.hasPrefix("/") {
+        return String(trimmed.dropFirst())
+    }
+    return trimmed
+}
+
+private func composerNormalizeSlashSearchText(_ value: String) -> String {
+    value
+        .lowercased()
+        .replacingOccurrences(of: "/", with: " ")
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .split { $0.isWhitespace || $0.isNewline }
+        .joined(separator: " ")
 }
 
 func composerSkillCommand(for capability: Capability) -> String {
@@ -5526,6 +6888,12 @@ func composerShouldShowSkillCards(for text: String) -> Bool {
     return trimmed.isEmpty || trimmed == "/"
 }
 
+func composerShouldShowSlashCommandList(for text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("/") else { return false }
+    return !trimmed.dropFirst().contains { $0.isWhitespace || $0.isNewline }
+}
+
 private func isLogTraceSkillName(_ lowercasedName: String) -> Bool {
     lowercasedName.contains("logtrace")
         || lowercasedName.contains("log tracer")
@@ -5581,6 +6949,8 @@ private struct MinimalChatComposer: View {
     @State private var attachmentError: String?
     @State private var editingQueuedMessageId: EntityID?
     @State private var editingQueuedMessageText = ""
+    @State private var selectedSkillCommand: String?
+    @State private var focusRequest = 0
 
     init(
         snapshot: NativeStoreSnapshot,
@@ -5620,6 +6990,7 @@ private struct MinimalChatComposer: View {
     private var canSend: Bool {
         !isRunning && (
             !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || selectedSkillCommand != nil
                 || !imageAttachments.isEmpty
                 || !referenceAttachments.isEmpty
         )
@@ -5648,75 +7019,107 @@ private struct MinimalChatComposer: View {
         return "Send with \([referenceText, imageText].compactMap { $0 }.joined(separator: " and "))"
     }
 
-    private var skillCards: [ComposerSkillCardModel] {
+    private var slashCommands: [ComposerSkillCardModel] {
         guard showsSkillCards else {
+            return []
+        }
+        guard composerShouldShowSlashCommandList(for: draftText) else {
             return []
         }
         return composerCommandCards(snapshot: snapshot, agentKind: selectedAgentKind, draftText: draftText)
     }
 
+    private var skillCards: [ComposerSkillCardModel] {
+        guard showsSkillCards else {
+            return []
+        }
+        guard composerShouldShowSkillCards(for: draftText),
+              selectedSkillCommand == nil,
+              referenceAttachments.isEmpty,
+              imageAttachments.isEmpty else {
+            return []
+        }
+        return Array(composerCommandCards(
+            snapshot: snapshot,
+            agentKind: selectedAgentKind,
+            draftText: draftText,
+            limit: 4
+        ).prefix(4))
+    }
+
+    private var hasContextTokens: Bool {
+        selectedSkillCommand != nil
+            || !referenceAttachments.isEmpty
+            || !imageAttachments.isEmpty
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !skillCards.isEmpty {
-                ComposerSkillCardRow(skills: skillCards) { skill in
+        VStack(alignment: .leading, spacing: 12) {
+            if !slashCommands.isEmpty {
+                ComposerSlashCommandList(commands: slashCommands) { skill in
                     insertSkillCommand(skill.previewCommand)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             VStack(spacing: 0) {
+                if hasContextTokens {
+                    ComposerContextTokenLane(
+                        skillCommand: nil,
+                        references: referenceAttachments,
+                        images: imageAttachments,
+                        accent: accent,
+                        removeSkill: { selectedSkillCommand = nil },
+                        removeReference: { reference in
+                            referenceAttachments.removeAll { $0.id == reference.id }
+                        },
+                        removeImage: { image in
+                            imageAttachments.removeAll { $0.id == image.id }
+                        }
+                    )
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
+                    .padding(.bottom, 0)
+                }
+
                 ZStack(alignment: .topLeading) {
                     if draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(placeholder)
-                                .font(.system(size: 16, weight: .medium))
+                                .font(.system(size: 14, weight: .medium))
                                 .foregroundStyle(PKTheme.text4.opacity(0.82))
                             Text(projectTitle(for: selectedWorkspaceId, snapshot: snapshot))
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(PKTheme.text4.opacity(0.62))
                         }
-                        .padding(.top, 20)
-                        .padding(.leading, 18)
+                        .padding(.top, 13)
+                        .padding(.leading, 14)
                         .allowsHitTesting(false)
                     }
 
                     NativeSendingTextEditor(
                         text: $draftText,
                         focused: focused,
-                        fontSize: 16,
-                        lineSpacing: 3,
-                        textContainerInset: NSSize(width: 0, height: 6),
+                        focusRequest: focusRequest,
+                        fontSize: 14,
+                        lineSpacing: 2,
+                        textContainerInset: NSSize(width: 0, height: 4),
                         onSend: sendWithAttachments,
                         onPasteImages: pasteImagesFromClipboard,
                         onPasteReferences: pasteReferencesFromClipboard,
                         onFocusChange: { editorFocused = $0 }
                     )
-                    .frame(minHeight: 126, maxHeight: 176)
-                    .padding(.top, 20)
+                    .frame(minHeight: 76, maxHeight: 112)
+                    .padding(.top, 12)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 2)
+                }
+
+                if let attachmentError {
+                    ComposerInlineErrorBanner(message: attachmentError) {
+                        self.attachmentError = nil
+                    }
                     .padding(.horizontal, 18)
-                    .padding(.bottom, 4)
-                }
-
-                if !referenceAttachments.isEmpty {
-                    ComposerReferenceAttachmentStrip(
-                        references: referenceAttachments,
-                        remove: { reference in
-                            referenceAttachments.removeAll { $0.id == reference.id }
-                        }
-                    )
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 9)
-                }
-
-                if !imageAttachments.isEmpty || attachmentError != nil {
-                    ComposerImageAttachmentStrip(
-                        attachments: imageAttachments,
-                        error: attachmentError,
-                        remove: { attachment in
-                            imageAttachments.removeAll { $0.id == attachment.id }
-                        },
-                        clearError: { attachmentError = nil }
-                    )
-                    .padding(.horizontal, 12)
                     .padding(.bottom, 9)
                 }
 
@@ -5743,7 +7146,7 @@ private struct MinimalChatComposer: View {
                     PermissionPickerChip(selectedPermissionMode: $selectedPermissionMode)
 
                     StatusPill(
-                        text: isRunning ? "RUNNING" : "READY",
+                        text: isRunning ? "RUNNING" : (selectedSkillCommand == nil ? "READY" : "SKILL"),
                         color: isRunning ? PKTheme.warn : accent
                     )
 
@@ -5761,10 +7164,10 @@ private struct MinimalChatComposer: View {
 
                     Spacer(minLength: 0)
 
-                    ComposerIconButton(symbol: "paperclip", title: "Attach Images") {
+                    ComposerIconButton(symbol: "paperclip", title: "Choose image files", help: "Choose image files from disk") {
                         addAttachments(ComposerImageAttachmentStore.pickImageFiles())
                     }
-                    ComposerIconButton(symbol: "doc.on.clipboard", title: "Paste Image") {
+                    ComposerIconButton(symbol: "photo.badge.plus", title: "Paste image", help: "Add the image currently on the clipboard") {
                         addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
                     }
                     Spacer()
@@ -5804,6 +7207,10 @@ private struct MinimalChatComposer: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .shadow(color: Color.black.opacity(focused.wrappedValue ? 0.22 : 0.12), radius: focused.wrappedValue ? 24 : 16, x: 0, y: 14)
             .onHover { isHovering = $0 }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                refocusComposer()
+            }
             .onPasteCommand(of: composerPasteCommandTypes) { _ in
                 if !pasteImagesFromClipboard() {
                     _ = pasteReferencesFromClipboard()
@@ -5818,6 +7225,13 @@ private struct MinimalChatComposer: View {
             .onChange(of: text) { _, newValue in
                 guard newValue != draftText else { return }
                 draftText = newValue
+            }
+
+            if !skillCards.isEmpty {
+                ComposerSkillCardRow(skills: skillCards) { skill in
+                    insertSkillCommand(skill.previewCommand)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -5840,19 +7254,20 @@ private struct MinimalChatComposer: View {
     }
 
     private func insertSkillCommand(_ command: String) {
-        draftText = command
-        focused.wrappedValue = true
+        selectedSkillCommand = nil
+        draftText = command.gitTrimmed
+        refocusComposer()
     }
 
-    private func pasteImagesFromClipboard() -> Bool {
-        guard ComposerImageAttachmentStore.canImportImagesFromPasteboard() else { return false }
-        addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+    private func pasteImagesFromClipboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        guard ComposerImageAttachmentStore.canImportImagesFromPasteboard(pasteboard) else { return false }
+        addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard(pasteboard))
         refocusComposer()
         return true
     }
 
-    private func pasteReferencesFromClipboard() -> Bool {
-        let extraction = ComposerReferenceAttachmentStore.importReferencesFromPasteboard()
+    private func pasteReferencesFromClipboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        let extraction = ComposerReferenceAttachmentStore.importFileReferencesFromPasteboard(pasteboard)
         guard !extraction.references.isEmpty else { return false }
         addReferences(extraction.references)
         appendRemainingReferenceText(extraction.text)
@@ -5881,8 +7296,13 @@ private struct MinimalChatComposer: View {
             to: outgoing,
             images: imageAttachments.map { ComposerImageAttachmentRef(name: $0.name, path: $0.url.path) }
         )
+        if let selectedSkillCommand {
+            let body = outgoing.gitTrimmed
+            outgoing = body.isEmpty ? selectedSkillCommand : "\(selectedSkillCommand)\n\n\(body)"
+        }
         text = outgoing
         draftText = ""
+        selectedSkillCommand = nil
         imageAttachments = []
         referenceAttachments = []
         attachmentError = nil
@@ -5892,6 +7312,7 @@ private struct MinimalChatComposer: View {
 
     private func refocusComposer() {
         DispatchQueue.main.async {
+            focusRequest += 1
             focused.wrappedValue = true
         }
     }
@@ -5943,7 +7364,7 @@ private struct PermissionPickerChip: View {
                 title: permissionTitle(selectedPermissionMode),
                 tint: PKTheme.text3,
                 showsChevron: true,
-                maxWidth: 118,
+                maxWidth: 138,
                 fontSize: 11.5,
                 height: 30
             )
@@ -5979,13 +7400,13 @@ private struct PermissionPickerPopover: View {
                     action: select
                 )
                 PermissionPickerRow(
-                    title: "Ask before edit",
+                    title: "Need approval",
                     mode: .askBeforeEdit,
                     selected: selectedPermissionMode == .askBeforeEdit,
                     action: select
                 )
                 PermissionPickerRow(
-                    title: "Autopilot",
+                    title: "Full access",
                     mode: .autopilot,
                     selected: selectedPermissionMode == .autopilot,
                     action: select
@@ -6439,15 +7860,78 @@ private struct ComposerIconButton: View {
     }
 }
 
+private enum ComposerInlineTokenKind {
+    case skill
+    case link
+}
+
+private struct ComposerInlineTokenRange {
+    let kind: ComposerInlineTokenKind
+    let range: NSRange
+}
+
+private func composerInlineTokenRanges(in text: String) -> [ComposerInlineTokenRange] {
+    let nsText = text as NSString
+    let fullRange = NSRange(location: 0, length: nsText.length)
+    guard fullRange.length > 0 else { return [] }
+
+    var ranges: [ComposerInlineTokenRange] = []
+    if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+        ranges.append(contentsOf: detector.matches(in: text, options: [], range: fullRange).compactMap { match in
+            guard let url = match.url,
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                return nil
+            }
+            return ComposerInlineTokenRange(kind: .link, range: match.range)
+        })
+    }
+
+    if let regex = try? NSRegularExpression(pattern: #"(?<!\S)/(?:sk_[A-Za-z0-9_-]+|logtrace|clickhouse)\b"#) {
+        ranges.append(contentsOf: regex.matches(in: text, range: fullRange).map {
+            ComposerInlineTokenRange(kind: .skill, range: $0.range)
+        })
+    }
+
+    return ranges.sorted { lhs, rhs in
+        if lhs.range.location != rhs.range.location {
+            return lhs.range.location < rhs.range.location
+        }
+        return lhs.range.length > rhs.range.length
+    }
+}
+
+private func composerInlineTokenAttributes(
+    for kind: ComposerInlineTokenKind,
+    fontSize: CGFloat
+) -> [NSAttributedString.Key: Any] {
+    let color: NSColor
+    let background: NSColor
+    switch kind {
+    case .skill:
+        color = NSColor(calibratedRed: 0.50, green: 0.83, blue: 0.76, alpha: 1)
+        background = NSColor(calibratedRed: 0.50, green: 0.83, blue: 0.76, alpha: 0.12)
+    case .link:
+        color = NSColor.systemBlue
+        background = NSColor.systemBlue.withAlphaComponent(0.10)
+    }
+
+    return [
+        .font: NSFont.systemFont(ofSize: fontSize, weight: .semibold),
+        .foregroundColor: color,
+        .backgroundColor: background,
+    ]
+}
+
 private struct NativeSendingTextEditor: NSViewRepresentable {
     @Binding var text: String
     var focused: FocusState<Bool>.Binding?
+    var focusRequest: Int = 0
     let fontSize: CGFloat
     let lineSpacing: CGFloat
     var textContainerInset: NSSize = NSSize(width: 0, height: 0)
     let onSend: () -> Void
-    var onPasteImages: (() -> Bool)? = nil
-    var onPasteReferences: (() -> Bool)? = nil
+    var onPasteImages: ((NSPasteboard) -> Bool)? = nil
+    var onPasteReferences: ((NSPasteboard) -> Bool)? = nil
     var onFocusChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -6521,7 +8005,11 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
         if !isComposingText {
             applyStyle(to: textView)
         }
-        if focused?.wrappedValue == true,
+        let shouldApplyFocusRequest = context.coordinator.lastAppliedFocusRequest != focusRequest
+        if shouldApplyFocusRequest {
+            context.coordinator.lastAppliedFocusRequest = focusRequest
+        }
+        if (focused?.wrappedValue == true || shouldApplyFocusRequest),
            textView.window?.firstResponder !== textView {
             DispatchQueue.main.async {
                 textView.window?.makeFirstResponder(textView)
@@ -6533,19 +8021,35 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
         textView.font = .systemFont(ofSize: fontSize)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = lineSpacing
-        textView.defaultParagraphStyle = paragraph
-        textView.typingAttributes = [
+        let baseAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: fontSize),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraph,
         ]
+        textView.defaultParagraphStyle = paragraph
+        textView.typingAttributes = baseAttributes
+
+        guard let storage = textView.textStorage, storage.length > 0 else {
+            return
+        }
+        let selectedRanges = textView.selectedRanges
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.beginEditing()
+        storage.setAttributes(baseAttributes, range: fullRange)
+        for token in composerInlineTokenRanges(in: storage.string) {
+            storage.addAttributes(composerInlineTokenAttributes(for: token.kind, fontSize: fontSize), range: token.range)
+        }
+        storage.endEditing()
+        textView.selectedRanges = selectedRanges
     }
 
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeSendingTextEditor
+        var lastAppliedFocusRequest: Int
 
         init(_ parent: NativeSendingTextEditor) {
             self.parent = parent
+            lastAppliedFocusRequest = parent.focusRequest
         }
 
         func setFocused(_ isFocused: Bool) {
@@ -6570,8 +8074,8 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
 
     final class SendingNSTextView: NSTextView {
         var onSend: (() -> Void)?
-        var onPasteImages: (() -> Bool)?
-        var onPasteReferences: (() -> Bool)?
+        var onPasteImages: ((NSPasteboard) -> Bool)?
+        var onPasteReferences: ((NSPasteboard) -> Bool)?
         var onFocusChange: ((Bool) -> Void)?
 
         override func becomeFirstResponder() -> Bool {
@@ -6613,21 +8117,32 @@ private struct NativeSendingTextEditor: NSViewRepresentable {
             super.keyDown(with: event)
         }
 
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifiers == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "v" {
+                paste(nil)
+                return true
+            }
+            return super.performKeyEquivalent(with: event)
+        }
+
         override func paste(_ sender: Any?) {
-            if onPasteImages?() == true {
+            let pasteboard = NSPasteboard.general
+            if onPasteImages?(pasteboard) == true {
                 return
             }
-            if onPasteReferences?() == true {
+            if onPasteReferences?(pasteboard) == true {
                 return
             }
             super.paste(sender)
         }
 
         override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
-            if onPasteImages?() == true {
+            if onPasteImages?(pboard) == true {
                 return true
             }
-            if onPasteReferences?() == true {
+            if onPasteReferences?(pboard) == true {
                 return true
             }
             return super.readSelection(from: pboard, type: type)
@@ -6648,6 +8163,7 @@ private struct ConversationWorkspace: View {
     var paneLabel: String?
     var locksComposerWorkspaceToRun = true
     let newChat: () -> Void
+    var newSessionSideChat: (() -> Void)?
     var newSideChat: (() -> Void)?
     var startFollowUpSideChat: ((AgentRun, RunFollowUpAction) -> Void)?
     var closeChat: (() -> Void)?
@@ -6680,6 +8196,14 @@ private struct ConversationWorkspace: View {
     private var cornerRadius: CGFloat {
         if fullBleed { return 0 }
         return immersive ? 18 : 8
+    }
+
+    private var centersFullscreenContent: Bool {
+        fullBleed && selectedOutputArtifactForSidePane == nil
+    }
+
+    private var conversationContentMaxWidth: CGFloat {
+        centersFullscreenContent ? nativeFullscreenConversationContentMaxWidth : .infinity
     }
 
     private var currentRunBlocksReply: Bool {
@@ -6723,6 +8247,7 @@ private struct ConversationWorkspace: View {
 
     private var shouldStartNewConversationForSelectedWorkspace: Bool {
         guard !locksComposerWorkspaceToRun,
+              !currentRunBlocksReply,
               startConversation != nil,
               let run,
               let selectedWorkspaceId else {
@@ -6766,22 +8291,35 @@ private struct ConversationWorkspace: View {
                             accent: accent
                         )
                     }
-                    if let paneLabel {
-                        StatusPill(text: paneLabel, color: accent)
+                    if let paneLabel, !nativeHeaderPaneLabelIsTicketKey(paneLabel) {
+                        HeaderMetadataChip(
+                            text: paneLabel,
+                            symbol: nil,
+                            color: accent,
+                            help: "Current chat pane"
+                        )
                     }
                     codeChangesHeaderEntry
-                    StatusPill(text: run?.state.rawValue ?? "draft", color: runStateColor(run?.state))
+                    HeaderMetadataChip(
+                        text: run?.state.rawValue ?? "draft",
+                        symbol: nil,
+                        color: runStateColor(run?.state),
+                        help: "Current chat status"
+                    )
+                    if let newSessionSideChat {
+                        HeaderIconButton(symbol: "bubble.left.and.bubble.right", title: "Open Session Side Chat", action: newSessionSideChat)
+                    }
                     if let newSideChat {
-                        ComposerIconButton(symbol: "rectangle.split.2x1", title: "Add Inline Chat", action: newSideChat)
+                        HeaderIconButton(symbol: "rectangle.split.2x1", title: "Add Inline Chat", action: newSideChat)
                     }
                     if let closeChat {
-                        ComposerIconButton(symbol: "xmark", title: "Close Pane", action: closeChat)
+                        HeaderIconButton(symbol: "xmark", title: "Close Pane", action: closeChat)
                     }
                     if let detachChat {
-                        ComposerIconButton(symbol: "arrow.up.right.square", title: "Detach Chat", action: detachChat)
+                        HeaderIconButton(symbol: "arrow.up.right.square", title: "Detach Chat", action: detachChat)
                     }
                     if immersive {
-                        ComposerIconButton(symbol: "terminal", title: "Terminal") {
+                        HeaderIconButton(symbol: "terminal", title: "Open terminal for this chat workspace") {
                             withAnimation(.easeInOut(duration: 0.16)) {
                                 terminalOpen.toggle()
                             }
@@ -6799,6 +8337,8 @@ private struct ConversationWorkspace: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
             }
+            .frame(maxWidth: conversationContentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal, immersive ? 22 : 18)
             .padding(.top, immersive ? 18 : 14)
             .padding(.bottom, 10)
@@ -6844,11 +8384,15 @@ private struct ConversationWorkspace: View {
 
             if let preComposerContent, !codeReviewOpen {
                 preComposerContent
+                    .frame(maxWidth: conversationContentMaxWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, immersive ? 18 : 16)
                     .padding(.top, immersive ? 14 : 12)
             }
 
             bottomComposerSection
+                .frame(maxWidth: conversationContentMaxWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(immersive ? 18 : 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -6927,7 +8471,7 @@ private struct ConversationWorkspace: View {
 
     private var runTitle: String {
         if let run {
-            return run.promptSnapshot.firstLineFallback("Conversation")
+            return composerPromptDisplayTitle(for: run.promptSnapshot)
         }
         if let conversationWorkItem {
             return conversationWorkItem.title
@@ -6988,11 +8532,18 @@ private struct ConversationWorkspace: View {
         )
     }
 
+    private var conversationHistoryMessages: [AgentRunMessage] {
+        guard let run else { return [] }
+        return composerVisibleHistoryMessages(for: run)
+    }
+
     private func conversationHistoryScroll(reader: ScrollViewProxy) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 conversationHistoryContent
             }
+            .frame(maxWidth: conversationContentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(immersive ? 24 : 20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -7008,16 +8559,17 @@ private struct ConversationWorkspace: View {
     @ViewBuilder
     private var conversationHistoryContent: some View {
         if let run {
-            ForEach(run.messages) { message in
+            ForEach(conversationHistoryMessages) { message in
                 ConversationHistoryMessageRow(
                     message: message,
                     userSubtitle: selectedWorkspace?.name ?? "Project",
                     assistantTitle: agentLabel,
-                    trailing: true,
-                    accent: accent,
-                    onSendReviewComments: sendReviewComments(_:)
-                )
-                .equatable()
+                trailing: true,
+                accent: accent,
+                onSendReviewComments: sendReviewComments(_:),
+                onAskSelectionSideChat: askSelectionInSideChat(_:)
+            )
+            .equatable()
             }
 
             ConversationMessageBubble(
@@ -7037,6 +8589,7 @@ private struct ConversationWorkspace: View {
                 createdAt: run.endedAt ?? run.startedAt,
                 startedAt: run.startedAt,
                 endedAt: run.endedAt,
+                lastActivityAt: run.lastActivityAt,
                 state: run.state,
                 isRunning: currentRunBlocksReply,
                 accent: accent,
@@ -7052,6 +8605,7 @@ private struct ConversationWorkspace: View {
                 outputs: conversationOutputs,
                 selectedOutputArtifactId: selectedOutputArtifactId,
                 onSendReviewComments: sendReviewComments(_:),
+                onAskSelectionSideChat: askSelectionInSideChat(_:),
                 onOpenOutput: openOutputPane(_:)
             )
             .id("assistant-output")
@@ -7125,6 +8679,18 @@ private struct ConversationWorkspace: View {
                 deleteQueuedMessage: { messageId in
                     guard let run else { return }
                     Task { await model.deleteQueuedMessage(in: run.id, messageId: messageId) }
+                },
+                moveQueuedMessage: { messageId, targetMessageId in
+                    guard let run else { return }
+                    Task {
+                        await model.moveQueuedMessage(in: run.id, messageId: messageId, near: targetMessageId)
+                    }
+                },
+                steerQueuedMessage: { messageId in
+                    guard let run else { return }
+                    Task {
+                        await model.steerQueuedMessage(in: run.id, messageId: messageId)
+                    }
                 }
             ) {
                 sendReplyComposerMessage()
@@ -7200,13 +8766,29 @@ private struct ConversationWorkspace: View {
     private func sendReviewComments(_ prompt: String) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let existing = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let existingDisplay = outputReviewPromptDisplay(for: existing),
+           let nextDisplay = outputReviewPromptDisplay(for: trimmed) {
+            let comments = (existingDisplay.comments + nextDisplay.comments).map {
+                ChatOutputReviewComment(quote: $0.quote, note: $0.note)
+            }
+            replyDraft = chatOutputReviewPrompt(outputTitle: existingDisplay.title, comments: comments)
+        } else if existing.isEmpty {
             replyDraft = trimmed
         } else {
             replyDraft += "\n\n\(trimmed)"
         }
         stagedFollowUpPermissionMode = effectiveReplyPermissionMode
         model.statusLine = "Comment added to input"
+    }
+
+    private func askSelectionInSideChat(_ quote: String) {
+        guard let run,
+              let startFollowUpSideChat else {
+            return
+        }
+        let action = runFollowUpAskSelectionSideChatAction(quote: quote)
+        startFollowUpSideChat(run, action)
     }
 
     private func sendCodeReviewComments() {
@@ -8011,6 +9593,7 @@ private struct NativeCodeDiffView: View {
                 fallbackLines: diffLines,
                 fallbackEmptyText: diffEmptyText,
                 filePath: change?.path ?? "",
+                comments: comments.filter { $0.filePath == change?.path },
                 onAddComment: addComment(_:lineNumber:filePath:note:)
             )
             .background(PKTheme.inset.opacity(0.72))
@@ -8047,6 +9630,7 @@ private struct NativeReactDiffView: View {
     let fallbackLines: [String]
     let fallbackEmptyText: String
     let filePath: String
+    let comments: [NativeCodeReviewComment]
     let onAddComment: (String, Int, String, String) -> Void
 
     private var viewerURL: URL? {
@@ -8073,6 +9657,7 @@ private struct NativeReactDiffView: View {
                 indexURL: viewerURL,
                 diffText: diffText,
                 filePath: filePath,
+                comments: comments,
                 onAddComment: onAddComment
             )
         } else {
@@ -8088,6 +9673,7 @@ private struct NativeReactDiffWebView: NSViewRepresentable {
     let indexURL: URL
     let diffText: String
     let filePath: String
+    let comments: [NativeCodeReviewComment]
     let onAddComment: (String, Int, String, String) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -8108,15 +9694,14 @@ private struct NativeReactDiffWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
-        context.coordinator.pendingDiffText = diffText
-        context.coordinator.render(diffText, in: webView)
+        context.coordinator.render(diffText, comments: comments, in: webView)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: NativeReactDiffWebView
         var loaded = false
         var pendingDiffText = ""
-        private var lastRenderedDiffText: String?
+        private var lastRenderedPayload: String?
 
         init(parent: NativeReactDiffWebView) {
             self.parent = parent
@@ -8124,18 +9709,27 @@ private struct NativeReactDiffWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             loaded = true
-            render(pendingDiffText, in: webView)
+            render(parent.diffText, comments: parent.comments, in: webView)
         }
 
-        func render(_ diffText: String, in webView: WKWebView) {
-            guard loaded, lastRenderedDiffText != diffText else { return }
-            lastRenderedDiffText = diffText
+        func render(_ diffText: String, comments: [NativeCodeReviewComment], in webView: WKWebView) {
+            guard loaded else { return }
             let payload: [String: Any] = [
                 "diffText": diffText,
-                "viewType": "unified"
+                "viewType": "unified",
+                "comments": comments.map { comment in
+                    [
+                        "id": comment.id.uuidString,
+                        "lineNumber": comment.line ?? 0,
+                        "quote": comment.quote,
+                        "note": comment.note
+                    ]
+                }
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }
+            guard lastRenderedPayload != json else { return }
+            lastRenderedPayload = json
             webView.evaluateJavaScript("window.PikiclawDiffViewer?.render(\(json));")
         }
 
@@ -8377,26 +9971,43 @@ private struct NativeCodeReviewComposer: View {
     let sendReview: () -> Void
     let noApproval: () -> Void
     let cancel: () -> Void
+    @State private var expandedComments = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "text.bubble")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(accent)
-                    .frame(width: 26, height: 26)
-                    .background(accent.opacity(0.10))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                Button {
+                    guard !comments.isEmpty else { return }
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        expandedComments.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "text.bubble")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(accent)
+                            .frame(width: 26, height: 26)
+                            .background(accent.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(comments.isEmpty ? "Review ready" : "\(comments.count) comments queued")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(PKTheme.text)
-                    Text(comments.isEmpty ? "Send a no-blocking review or add line comments in the diff." : "These comments will be sent as one review message.")
-                        .font(.caption2)
-                        .foregroundStyle(PKTheme.text4)
-                        .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(comments.isEmpty ? "Review ready" : "\(comments.count) comments queued")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(PKTheme.text)
+                            Text(comments.isEmpty ? "Send a no-blocking review or add line comments in the diff." : "Click to show queued comments.")
+                                .font(.caption2)
+                                .foregroundStyle(PKTheme.text4)
+                                .lineLimit(1)
+                        }
+
+                        if !comments.isEmpty {
+                            Image(systemName: expandedComments ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundStyle(accent)
+                        }
+                    }
                 }
+                .buttonStyle(.plain)
 
                 Spacer(minLength: 0)
 
@@ -8434,11 +10045,11 @@ private struct NativeCodeReviewComposer: View {
                 .help("Send queued line comments to this chat")
             }
 
-            if !comments.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+            if expandedComments && !comments.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach($comments) { $comment in
-                            NativeCodeReviewQueuedCommentChip(
+                            NativeCodeReviewQueuedCommentRow(
                                 comment: $comment,
                                 accent: accent,
                                 remove: {
@@ -8447,7 +10058,13 @@ private struct NativeCodeReviewComposer: View {
                             )
                         }
                     }
+                    .padding(.vertical, 1)
                 }
+                .frame(maxHeight: 150)
+                .padding(8)
+                .background(PKTheme.inset.opacity(0.44))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
         .padding(10)
@@ -8457,44 +10074,54 @@ private struct NativeCodeReviewComposer: View {
     }
 }
 
-private struct NativeCodeReviewQueuedCommentChip: View {
+private struct NativeCodeReviewQueuedCommentRow: View {
     @Binding var comment: NativeCodeReviewComment
     let accent: Color
     let remove: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "text.bubble.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(accent)
+                .frame(width: 18, height: 18)
+                .background(accent.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+
+            VStack(alignment: .leading, spacing: 5) {
                 Text(comment.line.map { "\(comment.filePath):\($0)" } ?? comment.filePath)
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(accent)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Button(action: remove) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(PKTheme.text4)
-                }
-                .buttonStyle(.plain)
+                Text(comment.quote.firstLineFallback("Selected diff line"))
+                    .font(.caption2)
+                    .foregroundStyle(PKTheme.text4)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                TextField("Review comment", text: $comment.note)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .padding(6)
+                    .background(PKTheme.control.opacity(0.56))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(0.64), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            Text(comment.quote.firstLineFallback("Selected diff line"))
-                .font(.caption2)
-                .foregroundStyle(PKTheme.text4)
-                .lineLimit(1)
-            TextField("Review comment", text: $comment.note)
-                .textFieldStyle(.plain)
-                .font(.system(size: 11))
-                .padding(6)
-                .background(PKTheme.inset.opacity(0.66))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(0.72), lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            Spacer(minLength: 0)
+
+            Button(action: remove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(PKTheme.text4)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
         }
         .padding(8)
-        .frame(width: 260)
         .background(PKTheme.surfaceRaised.opacity(0.32))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.62), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -9227,6 +10854,18 @@ private struct ConversationOutputCard: View {
         artifact.title.firstLineFallback("Output")
     }
 
+    private var actionLabel: String {
+        if selected {
+            return artifact.status == .failed || artifact.kind == .commandOutputSummary ? "Viewing" : "Reviewing"
+        }
+        return artifact.status == .failed || artifact.kind == .commandOutputSummary ? "Open" : "Review"
+    }
+
+    private var actionHelp: String {
+        let action = artifact.status == .failed || artifact.kind == .commandOutputSummary ? "Open" : "Review"
+        return "\(action) \(title) in this chat"
+    }
+
     var body: some View {
         Button(action: open) {
             HStack(spacing: 12) {
@@ -9257,7 +10896,7 @@ private struct ConversationOutputCard: View {
                 Spacer(minLength: 0)
 
                 HStack(spacing: 6) {
-                    Text(selected ? "Reviewing" : "Review")
+                    Text(actionLabel)
                         .font(.system(size: 12, weight: .semibold))
                     Image(systemName: selected ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .bold))
@@ -9276,7 +10915,7 @@ private struct ConversationOutputCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
-        .help("Review \(title) in this chat")
+        .help(actionHelp)
     }
 }
 
@@ -9436,8 +11075,8 @@ private struct ConversationOutputReviewPane: View {
         artifactStatusColor(artifact.status)
     }
 
-    private var provenance: String {
-        artifact.provenance.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var previewMarkdown: String {
+        artifactReviewMarkdownText(artifact).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var refs: [SourceRef] {
@@ -9476,9 +11115,9 @@ private struct ConversationOutputReviewPane: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if !provenance.isEmpty {
+                    if !previewMarkdown.isEmpty {
                         MarkdownWebReviewView(
-                            markdown: provenance,
+                            markdown: previewMarkdown,
                             selectedText: $selectedReviewQuote,
                             onAddComment: nil
                         )
@@ -9531,7 +11170,7 @@ private struct ConversationOutputReviewPane: View {
                         }
                     }
                 )
-                MessageActionButton(systemImage: "arrow.up.right.square", help: "Open output URI") {
+                MessageActionButton(systemImage: "arrow.up.right.square", help: "Open externally") {
                     openArtifactURI(artifact)
                 }
                 MessageActionButton(systemImage: "brain.head.profile", help: "Save knowledge", action: saveKnowledge)
@@ -9954,6 +11593,36 @@ func runFollowUpStagedLabel(_ action: RunFollowUpAction) -> String {
     "\(action.title) - \(action.detail)"
 }
 
+private func runFollowUpAskSelectionSideChatAction(quote: String) -> RunFollowUpAction {
+    let selected = sideChatSelectedOutputQuoteBlock(quote)
+    return RunFollowUpAction(
+        id: "ask-selection-side-chat",
+        title: "Ask Selection",
+        detail: "Start a side chat from selected output",
+        workflowLabel: "Side chat",
+        workflowSummary: "Discuss selected output in a focused side topic",
+        symbol: "bubble.left.and.bubble.right",
+        wrapsPrompt: false,
+        prompt: """
+        Start a focused side chat about this selected output from the parent session.
+
+        Selected output:
+        \(selected)
+
+        Explain what this selected text means in context, identify any uncertainty or follow-up question it raises, and keep the answer scoped to this side topic unless I ask to apply changes.
+        """
+    )
+}
+
+private func sideChatSelectedOutputQuoteBlock(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "> [empty selection]" }
+    return trimmed
+        .components(separatedBy: .newlines)
+        .map { "> \($0)" }
+        .joined(separator: "\n")
+}
+
 func runFollowUpStagedStatus(_ action: RunFollowUpAction) -> String {
     "\(action.title) follow-up staged - \(action.workflowLabel): \(action.workflowSummary)"
 }
@@ -9985,7 +11654,7 @@ private func runFollowUpDetail(id: String, permissionMode: PermissionMode?) -> S
     case "log-analysis":
         return "Read-only trace"
     case "skill-hardening":
-        return "Ask before edits"
+        return "Need approval"
     case "continue":
         return "Continue turn"
     case "mr-review":
@@ -10001,9 +11670,9 @@ private func runFollowUpDetail(id: String, permissionMode: PermissionMode?) -> S
         case .readOnly:
             return "Read-only"
         case .askBeforeEdit:
-            return "Ask before edits"
+            return "Need approval"
         case .autopilot:
-            return "Autopilot"
+            return "Full access"
         case nil:
             return "Follow-up"
         }
@@ -15431,6 +17100,18 @@ private struct ConversationMessageBubble: View {
 
     @State private var copied = false
 
+    private var skillDisplay: SkillPromptDisplay? {
+        trailing ? composerSkillPromptDisplay(for: text) : nil
+    }
+
+    private var outputReviewDisplay: OutputReviewPromptDisplay? {
+        trailing ? outputReviewPromptDisplay(for: text) : nil
+    }
+
+    private var imageAttachments: [UserPromptImageAttachment] {
+        trailing ? userPromptImageAttachments(in: text) : []
+    }
+
     var body: some View {
         HStack(alignment: .top) {
             if trailing { Spacer(minLength: 72) }
@@ -15448,12 +17129,7 @@ private struct ConversationMessageBubble: View {
                     if trailing { avatar }
                 }
 
-                Text(text.isEmpty ? "..." : text)
-                    .font(.system(size: 14))
-                    .lineSpacing(3)
-                    .foregroundStyle(PKTheme.text2)
-                    .textSelection(.enabled)
-                    .multilineTextAlignment(.leading)
+                bubbleContent
                     .padding(13)
                     .background(trailing ? accent.opacity(0.14) : PKTheme.panelAlt.opacity(0.52))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(trailing ? accent.opacity(0.28) : PKTheme.edge, lineWidth: 1))
@@ -15480,6 +17156,49 @@ private struct ConversationMessageBubble: View {
         }
     }
 
+    @ViewBuilder
+    private var bubbleContent: some View {
+        if let outputReviewDisplay {
+            VStack(alignment: .leading, spacing: 10) {
+                OutputReviewPromptCard(
+                    display: outputReviewDisplay,
+                    accent: accent,
+                    compact: true
+                )
+                imagePreviewStrip
+            }
+        } else if let skillDisplay {
+            VStack(alignment: .leading, spacing: 10) {
+                SkillPromptMessageCard(display: skillDisplay, accent: accent)
+                imagePreviewStrip
+            }
+        } else {
+            let displayText = friendlyUserPromptDisplay(text)
+            VStack(alignment: .leading, spacing: 10) {
+                if displayText.isEmpty && imageAttachments.isEmpty {
+                    Text("...")
+                        .font(.system(size: 14))
+                        .foregroundStyle(PKTheme.text2)
+                } else if !displayText.isEmpty {
+                    Text(displayText)
+                        .font(.system(size: 14))
+                        .lineSpacing(3)
+                        .foregroundStyle(PKTheme.text2)
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.leading)
+                }
+                imagePreviewStrip
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var imagePreviewStrip: some View {
+        if !imageAttachments.isEmpty {
+            UserPromptImagePreviewStrip(images: imageAttachments, accent: accent)
+        }
+    }
+
     private var avatar: some View {
         Image(systemName: symbol)
             .font(.system(size: 13, weight: .semibold))
@@ -15488,6 +17207,325 @@ private struct ConversationMessageBubble: View {
             .background(accent)
             .clipShape(RoundedRectangle(cornerRadius: 7))
     }
+}
+
+private struct UserPromptImagePreviewStrip: View {
+    let images: [UserPromptImageAttachment]
+    let accent: Color
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(images) { image in
+                    UserPromptImagePreviewTile(image: image, accent: accent)
+                }
+            }
+            .padding(.vertical, 1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct UserPromptImagePreviewTile: View {
+    let image: UserPromptImageAttachment
+    let accent: Color
+
+    private var thumbnail: NSImage? {
+        NSImage(contentsOf: image.url)
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(PKTheme.inset.opacity(0.82))
+
+            if let thumbnail {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                VStack(spacing: 7) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text("Image unavailable")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(PKTheme.text3)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "photo")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(accent)
+                Text(image.name)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(PKTheme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial)
+        }
+        .frame(width: 156, height: 104)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.20), lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture {
+            NSWorkspace.shared.open(image.url)
+        }
+        .help(image.url.path)
+    }
+}
+
+private struct SkillPromptMessageCard: View {
+    let display: SkillPromptDisplay
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .frame(width: 30, height: 30)
+                    .background(accent.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(composerSkillDisplayTitle(for: display.command))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    Text("Skill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            if !display.body.isEmpty {
+                Text(display.body)
+                    .font(.system(size: 14))
+                    .lineSpacing(3)
+                    .foregroundStyle(PKTheme.text2)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.leading)
+            }
+
+            if !display.references.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(display.references.count == 1 ? "Reference" : "References")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(PKTheme.text4)
+                        .textCase(.uppercase)
+
+                    ForEach(display.references) { reference in
+                        SkillPromptReferenceCard(reference: reference, accent: accent)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SkillPromptReferenceStrip: View {
+    let references: [ComposerReferenceAttachment]
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(references.count == 1 ? "Reference" : "References")
+                .font(.system(size: 9, weight: .heavy))
+                .foregroundStyle(PKTheme.text4)
+                .textCase(.uppercase)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 8)], alignment: .leading, spacing: 8) {
+                ForEach(references) { reference in
+                    SkillPromptReferenceCard(reference: reference, accent: accent)
+                }
+            }
+        }
+    }
+}
+
+private struct SkillPromptReferenceCard: View {
+    let reference: ComposerReferenceAttachment
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: reference.symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(accent)
+                .frame(width: 30, height: 30)
+                .background(accent.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(reference.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(reference.subtitle)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(PKTheme.text4)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 46)
+        .background(PKTheme.panelAlt.opacity(0.44))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.22), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help(reference.value)
+    }
+}
+
+private struct OutputReviewPromptDisplay {
+    struct Comment: Identifiable {
+        let id = UUID()
+        let quote: String
+        let note: String
+    }
+
+    let title: String
+    let comments: [Comment]
+
+    var countLabel: String {
+        "\(comments.count) comment\(comments.count == 1 ? "" : "s")"
+    }
+}
+
+private struct OutputReviewPromptCard: View {
+    let display: OutputReviewPromptDisplay
+    let accent: Color
+    var compact = false
+    var remove: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 9) {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 28, height: 28)
+                    .background(accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Review comments")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text("\(display.title) · \(display.countLabel)")
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text3)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                if let remove {
+                    Button(action: remove) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(PKTheme.text3)
+                            .frame(width: 24, height: 24)
+                            .background(PKTheme.control.opacity(0.72))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove review comments")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(display.comments.prefix(compact ? 3 : display.comments.count)) { comment in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(comment.quote.firstLineFallback("Selected output"))
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(PKTheme.text2)
+                            .lineLimit(compact ? 2 : 4)
+                            .textSelection(.enabled)
+                        Text(comment.note.isEmpty ? "No extra note." : comment.note)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PKTheme.text)
+                            .lineLimit(compact ? 2 : 4)
+                            .textSelection(.enabled)
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PKTheme.inset.opacity(0.45))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(accent.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+
+                if compact, display.comments.count > 3 {
+                    Text("+ \(display.comments.count - 3) more")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(accent)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private func outputReviewPromptDisplay(for text: String) -> OutputReviewPromptDisplay? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.contains("Please address these review comments"),
+          trimmed.contains("Selected output:"),
+          trimmed.contains("Comment:") else {
+        return nil
+    }
+
+    let title = outputReviewPromptTitle(from: trimmed)
+    let comments = outputReviewPromptComments(from: trimmed)
+    guard !comments.isEmpty else { return nil }
+    return OutputReviewPromptDisplay(title: title, comments: comments)
+}
+
+private func outputReviewPromptTitle(from text: String) -> String {
+    let pattern = #"Please address these review comments on "([^"]+)""#
+    guard let regex = try? NSRegularExpression(pattern: pattern),
+          let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
+          match.numberOfRanges > 1,
+          let range = Range(match.range(at: 1), in: text) else {
+        return "Output"
+    }
+    return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines).firstLineFallback("Output")
+}
+
+private func outputReviewPromptComments(from text: String) -> [OutputReviewPromptDisplay.Comment] {
+    let pattern = #"(?ms)^\s*\d+\.\s+Selected output:\s*\n(.*?)\n\s*Comment:\s*\n(.*?)(?=\n\s*\d+\.\s+Selected output:|\z)"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    return regex.matches(in: text, range: range).compactMap { match in
+        guard match.numberOfRanges > 2,
+              let quoteRange = Range(match.range(at: 1), in: text),
+              let noteRange = Range(match.range(at: 2), in: text) else {
+            return nil
+        }
+        let quote = outputReviewPromptQuoteText(String(text[quoteRange]))
+        let note = String(text[noteRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return OutputReviewPromptDisplay.Comment(quote: quote, note: note)
+    }
+}
+
+private func outputReviewPromptQuoteText(_ text: String) -> String {
+    text
+        .components(separatedBy: .newlines)
+        .map { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix(">") else { return line }
+            return String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+        .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private struct MessageActionRow: View {
@@ -15696,6 +17734,7 @@ private struct ConversationHistoryMessageRow: View, Equatable {
     let trailing: Bool
     let accent: Color
     var onSendReviewComments: ((String) -> Void)?
+    var onAskSelectionSideChat: ((String) -> Void)?
 
     nonisolated static func == (lhs: ConversationHistoryMessageRow, rhs: ConversationHistoryMessageRow) -> Bool {
         lhs.message == rhs.message
@@ -15721,10 +17760,11 @@ private struct ConversationHistoryMessageRow: View, Equatable {
                 title: assistantTitle,
                 text: message.content,
                 createdAt: message.createdAt,
-                state: .completed,
+                state: agentRunMessageState(for: message),
                 isRunning: false,
                 accent: accent,
-                onSendReviewComments: onSendReviewComments
+                onSendReviewComments: onSendReviewComments,
+                onAskSelectionSideChat: onAskSelectionSideChat
             )
         case .system:
             ConversationMessageBubble(
@@ -15756,6 +17796,7 @@ private struct AssistantResponseCard: View {
     let createdAt: Date?
     var startedAt: Date? = nil
     var endedAt: Date? = nil
+    var lastActivityAt: Date? = nil
     let state: RunState?
     let isRunning: Bool
     let accent: Color
@@ -15769,6 +17810,7 @@ private struct AssistantResponseCard: View {
     var outputs: [Artifact] = []
     var selectedOutputArtifactId: EntityID?
     var onSendReviewComments: ((String) -> Void)?
+    var onAskSelectionSideChat: ((String) -> Void)?
     var onOpenOutput: ((Artifact) -> Void)?
 
     @State private var copied = false
@@ -15777,6 +17819,7 @@ private struct AssistantResponseCard: View {
     @State private var activeReviewQuote = ""
     @State private var draftInlineReviewComment = ""
     @State private var reviewComments: [ChatOutputReviewComment] = []
+    @State private var markdownFileReview: MarkdownLocalFileReview?
 
     private var cleanedText: String {
         friendlyAgentOutput(text)
@@ -15784,6 +17827,12 @@ private struct AssistantResponseCard: View {
 
     private var presentation: AgentResponsePresentation {
         AgentResponsePresentation(text: cleanedText, state: state, isRunning: isRunning)
+    }
+
+    private var usesInlineThinkingFrame: Bool {
+        presentation.isActive
+            && presentation.showsLiveTranscriptTimeline
+            && !presentation.showsFinalResponse
     }
 
     private var showsOutputReview: Bool {
@@ -15796,6 +17845,14 @@ private struct AssistantResponseCard: View {
 
     private var visibleGenerativeItems: [GenerativeUIItem] {
         presentation.isActive ? presentation.generativeItems : []
+    }
+
+    private var visibleOutputs: [Artifact] {
+        assistantResponseVisibleOutputs(
+            outputs,
+            isActive: presentation.isActive,
+            showsThinkingTimeline: presentation.showsThinkingTimeline
+        )
     }
 
     private var standardFollowUpActions: [RunFollowUpAction] {
@@ -15826,18 +17883,18 @@ private struct AssistantResponseCard: View {
         VStack(alignment: .leading, spacing: 12) {
             responseHeader
             finalResponseSection
+            markdownFileReviewSection
             outputAndProgressSections
             followUpSections
             messageActions
         }
         .frame(maxWidth: 760, alignment: .leading)
-        .padding(14)
+        .padding(usesInlineThinkingFrame ? 0 : 14)
         .background {
             PKTheme.panelAlt
-                .opacity(0.42)
+                .opacity(usesInlineThinkingFrame ? 0 : 0.42)
         }
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(usesInlineThinkingFrame ? 0 : 0.18), lineWidth: 1))
     }
 
     private var responseHeader: some View {
@@ -15860,6 +17917,18 @@ private struct AssistantResponseCard: View {
     }
 
     @ViewBuilder
+    private var markdownFileReviewSection: some View {
+        if let markdownFileReview {
+            MarkdownLocalFileReviewPane(
+                review: markdownFileReview,
+                close: {
+                    self.markdownFileReview = nil
+                }
+            )
+        }
+    }
+
+    @ViewBuilder
     private var responseSubtitle: some View {
         if isRunning, startedAt != nil {
             TimelineView(.periodic(from: Date(), by: 1)) { timeline in
@@ -15869,6 +17938,10 @@ private struct AssistantResponseCard: View {
                     durationText: agentRunDurationText(
                         startedAt: startedAt,
                         endedAt: endedAt,
+                        now: timeline.date
+                    ),
+                    idleText: agentRunIdleText(
+                        lastActivityAt: lastActivityAt ?? startedAt,
                         now: timeline.date
                     )
                 ))
@@ -15882,7 +17955,8 @@ private struct AssistantResponseCard: View {
                 durationText: agentRunDurationText(
                     startedAt: startedAt,
                     endedAt: endedAt
-                )
+                ),
+                idleText: nil
             ))
             .font(.caption2)
             .foregroundStyle(PKTheme.text3)
@@ -15897,7 +17971,8 @@ private struct AssistantResponseCard: View {
                     markdown: presentation.finalText,
                     selectedText: $selectedReviewQuote,
                     selectedAnchor: $selectedReviewAnchor,
-                    onAddComment: reviewCommentHandler
+                    onAddComment: reviewCommentHandler,
+                    onOpenLink: openMarkdownLink(_:)
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
@@ -15906,33 +17981,42 @@ private struct AssistantResponseCard: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                selectionCommentButton
+                selectionActionButtons
                 activeInlineCommentComposer
             }
         }
     }
 
     @ViewBuilder
-    private var selectionCommentButton: some View {
-        if onSendReviewComments != nil,
-           !selectedReviewQuote.isEmpty,
+    private var selectionActionButtons: some View {
+        if !selectedReviewQuote.isEmpty,
            activeReviewQuote.isEmpty,
+           (onSendReviewComments != nil || onAskSelectionSideChat != nil),
            let selectedReviewAnchor {
-            Button {
-                beginInlineReviewComment(selectedReviewQuote)
-            } label: {
-                Image(systemName: "text.bubble")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(PKTheme.primaryText)
-                    .frame(width: 28, height: 28)
-                    .background(accent)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.58), lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 6)
+            HStack(spacing: 5) {
+                if onSendReviewComments != nil {
+                    SelectionQuickActionButton(
+                        symbol: "text.bubble",
+                        title: "Comment on selection",
+                        accent: accent
+                    ) {
+                        beginInlineReviewComment(selectedReviewQuote)
+                    }
+                }
+                if let onAskSelectionSideChat {
+                    SelectionQuickActionButton(
+                        symbol: "bubble.left.and.bubble.right",
+                        title: "Ask in side chat",
+                        accent: accent
+                    ) {
+                        let quote = selectedReviewQuote
+                        cancelInlineReviewComment()
+                        onAskSelectionSideChat(quote)
+                    }
+                }
             }
-            .buttonStyle(.plain)
-            .help("Comment on selection")
             .position(reviewCommentButtonPosition(for: selectedReviewAnchor))
+            .zIndex(18)
         }
     }
 
@@ -15950,15 +18034,15 @@ private struct AssistantResponseCard: View {
             .frame(width: 330)
             .position(reviewCommentComposerPosition())
             .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
-            .zIndex(4)
+            .zIndex(20)
         }
     }
 
     @ViewBuilder
     private var outputAndProgressSections: some View {
-        if !outputs.isEmpty {
+        if !visibleOutputs.isEmpty {
             ConversationOutputCardStack(
-                artifacts: outputs,
+                artifacts: visibleOutputs,
                 selectedArtifactId: selectedOutputArtifactId,
                 accent: accent,
                 sendReviewComments: { prompt in
@@ -15970,17 +18054,17 @@ private struct AssistantResponseCard: View {
             )
         }
 
-        if presentation.showsThinkingTimeline {
-            AgentActivityTimeline(
-                title: "Thinking",
-                items: presentation.visibleThinkingItems,
-                accent: accent,
-                startsExpanded: presentation.startsThinkingTimelineExpanded,
-                collapsedSummary: presentation.activitySummary
-            )
+        if presentation.showsLiveTranscriptTimeline {
+            TimelineView(.periodic(from: Date(), by: 5)) { timeline in
+                let items = visibleLiveTranscriptItems(now: timeline.date)
+                AgentLiveTranscriptTimeline(
+                    items: items,
+                    accent: accent
+                )
+            }
         }
 
-        if !presentation.showsThinkingTimeline && !presentation.showsFinalResponse {
+        if !presentation.showsLiveTranscriptTimeline && !presentation.showsFinalResponse {
             AgentExecutionProgressCard(
                 presentation: presentation,
                 accent: accent
@@ -15995,6 +18079,30 @@ private struct AssistantResponseCard: View {
                 accent: accent
             )
         }
+    }
+
+    private func visibleLiveTranscriptItems(now: Date) -> [AgentActivityItem] {
+        var items = presentation.visibleLiveTranscriptItems
+        if items.isEmpty, let item = visibleIdleNoticeItem(now: now) {
+            items.append(item)
+        }
+        return items
+    }
+
+    private func visibleIdleNoticeItem(now: Date) -> AgentActivityItem? {
+        guard presentation.isActive,
+              let lastActivityAt,
+              now.timeIntervalSince(lastActivityAt) >= 90 else {
+            return nil
+        }
+        let idleText = agentRunIdleText(lastActivityAt: lastActivityAt, now: now) ?? "idle"
+        let timeoutText = NativeAppModel.idleTimeoutDisplayText(NativeAppModel.activeRunIdleStaleInterval)
+        return AgentActivityItem(
+            kind: .waiting,
+            symbol: "hourglass",
+            title: "No visible progress",
+            detail: "No new visible text or tool call for \(idleText). If this turn has no Codex turn events for \(timeoutText), it will stop and let you retry."
+        )
     }
 
     @ViewBuilder
@@ -16039,6 +18147,15 @@ private struct AssistantResponseCard: View {
             onRerun: onRerun,
             onSaveEvidence: nil
         )
+    }
+
+    private func openMarkdownLink(_ destination: MarkdownReviewLinkDestination) {
+        switch destination {
+        case .localFile(let url):
+            markdownFileReview = MarkdownLocalFileReview(url: url)
+        case .external(let url):
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func addReviewComment(_ quote: String) {
@@ -16097,6 +18214,101 @@ private struct AssistantResponseCard: View {
             y: max(rect.maxY + contentInset + 104, 118)
         )
     }
+}
+
+private struct MarkdownLocalFileReview: Identifiable, Equatable {
+    let url: URL
+
+    var id: String {
+        url.standardizedFileURL.path
+    }
+
+    var title: String {
+        url.lastPathComponent.isEmpty ? "Markdown file" : url.lastPathComponent
+    }
+
+    var displayPath: String {
+        url.path
+    }
+
+    var markdown: String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+}
+
+private struct MarkdownLocalFileReviewPane: View {
+    let review: MarkdownLocalFileReview
+    let close: () -> Void
+    @State private var selectedText = ""
+
+    private var markdown: String {
+        review.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PKTheme.primaryText)
+                    .frame(width: 32, height: 32)
+                    .background(PKTheme.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(review.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                        .lineLimit(1)
+                    Text(review.displayPath)
+                        .font(.caption2)
+                        .foregroundStyle(PKTheme.text4)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+
+                Spacer(minLength: 0)
+                MessageActionButton(systemImage: "arrow.up.right.square", help: "Open externally") {
+                    NSWorkspace.shared.open(review.url)
+                }
+                ComposerIconButton(symbol: "xmark", title: "Close Review", action: close)
+            }
+            .padding(12)
+
+            Rectangle()
+                .fill(PKTheme.edge.opacity(0.72))
+                .frame(height: 1)
+
+            if markdown.isEmpty {
+                EmptyMiniState(title: "Could not read file", subtitle: review.displayPath)
+                    .frame(maxWidth: .infinity, minHeight: 140)
+                    .padding(14)
+            } else {
+                MarkdownWebReviewView(
+                    markdown: markdown,
+                    selectedText: $selectedText,
+                    onAddComment: nil
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(height: 520)
+            }
+        }
+        .background(PKTheme.inset.opacity(0.78))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+func assistantResponseVisibleOutputs(
+    _ outputs: [Artifact],
+    isActive: Bool,
+    showsThinkingTimeline: Bool
+) -> [Artifact] {
+    let visibleOutputs = outputs.filter { artifact in
+        !(artifact.kind == .commandOutputSummary && artifact.status == .failed)
+    }
+    guard !isActive else { return [] }
+    return visibleOutputs
 }
 
 private struct InlineOutputCommentComposer: View {
@@ -16172,6 +18384,29 @@ private struct InlineOutputCommentComposer: View {
                 isNoteFocused = true
             }
         }
+    }
+}
+
+private struct SelectionQuickActionButton: View {
+    let symbol: String
+    let title: String
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(PKTheme.primaryText)
+                .frame(width: 28, height: 28)
+                .background(accent)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.58), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .shadow(color: Color.black.opacity(0.24), radius: 10, x: 0, y: 6)
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel(Text(title))
     }
 }
 
@@ -16407,9 +18642,13 @@ private struct AgentResponsePresentation {
     let text: String
     let state: RunState?
     let isRunning: Bool
+    private let lines: [String]
 
-    private var lines: [String] {
-        runFollowUpRemovingStructuredUIBlocks(from: text)
+    init(text: String, state: RunState?, isRunning: Bool) {
+        self.text = text
+        self.state = state
+        self.isRunning = isRunning
+        self.lines = runFollowUpRemovingStructuredUIBlocks(from: text)
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -16452,7 +18691,6 @@ private struct AgentResponsePresentation {
             .filter { $0.hasPrefix("Thinking:") }
             .map { $0.replacingOccurrences(of: "Thinking:", with: "").trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-            .suffix(2)
             .joined(separator: "\n")
     }
 
@@ -16513,7 +18751,38 @@ private struct AgentResponsePresentation {
            !items.contains(where: { $0.kind == .thinking && $0.detail == readableItem.detail }) {
             items.append(readableItem)
         }
-        return items
+        let formattedItems = items.map { item in
+            AgentActivityItem(
+                kind: item.kind,
+                symbol: item.symbol,
+                title: item.title,
+                detail: formattedLiveThinkingDetail(item.detail)
+            )
+        }
+        return Self.continuousLiveTranscriptItems(formattedItems)
+    }
+
+    var visibleLiveTranscriptItems: [AgentActivityItem] {
+        guard isActive else { return [] }
+        let formattedItems = transcriptItems
+            .map { item in
+                guard item.kind == .thinking || item.kind == .assistantText else { return item }
+                return AgentActivityItem(
+                    kind: item.kind,
+                    symbol: item.symbol,
+                    title: item.title,
+                    detail: formattedLiveThinkingDetail(item.detail)
+                )
+            }
+        return Self.continuousLiveTranscriptItems(Self.collapsingToolActivityRuns(formattedItems))
+    }
+
+    var showsLiveTranscriptTimeline: Bool {
+        !visibleLiveTranscriptItems.isEmpty
+    }
+
+    var startsLiveTranscriptTimelineExpanded: Bool {
+        !visibleLiveTranscriptItems.isEmpty
     }
 
     var showsThinkingTimeline: Bool {
@@ -16538,37 +18807,59 @@ private struct AgentResponsePresentation {
 
     var activityItems: [AgentActivityItem] {
         lines.compactMap { line in
-            if line.hasPrefix("Thinking:") {
-                let detail = line.replacingOccurrences(of: "Thinking:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return detail.isEmpty ? nil : AgentActivityItem(kind: .thinking, symbol: "brain.head.profile", title: "Thinking", detail: detail)
-            }
-            if line.hasPrefix("Tool result:") {
-                let detail = line.replacingOccurrences(of: "Tool result:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return AgentActivityItem(kind: .toolResult, symbol: "checkmark.circle", title: "Ran a command", detail: detail)
-            }
-            if line.hasPrefix("Tool output:") {
-                let detail = line.replacingOccurrences(of: "Tool output:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return detail.isEmpty ? nil : AgentActivityItem(kind: .toolOutput, symbol: "text.alignleft", title: "Tool output", detail: detail)
-            }
-            if line.hasPrefix("Tool:") {
-                let detail = line.replacingOccurrences(of: "Tool:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return AgentActivityItem(kind: .toolCall, symbol: "terminal", title: "Running tool", detail: detail)
-            }
-            if line.hasPrefix("Artifact:") {
-                let detail = line.replacingOccurrences(of: "Artifact:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return AgentActivityItem(kind: .artifact, symbol: "shippingbox", title: "Created artifact", detail: detail)
-            }
-            if line.hasPrefix("File:") || line.hasPrefix("Files:") {
-                let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
-                return AgentActivityItem(
-                    kind: .file,
-                    symbol: "square.and.pencil",
-                    title: parts.first == "Files" ? "Edited files" : "Edited a file",
-                    detail: parts.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? line
-                )
-            }
-            return nil
+            activityItem(for: line)
         }
+    }
+
+    var transcriptItems: [AgentActivityItem] {
+        lines.compactMap { line in
+            if let item = activityItem(for: line) {
+                return item
+            }
+            guard !runFollowUpLineIsGeneratedKnowledgeNote(line),
+                  runFollowUpSanitizedGeneratedConfirmationQuestion(line) == nil else {
+                return nil
+            }
+            return AgentActivityItem(
+                kind: .assistantText,
+                symbol: "text.bubble",
+                title: "Output",
+                detail: line
+            )
+        }
+    }
+
+    private func activityItem(for line: String) -> AgentActivityItem? {
+        if line.hasPrefix("Thinking:") {
+            let detail = line.replacingOccurrences(of: "Thinking:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? nil : AgentActivityItem(kind: .thinking, symbol: "brain.head.profile", title: "Thinking", detail: detail)
+        }
+        if line.hasPrefix("Tool result:") {
+            let detail = line.replacingOccurrences(of: "Tool result:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return AgentActivityItem(kind: .toolResult, symbol: "checkmark.circle", title: "Ran a command", detail: detail)
+        }
+        if line.hasPrefix("Tool output:") {
+            let detail = line.replacingOccurrences(of: "Tool output:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? nil : AgentActivityItem(kind: .toolOutput, symbol: "text.alignleft", title: "Tool output", detail: detail)
+        }
+        if line.hasPrefix("Tool:") {
+            let detail = line.replacingOccurrences(of: "Tool:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return AgentActivityItem(kind: .toolCall, symbol: "terminal", title: "Running tool", detail: detail)
+        }
+        if line.hasPrefix("Artifact:") {
+            let detail = line.replacingOccurrences(of: "Artifact:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return AgentActivityItem(kind: .artifact, symbol: "shippingbox", title: "Created artifact", detail: detail)
+        }
+        if line.hasPrefix("File:") || line.hasPrefix("Files:") {
+            let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
+            return AgentActivityItem(
+                kind: .file,
+                symbol: "square.and.pencil",
+                title: parts.first == "Files" ? "Edited files" : "Edited a file",
+                detail: parts.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? line
+            )
+        }
+        return nil
     }
 
     private var runningReadableThinkingItem: AgentActivityItem? {
@@ -16622,7 +18913,7 @@ private struct AgentResponsePresentation {
 
     var phaseDetail: String {
         if !thinkingText.isEmpty {
-            return thinkingText
+            return formattedLiveThinkingDetail(thinkingText)
         }
         switch state {
         case .queued: return "Waiting for the runner to accept the request."
@@ -16634,6 +18925,119 @@ private struct AgentResponsePresentation {
         case .failed: return finalText.isEmpty ? "The run ended before producing a final response." : "Review the final response and run details."
         default: return text.isEmpty ? "No response text has been emitted yet." : "Preparing the response."
         }
+    }
+
+    private func formattedLiveThinkingDetail(_ detail: String) -> String {
+        detail
+            .components(separatedBy: .newlines)
+            .map { line in
+                line
+                    .components(separatedBy: .whitespaces)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                    .replacingOccurrences(
+                        of: #"(?<![A-Za-z0-9])MR(?=[A-Za-z0-9])"#,
+                        with: "MR ",
+                        options: .regularExpression
+                    )
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    private static func collapsingToolActivityRuns(_ items: [AgentActivityItem]) -> [AgentActivityItem] {
+        var visible: [AgentActivityItem] = []
+        var pendingActivity: [AgentActivityItem] = []
+
+        func flushPendingActivity() {
+            guard !pendingActivity.isEmpty else { return }
+            visible.append(AgentActivityItem(
+                kind: .activitySummary,
+                symbol: "terminal",
+                title: "Activity",
+                detail: AgentActivitySummary(items: pendingActivity).text
+            ))
+            pendingActivity.removeAll()
+        }
+
+        for item in items {
+            switch item.kind {
+            case .thinking, .assistantText, .waiting:
+                flushPendingActivity()
+                visible.append(item)
+            case .toolCall, .toolResult, .toolOutput, .artifact, .file, .activitySummary:
+                pendingActivity.append(item)
+            }
+        }
+        flushPendingActivity()
+        return visible
+    }
+
+    private static func continuousLiveTranscriptItems(_ items: [AgentActivityItem]) -> [AgentActivityItem] {
+        var visible: [AgentActivityItem] = []
+        var liveLines: [String] = []
+        var hasThinking = false
+        var hasAssistantText = false
+
+        func appendLiveLine(_ line: String) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            liveLines.append(trimmed)
+        }
+
+        func flushLiveLines() {
+            guard !liveLines.isEmpty else { return }
+            let kind: AgentActivityKind = hasThinking ? .thinking : hasAssistantText ? .assistantText : .activitySummary
+            let item: AgentActivityItem
+            switch kind {
+            case .thinking:
+                item = AgentActivityItem(
+                    kind: .thinking,
+                    symbol: "brain.head.profile",
+                    title: "Thinking",
+                    detail: liveLines.joined(separator: "\n")
+                )
+            case .assistantText:
+                item = AgentActivityItem(
+                    kind: .assistantText,
+                    symbol: "text.bubble",
+                    title: "Output",
+                    detail: liveLines.joined(separator: "\n")
+                )
+            default:
+                item = AgentActivityItem(
+                    kind: .activitySummary,
+                    symbol: "terminal",
+                    title: "Activity",
+                    detail: liveLines.joined(separator: "\n")
+                )
+            }
+            visible.append(item)
+            liveLines.removeAll()
+            hasThinking = false
+            hasAssistantText = false
+        }
+
+        for item in items {
+            switch item.kind {
+            case .thinking:
+                hasThinking = true
+                appendLiveLine(item.detail)
+            case .assistantText:
+                hasAssistantText = true
+                appendLiveLine(item.detail)
+            case .activitySummary:
+                appendLiveLine("Activity: \(item.detail)")
+            case .waiting:
+                flushLiveLines()
+                visible.append(item)
+            case .toolCall, .toolResult, .toolOutput, .artifact, .file:
+                appendLiveLine("Activity: \(AgentActivitySummary(items: [item]).text)")
+            }
+        }
+        flushLiveLines()
+        return visible
     }
 }
 
@@ -16648,9 +19052,12 @@ struct AgentResponsePresentationPreview: Equatable {
     let thinkingItems: [AgentResponsePresentationPreviewItem]
     let toolItems: [AgentResponsePresentationPreviewItem]
     let visibleThinkingItems: [AgentResponsePresentationPreviewItem]
+    let visibleLiveTranscriptItems: [AgentResponsePresentationPreviewItem]
     let showsThinkingTimeline: Bool
+    let showsLiveTranscriptTimeline: Bool
     let showsFinalResponse: Bool
     let startsThinkingTimelineExpanded: Bool
+    let startsLiveTranscriptTimelineExpanded: Bool
     let toolSummary: String
     let activitySummary: String
 }
@@ -16675,9 +19082,14 @@ func agentResponsePresentationPreview(
         visibleThinkingItems: presentation.visibleThinkingItems.map {
             AgentResponsePresentationPreviewItem(title: $0.title, detail: $0.detail)
         },
+        visibleLiveTranscriptItems: presentation.visibleLiveTranscriptItems.map {
+            AgentResponsePresentationPreviewItem(title: $0.title, detail: $0.detail)
+        },
         showsThinkingTimeline: presentation.showsThinkingTimeline,
+        showsLiveTranscriptTimeline: presentation.showsLiveTranscriptTimeline,
         showsFinalResponse: presentation.showsFinalResponse,
         startsThinkingTimelineExpanded: presentation.startsThinkingTimelineExpanded,
+        startsLiveTranscriptTimelineExpanded: presentation.startsLiveTranscriptTimelineExpanded,
         toolSummary: presentation.toolActivitySummary,
         activitySummary: presentation.activitySummary
     )
@@ -16738,18 +19150,6 @@ private struct AgentExecutionProgressCard: View {
                 Spacer()
             }
 
-            if presentation.isActive {
-                GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(PKTheme.control.opacity(0.75))
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(accent.opacity(0.82))
-                            .frame(width: max(6, proxy.size.width * presentation.progress))
-                    }
-                }
-                .frame(height: 6)
-            }
         }
         .padding(14)
         .background(PKTheme.inset.opacity(0.78))
@@ -16765,6 +19165,9 @@ private enum AgentActivityKind: Hashable {
     case toolOutput
     case artifact
     case file
+    case activitySummary
+    case assistantText
+    case waiting
 }
 
 private struct AgentActivityItem: Hashable {
@@ -16779,17 +19182,21 @@ private struct AgentActivitySummary {
 
     var text: String {
         var parts: [String] = []
+        let thinking = items.filter { $0.kind == .thinking }.count
         let calls = items.filter { $0.kind == .toolCall }.count
         let results = items.filter { $0.kind == .toolResult }.count
         let outputs = items.filter { $0.kind == .toolOutput }.count
         let files = items.filter { $0.kind == .file }.count
         let artifacts = items.filter { $0.kind == .artifact }.count
+        let waiting = items.filter { $0.kind == .waiting }.count
 
+        if thinking > 0 { parts.append("\(thinking) thinking") }
         if calls > 0 { parts.append("\(calls) call\(calls == 1 ? "" : "s")") }
         if results > 0 { parts.append("\(results) completed") }
         if outputs > 0 { parts.append("\(outputs) output\(outputs == 1 ? "" : "s")") }
         if files > 0 { parts.append("\(files) file\(files == 1 ? "" : "s")") }
         if artifacts > 0 { parts.append("\(artifacts) artifact\(artifacts == 1 ? "" : "s")") }
+        if waiting > 0 { parts.append("waiting") }
 
         return parts.isEmpty ? "\(items.count) item\(items.count == 1 ? "" : "s")" : parts.joined(separator: " · ")
     }
@@ -16867,6 +19274,119 @@ private struct AgentActivityTimeline: View {
         .background(PKTheme.inset.opacity(0.58))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct AgentLiveTranscriptTimeline: View {
+    let items: [AgentActivityItem]
+    let accent: Color
+
+    private var visibleItems: [AgentActivityItem] {
+        items.filter { item in
+            item.kind == .thinking
+                || item.kind == .assistantText
+                || item.kind == .waiting
+                || item.kind == .activitySummary
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(visibleItems.enumerated()), id: \.offset) { _, item in
+                AgentLiveTranscriptSegment(item: item, accent: accent)
+            }
+        }
+        .padding(14)
+        .background(PKTheme.inset.opacity(0.66))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct AgentLiveTranscriptSegment: View {
+    let item: AgentActivityItem
+    let accent: Color
+
+    private var label: String {
+        switch item.kind {
+        case .thinking:
+            return "Thinking"
+        case .assistantText:
+            return "Output"
+        case .waiting:
+            return "Status"
+        case .activitySummary:
+            return item.detail
+        default:
+            return item.title
+        }
+    }
+
+    private var symbol: String {
+        switch item.kind {
+        case .thinking:
+            return "brain.head.profile"
+        case .assistantText:
+            return "text.bubble"
+        case .waiting:
+            return "hourglass"
+        case .activitySummary:
+            return "terminal"
+        default:
+            return item.symbol
+        }
+    }
+
+    private var tone: Color {
+        switch item.kind {
+        case .assistantText:
+            return PKTheme.ok
+        case .activitySummary:
+            return PKTheme.text4
+        default:
+            return accent
+        }
+    }
+
+    var body: some View {
+        Group {
+            if item.kind == .activitySummary {
+                HStack(spacing: 6) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Text(label)
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                .foregroundStyle(tone.opacity(0.78))
+            } else {
+                AgentLiveTranscriptParagraphText(text: item.detail)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AgentLiveTranscriptParagraphText: View {
+    let text: String
+
+    private var paragraphs: [String] {
+        text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                Text(paragraph)
+                    .font(.system(size: 13))
+                    .lineSpacing(3)
+                    .foregroundStyle(PKTheme.text2)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -17265,6 +19785,8 @@ private struct ComposerQueuedMessageStrip: View {
     @Binding var editingText: String
     let save: (EntityID, String) -> Void
     let delete: (EntityID) -> Void
+    let move: (EntityID, EntityID) -> Void
+    let steer: (EntityID) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -17295,6 +19817,11 @@ private struct ComposerQueuedMessageStrip: View {
     private func row(for message: AgentRunQueuedMessage) -> some View {
         let isEditing = editingMessageId == message.id
         HStack(spacing: 7) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10.5, weight: .heavy))
+                .foregroundStyle(PKTheme.text4)
+                .frame(width: 12)
+
             Text("#\(queuePosition(for: message))")
                 .font(.system(size: 9, weight: .heavy, design: .monospaced))
                 .foregroundStyle(accent)
@@ -17311,7 +19838,7 @@ private struct ComposerQueuedMessageStrip: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             } else {
-                Text(message.content.firstLineFallback("Queued message"))
+                Text(composerQueuedMessageDisplayTitle(message.content))
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(PKTheme.text2)
                     .lineLimit(1)
@@ -17330,6 +19857,12 @@ private struct ComposerQueuedMessageStrip: View {
                     editingText = ""
                 }
             } else {
+                ComposerQueueSteerButton(
+                    isActive: composerQueuedMessageIsSteer(message.content),
+                    accent: PKTheme.warn
+                ) {
+                    steer(message.id)
+                }
                 ComposerQueueIconButton(symbol: "pencil", title: "Edit queued message", accent: accent) {
                     editingMessageId = message.id
                     editingText = message.content
@@ -17348,10 +19881,58 @@ private struct ComposerQueuedMessageStrip: View {
         .background(PKTheme.control.opacity(isEditing ? 0.58 : 0.34))
         .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.62), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 7))
+        .draggable(message.id.rawValue)
+        .dropDestination(for: String.self) { values, _ in
+            guard let rawValue = values.first else { return false }
+            let draggedId = EntityID(rawValue)
+            guard draggedId != message.id else { return false }
+            move(draggedId, message.id)
+            return true
+        }
     }
 
     private func queuePosition(for message: AgentRunQueuedMessage) -> Int {
         (messages.firstIndex(where: { $0.id == message.id }) ?? 0) + 1
+    }
+
+    private func composerQueuedMessageDisplayTitle(_ content: String) -> String {
+        let displayContent = composerQueuedMessageVisibleContent(content)
+        if let display = composerSkillPromptDisplay(for: displayContent) {
+            return display.body.isEmpty
+                ? composerSkillDisplayTitle(for: display.command)
+                : "\(composerSkillDisplayTitle(for: display.command)): \(display.body.firstLineFallback("Queued message"))"
+        }
+        return displayContent.firstLineFallback("Queued message")
+    }
+}
+
+private func composerQueuedMessageIsSteer(_ content: String) -> Bool {
+    NativeAppModel.isQueuedSteerPrompt(content)
+}
+
+private func composerQueuedMessageVisibleContent(_ content: String) -> String {
+    NativeAppModel.queuedSteerVisibleContent(content)
+}
+
+private struct ComposerQueueSteerButton: View {
+    let isActive: Bool
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Steer")
+                .font(.system(size: 9.5, weight: .heavy))
+                .foregroundStyle(isActive ? PKTheme.primaryText : accent)
+                .padding(.horizontal, 7)
+                .frame(height: 24)
+                .background(isActive ? accent.opacity(0.90) : accent.opacity(0.10))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(accent.opacity(isActive ? 0.36 : 0.22), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .help(isActive ? "Move this steer message next" : "Make this queued message the next steer instruction")
+        .accessibilityLabel(isActive ? "Queued as steer" : "Steer queued message")
     }
 }
 
@@ -17391,6 +19972,8 @@ private struct ConversationReplyComposer: View {
     var switchBranch: (String) -> Void = { _ in }
     var editQueuedMessage: (EntityID, String) -> Void = { _, _ in }
     var deleteQueuedMessage: (EntityID) -> Void = { _ in }
+    var moveQueuedMessage: (EntityID, EntityID) -> Void = { _, _ in }
+    var steerQueuedMessage: (EntityID) -> Void = { _ in }
     let send: () -> Void
     @FocusState private var focused: Bool
     @State private var editorFocused = false
@@ -17400,6 +19983,8 @@ private struct ConversationReplyComposer: View {
     @State private var attachmentError: String?
     @State private var editingQueuedMessageId: EntityID?
     @State private var editingQueuedMessageText = ""
+    @State private var selectedSkillCommand: String?
+    @State private var focusRequest = 0
 
     init(
         snapshot: NativeStoreSnapshot,
@@ -17416,6 +20001,8 @@ private struct ConversationReplyComposer: View {
         switchBranch: @escaping (String) -> Void = { _ in },
         editQueuedMessage: @escaping (EntityID, String) -> Void = { _, _ in },
         deleteQueuedMessage: @escaping (EntityID) -> Void = { _ in },
+        moveQueuedMessage: @escaping (EntityID, EntityID) -> Void = { _, _ in },
+        steerQueuedMessage: @escaping (EntityID) -> Void = { _ in },
         send: @escaping () -> Void
     ) {
         self.snapshot = snapshot
@@ -17432,12 +20019,15 @@ private struct ConversationReplyComposer: View {
         self.switchBranch = switchBranch
         self.editQueuedMessage = editQueuedMessage
         self.deleteQueuedMessage = deleteQueuedMessage
+        self.moveQueuedMessage = moveQueuedMessage
+        self.steerQueuedMessage = steerQueuedMessage
         self.send = send
         self._draftText = State(initialValue: text.wrappedValue)
     }
 
     private var canSend: Bool {
         !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || selectedSkillCommand != nil
             || !imageAttachments.isEmpty
             || !referenceAttachments.isEmpty
     }
@@ -17457,165 +20047,199 @@ private struct ConversationReplyComposer: View {
         return "Ask for the next action, validation, or follow-up"
     }
 
-    private var skillCards: [ComposerSkillCardModel] {
-        composerCommandCards(snapshot: snapshot, agentKind: selectedAgentKind, draftText: draftText)
+    private var sendButtonHelp: String {
+        guard isRunning else { return "Send follow-up" }
+        return "Queue next message"
+    }
+
+    private var slashCommands: [ComposerSkillCardModel] {
+        guard composerShouldShowSlashCommandList(for: draftText) else {
+            return []
+        }
+        return composerCommandCards(snapshot: snapshot, agentKind: selectedAgentKind, draftText: draftText)
+    }
+
+    private var outputReviewDraftDisplay: OutputReviewPromptDisplay? {
+        outputReviewPromptDisplay(for: draftText)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !skillCards.isEmpty {
-                ComposerSkillCardRow(skills: skillCards) { skill in
-                    insertSkillCommand(skill.previewCommand)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-            }
-
-            ZStack(alignment: .topLeading) {
-                if draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
-                    Text(placeholderText)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(PKTheme.text4.opacity(0.72))
-                        .padding(.top, 5)
-                        .padding(.leading, 10)
-                        .allowsHitTesting(false)
-                }
-                NativeSendingTextEditor(
-                    text: $draftText,
-                    focused: $focused,
-                    fontSize: 13,
-                    lineSpacing: 1,
-                    textContainerInset: NSSize(width: 0, height: 3),
-                    onSend: sendWithAttachments,
-                    onPasteImages: pasteImagesFromClipboard,
-                    onPasteReferences: pasteReferencesFromClipboard,
-                    onFocusChange: { editorFocused = $0 }
-                )
-                    .frame(minHeight: 38, maxHeight: 56)
-                    .padding(.horizontal, 10)
-                    .padding(.top, 4)
-                    .padding(.bottom, 0)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                focused = true
-            }
-
-            if !referenceAttachments.isEmpty {
-                ComposerReferenceAttachmentStrip(
-                    references: referenceAttachments,
-                    remove: { reference in
-                        referenceAttachments.removeAll { $0.id == reference.id }
-                    },
-                    compact: true
-                )
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-            }
-
-            if !imageAttachments.isEmpty || attachmentError != nil {
-                ComposerImageAttachmentStrip(
-                    attachments: imageAttachments,
-                    error: attachmentError,
-                    remove: { attachment in
-                        imageAttachments.removeAll { $0.id == attachment.id }
-                    },
-                    clearError: { attachmentError = nil },
-                    compact: true
-                )
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-            }
-
-            if !queuedMessages.isEmpty {
+        VStack(alignment: .leading, spacing: 8) {
+            if outputReviewDraftDisplay == nil && !queuedMessages.isEmpty {
                 ComposerQueuedMessageStrip(
                     messages: queuedMessages,
                     accent: accent,
                     editingMessageId: $editingQueuedMessageId,
                     editingText: $editingQueuedMessageText,
                     save: editQueuedMessage,
-                    delete: deleteQueuedMessage
+                    delete: deleteQueuedMessage,
+                    move: moveQueuedMessage,
+                    steer: steerQueuedMessage
                 )
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            VStack(spacing: 0) {
+                if !slashCommands.isEmpty {
+                    ComposerSlashCommandList(commands: slashCommands) { skill in
+                        insertSkillCommand(skill.previewCommand)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if let outputReviewDraftDisplay {
+                    OutputReviewPromptCard(
+                        display: outputReviewDraftDisplay,
+                        accent: accent,
+                        compact: true,
+                        remove: { draftText = "" }
+                    )
+                    .padding(.horizontal, 10)
+                    .padding(.top, selectedSkillCommand == nil && slashCommands.isEmpty ? 8 : 0)
+                    .padding(.bottom, 8)
+                } else {
+                    ZStack(alignment: .topLeading) {
+                        if draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composerFocused {
+                            Text(placeholderText)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(PKTheme.text4.opacity(0.72))
+                                .padding(.top, 5)
+                                .padding(.leading, 10)
+                                .allowsHitTesting(false)
+                        }
+                        NativeSendingTextEditor(
+                            text: $draftText,
+                            focused: $focused,
+                            focusRequest: focusRequest,
+                            fontSize: 13,
+                            lineSpacing: 1,
+                            textContainerInset: NSSize(width: 0, height: 3),
+                            onSend: sendWithAttachments,
+                            onPasteImages: pasteImagesFromClipboard,
+                            onPasteReferences: pasteReferencesFromClipboard,
+                            onFocusChange: { editorFocused = $0 }
+                        )
+                            .frame(minHeight: 38, maxHeight: 56)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 4)
+                            .padding(.bottom, 0)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        refocusComposer()
+                    }
+                }
+
+                if !referenceAttachments.isEmpty {
+                    ComposerReferenceAttachmentStrip(
+                        references: referenceAttachments,
+                        remove: { reference in
+                            referenceAttachments.removeAll { $0.id == reference.id }
+                        },
+                        compact: true
+                    )
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                }
+
+                if !imageAttachments.isEmpty || attachmentError != nil {
+                    ComposerImageAttachmentStrip(
+                        attachments: imageAttachments,
+                        error: attachmentError,
+                        remove: { attachment in
+                            imageAttachments.removeAll { $0.id == attachment.id }
+                        },
+                        clearError: { attachmentError = nil },
+                        compact: true
+                    )
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                }
+
+                HStack(spacing: 7) {
+                    if let contextWorkspaceId {
+                        ProjectContextChip(
+                            snapshot: snapshot,
+                            workspaceId: contextWorkspaceId,
+                            accent: accent,
+                            compact: true
+                        )
+                    } else {
+                        ProjectPickerChip(
+                            snapshot: snapshot,
+                            selectedWorkspaceId: $selectedWorkspaceId,
+                            accent: accent,
+                            compact: true
+                        )
+                    }
+
+                    if let branch = branchTitle(for: composerWorkspaceId, snapshot: snapshot) {
+                        BranchPickerChip(
+                            currentBranch: branch,
+                            branchOptions: branchOptions,
+                            branchStatus: branchStatus,
+                            compact: true,
+                            switchBranch: switchBranch
+                        )
+                    }
+
+                    if isRunning {
+                        StatusPill(text: queuedMessages.isEmpty ? "RUNNING" : "\(queuedMessages.count) QUEUED", color: PKTheme.warn)
+                    } else if referenceAttachments.isEmpty && imageAttachments.isEmpty && selectedSkillCommand == nil && draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        StatusPill(text: "READY", color: PKTheme.ok)
+                    } else if outputReviewDraftDisplay != nil {
+                        StatusPill(text: "COMMENTS", color: accent)
+                    } else if selectedSkillCommand != nil {
+                        StatusPill(text: "SKILL", color: accent)
+                    } else if !referenceAttachments.isEmpty {
+                        StatusPill(text: "\(referenceAttachments.count) REF\(referenceAttachments.count == 1 ? "" : "S")", color: accent)
+                    } else if !imageAttachments.isEmpty {
+                        StatusPill(text: "\(imageAttachments.count) IMAGE\(imageAttachments.count == 1 ? "" : "S")", color: accent)
+                    } else if !statusLine.isEmpty && statusLine != "New chat ready" {
+                        Text(statusLine)
+                            .font(.caption)
+                            .foregroundStyle(PKTheme.text3)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    ComposerIconButton(symbol: "paperclip", title: "Choose image files", help: "Choose image files from disk") {
+                        addAttachments(ComposerImageAttachmentStore.pickImageFiles())
+                    }
+                    ComposerIconButton(symbol: "photo.badge.plus", title: "Paste image", help: "Add the image currently on the clipboard") {
+                        addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+                    }
+                    Button(action: sendWithAttachments) {
+                        Image(systemName: isRunning ? "text.badge.plus" : "arrow.up")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
+                            .frame(width: 30, height: 30)
+                            .background(canSend ? accent : PKTheme.control.opacity(0.86))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help(sendButtonHelp)
+                }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
             }
-
-            HStack(spacing: 7) {
-                if let contextWorkspaceId {
-                    ProjectContextChip(
-                        snapshot: snapshot,
-                        workspaceId: contextWorkspaceId,
-                        accent: accent,
-                        compact: true
-                    )
-                } else {
-                    ProjectPickerChip(
-                        snapshot: snapshot,
-                        selectedWorkspaceId: $selectedWorkspaceId,
-                        accent: accent,
-                        compact: true
-                    )
-                }
-
-                if let branch = branchTitle(for: composerWorkspaceId, snapshot: snapshot) {
-                    BranchPickerChip(
-                        currentBranch: branch,
-                        branchOptions: branchOptions,
-                        branchStatus: branchStatus,
-                        compact: true,
-                        switchBranch: switchBranch
-                    )
-                }
-
-                if isRunning {
-                    StatusPill(text: queuedMessages.isEmpty ? "RUNNING" : "\(queuedMessages.count) QUEUED", color: PKTheme.warn)
-                } else if referenceAttachments.isEmpty && imageAttachments.isEmpty && draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    StatusPill(text: "READY", color: PKTheme.ok)
-                } else if !referenceAttachments.isEmpty {
-                    StatusPill(text: "\(referenceAttachments.count) REF\(referenceAttachments.count == 1 ? "" : "S")", color: accent)
-                } else if !imageAttachments.isEmpty {
-                    StatusPill(text: "\(imageAttachments.count) IMAGE\(imageAttachments.count == 1 ? "" : "S")", color: accent)
-                } else if !statusLine.isEmpty && statusLine != "New chat ready" {
-                    Text(statusLine)
-                        .font(.caption)
-                        .foregroundStyle(PKTheme.text3)
-                        .lineLimit(1)
-                }
-                Spacer()
-                ComposerIconButton(symbol: "paperclip", title: "Attach Images") {
-                    addAttachments(ComposerImageAttachmentStore.pickImageFiles())
-                }
-                ComposerIconButton(symbol: "doc.on.clipboard", title: "Paste Image") {
-                    addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
-                }
-                Button(action: sendWithAttachments) {
-                    Image(systemName: isRunning ? "text.badge.plus" : "arrow.up")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(canSend ? PKTheme.primaryText : PKTheme.text4)
-                        .frame(width: 30, height: 30)
-                        .background(canSend ? accent : PKTheme.control.opacity(0.86))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help(isRunning ? "Queue next message" : "Send follow-up")
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
-        }
-        .background(
-            LinearGradient(
-                colors: [
-                    accent.opacity(0.06),
-                    PKTheme.surfaceRaised.opacity(0.92)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+            .background(
+                LinearGradient(
+                    colors: [
+                        accent.opacity(0.06),
+                        PKTheme.surfaceRaised.opacity(0.92)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
             )
-        )
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused ? accent.opacity(0.62) : PKTheme.edgeStrong.opacity(0.48), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused ? accent.opacity(0.62) : PKTheme.edgeStrong.opacity(0.48), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
         .onPasteCommand(of: composerPasteCommandTypes) { _ in
             if !pasteImagesFromClipboard() {
                 _ = pasteReferencesFromClipboard()
@@ -17650,15 +20274,15 @@ private struct ConversationReplyComposer: View {
         }
     }
 
-    private func pasteImagesFromClipboard() -> Bool {
-        guard ComposerImageAttachmentStore.canImportImagesFromPasteboard() else { return false }
-        addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard())
+    private func pasteImagesFromClipboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        guard ComposerImageAttachmentStore.canImportImagesFromPasteboard(pasteboard) else { return false }
+        addAttachments(ComposerImageAttachmentStore.importImagesFromPasteboard(pasteboard))
         refocusComposer()
         return true
     }
 
-    private func pasteReferencesFromClipboard() -> Bool {
-        let extraction = ComposerReferenceAttachmentStore.importReferencesFromPasteboard()
+    private func pasteReferencesFromClipboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        let extraction = ComposerReferenceAttachmentStore.importFileReferencesFromPasteboard(pasteboard)
         guard !extraction.references.isEmpty else { return false }
         addReferences(extraction.references)
         appendRemainingReferenceText(extraction.text)
@@ -17673,27 +20297,42 @@ private struct ConversationReplyComposer: View {
     }
 
     private func insertSkillCommand(_ command: String) {
-        draftText = command
+        selectedSkillCommand = nil
+        draftText = command.gitTrimmed
         refocusComposer()
     }
 
     private func sendWithAttachments() {
         guard canSend else { return }
-        let extraction = composerExtractReferenceAttachments(from: draftText)
+        let extractionText: String
+        let extractedReferences: [ComposerReferenceAttachment]
+        if outputReviewDraftDisplay != nil {
+            extractionText = draftText
+            extractedReferences = []
+        } else {
+            let extraction = composerExtractReferenceAttachments(from: draftText)
+            extractionText = extraction.text
+            extractedReferences = extraction.references
+        }
         let references = composerMergedReferenceAttachments(
             existing: referenceAttachments,
-            newReferences: extraction.references
+            newReferences: extractedReferences
         )
         var outgoing = ComposerAttachmentPrompt.appendReferenceRefs(
-            to: extraction.text,
+            to: extractionText,
             references: references.map(\.promptRef)
         )
         outgoing = ComposerAttachmentPrompt.appendImageRefs(
             to: outgoing,
             images: imageAttachments.map { ComposerImageAttachmentRef(name: $0.name, path: $0.url.path) }
         )
+        if let selectedSkillCommand {
+            let body = outgoing.gitTrimmed
+            outgoing = body.isEmpty ? selectedSkillCommand : "\(selectedSkillCommand)\n\n\(body)"
+        }
         text = outgoing
         draftText = ""
+        selectedSkillCommand = nil
         referenceAttachments = []
         imageAttachments = []
         attachmentError = nil
@@ -17703,6 +20342,7 @@ private struct ConversationReplyComposer: View {
 
     private func refocusComposer() {
         DispatchQueue.main.async {
+            focusRequest += 1
             focused = true
         }
     }
@@ -18314,7 +20954,7 @@ private struct RecentChatList: View {
             ForEach(snapshot.runs.prefix(4)) { run in
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(run.promptSnapshot.firstLineFallback("Conversation"))
+                        Text(composerPromptDisplayTitle(for: run.promptSnapshot))
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(PKTheme.text)
                             .lineLimit(1)
@@ -18347,6 +20987,27 @@ private func runStateColor(_ state: RunState?) -> Color {
     case .draft: PKTheme.primary
     default: PKTheme.text3
     }
+}
+
+private func agentRunMessageState(for message: AgentRunMessage) -> RunState {
+    let normalized = message.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized.contains("[failed]")
+        || normalized.contains("[runner failed]")
+        || normalized.contains("failed: no codex turn events")
+        || normalized.contains("no codex turn events")
+        || normalized.contains("[completed with exit code 1]")
+        || normalized.contains("[completed with exit code 2]") {
+        return .failed
+    }
+    if normalized.contains("[system] marked stale")
+        || normalized.contains("marked stale because pikiclaw restarted") {
+        return .stale
+    }
+    if normalized.contains("[completed with exit code 0]")
+        || !normalized.isEmpty {
+        return .completed
+    }
+    return .completed
 }
 
 func runStateDisplayLabel(_ state: RunState?) -> String {
@@ -18393,9 +21054,13 @@ func agentRunDurationText(startedAt: Date?, endedAt: Date?, now: Date = Date()) 
 private func agentOutputSubtitle(
     state: RunState?,
     isRunning: Bool,
-    durationText: String? = nil
+    durationText: String? = nil,
+    idleText: String? = nil
 ) -> String {
     if isRunning {
+        if let durationText, let idleText {
+            return "Working for \(durationText) · \(idleText)"
+        }
         if let durationText {
             return "Working for \(durationText)"
         }
@@ -18432,6 +21097,27 @@ private func agentOutputSubtitle(
     default:
         return "Agent output"
     }
+}
+
+private func agentRunIdleText(lastActivityAt: Date?, now: Date = Date()) -> String? {
+    guard let lastActivityAt else { return nil }
+    let seconds = max(0, Int(now.timeIntervalSince(lastActivityAt).rounded(.down)))
+    guard seconds >= 20 else { return nil }
+    if seconds < 60 {
+        return "active \(seconds)s ago"
+    }
+    let minutes = seconds / 60
+    let remainingSeconds = seconds % 60
+    if minutes < 60 {
+        return remainingSeconds == 0
+            ? "idle \(minutes)m"
+            : "idle \(minutes)m \(remainingSeconds)s"
+    }
+    let hours = minutes / 60
+    let remainingMinutes = minutes % 60
+    return remainingMinutes == 0
+        ? "idle \(hours)h"
+        : "idle \(hours)h \(remainingMinutes)m"
 }
 
 func friendlyAgentOutput(_ text: String) -> String {
@@ -18515,6 +21201,169 @@ private func friendlyAgentOutputLineIsActivity(_ line: String) -> Bool {
         || trimmed.hasPrefix("Runner failed:")
 }
 
+func friendlyUserPromptDisplay(_ text: String) -> String {
+    let trimmed = userPromptTextWithoutImageAttachments(text).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "" }
+
+    if let codeReviewSummary = friendlyCodeReviewPromptSummary(trimmed) {
+        return codeReviewSummary
+    }
+
+    if let userContext = friendlyPromptSection(
+        in: trimmed,
+        header: "User-provided context:",
+        stopHeaders: ["Context:", "Permission guard:"]
+    ) {
+        return userContext
+    }
+
+    if let jiraSummary = friendlyJiraPromptSummary(trimmed) {
+        return jiraSummary
+    }
+
+    if trimmed.hasPrefix("Continue this conversation."),
+       let current = friendlyPromptSection(in: trimmed, header: "User:", stopHeaders: []) {
+        return current
+    }
+
+    if trimmed.hasPrefix("This is a focused side chat.") {
+        return friendlySideChatPromptSummary(trimmed) ?? "Focused side chat"
+    }
+
+    return trimmed
+}
+
+private func friendlyCodeReviewPromptSummary(_ text: String) -> String? {
+    if text == "Reviewed changes. No blocking comments." {
+        return "Code review completed: no blocking comments."
+    }
+
+    if text.hasPrefix("Please address these review comments") {
+        let commentCount = friendlyOutputReviewCommentCount(text)
+        if let commentCount {
+            return "Sent output review · \(commentCount) comment\(commentCount == 1 ? "" : "s")"
+        }
+        return "Sent output review comments."
+    }
+
+    if text.hasPrefix("Explain the current code changes") {
+        let fileCount = friendlyCodeReviewFileCount(text)
+        let suffix = fileCount.map { " · \($0) files" } ?? ""
+        return "Requested code change explanation\(suffix)."
+    }
+
+    guard text.hasPrefix("Review the current code changes") else {
+        return nil
+    }
+
+    let commentCount = friendlyCodeReviewCommentCount(text)
+    let fileCount = friendlyCodeReviewFileCount(text)
+    var parts = ["Sent code review"]
+    if let commentCount {
+        parts.append("\(commentCount) comment\(commentCount == 1 ? "" : "s")")
+    }
+    if let fileCount {
+        parts.append("\(fileCount) file\(fileCount == 1 ? "" : "s")")
+    }
+    return parts.joined(separator: " · ")
+}
+
+private func friendlyOutputReviewCommentCount(_ text: String) -> Int? {
+    let pattern = #"(?m)^\s*\d+\.\s+Selected output:"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    let count = regex.numberOfMatches(in: text, range: range)
+    return count > 0 ? count : nil
+}
+
+private func friendlyCodeReviewFileCount(_ text: String) -> Int? {
+    let lines = text.components(separatedBy: .newlines)
+    guard let filesIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "Files:" }) else {
+        return nil
+    }
+    let count = lines[(filesIndex + 1)...].prefix { line in
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("- ")
+    }.count
+    return count > 0 ? count : nil
+}
+
+private func friendlyCodeReviewCommentCount(_ text: String) -> Int? {
+    guard text.contains("User inline review comments:") else { return nil }
+    let pattern = #"(?m)^\s*\d+\.\s+"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    let count = regex.numberOfMatches(in: text, range: range)
+    return count > 0 ? count : nil
+}
+
+private func friendlyJiraPromptSummary(_ text: String) -> String? {
+    let lines = text.components(separatedBy: .newlines)
+    let jira = friendlyPromptField("Jira", in: lines)
+    let title = friendlyPromptField("Title", in: lines)
+    guard jira != nil || title != nil else { return nil }
+
+    let phase = lines
+        .compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("Selected phase:") else { return nil }
+            return trimmed
+                .replacingOccurrences(of: "Selected phase:", with: "")
+                .replacingOccurrences(of: ".", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        .first
+    let action = phase.map { "Start \($0)" } ?? "Start Jira chat"
+    let subject: String
+    if let jira = jira?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+       let title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+        subject = title.hasPrefix("\(jira):") ? title : "\(jira): \(title)"
+    } else {
+        subject = (jira ?? title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return subject.isEmpty ? action : "\(action): \(subject)"
+}
+
+private func friendlySideChatPromptSummary(_ text: String) -> String? {
+    let lines = text.components(separatedBy: .newlines)
+    if let followUp = friendlyPromptField("- Follow-up", in: lines) {
+        return "Focused side chat: \(followUp)"
+    }
+    if let workItem = friendlyPromptField("- Work item", in: lines) {
+        return "Focused side chat: \(workItem)"
+    }
+    return nil
+}
+
+private func friendlyPromptField(_ label: String, in lines: [String]) -> String? {
+    let prefix = "\(label):"
+    return lines.compactMap { line -> String? in
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(prefix) else { return nil }
+        return String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }.first
+}
+
+private func friendlyPromptSection(in text: String, header: String, stopHeaders: [String]) -> String? {
+    guard let range = text.range(of: header) else { return nil }
+    let suffix = String(text[range.upperBound...])
+    var sectionLines: [String] = []
+    for line in suffix.components(separatedBy: .newlines) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !sectionLines.isEmpty, trimmed.isEmpty {
+            break
+        }
+        if stopHeaders.contains(where: { trimmed.hasPrefix($0) }) {
+            break
+        }
+        sectionLines.append(line)
+    }
+    return sectionLines
+        .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .nilIfEmpty
+}
+
 private func friendlyAgentThinkingText(_ text: String) -> String {
     text.components(separatedBy: .newlines)
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -18531,6 +21380,9 @@ private func isHiddenAgentCLIDiagnosticLine(_ trimmed: String) -> Bool {
         return true
     }
     if lower.hasPrefix("[system] marked stale because pikiclaw restarted before this run reported completion") {
+        return true
+    }
+    if lower.hasPrefix("[system] recovering after pikiclaw restarted before this run reported completion") {
         return true
     }
     if lower == "plugin.json" || lower == "sessionstart" { return true }
@@ -18834,9 +21686,9 @@ private struct ComposerPanel: View {
 
                 PickerRow(label: "PERMISSION") {
                     Picker("Permission", selection: $model.selectedPermissionMode) {
-                        Text("Read").tag(PermissionMode.readOnly)
-                        Text("Ask").tag(PermissionMode.askBeforeEdit)
-                        Text("Autopilot").tag(PermissionMode.autopilot)
+                        Text("Read only").tag(PermissionMode.readOnly)
+                        Text("Need approval").tag(PermissionMode.askBeforeEdit)
+                        Text("Full access").tag(PermissionMode.autopilot)
                     }
                     .labelsHidden()
                 }
@@ -23635,7 +26487,11 @@ private struct ProjectChatStarter: View {
                     ComposerIconButton(symbol: "terminal", title: "Terminal", action: openTerminal)
                 }
 
-                NewChatCategoryStrip(mode: .engineering) { action in
+                NewChatCategoryStrip(
+                    mode: .engineering,
+                    snapshot: snapshot,
+                    selectedWorkspaceId: selectedWorkspaceId
+                ) { action in
                     applyPrompt(action.prompt)
                 }
 
@@ -24683,9 +27539,9 @@ private struct JiraTicketSidebar: View {
                         .frame(width: 34, height: 32)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(PKTheme.text2)
-                .background(PKTheme.control.opacity(0.78))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+                .foregroundStyle(isSyncing ? PKTheme.ok : PKTheme.jira)
+                .background(PKTheme.jira.opacity(isSyncing ? 0.08 : 0.10))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.jira.opacity(0.26), lineWidth: 1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .disabled(isSyncing)
                 .help("Sync current sprint")
@@ -24695,7 +27551,7 @@ private struct JiraTicketSidebar: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(PKTheme.text4)
+                    .foregroundStyle(PKTheme.jira.opacity(0.78))
                 TextField("Filter tickets", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium))
@@ -24703,8 +27559,8 @@ private struct JiraTicketSidebar: View {
             }
             .padding(.horizontal, 11)
             .frame(height: 34)
-            .background(PKTheme.control.opacity(0.54))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+            .background(PKTheme.jira.opacity(0.07))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.jira.opacity(0.22), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .padding(.horizontal, 16)
             .padding(.bottom, 12)
@@ -24745,12 +27601,12 @@ private struct JiraWorkspaceTicketRow: View {
     let action: () -> Void
     @State private var hovering = false
 
-    private var tint: Color {
+    private var statusTint: Color {
         switch item.state {
         case .active, .done: return PKTheme.ok
         case .blocked, .review: return PKTheme.warn
         case .cancelled, .archived: return PKTheme.text4
-        default: return PKTheme.primary
+        default: return PKTheme.jira
         }
     }
 
@@ -24758,16 +27614,16 @@ private struct JiraWorkspaceTicketRow: View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 12) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(tint)
+                    .fill(PKTheme.jira)
                     .frame(width: 4)
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         Text(item.jira?.key ?? "Jira")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(tint)
+                            .foregroundStyle(PKTheme.jira)
                             .lineLimit(1)
-                        StatusPill(text: item.jira?.status ?? item.state.rawValue, color: tint)
+                        StatusPill(text: item.jira?.status ?? item.state.rawValue, color: statusTint)
                         Spacer(minLength: 0)
                     }
 
@@ -24797,10 +27653,10 @@ private struct JiraWorkspaceTicketRow: View {
             }
             .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? tint.opacity(0.14) : hovering ? tint.opacity(0.09) : PKTheme.surfaceRaised.opacity(0.54))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? tint.opacity(0.58) : hovering ? tint.opacity(0.44) : PKTheme.edge, lineWidth: 1))
+            .background(selected ? PKTheme.jira.opacity(0.18) : hovering ? PKTheme.jira.opacity(0.10) : PKTheme.surfaceRaised.opacity(0.54))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.jira.opacity(0.66) : hovering ? PKTheme.jira.opacity(0.48) : PKTheme.edge, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
-            .shadow(color: tint.opacity(hovering ? 0.16 : 0), radius: hovering ? 12 : 0, y: hovering ? 7 : 0)
+            .shadow(color: PKTheme.jira.opacity(hovering ? 0.18 : 0), radius: hovering ? 12 : 0, y: hovering ? 7 : 0)
             .offset(y: hovering ? -1 : 0)
             .brightness(hovering ? 0.018 : 0)
             .animation(.spring(response: 0.22, dampingFraction: 0.78), value: hovering)
@@ -24972,7 +27828,7 @@ private struct JiraTicketChatWorkbench: View {
                     HStack(spacing: 8) {
                         Text(item.jira?.key ?? "Jira")
                             .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(PKTheme.primary)
+                            .foregroundStyle(PKTheme.jira)
                         StatusPill(text: item.jira?.status ?? item.state.rawValue, color: statusColor(item.state))
                         if let issueType = item.jira?.issueType, !issueType.isEmpty {
                             CountBadge(text: issueType)
@@ -25020,6 +27876,10 @@ private struct JiraTicketChatWorkbench: View {
                         action: sync
                     )
                         .disabled(isSyncing)
+
+                    JiraStartPhaseMenu { phase in
+                        startTicketChat(item, phase: phase)
+                    }
                 }
                 .fixedSize(horizontal: true, vertical: false)
             }
@@ -25037,9 +27897,71 @@ private struct JiraTicketChatWorkbench: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(PKTheme.control.opacity(0.30))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .background(PKTheme.jira.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.jira.opacity(0.26), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func startTicketChat(_ item: WorkItem, phase: JiraTicketChatPhase) {
+        selectedWorkItemId = item.id
+        if selectedWorkspaceId == nil {
+            selectedWorkspaceId = item.workspaceId
+        }
+        Task {
+            if let runId = await model.startJiraTicketFromChat(
+                workItemId: item.id,
+                workspaceId: selectedWorkspaceId ?? item.workspaceId,
+                phase: phase
+            ) {
+                await MainActor.run {
+                    selectedRunId = runId
+                    if let run = model.snapshot.runs.first(where: { $0.id == runId }) {
+                        selectedWorkspaceId = run.workspaceId
+                        selectedWorkItemId = run.workItemId
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct JiraStartPhaseMenu: View {
+    let start: (JiraTicketChatPhase) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(JiraTicketChatPhase.allCases) { phase in
+                Button {
+                    start(phase)
+                } label: {
+                    Label(phase.title, systemImage: phase.symbol)
+                }
+                .help(help(for: phase))
+            }
+        } label: {
+            Label("Start", systemImage: "play.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PKTheme.jiraText)
+                .padding(.horizontal, 13)
+                .frame(height: 30)
+                .background(PKTheme.jira)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .help("Start a new ticket chat and choose the phase.")
+        .accessibilityLabel(Text("Start ticket chat"))
+    }
+
+    private func help(for phase: JiraTicketChatPhase) -> String {
+        switch phase {
+        case .solution:
+            return "Start a new requirement and solution checkpoint chat."
+        case .coding:
+            return "Start a new coding chat from the ticket or latest solution checkpoint."
+        case .review:
+            return "Start a new read-only review chat for the ticket."
+        }
     }
 }
 
@@ -25048,6 +27970,10 @@ private struct JiraTicketExpandedComposerDetails: View {
     let runs: [AgentRun]
     let artifacts: [Artifact]
     let writeBackReadiness: JiraWriteBackReadiness
+
+    private var displayDescription: String {
+        jiraTicketDisplayDescription(for: item)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -25059,11 +27985,13 @@ private struct JiraTicketExpandedComposerDetails: View {
                 JiraTicketMiniMetric(label: "Write-back", value: writeBackReadiness.isReady ? "Ready" : "Setup", symbol: "paperplane")
             }
 
-            if !item.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(item.description)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Description")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(PKTheme.text4)
+                Text(displayDescription.isEmpty ? "No Jira description synced yet." : displayDescription)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(PKTheme.text3)
-                    .lineLimit(4)
+                    .foregroundStyle(displayDescription.isEmpty ? PKTheme.text4 : PKTheme.text3)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -25105,7 +28033,7 @@ private struct JiraTicketMiniMetric: View {
         HStack(spacing: 6) {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(PKTheme.primary)
+                .foregroundStyle(PKTheme.jira)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label.uppercased())
                     .font(.system(size: 8, weight: .bold))
@@ -25119,8 +28047,8 @@ private struct JiraTicketMiniMetric: View {
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, minHeight: 34)
-        .background(PKTheme.control.opacity(0.32))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.70), lineWidth: 1))
+        .background(PKTheme.jira.opacity(0.07))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.jira.opacity(0.18), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
@@ -25227,7 +28155,7 @@ private struct JiraTicketWorkspaceInspector: View {
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(PKTheme.panel.opacity(0.46))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(PKTheme.edge.opacity(0.82), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(PKTheme.jira.opacity(0.22), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 18))
     }
 
@@ -25283,6 +28211,14 @@ private struct JiraInspectorRunRow: View {
     let selected: Bool
     let action: () -> Void
 
+    private var promptPreview: String {
+        friendlyUserPromptDisplay(run.promptSnapshot).firstLineFallback("Ticket chat")
+    }
+
+    private var outputPreview: String {
+        friendlyAgentOutput(run.transcript).firstLineFallback("")
+    }
+
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 7) {
@@ -25293,12 +28229,12 @@ private struct JiraInspectorRunRow: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(PKTheme.text4)
                 }
-                Text(run.promptSnapshot.firstLineFallback("Ticket chat"))
+                Text(promptPreview)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(PKTheme.text)
                     .lineLimit(2)
-                if !run.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(run.transcript.firstLineFallback("Output captured"))
+                if !outputPreview.isEmpty {
+                    Text(outputPreview)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(PKTheme.text3)
                         .lineLimit(2)
@@ -25306,8 +28242,8 @@ private struct JiraInspectorRunRow: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(selected ? PKTheme.selected : PKTheme.surfaceRaised.opacity(0.42))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.edgeStrong : PKTheme.edge, lineWidth: 1))
+            .background(selected ? PKTheme.jira.opacity(0.12) : PKTheme.surfaceRaised.opacity(0.42))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.jira.opacity(0.46) : PKTheme.edge, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
@@ -25382,9 +28318,9 @@ private struct JiraInspectorFileRow: View {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: ref.symbol)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(PKTheme.primary)
+                    .foregroundStyle(PKTheme.jira)
                     .frame(width: 28, height: 28)
-                    .background(PKTheme.primary.opacity(0.12))
+                    .background(PKTheme.jira.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 VStack(alignment: .leading, spacing: 5) {
@@ -25514,9 +28450,10 @@ private struct JiraTicketDetailSidebar: View {
 
     private var descriptionSection: some View {
         detailSection("Description") {
-            Text(item.description.isEmpty ? "No Jira description synced yet." : item.description)
+            let displayDescription = jiraTicketDisplayDescription(for: item)
+            Text(displayDescription.isEmpty ? "No Jira description synced yet." : displayDescription)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(PKTheme.text3)
+                .foregroundStyle(displayDescription.isEmpty ? PKTheme.text4 : PKTheme.text3)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -25596,7 +28533,7 @@ private struct JiraTicketDetailSidebar: View {
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(PKTheme.text4)
                             }
-                            Text(run.promptSnapshot.firstLineFallback("Ticket chat"))
+                            Text(friendlyUserPromptDisplay(run.promptSnapshot).firstLineFallback("Ticket chat"))
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(PKTheme.text)
                                 .lineLimit(2)
@@ -26021,10 +28958,11 @@ private struct JiraRunConversationPane: View {
                             JiraChatMessageRow(message: message)
                         }
 
-                        JiraPromptBubble(title: "Prompt", text: run.promptSnapshot)
+                        JiraPromptBubble(title: "Prompt", text: friendlyUserPromptDisplay(run.promptSnapshot))
 
-                        if !run.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            JiraPromptBubble(title: "Output", text: run.transcript)
+                        let outputText = friendlyAgentOutput(run.transcript)
+                        if !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            JiraPromptBubble(title: "Output", text: outputText)
                         }
                     } else {
                         JiraPromptBubble(title: "Ready", text: item.description.isEmpty ? item.title : item.description)
@@ -26095,7 +29033,12 @@ private struct JiraChatMessageRow: View {
     }
 
     var body: some View {
-        JiraPromptBubble(title: title, text: message.content)
+        JiraPromptBubble(
+            title: title,
+            text: message.role == .user
+                ? friendlyUserPromptDisplay(message.content)
+                : message.content
+        )
     }
 }
 
@@ -29932,12 +32875,7 @@ private struct SettingsWorkbench: View {
                 }
             }
         case .permissions:
-            SurfaceCard(
-                symbol: "shield",
-                title: "Permissions",
-                subtitle: "Read, Ask, and Autopilot policies are enforced before runner launch.",
-                badge: "Native"
-            )
+            PermissionSettingsCard(model: model)
         case .nativeApp:
             RestartSettingsCard(
                 statusLine: statusLine,
@@ -29958,6 +32896,99 @@ private struct SettingsWorkbench: View {
                 }
             )
         }
+    }
+}
+
+private struct PermissionSettingsCard: View {
+    @ObservedObject var model: NativeAppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: "shield")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(PKTheme.primary)
+                    .frame(width: 34, height: 34)
+                    .background(PKTheme.primary.opacity(0.11))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Default Permission")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PKTheme.text)
+                    Text("Used by new chats, Jira phase starts, and normal agent runs unless the composer overrides it.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(PKTheme.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                CountBadge(text: permissionTitle(model.defaultPermissionMode))
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 10)], spacing: 10) {
+                ForEach(PermissionMode.allCases, id: \.self) { mode in
+                    PermissionDefaultOption(
+                        mode: mode,
+                        selected: model.defaultPermissionMode == mode,
+                        action: { model.setDefaultPermissionMode(mode) }
+                    )
+                }
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PKTheme.text4)
+                Text("Composer override: \(permissionTitle(model.selectedPermissionMode))")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(PKTheme.text3)
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .background(PKTheme.control.opacity(0.35))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge.opacity(0.8), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .padding(14)
+        .background(PKTheme.panel.opacity(0.62))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(PKTheme.edge, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct PermissionDefaultOption: View {
+    let mode: PermissionMode
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "shield")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(selected ? PKTheme.primary : PKTheme.text3)
+                    Text(permissionTitle(mode))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(selected ? PKTheme.text : PKTheme.text2)
+                    Spacer(minLength: 0)
+                }
+                Text(permissionDescription(mode))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(PKTheme.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+            .background(selected ? PKTheme.primary.opacity(0.12) : hovering ? PKTheme.control.opacity(0.54) : PKTheme.control.opacity(0.34))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? PKTheme.primary.opacity(0.38) : PKTheme.edge, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(permissionDescription(mode))
     }
 }
 
@@ -31436,6 +34467,66 @@ private struct StatusPill: View {
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(color.opacity(0.24), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 5))
     }
+}
+
+private struct HeaderMetadataChip: View {
+    let text: String
+    let symbol: String?
+    let color: Color
+    var help: String? = nil
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let symbol {
+                Image(systemName: symbol)
+                    .font(.system(size: 10.5, weight: .bold))
+            }
+            Text(text)
+                .font(.system(size: 11, weight: .bold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, symbol == nil ? 9 : 8)
+        .frame(height: 28)
+        .background(color.opacity(0.12))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.24), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .help(help ?? text)
+        .accessibilityLabel(Text(help ?? text))
+    }
+}
+
+private struct HeaderIconButton: View {
+    let symbol: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(PKTheme.text3)
+                .frame(width: 28, height: 28)
+                .background(PKTheme.control.opacity(0.72))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(PKTheme.edge, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel(Text(title))
+    }
+}
+
+private func nativeHeaderPaneLabelIsTicketKey(_ label: String) -> Bool {
+    let parts = label.split(separator: "-", maxSplits: 1).map(String.init)
+    guard parts.count == 2,
+          !parts[0].isEmpty,
+          !parts[1].isEmpty,
+          parts[0].allSatisfy({ $0.isUppercase || $0.isNumber }),
+          parts[1].allSatisfy(\.isNumber) else {
+        return false
+    }
+    return true
 }
 
 private struct Dot: View {
@@ -34059,9 +37150,9 @@ private func statusColor(_ state: WorkItemState) -> Color {
 
 private func permissionLabel(_ mode: PermissionMode) -> String {
     switch mode {
-    case .readOnly: "Read"
-    case .askBeforeEdit: "Ask"
-    case .autopilot: "Autopilot"
+    case .readOnly: "Read only"
+    case .askBeforeEdit: "Need approval"
+    case .autopilot: "Full access"
     }
 }
 
@@ -34351,6 +37442,71 @@ private func jiraRefLabel(_ ref: SourceRef) -> String {
     return "\(kind) · \(primary)"
 }
 
+private func jiraTicketDisplayDescription(for item: WorkItem) -> String {
+    let raw = item.description.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard item.sourceType == .jira, !raw.isEmpty else { return raw }
+
+    var lines = raw.components(separatedBy: .newlines)
+    var didStripHeader = false
+    while let first = lines.first {
+        let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            if didStripHeader {
+                lines.removeFirst()
+                break
+            }
+            lines.removeFirst()
+            continue
+        }
+        if isJiraSyntheticDescriptionHeader(trimmed) {
+            didStripHeader = true
+            lines.removeFirst()
+            continue
+        }
+        break
+    }
+
+    let body = lines
+        .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !body.isEmpty else { return "" }
+
+    let normalizedBody = body.normalizedJiraDescriptionComparable
+    let titleWithoutKey = item.title.strippingJiraKeyPrefix.normalizedJiraDescriptionComparable
+    let rawTitle = item.title.normalizedJiraDescriptionComparable
+    if normalizedBody == titleWithoutKey || normalizedBody == rawTitle {
+        return ""
+    }
+    return body
+}
+
+private func isJiraSyntheticDescriptionHeader(_ line: String) -> Bool {
+    let lower = line.lowercased()
+    return lower.hasPrefix("jira:")
+        || lower.hasPrefix("status:")
+        || lower.hasPrefix("sprint:")
+        || lower.hasPrefix("assignee:")
+        || lower.hasPrefix("priority:")
+        || lower.hasPrefix("issue type:")
+}
+
+private extension String {
+    var normalizedJiraDescriptionComparable: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    var strippingJiraKeyPrefix: String {
+        replacingOccurrences(
+            of: #"^[A-Z][A-Z0-9]+-\d+:\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 private func agentKind(for run: AgentRun, snapshot: NativeStoreSnapshot) -> NativeAgentKind {
     snapshot.agentProfiles.first(where: { $0.id == run.agentProfileId })?.kind ?? .codex
 }
@@ -34382,9 +37538,20 @@ private func branchTitle(for workspaceId: EntityID?, snapshot: NativeStoreSnapsh
 
 private func permissionTitle(_ mode: PermissionMode) -> String {
     switch mode {
-    case .readOnly: return "Read"
-    case .askBeforeEdit: return "Ask"
-    case .autopilot: return "Autopilot"
+    case .readOnly: return "Read only"
+    case .askBeforeEdit: return "Need approval"
+    case .autopilot: return "Full access"
+    }
+}
+
+private func permissionDescription(_ mode: PermissionMode) -> String {
+    switch mode {
+    case .readOnly:
+        return "Can inspect files and history, but cannot edit the workspace."
+    case .askBeforeEdit:
+        return "Can prepare changes and asks before writes or sensitive actions."
+    case .autopilot:
+        return "Can edit and run locally with fewer prompts; delete, revert, reset, and external write-back still require confirmation."
     }
 }
 

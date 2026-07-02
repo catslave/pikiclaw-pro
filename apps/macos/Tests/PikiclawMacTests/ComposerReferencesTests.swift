@@ -58,3 +58,27 @@ import Testing
     #expect(merged.map(\.kind) == [.file, .web])
     #expect(merged.map(\.value) == ["/tmp/plan.md", "https://example.com/docs"])
 }
+
+@Test func composerFileOnlyReferenceExtractionLeavesWebLinksInline() {
+    let web = ComposerReferenceAttachment(kind: .web, value: "https://example.com/docs")
+
+    let extraction = composerFileOnlyReferenceExtraction(
+        from: ComposerReferenceExtraction(text: "", references: [web])
+    )
+
+    #expect(extraction.text.isEmpty)
+    #expect(extraction.references.isEmpty)
+}
+
+@Test func composerFileOnlyReferenceExtractionKeepsFilesAndReturnsWebText() {
+    let file = ComposerReferenceAttachment(kind: .file, value: "/tmp/plan.md")
+    let web = ComposerReferenceAttachment(kind: .web, value: "https://example.com/docs")
+
+    let extraction = composerFileOnlyReferenceExtraction(
+        from: ComposerReferenceExtraction(text: "Please review", references: [file, web])
+    )
+
+    #expect(extraction.text == "Please review https://example.com/docs")
+    #expect(extraction.references.map(\.kind) == [.file])
+    #expect(extraction.references.map(\.value) == ["/tmp/plan.md"])
+}

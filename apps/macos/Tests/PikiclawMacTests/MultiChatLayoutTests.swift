@@ -150,6 +150,50 @@ import Testing
     ])
 }
 
+@Test func effectiveActiveRunRestoresSelectedWorkItemCurrentRun() {
+    let staleActive = multiChatTestRun(id: "run-stale-active", title: "Old chat")
+    let current = multiChatTestRun(id: "run-current", title: "Current chat")
+    let item = WorkItem(
+        id: "workitem-current",
+        workspaceId: "workspace-test",
+        title: "Current item",
+        currentRunId: current.id
+    )
+    var selectedRun = current
+    selectedRun.workItemId = item.id
+
+    let effective = nativeEffectiveActiveRun(
+        activeRun: staleActive,
+        selectedWorkItem: item,
+        runs: [staleActive, selectedRun]
+    )
+
+    #expect(effective?.id == current.id)
+}
+
+@Test func effectiveActiveRunKeepsExplicitRunWhileTemporaryPaneIsOpen() {
+    let current = multiChatTestRun(id: "run-current", title: "Current chat")
+    let dragged = multiChatTestRun(id: "run-dragged", title: "Dragged chat")
+    let item = WorkItem(
+        id: "workitem-dragged",
+        workspaceId: "workspace-test",
+        title: "Dragged item",
+        currentRunId: dragged.id
+    )
+
+    #expect(nativeEffectiveActiveRun(
+        activeRun: current,
+        selectedWorkItem: item,
+        runs: [current, dragged]
+    )?.id == dragged.id)
+    #expect(nativeEffectiveActiveRun(
+        activeRun: current,
+        selectedWorkItem: item,
+        runs: [current, dragged],
+        prefersExplicitActiveRun: true
+    )?.id == current.id)
+}
+
 @Test func temporaryPaneOpeningDeDuplicatesWithoutCappingWindowLayout() {
     let duplicated = nativeTemporaryPaneRunIdsAfterOpening(
         existing: ["run-one", "run-two"],
@@ -253,6 +297,13 @@ import Testing
     #expect(nativeMultiChatGridRowsPerScreen(for: 5) == 2)
     #expect(nativeMultiChatPaneHeight(containerHeight: 1000, paneCount: 2, spacing: 12) == 1000)
     #expect(nativeMultiChatPaneHeight(containerHeight: 1000, paneCount: 3, spacing: 12) == 494)
+}
+
+@Test func multiChatAddTileDoesNotForceTwoChatLayoutIntoRows() {
+    #expect(!nativeShouldShowAddSideChatTile(paneCount: 2, hasTemporaryPane: false))
+    #expect(nativeMultiChatGridRowsPerScreen(for: 2) == 1)
+    #expect(nativeShouldShowAddSideChatTile(paneCount: 3, hasTemporaryPane: false))
+    #expect(!nativeShouldShowAddSideChatTile(paneCount: 3, hasTemporaryPane: true))
 }
 
 private struct MultiChatFixture {

@@ -86,6 +86,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
     public var state: RunState
     public var startedAt: Date?
     public var endedAt: Date?
+    public var lastActivityAt: Date?
     public var nativeSessionRef: String?
     public var handoverFromRunId: EntityID?
     public var sideChatOfRunId: EntityID?
@@ -109,6 +110,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         case state
         case startedAt
         case endedAt
+        case lastActivityAt
         case nativeSessionRef
         case handoverFromRunId
         case sideChatOfRunId
@@ -133,6 +135,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         state: RunState = .queued,
         startedAt: Date? = nil,
         endedAt: Date? = nil,
+        lastActivityAt: Date? = nil,
         nativeSessionRef: String? = nil,
         handoverFromRunId: EntityID? = nil,
         sideChatOfRunId: EntityID? = nil,
@@ -154,6 +157,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.state = state
         self.startedAt = startedAt
         self.endedAt = endedAt
+        self.lastActivityAt = lastActivityAt
         self.nativeSessionRef = nativeSessionRef
         self.handoverFromRunId = handoverFromRunId
         self.sideChatOfRunId = sideChatOfRunId
@@ -178,6 +182,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         state: RunState = .queued,
         startedAt: Date? = nil,
         endedAt: Date? = nil,
+        lastActivityAt: Date? = nil,
         nativeSessionRef: String? = nil,
         handoverFromRunId: EntityID? = nil,
         sideChatOfRunId: EntityID? = nil,
@@ -199,6 +204,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
             state: state,
             startedAt: startedAt,
             endedAt: endedAt,
+            lastActivityAt: lastActivityAt,
             nativeSessionRef: nativeSessionRef,
             handoverFromRunId: handoverFromRunId,
             sideChatOfRunId: sideChatOfRunId,
@@ -224,6 +230,7 @@ public struct AgentRun: Identifiable, Hashable, Codable, Sendable {
         self.state = try container.decode(RunState.self, forKey: .state)
         self.startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
         self.endedAt = try container.decodeIfPresent(Date.self, forKey: .endedAt)
+        self.lastActivityAt = try container.decodeIfPresent(Date.self, forKey: .lastActivityAt)
         self.nativeSessionRef = try container.decodeIfPresent(String.self, forKey: .nativeSessionRef)
         self.handoverFromRunId = try container.decodeIfPresent(EntityID.self, forKey: .handoverFromRunId)
         self.sideChatOfRunId = try container.decodeIfPresent(EntityID.self, forKey: .sideChatOfRunId)

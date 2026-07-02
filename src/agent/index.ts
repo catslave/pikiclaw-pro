@@ -129,7 +129,7 @@ export {
 // ── Re-export: skills ───────────────────────────────────────────────────────
 export {
   buildPinnedSkillsPrompt, buildRelevantSkillsPrompt, getProjectSkillPaths, initializeProjectSkills, listPinnedSkills, listSkills, getGlobalSkillsRoot,
-  retrieveRelevantSkills, setSkillPinned,
+  retrieveRelevantSkills, resolveSkillDefinitionFile, setSkillPinned,
   collapseSkillPrompt,
   type PinnedSkillListResult, type ProjectSkillPaths, type RetrievedSkillInfo, type SkillInfo, type SkillListResult, type SkillPinResult, type SkillScope,
 } from './skills.js';

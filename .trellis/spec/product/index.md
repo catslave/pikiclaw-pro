@@ -19,6 +19,7 @@ Pikiclaw is a layered, open Agent orchestrator. It is not primarily an IM bridge
 - Outputs should be easy to open from the chat context: rendered markdown, files, previews, side chat, and review comments should feel attached to the active session.
 - If a feature creates a persistent panel, ask whether it is truly a core workspace surface or just an attention/status entry point.
 - In the macOS native client, chat launch is a high-frequency hot path: direct chat creation and agent launcher creation should allow separate chat lanes to start immediately, stay visible while launching/streaming, and avoid global "one run at a time" gates.
+- In the macOS native client, app restart recovery and window focus are separate concerns: recover every persisted interrupted agent run in the background, but restore the foreground window to the user's last route and selected context instead of hardcoding a stale run.
 
 ## Dashboard Mental Model
 

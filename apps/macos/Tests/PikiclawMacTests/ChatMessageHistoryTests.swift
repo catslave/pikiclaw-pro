@@ -334,6 +334,107 @@ import Testing
 }
 
 @MainActor
+@Test func nativeModelRecoversPersistedInterruptedRunsOnLaunch() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-launch-recovery-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-launch-recovery",
+        name: "Launch Recovery",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-launch-recovery",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let oldActivity = Date(timeIntervalSince1970: 10)
+    let firstRun = AgentRun(
+        id: "run-launch-recovery-running",
+        workspaceId: workspace.id,
+        agentProfileId: agent.id,
+        state: .running,
+        startedAt: oldActivity,
+        lastActivityAt: oldActivity,
+        nativeSessionRef: "thread-running",
+        promptSnapshot: "Resume interrupted running turn"
+    )
+    let secondRun = AgentRun(
+        id: "run-launch-recovery-starting",
+        workspaceId: workspace.id,
+        agentProfileId: agent.id,
+        state: .starting,
+        startedAt: oldActivity,
+        lastActivityAt: oldActivity,
+        promptSnapshot: "Retry interrupted starting turn"
+    )
+    let waitingRun = AgentRun(
+        id: "run-launch-recovery-waiting",
+        workspaceId: workspace.id,
+        agentProfileId: agent.id,
+        state: .waitingForUser,
+        startedAt: oldActivity,
+        lastActivityAt: oldActivity,
+        promptSnapshot: "Keep waiting for user"
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [firstRun, secondRun, waitingRun],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let capture = PromptCapture()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            CapturingAgentAdapter(descriptor: descriptor, capture: capture)
+        },
+        recoversPersistedRunsOnLaunch: true
+    )
+
+    await capture.waitForPromptCount(2)
+
+    var snapshot = try await store.loadSnapshot()
+    for _ in 0..<50 {
+        snapshot = try await store.loadSnapshot()
+        let recoveredCount = snapshot.runs.filter {
+            [firstRun.id, secondRun.id].contains($0.id) && $0.state == .completed
+        }.count
+        if recoveredCount == 2 { break }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+
+    let recoveredFirst = try #require(snapshot.runs.first(where: { $0.id == firstRun.id }))
+    let recoveredSecond = try #require(snapshot.runs.first(where: { $0.id == secondRun.id }))
+    let stillWaiting = try #require(snapshot.runs.first(where: { $0.id == waitingRun.id }))
+
+    #expect(capture.prompts == [
+        "Resume interrupted running turn",
+        "Retry interrupted starting turn",
+    ])
+    #expect(recoveredFirst.state == .completed)
+    #expect(recoveredSecond.state == .completed)
+    #expect(recoveredFirst.transcript.contains("Recovering after Pikiclaw restarted"))
+    #expect(recoveredSecond.transcript.contains("Recovering after Pikiclaw restarted"))
+    #expect(!recoveredFirst.transcript.contains("Marked stale because Pikiclaw restarted"))
+    #expect(!recoveredSecond.transcript.contains("Marked stale because Pikiclaw restarted"))
+    #expect(stillWaiting.state == .waitingForUser)
+    #expect(model.restartBlockedByActiveRun == true)
+}
+
+@MainActor
 @Test func sendingNextChatMessagePreservesPreviousTurnInHistory() async throws {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-chat-history-\(UUID().uuidString)", isDirectory: true)
@@ -456,6 +557,76 @@ import Testing
 }
 
 @MainActor
+@Test func steeringQueuedMessageMarksItAndMovesItNext() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-queue-steer-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-chat-queue-steer",
+        name: "Chat Queue Steer",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-chat-queue-steer",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let firstQueued = AgentRunQueuedMessage(
+        id: "queue-follow-up",
+        content: "normal follow-up",
+        permissionMode: .readOnly,
+        createdAt: Date(timeIntervalSince1970: 20),
+        updatedAt: Date(timeIntervalSince1970: 20)
+    )
+    let secondQueued = AgentRunQueuedMessage(
+        id: "queue-steer-target",
+        content: "focus on this first",
+        permissionMode: .autopilot,
+        createdAt: Date(timeIntervalSince1970: 21),
+        updatedAt: Date(timeIntervalSince1970: 21)
+    )
+    let run = AgentRun(
+        id: "run-chat-queue-steer",
+        workspaceId: workspace.id,
+        agentProfileId: agent.id,
+        state: .running,
+        startedAt: Date(timeIntervalSince1970: 10),
+        promptSnapshot: "active question",
+        queuedMessages: [firstQueued, secondQueued],
+        transcript: "working\n"
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [run],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let model = NativeAppModel(store: store)
+    await model.reload()
+
+    await model.steerQueuedMessage(in: run.id, messageId: secondQueued.id)
+
+    let updated = try #require((try await store.loadSnapshot()).runs.first(where: { $0.id == run.id }))
+    #expect(updated.queuedMessages.map(\.id) == [secondQueued.id, firstQueued.id])
+    #expect(updated.queuedMessages.first?.content == "Steer current run:\nfocus on this first")
+    #expect(updated.queuedMessages.first?.permissionMode == .autopilot)
+    #expect(updated.queuedMessages.dropFirst().first?.content == "normal follow-up")
+    #expect(model.statusLine == "Steer queued next")
+}
+
+@MainActor
 @Test func queuedChatMessageStartsAfterActiveRunCompletes() async throws {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-chat-queue-drain-\(UUID().uuidString)", isDirectory: true)
@@ -534,6 +705,138 @@ import Testing
     #expect(final.messages.first?.content == "first question")
     #expect(final.messages.dropFirst().first?.role == .assistant)
     #expect(final.messages.dropFirst().first?.content.contains("first token") == true)
+}
+
+@MainActor
+@Test func deletingRunningChatPreventsLaterStreamEventsFromRestoringIt() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-delete-running-chat-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-delete-running-chat",
+        name: "Delete Running Chat",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-delete-running-chat",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let item = WorkItem(
+        id: "workitem-delete-running-chat",
+        workspaceId: workspace.id,
+        title: "Delete running chat",
+        description: "review this MR",
+        sourceType: .manualPrompt,
+        state: .active
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [item],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let probe = StreamingRunProbe()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            StreamingRunProbeAdapter(descriptor: descriptor, probe: probe)
+        }
+    )
+    await model.reload()
+
+    let task = Task { @MainActor in
+        await model.run(workItemId: item.id)
+    }
+    await probe.waitForFirstOutput()
+    let runningRun = try #require(model.snapshot.runs.first(where: { $0.workItemId == item.id }))
+
+    await model.deleteChat(runId: runningRun.id)
+    probe.finish(exitCode: 0)
+    _ = await task.value
+
+    let snapshot = try await store.loadSnapshot()
+    #expect(snapshot.runs.contains(where: { $0.id == runningRun.id }) == false)
+    #expect(model.snapshot.runs.contains(where: { $0.id == runningRun.id }) == false)
+}
+
+@Test func stalledRunningRunIsMarkedStaleAfterIdleTimeout() {
+    let workspace = Workspace(
+        id: "workspace-stalled-run",
+        name: "Stalled Run",
+        pathDisplay: "/tmp/stalled-run",
+        trustState: .trusted
+    )
+    let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+    let now = startedAt.addingTimeInterval(NativeAppModel.activeRunIdleStaleInterval + 1)
+    let run = AgentRun(
+        id: "run-stalled",
+        workspaceId: workspace.id,
+        agentProfileId: "agent-codex",
+        state: .running,
+        startedAt: startedAt,
+        lastActivityAt: startedAt,
+        promptSnapshot: "Review MR",
+        transcript: "Thinking: reading changed files"
+    )
+    var snapshot = NativeStoreSnapshot(workspaces: [workspace], runs: [run])
+
+    let staleRunIds = NativeAppModel.markStalledActiveRuns(
+        in: &snapshot,
+        now: now,
+        idleTimeout: NativeAppModel.activeRunIdleStaleInterval
+    )
+
+    let updated = snapshot.runs[0]
+    #expect(staleRunIds == [run.id])
+    #expect(updated.state == .stale)
+    #expect(updated.endedAt == now)
+    #expect(updated.transcript.contains("no agent events for 4 minutes"))
+    #expect(NativeAppModel.idleTimeoutDisplayText(NativeAppModel.activeRunIdleStaleInterval) == "4 minutes")
+}
+
+@Test func waitingForUserRunIsNotMarkedStaleAfterIdleTimeout() {
+    let workspace = Workspace(
+        id: "workspace-waiting-run",
+        name: "Waiting Run",
+        pathDisplay: "/tmp/waiting-run",
+        trustState: .trusted
+    )
+    let startedAt = Date(timeIntervalSinceReferenceDate: 2_000)
+    let now = startedAt.addingTimeInterval(NativeAppModel.activeRunIdleStaleInterval + 1)
+    let run = AgentRun(
+        id: "run-waiting",
+        workspaceId: workspace.id,
+        agentProfileId: "agent-codex",
+        state: .waitingForUser,
+        startedAt: startedAt,
+        lastActivityAt: startedAt,
+        promptSnapshot: "Need input",
+        transcript: "Waiting for confirmation"
+    )
+    var snapshot = NativeStoreSnapshot(workspaces: [workspace], runs: [run])
+
+    let staleRunIds = NativeAppModel.markStalledActiveRuns(
+        in: &snapshot,
+        now: now,
+        idleTimeout: NativeAppModel.activeRunIdleStaleInterval
+    )
+
+    #expect(staleRunIds.isEmpty)
+    #expect(snapshot.runs[0].state == .waitingForUser)
+    #expect(snapshot.runs[0].endedAt == nil)
 }
 
 @MainActor
@@ -661,6 +964,241 @@ import Testing
 }
 
 @MainActor
+@Test func startingSkillChatConsumesDraftWithoutDuplicatingPromptMessage() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-start-skill-chat-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let workspace = Workspace(
+        id: "workspace-start-skill-chat",
+        name: "Start Skill Chat",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-start-skill-chat",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let capture = PromptCapture()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            CapturingAgentAdapter(descriptor: descriptor, capture: capture)
+        }
+    )
+    await model.reload()
+
+    model.draftPrompt = """
+    /sk_code_review
+
+    References for the agent:
+    - Web: https://git.example.com/group/repo/-/merge_requests/190
+    """
+
+    let runId = try #require(await model.startChat(workspaceId: workspace.id, targetWorkItemId: nil))
+    await capture.waitForPromptCount(1)
+    let run = try #require(model.snapshot.runs.first(where: { $0.id == runId }))
+    let prompt = try #require(capture.prompts.last)
+
+    #expect(model.draftPrompt.isEmpty)
+    #expect(model.snapshot.runs.count == 1)
+    #expect(run.promptSnapshot.contains("/sk_code_review"))
+    #expect(run.promptSnapshot.contains("merge_requests/190"))
+    #expect(run.messages.isEmpty)
+    #expect(capture.prompts.count == 1)
+    #expect(prompt.contains("Read the skill definition at `"))
+    #expect(prompt.contains("code-review/SKILL.md`"))
+    #expect(prompt.contains("Additional context: References for the agent:"))
+    #expect(prompt.contains("merge_requests/190"))
+    #expect(!prompt.contains("User: /sk_code_review"))
+    #expect(capture.runPromptSnapshots.last?.contains("Read the skill definition at `") == true)
+}
+
+@MainActor
+@Test func sendingSkillCommandResolvesProjectSkillBeforeLaunch() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-skill-command-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let skillDirectory = directory
+        .appendingPathComponent(".pikiclaw", isDirectory: true)
+        .appendingPathComponent("skills", isDirectory: true)
+        .appendingPathComponent("code-review", isDirectory: true)
+    try FileManager.default.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+    let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
+    try """
+    ---
+    name: code-review
+    description: Deep second-layer review.
+    mcp_requires:
+      - gitlab
+      - atlassian
+    ---
+
+    # Code Review
+    """.write(to: skillFile, atomically: true, encoding: .utf8)
+
+    let workspace = Workspace(
+        id: "workspace-chat-skill-command",
+        name: "Chat Skill Command",
+        pathDisplay: directory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-codex-skill-command",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let run = AgentRun(
+        id: "run-chat-skill-command",
+        workspaceId: workspace.id,
+        agentProfileId: agent.id,
+        state: .completed,
+        endedAt: Date(timeIntervalSince1970: 10),
+        promptSnapshot: "first question",
+        transcript: "first answer\n[completed with exit code 0]\n"
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [workspace],
+        workItems: [],
+        runs: [run],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: directory.appendingPathComponent("state.json"), seed: seed)
+    let capture = PromptCapture()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            CapturingAgentAdapter(descriptor: descriptor, capture: capture)
+        }
+    )
+    await model.reload()
+
+    _ = try #require(await model.sendMessage(in: run.id, message: "/sk_code_review MR 190"))
+
+    let prompt = try #require(capture.prompts.last)
+    #expect(prompt.contains("[Project directory: \(directory.path)]"))
+    #expect(prompt.contains(".pikiclaw/skills/code-review/SKILL.md`"))
+    #expect(prompt.contains("Additional context: MR 190"))
+    #expect(!prompt.contains("User: /sk_code_review MR 190"))
+    #expect(capture.mcpRequirements.last == ["gitlab", "atlassian"])
+    #expect(capture.runPromptSnapshots.last?.contains(".pikiclaw/skills/code-review/SKILL.md`") == true)
+}
+
+@MainActor
+@Test func sendingSkillCommandDoesNotResolveProjectSkillFromAnotherWorkspace() async throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pikiclaw-chat-cross-workspace-skill-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let airDirectory = root.appendingPathComponent("assistant-runtime-next-gen", isDirectory: true)
+    let otherDirectory = root.appendingPathComponent("other-project", isDirectory: true)
+    try FileManager.default.createDirectory(at: airDirectory, withIntermediateDirectories: true)
+    let skillDirectory = otherDirectory
+        .appendingPathComponent(".pikiclaw", isDirectory: true)
+        .appendingPathComponent("skills", isDirectory: true)
+        .appendingPathComponent("workspace-only-review", isDirectory: true)
+    try FileManager.default.createDirectory(at: skillDirectory, withIntermediateDirectories: true)
+    let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
+    try """
+    ---
+    name: workspace-only-review
+    description: Only valid inside another workspace.
+    ---
+
+    # Workspace Only Review
+    """.write(to: skillFile, atomically: true, encoding: .utf8)
+
+    let airWorkspace = Workspace(
+        id: "workspace-air-cross-skill",
+        name: "assistant-runtime-next-gen",
+        pathDisplay: airDirectory.path,
+        trustState: .trusted
+    )
+    let otherWorkspace = Workspace(
+        id: "workspace-other-cross-skill",
+        name: "Other Project",
+        pathDisplay: otherDirectory.path,
+        trustState: .trusted
+    )
+    let agent = AgentProfile(
+        id: "agent-codex-cross-skill",
+        kind: .codex,
+        displayName: "Codex",
+        executableName: "codex",
+        isEnabled: true
+    )
+    let run = AgentRun(
+        id: "run-chat-cross-skill",
+        workspaceId: airWorkspace.id,
+        agentProfileId: agent.id,
+        state: .completed,
+        endedAt: Date(timeIntervalSince1970: 10),
+        promptSnapshot: "first question",
+        transcript: "first answer\n[completed with exit code 0]\n"
+    )
+    let seed = NativeAppSeed(
+        projects: [],
+        workspaces: [airWorkspace, otherWorkspace],
+        workItems: [],
+        runs: [run],
+        artifacts: [],
+        capabilities: [],
+        knowledgeCards: [],
+        automations: [],
+        agentProfiles: [agent],
+        providerProfiles: []
+    )
+    let store = JSONNativeStore(fileURL: root.appendingPathComponent("state.json"), seed: seed)
+    let capture = PromptCapture()
+    let model = NativeAppModel(
+        store: store,
+        agentAdapterFactory: { descriptor in
+            CapturingAgentAdapter(descriptor: descriptor, capture: capture)
+        }
+    )
+    await model.reload()
+
+    _ = try #require(await model.sendMessage(in: run.id, message: """
+    /sk_workspace_only_review
+
+    References for the agent:
+    - Web: https://git.example.com/group/repo/-/merge_requests/190
+    """))
+
+    let prompt = try #require(capture.prompts.last)
+    #expect(!prompt.contains("Read the skill definition at `\(skillFile.path)`"))
+    #expect(prompt.contains("User: /sk_workspace_only_review"))
+}
+
+@MainActor
 @Test func sendingCodexNextMessageResumesNativeSessionWithCurrentPromptOnly() async throws {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pikiclaw-chat-native-resume-\(UUID().uuidString)", isDirectory: true)
@@ -717,7 +1255,7 @@ import Testing
     #expect(capture.prompts.last == "second question")
     #expect(capture.stdinTexts.last == "second question")
     #expect(capture.arguments.last == [
-        "--ask-for-approval", "never",
+        "--ask-for-approval", "on-request",
         "--sandbox", "workspace-write",
         "-C", directory.path,
         "exec",
@@ -4275,7 +4813,7 @@ import Testing
 
     #expect(actions.map(\.id) == ["skill-hardening", "bug-analysis", "log-analysis", "skill-command-1"])
     #expect(actions[0].title == "Skill")
-    #expect(actions[0].detail == "Ask before edits")
+    #expect(actions[0].detail == "Need approval")
     #expect(actions[0].permissionMode == .askBeforeEdit)
     #expect(actions[0].prompt.contains("Harden the skill path"))
     #expect(actions[0].prompt.contains("inspect its SKILL.md and scripts"))
@@ -4395,12 +4933,12 @@ import Testing
         prompt: "Harden /logtrace"
     )
 
-    #expect(action.detail == "Ask before edits")
+    #expect(action.detail == "Need approval")
     #expect(action.workflowLabel == "Hardening")
     #expect(action.workflowSummary == "Improve invocation, recovery, guardrails, and validation")
-    #expect(runFollowUpStagedLabel(action) == "Skill - Ask before edits")
+    #expect(runFollowUpStagedLabel(action) == "Skill - Need approval")
     #expect(runFollowUpStagedStatus(action) == "Skill follow-up staged - Hardening: Improve invocation, recovery, guardrails, and validation")
-    #expect(runFollowUpActionHelp(action) == "Hardening: Improve invocation, recovery, guardrails, and validation - Ask before edits")
+    #expect(runFollowUpActionHelp(action) == "Hardening: Improve invocation, recovery, guardrails, and validation - Need approval")
 }
 
 @Test func chatRunFollowUpActionsExposeEnterpriseWorkflowLabels() throws {
@@ -6971,10 +7509,77 @@ import Testing
 }
 
 private final class PromptCapture: @unchecked Sendable {
-    var prompts: [String] = []
-    var permissionModes: [PermissionMode] = []
-    var arguments: [[String]] = []
-    var stdinTexts: [String?] = []
+    private let lock = NSLock()
+    private var storedPrompts: [String] = []
+    private var storedPermissionModes: [PermissionMode] = []
+    private var storedArguments: [[String]] = []
+    private var storedStdinTexts: [String?] = []
+    private var storedMcpRequirements: [[String]] = []
+    private var storedRunPromptSnapshots: [String] = []
+    private var promptWaiters: [(count: Int, waiter: CheckedContinuation<Void, Never>)] = []
+
+    var prompts: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPrompts
+    }
+
+    var permissionModes: [PermissionMode] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPermissionModes
+    }
+
+    var arguments: [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedArguments
+    }
+
+    var stdinTexts: [String?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedStdinTexts
+    }
+
+    var mcpRequirements: [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedMcpRequirements
+    }
+
+    var runPromptSnapshots: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRunPromptSnapshots
+    }
+
+    func record(_ request: AgentLaunchRequest) {
+        lock.lock()
+        storedPrompts.append(request.prompt)
+        storedPermissionModes.append(request.run.permissionMode)
+        storedArguments.append(request.arguments)
+        storedStdinTexts.append(request.stdinText)
+        storedMcpRequirements.append(request.mcpRequirements)
+        storedRunPromptSnapshots.append(request.run.promptSnapshot)
+        let readyWaiters = promptWaiters.filter { storedPrompts.count >= $0.count }
+        promptWaiters.removeAll { storedPrompts.count >= $0.count }
+        lock.unlock()
+        readyWaiters.forEach { $0.waiter.resume() }
+    }
+
+    func waitForPromptCount(_ count: Int) async {
+        await withCheckedContinuation { waiter in
+            lock.lock()
+            if storedPrompts.count >= count {
+                lock.unlock()
+                waiter.resume()
+                return
+            }
+            promptWaiters.append((count, waiter))
+            lock.unlock()
+        }
+    }
 }
 
 private struct CapturingAgentAdapter: AgentAdapter {
@@ -6986,10 +7591,7 @@ private struct CapturingAgentAdapter: AgentAdapter {
     }
 
     func start(_ request: AgentLaunchRequest) -> AsyncThrowingStream<RunnerEvent, Error> {
-        capture.prompts.append(request.prompt)
-        capture.permissionModes.append(request.run.permissionMode)
-        capture.arguments.append(request.arguments)
-        capture.stdinTexts.append(request.stdinText)
+        capture.record(request)
         return AsyncThrowingStream { continuation in
             continuation.yield(.stateChanged(.running))
             continuation.yield(.output("second answer\n"))

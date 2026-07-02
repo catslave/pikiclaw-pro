@@ -1,4 +1,0 @@
-interface:
-  display_name: "Code Review"
-  short_description: "Find future pitfalls in runnable diffs."
-  default_prompt: "Please review the current diff for hidden side effects, compatibility breaks, edge cases, performance and security risks, misleading names, test gaps, and future maintenance costs. Sort findings by severity."

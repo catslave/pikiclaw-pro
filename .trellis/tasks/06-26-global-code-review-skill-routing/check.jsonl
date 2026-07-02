@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/skills/index.md", "reason": "Verify explicit skill slash commands are intercepted before downstream agent execution."}

@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+@testable import PikiclawCore
 @testable import PikiclawMac
 
 @Test func friendlyAgentOutputHidesCodexCliDiagnostics() {
@@ -12,6 +13,7 @@ import Testing
     Reading additional input from stdin...
     Reading prompt from stdin...
     [system] Marked stale because Pikiclaw restarted before this run reported completion.
+    [system] Recovering after Pikiclaw restarted before this run reported completion.
     I am checking the repository first.
     [tool] exec_command
     [artifact] changed-files
@@ -102,6 +104,69 @@ import Testing
     已经改好了。
     Jira 会使用当前选中的 workspace 启动。
     """)
+}
+
+@Test func friendlyUserPromptDisplaySummarizesJiraLaunchPrompt() {
+    let raw = """
+    Jira: IVAS-7167
+    Title: IVAS-7167: [IVAR] Support Kafka producer failover for IVAR message and conversation events
+    Workspace: assistant-runtime-next-gen
+    Path: /Users/michael.yang/Codes/RC/AIR/assistant-runtime-next-gen
+    Branch: main
+
+    Selected phase: Coding.
+    - The user explicitly chose Start > Coding for IVAS-7167.
+
+    Context:
+    - Workspace: assistant-runtime-next-gen
+    """
+
+    #expect(friendlyUserPromptDisplay(raw) == "Start Coding: IVAS-7167: [IVAR] Support Kafka producer failover for IVAR message and conversation events")
+}
+
+@Test func friendlyUserPromptDisplayPrefersExplicitUserContext() {
+    let raw = """
+    Jira: IVAS-7167
+    Title: IVAS-7167: [IVAR] Support Kafka producer failover for IVAR message and conversation events
+
+    User-provided context:
+    只重新做 coding，不要重新聊 solution。
+
+    Context:
+    - Workspace: assistant-runtime-next-gen
+    """
+
+    #expect(friendlyUserPromptDisplay(raw) == "只重新做 coding，不要重新聊 solution。")
+}
+
+@Test func friendlyUserPromptDisplayHidesAttachedImagePaths() {
+    let raw = """
+    请看这两张截图。
+
+    Attached images for the agent:
+    - first.png: /Users/michael.yang/Library/Application Support/PikiclawMacNative/ComposerAttachments/first.png
+    - second.png: /Users/michael.yang/Library/Application Support/PikiclawMacNative/ComposerAttachments/second.png
+    """
+
+    #expect(friendlyUserPromptDisplay(raw) == "请看这两张截图。")
+}
+
+@Test func userPromptImageAttachmentsParseAttachedImageRefs() {
+    let raw = """
+    请看截图。
+
+    Attached images for the agent:
+    - first.png: /Users/michael.yang/Library/Application Support/PikiclawMacNative/ComposerAttachments/first.png
+    - second.png: file:///Users/michael.yang/Library/Application%20Support/PikiclawMacNative/ComposerAttachments/second.png
+    """
+
+    let attachments = userPromptImageAttachments(in: raw)
+
+    #expect(attachments.map(\.name) == ["first.png", "second.png"])
+    #expect(attachments.map { $0.url.path } == [
+        "/Users/michael.yang/Library/Application Support/PikiclawMacNative/ComposerAttachments/first.png",
+        "/Users/michael.yang/Library/Application Support/PikiclawMacNative/ComposerAttachments/second.png"
+    ])
 }
 
 @Test func agentResponsePresentationKeepsToolOutputOutOfFinalResponse() {
@@ -208,6 +273,164 @@ import Testing
     ])
     #expect(preview.showsThinkingTimeline)
     #expect(preview.startsThinkingTimelineExpanded)
+}
+
+@Test func agentResponsePresentationKeepsRunningTranscriptInOutputOrder() {
+    let output = """
+    Thinking: 我先确认 workspace。
+    找到了输入框渲染位置。
+    Thinking: 接下来只改展示层。
+    """
+
+    let preview = agentResponsePresentationPreview(text: output, state: .running, isRunning: true)
+
+    #expect(preview.visibleLiveTranscriptItems == [
+        AgentResponsePresentationPreviewItem(
+            title: "Thinking",
+            detail: """
+            我先确认 workspace。
+            找到了输入框渲染位置。
+            接下来只改展示层。
+            """
+        )
+    ])
+    #expect(preview.showsLiveTranscriptTimeline)
+    #expect(preview.startsLiveTranscriptTimelineExpanded)
+}
+
+@Test func agentResponsePresentationKeepsAllRunningThinkingItemsVisible() {
+    let output = """
+    Thinking: 第一步，确认 MR ref。
+    Thinking: 第二步，读取变更文件。
+    Thinking: 第三步，检查调用链。
+    Thinking: 第四步，准备验证。
+    """
+
+    let preview = agentResponsePresentationPreview(text: output, state: .running, isRunning: true)
+
+    #expect(preview.visibleThinkingItems == [
+        AgentResponsePresentationPreviewItem(
+            title: "Thinking",
+            detail: """
+            第一步，确认 MR ref。
+            第二步，读取变更文件。
+            第三步，检查调用链。
+            第四步，准备验证。
+            """
+        )
+    ])
+    #expect(preview.visibleLiveTranscriptItems == preview.visibleThinkingItems)
+    #expect(preview.showsThinkingTimeline)
+}
+
+@Test func agentResponsePresentationShowsActivitySummaryBetweenRunningThinkingItems() {
+    let output = """
+    Thinking: 我先确认 workspace。
+    Tool: git status --short
+    Tool result: git status --short
+    Tool output: [7 output lines]
+    File: apps/macos/Sources/PikiclawMac/RootView.swift
+    Thinking: 接下来只改展示层。
+    """
+
+    let preview = agentResponsePresentationPreview(text: output, state: .running, isRunning: true)
+
+    #expect(preview.visibleLiveTranscriptItems == [
+        AgentResponsePresentationPreviewItem(
+            title: "Thinking",
+            detail: """
+            我先确认 workspace。
+            Activity: 1 call · 1 completed · 1 output · 1 file
+            接下来只改展示层。
+            """
+        )
+    ])
+    #expect(preview.visibleThinkingItems == [
+        AgentResponsePresentationPreviewItem(
+            title: "Thinking",
+            detail: """
+            我先确认 workspace。
+            接下来只改展示层。
+            """
+        )
+    ])
+}
+
+@Test func assistantResponseVisibleOutputsHidesPriorEvidenceWhileRunIsActive() {
+    let evidence = Artifact(
+        workspaceId: EntityID("workspace"),
+        runId: EntityID("run"),
+        kind: .commandOutputSummary,
+        title: "Evidence: previous answer",
+        uri: "pikiclaw://runs/run/evidence",
+        status: .ready,
+        provenance: "previous answer"
+    )
+
+    #expect(assistantResponseVisibleOutputs(
+        [evidence],
+        isActive: true,
+        showsThinkingTimeline: true
+    ).isEmpty)
+
+    #expect(assistantResponseVisibleOutputs(
+        [evidence],
+        isActive: false,
+        showsThinkingTimeline: false
+    ) == [evidence])
+}
+
+@Test func assistantResponseVisibleOutputsHidesFailedEvidenceAfterRunFailure() {
+    let failedEvidence = Artifact(
+        workspaceId: EntityID("workspace"),
+        runId: EntityID("run"),
+        kind: .commandOutputSummary,
+        title: "Evidence: failed output",
+        uri: "pikiclaw://runs/run/evidence",
+        status: .failed,
+        provenance: "failed output"
+    )
+    let readyEvidence = Artifact(
+        workspaceId: EntityID("workspace"),
+        runId: EntityID("run"),
+        kind: .commandOutputSummary,
+        title: "Evidence: ready output",
+        uri: "pikiclaw://runs/run/ready-evidence",
+        status: .ready,
+        provenance: "ready output"
+    )
+
+    #expect(assistantResponseVisibleOutputs(
+        [failedEvidence, readyEvidence],
+        isActive: false,
+        showsThinkingTimeline: false
+    ) == [readyEvidence])
+}
+
+@Test func agentResponsePresentationDoesNotOverSplitRunningThinkingText() {
+    let output = """
+    MRhead/merge refs, then reviewing the diff plus surrounding code.
+    MR 190 targets `stage`, not `main` (`Merge branch ... into 'stage').
+    I'm switching the comparison base to the merge ref's first parent so the review doesn't include unrelated branch drift.
+    The MR is broad: it changes gRPC clients, SRS clients, Kafka publishing/export, websocket handling, and runtime session/registry cleanup around non-blocking/threading behavior.
+    """
+
+    let preview = agentResponsePresentationPreview(text: output, state: .running, isRunning: true)
+
+    #expect(preview.visibleThinkingItems == [
+        AgentResponsePresentationPreviewItem(
+            title: "Thinking",
+            detail: """
+            MR head/merge refs, then reviewing the diff plus surrounding code.
+            MR 190 targets `stage`, not `main` (`Merge branch ... into 'stage').
+            I'm switching the comparison base to the merge ref's first parent so the review doesn't include unrelated branch drift.
+            The MR is broad: it changes gRPC clients, SRS clients, Kafka publishing/export, websocket handling, and runtime session/registry cleanup around non-blocking/threading behavior.
+            """
+        )
+    ])
+    #expect(preview.visibleThinkingItems.first?.detail.contains("\n\n") == false)
+    #expect(preview.visibleThinkingItems.first?.detail.contains("\nThe\n") == false)
+    #expect(preview.visibleThinkingItems.first?.detail.contains("MRhead") == false)
 }
 
 @Test func agentResponsePresentationKeepsCompletedReadableTextOutOfThinking() {
@@ -337,6 +560,108 @@ import Testing
     #expect(rendered.string.contains("src/main/kotlin/com/example/IvarProperties.kt"))
     #expect(commandFont?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
     #expect(proseFont?.fontDescriptor.symbolicTraits.contains(.monoSpace) == false)
+}
+
+@Test func markdownReviewLinkDestinationTreatsAbsolutePathWithSpacesAsLocalFile() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Pikiclaw Markdown Links \(UUID().uuidString)")
+    let note = directory
+        .appendingPathComponent("Obsidian Vault")
+        .appendingPathComponent("repo")
+        .appendingPathComponent("note with spaces.md")
+    try FileManager.default.createDirectory(at: note.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "# Note".write(to: note, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    guard case let .localFile(url)? = markdownReviewLinkDestination(note.path) else {
+        #expect(Bool(false))
+        return
+    }
+
+    #expect(url.path == note.path)
+}
+
+@Test func markdownReviewLinkDestinationDecodesFileURLAndStripsExistingLineSuffix() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Pikiclaw Markdown URL Links \(UUID().uuidString)")
+    let note = directory
+        .appendingPathComponent("Obsidian Vault")
+        .appendingPathComponent("repo")
+        .appendingPathComponent("note.md")
+    try FileManager.default.createDirectory(at: note.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "# Note".write(to: note, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    guard case let .localFile(url)? = markdownReviewLinkDestination("\(note.absoluteString):17") else {
+        #expect(Bool(false))
+        return
+    }
+
+    #expect(url.path == note.path)
+}
+
+@Test func markdownReviewLinkDestinationDecodesAbsolutePathAndStripsLineSuffix() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Pikiclaw Markdown Encoded Path Links \(UUID().uuidString)")
+    let note = directory
+        .appendingPathComponent("Obsidian Vault")
+        .appendingPathComponent("repo")
+        .appendingPathComponent("note.md")
+    try FileManager.default.createDirectory(at: note.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "# Note".write(to: note, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let encodedPath = note.path.replacingOccurrences(of: " ", with: "%20")
+    guard case let .localFile(url)? = markdownReviewLinkDestination("\(encodedPath):1") else {
+        #expect(Bool(false))
+        return
+    }
+
+    #expect(url.path == note.path)
+}
+
+@Test func markdownReviewLinkDestinationKeepsWebURLsExternal() {
+    guard case let .external(url)? = markdownReviewLinkDestination("https://example.com/docs") else {
+        #expect(Bool(false))
+        return
+    }
+
+    #expect(url.scheme == "https")
+    #expect(url.host == "example.com")
+}
+
+@Test func nativeReviewDisplayMarkdownStructuresReviewLabels() {
+    let markdown = """
+    Risk: primary failure with fallback configured increments `changeEventKafkaFallback("primary_failure")`.
+    Why it matters: dashboards can show fallback success without primary failure rate.
+    Suggested fix record `ProducerTarget.Primary / Failure` before attempting fallback.
+    Suggested comments MR
+    - `memory-controller/src/main/scala/EventProducer.scala:95` - Bound the primary attempt.
+    Open questions
+    - Which consumer is intended?
+    Residual risk
+    - Could not fetch MR discussions.
+    """
+
+    #expect(nativeReviewDisplayMarkdown(markdown) == """
+    ### Risk
+    primary failure with fallback configured increments `changeEventKafkaFallback("primary_failure")`.
+
+    ### Why It Matters
+    dashboards can show fallback success without primary failure rate.
+
+    ### Suggested Fix
+    record `ProducerTarget.Primary / Failure` before attempting fallback.
+
+    ### Suggested Comments
+    - `memory-controller/src/main/scala/EventProducer.scala:95` - Bound the primary attempt.
+
+    ### Open Questions
+    - Which consumer is intended?
+
+    ### Residual Risk
+    - Could not fetch MR discussions.
+    """)
 }
 
 @Test func chatOutputReviewPromptCombinesMultipleInlineComments() {

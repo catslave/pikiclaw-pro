@@ -79,6 +79,8 @@ enum PKTheme {
     static let text4 = pkAdaptive(light: pkColor(0.278, 0.333, 0.412, 0.58), dark: pkColor(1, 1, 1, 0.46))
     static let primary = pkAdaptive(light: pkColor(0.059, 0.463, 0.431), dark: pkColor(0.498, 0.796, 0.733))
     static let primaryText = pkAdaptive(light: pkColor(1, 1, 1), dark: pkColor(0.012, 0.090, 0.078))
+    static let jira = pkAdaptive(light: pkColor(0.000, 0.322, 0.800), dark: pkColor(0.322, 0.612, 1.000))
+    static let jiraText = pkAdaptive(light: pkColor(1, 1, 1), dark: pkColor(0.020, 0.063, 0.141))
     static let ok = pkAdaptive(light: pkColor(0.133, 0.773, 0.369), dark: pkColor(0.204, 0.827, 0.600))
     static let warn = pkAdaptive(light: pkColor(0.961, 0.620, 0.043), dark: pkColor(0.984, 0.749, 0.141))
     static let err = pkAdaptive(light: pkColor(0.937, 0.267, 0.267), dark: pkColor(0.973, 0.443, 0.443))

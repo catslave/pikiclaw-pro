@@ -117,6 +117,31 @@ enum ComposerReferenceAttachmentStore {
             references: composerDeduplicatedReferences(references)
         )
     }
+
+    static func importFileReferencesFromPasteboard(_ pasteboard: NSPasteboard = .general) -> ComposerReferenceExtraction {
+        let extraction = importReferencesFromPasteboard(pasteboard)
+        return composerFileOnlyReferenceExtraction(from: extraction)
+    }
+}
+
+func composerFileOnlyReferenceExtraction(from extraction: ComposerReferenceExtraction) -> ComposerReferenceExtraction {
+    let fileReferences = extraction.references.filter { $0.kind == .file }
+    guard !fileReferences.isEmpty else {
+        return ComposerReferenceExtraction(text: "", references: [])
+    }
+
+    let inlineTextReferences = extraction.references
+        .filter { $0.kind != .file }
+        .map(\.value)
+    let remainingText = ([extraction.text] + inlineTextReferences)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+
+    return ComposerReferenceExtraction(
+        text: remainingText,
+        references: composerDeduplicatedReferences(fileReferences)
+    )
 }
 
 struct ComposerReferenceAttachmentStrip: View {

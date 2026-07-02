@@ -2711,6 +2711,13 @@ private final class FakeNativeNotificationCenterClient: NativeNotificationCenter
     #expect(composerShouldShowSkillCards(for: " / "))
     #expect(!composerShouldShowSkillCards(for: "/log"))
     #expect(!composerShouldShowSkillCards(for: "trace lookup"))
+    #expect(!composerShouldShowSlashCommandList(for: ""))
+    #expect(!composerShouldShowSlashCommandList(for: "   "))
+    #expect(composerShouldShowSlashCommandList(for: "/"))
+    #expect(composerShouldShowSlashCommandList(for: " / "))
+    #expect(composerShouldShowSlashCommandList(for: "/log"))
+    #expect(composerShouldShowSlashCommandList(for: "/code"))
+    #expect(!composerShouldShowSlashCommandList(for: "/log trace"))
 }
 
 @Test func composerBuiltinCommandsFollowSelectedAgentCapabilities() {
@@ -2735,6 +2742,50 @@ private final class FakeNativeNotificationCenterClient: NativeNotificationCenter
     #expect(!hermesCommands.contains("/plan "))
 
     #expect(composerBuiltinCommandOptions(for: .customCLI).isEmpty)
+}
+
+@Test func composerSlashCommandsFilterByQueryText() {
+    let snapshot = NativeStoreSnapshot(capabilities: [
+        Capability(
+            kind: .skill,
+            name: "code-review",
+            scope: .workspace,
+            installState: "installed",
+            configState: "ready",
+            trustLevel: .trusted,
+            healthState: .healthy
+        ),
+        Capability(
+            kind: .skill,
+            name: "IVA Log Tracer",
+            scope: .workspace,
+            installState: "installed",
+            configState: "ready",
+            trustLevel: .trusted,
+            healthState: .healthy
+        ),
+        Capability(
+            kind: .skill,
+            name: "Using Superpowers",
+            scope: .workspace,
+            installState: "installed",
+            configState: "ready",
+            trustLevel: .trusted,
+            healthState: .healthy
+        )
+    ])
+
+    let codeCommands = composerCommandCards(snapshot: snapshot, agentKind: .codex, draftText: "/code").map(\.command)
+    #expect(codeCommands.contains("/sk_code_review "))
+    #expect(!codeCommands.contains("/logtrace env=lab conversationId= last=24h "))
+
+    let reviewCommands = composerCommandCards(snapshot: snapshot, agentKind: .codex, draftText: "/review").map(\.command)
+    #expect(reviewCommands.contains("/sk_code_review "))
+
+    let goalCommands = composerCommandCards(snapshot: snapshot, agentKind: .codex, draftText: "/goal").map(\.command)
+    #expect(goalCommands.contains("/goal "))
+    #expect(goalCommands.contains("/goal pause"))
+    #expect(!goalCommands.contains("/sk_code_review "))
 }
 
 @Test func composerSkillAvailabilityFollowsSelectedAgent() {

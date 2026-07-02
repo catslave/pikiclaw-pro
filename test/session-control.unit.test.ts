@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+const originalHome = process.env.HOME;
 
 const {
   getBotRefMock,
@@ -29,6 +30,8 @@ describe('session-control', () => {
     vi.resetModules();
     if (originalOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
   });
 
   it('queues dashboard tasks through the public bot API', async () => {
@@ -190,6 +193,38 @@ describe('session-control', () => {
     expect(call.prompt).not.toContain('Read the skill definition');
     expect(call.displayPrompt).toBe('/plan add native goal UI');
     expect(result).toEqual({ ok: true, queued: true, taskId: 'task-plan', sessionKey: 'codex:pending_plan' });
+  });
+
+  it('resolves dashboard /sk skill commands before forwarding to the selected agent', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-global-skill-home-'));
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-global-skill-workdir-'));
+    process.env.HOME = home;
+    vi.resetModules();
+
+    const skillFile = path.join(home, '.pikiclaw', 'skills', 'code-review', 'SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.writeFileSync(skillFile, '---\nlabel: Code Review\ndescription: Review code changes.\n---\n');
+
+    const submitSessionTask = vi.fn(() => ({ ok: true, queued: true, taskId: 'task-skill', sessionKey: 'codex:sess-1' }));
+    getBotRefMock.mockReturnValue({ submitSessionTask });
+
+    const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
+    const result = await queueDashboardSessionTask({
+      workdir,
+      agent: 'codex',
+      sessionId: 'sess-1',
+      prompt: '/sk_code_review MR 190',
+      attachments: [],
+    });
+
+    expect(submitSessionTask).toHaveBeenCalledTimes(1);
+    const call = submitSessionTask.mock.calls[0][0];
+    expect(call.agent).toBe('codex');
+    expect(call.prompt).toContain(`Read the skill definition at \`${skillFile}\``);
+    expect(call.prompt).toContain('Additional context: MR 190');
+    expect(call.prompt).not.toContain(path.join(workdir, '.pikiclaw', 'skills', 'code-review', 'SKILL.md'));
+    expect(call.displayPrompt).toBe('/sk_code_review MR 190');
+    expect(result).toEqual({ ok: true, queued: true, taskId: 'task-skill', sessionKey: 'codex:sess-1' });
   });
 
   it('keeps page reading requests on the selected agent while OpenClaw is disabled', async () => {

@@ -7,6 +7,17 @@ import Testing
     #expect(nativeInitialRoute(environment: [:]) == .chat)
 }
 
+@Test func nativeInitialRouteRestoresPersistedRouteWhenEnvironmentIsEmpty() {
+    #expect(nativeInitialRoute(environment: [:], persistedRoute: "workItems") == .workItems)
+}
+
+@Test func nativeInitialRouteEnvironmentOverridesPersistedRoute() {
+    #expect(nativeInitialRoute(
+        environment: [nativeInitialRouteEnvironmentKey: "settings"],
+        persistedRoute: "workItems"
+    ) == .settings)
+}
+
 @Test func nativeInitialRouteAcceptsMissionControlAliases() {
     #expect(nativeInitialRoute(environment: [
         nativeInitialRouteEnvironmentKey: "mission-control",
@@ -23,6 +34,13 @@ import Testing
     #expect(nativeInitialRoute(environment: [
         nativeInitialRouteEnvironmentKey: "unknown-workbench",
     ]) == .chat)
+    #expect(nativeInitialRoute(environment: [:], persistedRoute: "unknown-workbench") == .chat)
+}
+
+@Test func nativeInitialEntityIDIgnoresBlankValues() {
+    #expect(nativeInitialEntityID(nil) == nil)
+    #expect(nativeInitialEntityID("   ") == nil)
+    #expect(nativeInitialEntityID(" workspace-pikiclaw ") == EntityID("workspace-pikiclaw"))
 }
 
 @Test func nativeDeferredRouteCommitSkipsStaleDockSelection() {

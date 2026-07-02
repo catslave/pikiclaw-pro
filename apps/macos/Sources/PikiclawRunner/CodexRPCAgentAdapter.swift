@@ -53,19 +53,35 @@ public struct CodexRPCAgentAdapter: ReusableAgentAdapter {
             throw CodexRPCError.executableMissing(descriptor.executableName)
         }
         environment = NativeExecutableResolver.environmentIncludingExecutableDirectory(executablePath, environment: environment)
+        let mcpPlan = initialRequest.mcpRequirements.isEmpty
+            ? CodexMCPRegistrationPlan()
+            : CodexMCPRegistrationPlan.prepare(
+                workspacePath: initialRequest.workspacePath,
+                baseEnvironment: &environment
+            )
         return CodexRPCAgentConnection(
             executablePath: executablePath,
-            environment: environment
+            environment: environment,
+            mcpPlan: mcpPlan
         )
     }
 }
 
 public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked Sendable {
+    static let turnEventIdleTimeout: TimeInterval = 4 * 60
+    static let threadOpenTimeout: TimeInterval = 90
+
+    private let executablePath: String
     private let client: CodexRPCClient
+    private let environment: [String: String]
+    private let mcpPlan: CodexMCPRegistrationPlan
     private let threadLock = NSLock()
     private var threadId: String?
 
-    init(executablePath: String, environment: [String: String]) {
+    fileprivate init(executablePath: String, environment: [String: String], mcpPlan: CodexMCPRegistrationPlan) {
+        self.executablePath = executablePath
+        self.environment = environment
+        self.mcpPlan = mcpPlan
         self.client = CodexRPCClient(executablePath: executablePath, environment: environment)
     }
 
@@ -89,38 +105,75 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         continuation: AsyncThrowingStream<RunnerEvent, Error>.Continuation
     ) async {
         continuation.yield(.stateChanged(.starting))
+        continuation.yield(.output(Self.thinkingOutput("Starting Codex session.") + "\n"))
+        let mcpRegistration = request.mcpRequirements.isEmpty
+            ? nil
+            : CodexMCPRegistration(plan: mcpPlan, executablePath: executablePath, environment: environment)
+        if let mcpRegistration {
+            await client.close()
+            await mcpRegistration.register()
+        }
+        defer {
+            if let mcpRegistration {
+                Task {
+                    await mcpRegistration.cleanup()
+                    await client.close()
+                }
+            }
+        }
         guard await client.ensureRunning() else {
-            continuation.yield(.failed("Failed to start Codex app-server."))
+            let diagnostic = await client.recentStderrSummary()
+            continuation.yield(.failed(Self.failureMessage("Failed to start Codex app-server.", diagnostic: diagnostic)))
             continuation.finish()
             return
         }
 
-        let activeThreadId = currentThreadId() ?? request.run.nativeSessionRef?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        let threadResp: CodexRPCResponse
+        let activeThreadId = Self.sanitizedThreadId(currentThreadId())
+            ?? Self.sanitizedThreadId(request.run.nativeSessionRef)
+        continuation.yield(.output(Self.thinkingOutput(activeThreadId == nil ? "Opening a Codex thread." : "Resuming Codex thread.") + "\n"))
+        var threadResp: CodexRPCResponse
+        var resolvedActiveThreadId = activeThreadId
         if let activeThreadId {
             threadResp = await client.call(
                 "thread/resume",
                 params: threadParams(request, threadId: activeThreadId),
-                timeout: 60
+                timeout: Self.threadOpenTimeout
             )
+            if Self.isTimeoutResponse(threadResp, method: "thread/resume") {
+                continuation.yield(.output(Self.thinkingOutput("Resume timed out; opening a fresh Codex thread.") + "\n"))
+                await client.close()
+                guard await client.ensureRunning() else {
+                    let diagnostic = await client.recentStderrSummary()
+                    continuation.yield(.failed(Self.failureMessage("Failed to restart Codex app-server after resume timed out.", diagnostic: diagnostic)))
+                    continuation.finish()
+                    return
+                }
+                resolvedActiveThreadId = nil
+                threadResp = await client.call(
+                    "thread/start",
+                    params: threadParams(request),
+                    timeout: Self.threadOpenTimeout
+                )
+            }
         } else {
             threadResp = await client.call(
                 "thread/start",
                 params: threadParams(request),
-                timeout: 60
+                timeout: Self.threadOpenTimeout
             )
         }
 
         if let error = CodexRPCClient.errorMessage(from: threadResp) {
-            continuation.yield(.failed(error))
+            let diagnostic = await client.recentStderrSummary()
+            continuation.yield(.failed(Self.failureMessage(error, diagnostic: diagnostic)))
             continuation.finish()
             return
         }
 
-        let resolvedThreadId = Self.threadId(from: threadResp.value) ?? activeThreadId
+        let resolvedThreadId = Self.sanitizedThreadId(Self.threadId(from: threadResp.value)) ?? resolvedActiveThreadId
         if let resolvedThreadId {
             setThreadId(resolvedThreadId)
-            continuation.yield(.output("{\"type\":\"thread.started\",\"thread_id\":\"\(Self.jsonEscaped(resolvedThreadId))\"}\n"))
+            continuation.yield(.output(Self.threadStartedOutput(threadId: resolvedThreadId)))
         }
 
         guard let turnThreadId = resolvedThreadId else {
@@ -138,6 +191,10 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         }
 
         continuation.yield(.stateChanged(.running))
+        continuation.yield(.output(Self.thinkingOutput("Waiting for Codex response.") + "\n"))
+        turnBox.startIdleWatchdog(timeout: Self.turnEventIdleTimeout) { [client] in
+            await client.close()
+        }
         let turnResp = await client.call(
             "turn/start",
             params: [
@@ -150,7 +207,9 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         if let error = CodexRPCClient.errorMessage(from: turnResp) {
             await client.setNotificationHandler(nil)
             await client.setExitHandler(nil)
-            continuation.yield(.failed(error))
+            turnBox.cancelIdleWatchdog()
+            let diagnostic = await client.recentStderrSummary()
+            continuation.yield(.failed(Self.failureMessage(error, diagnostic: diagnostic)))
             continuation.finish()
             return
         }
@@ -158,10 +217,12 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         await turnBox.waitForCompletion()
         await client.setNotificationHandler(nil)
         await client.setExitHandler(nil)
+        turnBox.cancelIdleWatchdog()
 
         let finalState = turnBox.withLock { $0 }
         if let error = finalState.error {
-            continuation.yield(.failed(error))
+            let diagnostic = await client.recentStderrSummary()
+            continuation.yield(.failed(Self.failureMessage(error, diagnostic: diagnostic)))
         } else {
             continuation.yield(.completed(exitCode: finalState.completed ? 0 : 1))
         }
@@ -183,7 +244,7 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
     private func threadParams(_ request: AgentLaunchRequest, threadId: String? = nil) -> [String: Any] {
         var params: [String: Any] = [
             "cwd": request.workspacePath,
-            "approvalPolicy": "never",
+            "approvalPolicy": Self.codexApprovalPolicy(for: request.run.permissionMode),
             "sandbox": Self.codexSandbox(for: request.run.permissionMode)
         ]
         if let threadId {
@@ -203,6 +264,15 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         }
     }
 
+    private static func codexApprovalPolicy(for mode: PermissionMode) -> String {
+        switch mode {
+        case .readOnly, .autopilot:
+            return "never"
+        case .askBeforeEdit:
+            return "on-request"
+        }
+    }
+
     private static func handleNotification(
         method: String,
         params: [String: Any],
@@ -215,38 +285,279 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         }
 
         switch method {
+        case "item/started":
+            if let item = params["item"] as? [String: Any] {
+                if let itemId = item["id"] as? String,
+                   Self.normalizedItemType(item) == "agentMessage" {
+                    let phase = item["phase"] as? String ?? "final_answer"
+                    state.withLock { state in
+                        state.messagePhases[itemId] = phase
+                    }
+                }
+                if let label = Self.commandExecutionLabel(from: item) {
+                    state.recordActivity()
+                    continuation.yield(.toolCallStarted(label))
+                }
+            }
         case "item/agentMessage/delta":
             if let delta = params["delta"] as? String, !delta.isEmpty {
-                state.withLock { state in
-                    state.didStreamText = true
+                let itemId = params["itemId"] as? String
+                let phase = itemId.flatMap { itemId in
+                    state.withLock { $0.messagePhases[itemId] }
+                } ?? "final_answer"
+                state.recordActivity()
+                if phase == "final_answer" {
+                    state.withLock { state in
+                        if let itemId {
+                            state.deltaSeenForItem.insert(itemId)
+                        }
+                        state.didStreamFinalText = true
+                    }
+                    continuation.yield(.output(delta))
+                } else {
+                    let output = state.withLock { state -> String in
+                        let key = itemId ?? "commentary"
+                        if let itemId {
+                            state.deltaSeenForItem.insert(itemId)
+                            state.commentaryByItem[itemId, default: ""] += delta
+                        }
+                        let shouldPrefix = state.streamingThinkingItemIds.insert(key).inserted
+                        return shouldPrefix ? Self.thinkingOutput(delta) : delta
+                    }
+                    continuation.yield(.output(output))
                 }
-                continuation.yield(.output(delta))
             }
         case "item/completed":
-            if let item = params["item"] as? [String: Any],
-               item["type"] as? String == "agentMessage",
-               let text = item["text"] as? String,
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let shouldEmit = state.withLock { state -> Bool in
-                    guard !state.didStreamText else { return false }
-                    state.didStreamText = true
-                    return true
-                }
-                if shouldEmit {
-                    continuation.yield(.output(text))
-                }
+            if let item = params["item"] as? [String: Any] {
+                Self.handleCompletedItem(item, state: state, continuation: continuation)
+            }
+        case "rawResponseItem/completed":
+            if let item = params["item"] as? [String: Any] {
+                Self.handleCompletedRawResponseItem(item, state: state, continuation: continuation)
             }
         case "item/reasoning/textDelta", "item/reasoning/summaryTextDelta":
-            break
+            if let delta = params["delta"] as? String, !delta.isEmpty {
+                let itemId = params["itemId"] as? String ?? params["id"] as? String
+                state.recordActivity()
+                let output = state.withLock { state -> String in
+                    let key = itemId ?? "reasoning"
+                    if let itemId {
+                        state.deltaSeenForItem.insert(itemId)
+                    }
+                    let shouldPrefix = state.streamingThinkingItemIds.insert(key).inserted
+                    return shouldPrefix ? Self.thinkingOutput(delta) : delta
+                }
+                continuation.yield(.output(output))
+            }
         case "turn/completed", "turn/failed", "turn/cancelled", "turn/interrupted":
             let turn = params["turn"] as? [String: Any]
             let status = turn?["status"] as? String
             let error = turn?["error"] as? [String: Any]
             let errorMessage = error?["message"] as? String ?? error?["code"] as? String
             let success = method == "turn/completed" && (status == nil || status == "completed")
-            state.complete(success: success, error: errorMessage)
+            state.recordActivity()
+            state.complete(
+                success: success,
+                error: success ? nil : errorMessage ?? Self.turnFailureMessage(method: method, status: status)
+            )
         default:
             break
+        }
+    }
+
+    private static func handleCompletedItem(
+        _ item: [String: Any],
+        state: LockedValue<CodexRPCTurnState>,
+        continuation: AsyncThrowingStream<RunnerEvent, Error>.Continuation
+    ) {
+        let type = normalizedItemType(item)
+        switch type {
+        case "agentMessage":
+            let itemId = item["id"] as? String
+            let text = Self.agentMessageText(from: item)
+                ?? itemId.flatMap { id in state.withLock { $0.commentaryByItem[id] } }
+            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let phase = item["phase"] as? String
+                    ?? itemId.flatMap { itemId in
+                        state.withLock { $0.messagePhases[itemId] }
+                    }
+                let isFinalAnswer = phase == "final_answer" || phase == nil
+                let shouldEmit = state.withLock { state -> Bool in
+                    if let itemId, state.deltaSeenForItem.contains(itemId) {
+                        return false
+                    }
+                    if isFinalAnswer, itemId == nil, state.didStreamFinalText {
+                        return false
+                    }
+                    if let itemId {
+                        state.deltaSeenForItem.insert(itemId)
+                    }
+                    if isFinalAnswer {
+                        state.didStreamFinalText = true
+                    }
+                    return true
+                }
+                if shouldEmit {
+                    state.recordActivity()
+                    continuation.yield(.output(isFinalAnswer ? text : Self.thinkingOutput(text)))
+                }
+            }
+            if let itemId {
+                state.withLock { state in
+                    state.messagePhases.removeValue(forKey: itemId)
+                    state.commentaryByItem.removeValue(forKey: itemId)
+                    state.streamingThinkingItemIds.remove(itemId)
+                }
+            }
+        case "reasoning":
+            emitReasoningText(from: item, state: state, continuation: continuation)
+        case "commandExecution":
+            state.recordActivity()
+            continuation.yield(.activity(Date()))
+        default:
+            break
+        }
+    }
+
+    private static func handleCompletedRawResponseItem(
+        _ item: [String: Any],
+        state: LockedValue<CodexRPCTurnState>,
+        continuation: AsyncThrowingStream<RunnerEvent, Error>.Continuation
+    ) {
+        if normalizedItemType(item) == "reasoning" {
+            emitReasoningText(from: item, state: state, continuation: continuation)
+        }
+    }
+
+    private static func emitReasoningText(
+        from item: [String: Any],
+        state: LockedValue<CodexRPCTurnState>,
+        continuation: AsyncThrowingStream<RunnerEvent, Error>.Continuation
+    ) {
+        guard let text = reasoningText(from: item),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        let itemId = item["id"] as? String
+        let shouldEmit = state.withLock { state -> Bool in
+            guard let itemId else { return true }
+            guard !state.deltaSeenForItem.contains(itemId) else { return false }
+            state.deltaSeenForItem.insert(itemId)
+            return true
+        }
+        guard shouldEmit else { return }
+        state.recordActivity()
+        continuation.yield(.output(Self.thinkingOutput(text)))
+    }
+
+    static func agentMessageText(from item: [String: Any]) -> String? {
+        if let text = trimmedNonEmptyString(item["text"]) {
+            return text
+        }
+        if let content = item["content"] as? [Any] {
+            let text = text(fromContent: content)
+            if !text.isEmpty {
+                return text
+            }
+        }
+        if let message = item["message"] as? [String: Any] {
+            return agentMessageText(from: message)
+        }
+        return nil
+    }
+
+    static func reasoningText(from item: [String: Any]) -> String? {
+        if let text = trimmedNonEmptyString(item["text"]) {
+            return text
+        }
+        var parts: [String] = []
+        if let summary = item["summary"] as? [Any] {
+            parts.append(text(fromContent: summary))
+        }
+        if let content = item["content"] as? [Any] {
+            parts.append(text(fromContent: content))
+        }
+        let text = parts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return text.isEmpty ? nil : text
+    }
+
+    static func commandExecutionLabel(from item: [String: Any]) -> String? {
+        guard normalizedItemType(item) == "commandExecution" else { return nil }
+        return trimmedNonEmptyString(item["command"])
+            ?? trimmedNonEmptyString(item["cmd"])
+            ?? trimmedNonEmptyString(item["name"])
+            ?? "tool"
+    }
+
+    static func normalizedItemType(_ item: [String: Any]) -> String {
+        let raw = (item["type"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        switch raw {
+        case "agent_message":
+            return "agentMessage"
+        case "command_execution":
+            return "commandExecution"
+        case "raw_response_item":
+            return "rawResponseItem"
+        default:
+            return raw
+        }
+    }
+
+    private static func trimmedNonEmptyString(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : text
+    }
+
+    private static func text(fromContent content: [Any]) -> String {
+        content
+            .compactMap { entry -> String? in
+                if let text = entry as? String {
+                    return text
+                }
+                guard let dictionary = entry as? [String: Any] else {
+                    return nil
+                }
+                if let text = trimmedNonEmptyString(dictionary["text"]) {
+                    return text
+                }
+                if let content = dictionary["content"] as? [Any] {
+                    let nested = text(fromContent: content)
+                    return nested.isEmpty ? nil : nested
+                }
+                return nil
+            }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    static func thinkingOutput(_ text: String) -> String {
+        text
+            .components(separatedBy: .newlines)
+            .map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return line }
+                return trimmed.hasPrefix("Thinking:") ? line : "Thinking: \(line)"
+            }
+            .joined(separator: "\n")
+    }
+
+    static func turnFailureMessage(method: String, status: String?) -> String {
+        let statusText = status?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        switch method {
+        case "turn/failed":
+            return statusText.map { "Codex turn failed: \($0)." } ?? "Codex turn failed."
+        case "turn/cancelled":
+            return statusText.map { "Codex turn was cancelled: \($0)." } ?? "Codex turn was cancelled."
+        case "turn/interrupted":
+            return statusText.map { "Codex turn was interrupted: \($0)." } ?? "Codex turn was interrupted."
+        default:
+            return statusText.map { "Codex turn ended with status \($0)." } ?? "Codex turn did not complete."
         }
     }
 
@@ -260,11 +571,68 @@ public final class CodexRPCAgentConnection: ReusableAgentConnection, @unchecked 
         return id.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func jsonEscaped(_ value: String) -> String {
-        (try? String(data: JSONSerialization.data(withJSONObject: [value]), encoding: .utf8))?
-            .dropFirst()
-            .dropLast()
-            .description ?? value
+    static func threadStartedOutput(threadId: String) -> String {
+        let payload: [String: Any] = [
+            "type": "thread.started",
+            "thread_id": threadId
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return #"{"type":"thread.started","thread_id":"# + jsonStringLiteral(threadId) + "}\n"
+        }
+        return text + "\n"
+    }
+
+    static func sanitizedThreadId(_ value: String?) -> String? {
+        guard var text = value?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+        for _ in 0..<3 {
+            if text.hasPrefix("\\\""), text.hasSuffix("\\\""), text.count >= 4 {
+                text = String(text.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+            guard text.hasPrefix("\""), text.hasSuffix("\"") else {
+                break
+            }
+            if let data = text.data(using: .utf8),
+               let decoded = try? JSONSerialization.jsonObject(with: data) as? String {
+                text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                text = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return text.isEmpty ? nil : text
+    }
+
+    private static func isTimeoutResponse(_ response: CodexRPCResponse, method: String) -> Bool {
+        guard let message = CodexRPCClient.errorMessage(from: response) else { return false }
+        return message.contains("RPC call '\(method)' timed out")
+    }
+
+    static func failureMessage(_ message: String, diagnostic: String?) -> String {
+        let cleanMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanDiagnostic = diagnostic?
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard let cleanDiagnostic, !cleanDiagnostic.isEmpty else {
+            return cleanMessage
+        }
+        return "\(cleanMessage)\nCodex app-server diagnostics:\n\(cleanDiagnostic)"
+    }
+
+    private static func jsonStringLiteral(_ value: String) -> String {
+        guard JSONSerialization.isValidJSONObject([value]),
+              let data = try? JSONSerialization.data(withJSONObject: [value]),
+              let text = String(data: data, encoding: .utf8),
+              text.hasPrefix("["),
+              text.hasSuffix("]") else {
+            return "\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
+        }
+        return String(text.dropFirst().dropLast())
     }
 }
 
@@ -279,6 +647,237 @@ private enum CodexRPCError: LocalizedError {
     }
 }
 
+private struct CodexMCPRegistrationPlan: Sendable {
+    var servers: [CodexMCPServer] = []
+
+    static func prepare(workspacePath: String, baseEnvironment: inout [String: String]) -> CodexMCPRegistrationPlan {
+        var serversByName: [String: CodexMCPServer] = [:]
+        for server in globalServers(environment: baseEnvironment) {
+            serversByName[server.name] = server
+        }
+        for server in workspaceServers(workspacePath: workspacePath, environment: baseEnvironment) {
+            if server.disabled {
+                serversByName.removeValue(forKey: server.name)
+            } else {
+                serversByName[server.name] = server
+            }
+        }
+
+        var servers: [CodexMCPServer] = []
+        for var server in serversByName.values.sorted(by: { $0.name < $1.name }) {
+            if let token = server.bearerToken {
+                let envName = "PIKICLAW_MCP_\(sanitizeEnvName(server.name))_TOKEN"
+                baseEnvironment[envName] = token
+                server.bearerTokenEnvName = envName
+            }
+            servers.append(server)
+        }
+        return CodexMCPRegistrationPlan(servers: servers)
+    }
+
+    private static func globalServers(environment: [String: String]) -> [CodexMCPServer] {
+        let configPath = environment["PIKICLAW_CONFIG"]?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".pikiclaw", isDirectory: true)
+                .appendingPathComponent("setting.json", isDirectory: false)
+                .path
+        guard let root = jsonObject(at: configPath),
+              let extensions = root["extensions"] as? [String: Any],
+              let mcp = extensions["mcp"] as? [String: Any] else {
+            return []
+        }
+        return mcp.compactMap { name, rawConfig in
+            guard let config = rawConfig as? [String: Any],
+                  !boolValue(config["disabled"]),
+                  config["enabled"].map(boolValue) != false else {
+                return nil
+            }
+            return server(name: visibleServerName(name), config: config)
+        }
+    }
+
+    private static func workspaceServers(workspacePath: String, environment: [String: String]) -> [CodexMCPServer] {
+        let configPath = URL(fileURLWithPath: workspacePath, isDirectory: true)
+            .appendingPathComponent(".mcp.json", isDirectory: false)
+            .path
+        guard let root = jsonObject(at: configPath) else { return [] }
+        let servers = (root["mcpServers"] as? [String: Any]) ?? root
+        return servers.compactMap { name, rawConfig in
+            guard let config = rawConfig as? [String: Any] else { return nil }
+            if boolValue(config["disabled"]) {
+                return CodexMCPServer(name: visibleServerName(name), disabled: true)
+            }
+            return server(name: visibleServerName(name), config: config)
+        }
+    }
+
+    private static func server(name: String, config: [String: Any]) -> CodexMCPServer? {
+        if let url = stringValue(config["url"]), !url.isEmpty {
+            let headers = config["headers"] as? [String: Any]
+            return CodexMCPServer(
+                name: name,
+                transport: .http(url: url),
+                bearerToken: bearerToken(from: headers)
+            )
+        }
+        guard let command = stringValue(config["command"]), !command.isEmpty else { return nil }
+        let args = (config["args"] as? [Any])?.compactMap(stringValue) ?? []
+        let env = (config["env"] as? [String: Any])?.compactMapValues(stringValue) ?? [:]
+        return CodexMCPServer(name: name, transport: .stdio(command: command, args: args, env: env))
+    }
+
+    private static func jsonObject(at path: String) -> [String: Any]? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any] else {
+            return nil
+        }
+        return dictionary
+    }
+
+    private static func visibleServerName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+        if trimmed.range(of: #"^pikiclaw(?:[-_]|$)"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return trimmed
+        }
+        return "pikiclaw-\(trimmed)"
+    }
+
+    private static func bearerToken(from headers: [String: Any]?) -> String? {
+        guard let entry = headers?.first(where: { $0.key.lowercased() == "authorization" }),
+              let value = stringValue(entry.value)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.lowercased().hasPrefix("bearer ") {
+            return String(value.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        }
+        return value
+    }
+
+    private static func sanitizeEnvName(_ name: String) -> String {
+        var output = ""
+        for scalar in name.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                output.unicodeScalars.append(Character(String(scalar).uppercased()).unicodeScalars.first!)
+            } else {
+                output.append("_")
+            }
+        }
+        if output.first?.isNumber == true {
+            output = "_\(output)"
+        }
+        return output.isEmpty ? "MCP" : output
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        switch value {
+        case let value as String:
+            return value
+        case let value as NSNumber:
+            return value.stringValue
+        default:
+            return nil
+        }
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool {
+        switch value {
+        case let value as Bool:
+            return value
+        case let value as NSNumber:
+            return value.boolValue
+        case let value as String:
+            return ["true", "yes", "1"].contains(value.lowercased())
+        default:
+            return false
+        }
+    }
+}
+
+private struct CodexMCPServer: Sendable {
+    enum Transport: Sendable {
+        case http(url: String)
+        case stdio(command: String, args: [String], env: [String: String])
+    }
+
+    var name: String
+    var transport: Transport = .stdio(command: "", args: [], env: [:])
+    var bearerToken: String?
+    var bearerTokenEnvName: String?
+    var disabled = false
+}
+
+private final actor CodexMCPRegistration {
+    private let plan: CodexMCPRegistrationPlan
+    private let executablePath: String
+    private let environment: [String: String]
+    private var registeredNames: [String] = []
+
+    init(plan: CodexMCPRegistrationPlan, executablePath: String, environment: [String: String]) {
+        self.plan = plan
+        self.executablePath = executablePath
+        self.environment = environment
+    }
+
+    func register() {
+        for server in plan.servers {
+            guard !server.disabled else { continue }
+            let args = codexMcpAddArguments(for: server)
+            guard !args.isEmpty else { continue }
+            if runCodex(args) || (runCodex(["mcp", "remove", server.name]) && runCodex(args)) {
+                registeredNames.append(server.name)
+            }
+        }
+    }
+
+    func cleanup() {
+        for name in registeredNames.reversed() {
+            _ = runCodex(["mcp", "remove", name])
+        }
+        registeredNames.removeAll()
+    }
+
+    private func codexMcpAddArguments(for server: CodexMCPServer) -> [String] {
+        var args = ["mcp", "add"]
+        switch server.transport {
+        case .http(let url):
+            args.append(contentsOf: ["--url", url])
+            if let bearerTokenEnvName = server.bearerTokenEnvName {
+                args.append(contentsOf: ["--bearer-token-env-var", bearerTokenEnvName])
+            }
+            args.append(server.name)
+        case .stdio(let command, let commandArgs, let env):
+            guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+            for key in env.keys.sorted() {
+                if let value = env[key] {
+                    args.append(contentsOf: ["--env", "\(key)=\(value)"])
+                }
+            }
+            args.append(contentsOf: [server.name, "--", command])
+            args.append(contentsOf: commandArgs)
+        }
+        return args
+    }
+
+    private func runCodex(_ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.environment = environment
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}
+
 private struct CodexRPCResponse: @unchecked Sendable {
     var value: [String: Any]
 }
@@ -286,12 +885,21 @@ private struct CodexRPCResponse: @unchecked Sendable {
 private struct CodexRPCTurnState {
     var completed = false
     var error: String?
-    var didStreamText = false
+    var didStreamFinalText = false
+    var lastActivityAt = Date()
+    var messagePhases: [String: String] = [:]
+    var deltaSeenForItem: Set<String> = []
+    var commentaryByItem: [String: String] = [:]
+    var streamingThinkingItemIds: Set<String> = []
     fileprivate var continuation: CheckedContinuation<Void, Never>?
+    fileprivate var idleWatchdog: Task<Void, Never>?
 
     mutating func finish(success: Bool, error: String?) {
+        guard !completed, self.error == nil else { return }
         completed = success
         self.error = error
+        idleWatchdog?.cancel()
+        idleWatchdog = nil
         continuation?.resume()
         continuation = nil
     }
@@ -301,6 +909,42 @@ private extension LockedValue where Value == CodexRPCTurnState {
     func complete(success: Bool, error: String?) {
         withLock { state in
             state.finish(success: success, error: error)
+        }
+    }
+
+    func recordActivity() {
+        withLock { state in
+            state.lastActivityAt = Date()
+        }
+    }
+
+    func startIdleWatchdog(timeout: TimeInterval, onTimeout: @escaping @Sendable () async -> Void) {
+        withLock { state in
+            state.idleWatchdog?.cancel()
+            state.lastActivityAt = Date()
+            state.idleWatchdog = Task {
+                while !Task.isCancelled {
+                    let delay = UInt64(max(timeout, 1) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: delay)
+                    guard !Task.isCancelled else { return }
+                    let shouldFail = self.withLock { state -> Bool in
+                        guard !state.completed, state.error == nil else { return false }
+                        return Date().timeIntervalSince(state.lastActivityAt) >= timeout
+                    }
+                    if shouldFail {
+                        self.complete(success: false, error: "No Codex turn events for \(Int(timeout / 60)) minutes. The model request likely stalled before producing more agent output.")
+                        await onTimeout()
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    func cancelIdleWatchdog() {
+        withLock { state in
+            state.idleWatchdog?.cancel()
+            state.idleWatchdog = nil
         }
     }
 
@@ -328,6 +972,8 @@ private final actor CodexRPCClient {
     private var stdout: Pipe?
     private var stderr: Pipe?
     private var buffer = ""
+    private var stderrBuffer = ""
+    private var recentStderrLines: [String] = []
     private var nextId = 1
     private var pending: [Int: CheckedContinuation<CodexRPCResponse, Never>] = [:]
     private var notificationHandler: (@Sendable (String, [String: Any]) -> Void)?
@@ -395,6 +1041,15 @@ private final actor CodexRPCClient {
         exitHandler = nil
     }
 
+    func recentStderrSummary(limit: Int = 6) -> String? {
+        let lines = recentStderrLines
+            .suffix(max(limit, 1))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+        return lines.joined(separator: "\n")
+    }
+
     static func errorMessage(from response: CodexRPCResponse) -> String? {
         guard let error = response.value["error"] as? [String: Any] else { return nil }
         if let message = error["message"] as? String, !message.isEmpty {
@@ -421,7 +1076,11 @@ private final actor CodexRPCClient {
             guard !data.isEmpty else { return }
             Task { await self?.handleStdout(data) }
         }
-        stderr.fileHandleForReading.readabilityHandler = { _ in }
+        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            Task { await self?.handleStderr(data) }
+        }
         process.terminationHandler = { [weak self] _ in
             Task {
                 await self?.handleProcessExit()
@@ -452,6 +1111,21 @@ private final actor CodexRPCClient {
             return false
         }
         return true
+    }
+
+    private func handleStderr(_ data: Data) {
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        stderrBuffer += text
+        let lines = stderrBuffer.components(separatedBy: "\n")
+        stderrBuffer = lines.last ?? ""
+        for line in lines.dropLast() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            recentStderrLines.append(trimmed)
+        }
+        if recentStderrLines.count > 24 {
+            recentStderrLines.removeFirst(recentStderrLines.count - 24)
+        }
     }
 
     private func handleStdout(_ data: Data) {

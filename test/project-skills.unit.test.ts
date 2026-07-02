@@ -132,6 +132,32 @@ describe('project skills', () => {
     expect(collapseSkillPrompt('[Project directory: /tmp]\n\nbuild the app')).toBeNull();
   });
 
+  it('resolves global-only skill commands to their installed skill file', () => {
+    const workdir = makeTmpDir('pikiclaw-global-skill-workdir-');
+    const globalSkillFile = path.join(makeTmpDir('pikiclaw-global-skill-home-'), '.pikiclaw', 'skills', 'code-review', 'SKILL.md');
+    const bot = {
+      chatWorkdir: () => workdir,
+      fetchSkills: () => ({
+        skills: [{
+          name: 'code-review',
+          label: 'Code Review',
+          description: 'Review code changes.',
+          source: 'skills' as const,
+          scope: 'global' as const,
+          path: globalSkillFile,
+        }],
+      }),
+    } as unknown as Bot;
+
+    const resolved = resolveSkillPrompt(bot, 1, 'sk_code_review', 'MR 190');
+
+    expect(resolved).not.toBeNull();
+    expect(resolved!.skillName).toBe('code-review');
+    expect(resolved!.prompt).toContain(globalSkillFile);
+    expect(resolved!.prompt).not.toContain(path.join(workdir, '.pikiclaw', 'skills', 'code-review', 'SKILL.md'));
+    expect(resolved!.prompt).toContain('Additional context: MR 190');
+  });
+
   it('pins workspace skills as always-at-hand chat references', () => {
     const workdir = makeTmpDir('pikiclaw-pinned-skill-');
     const skillFile = path.join(workdir, '.pikiclaw', 'skills', 'release-check', 'SKILL.md');

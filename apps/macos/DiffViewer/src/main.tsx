@@ -7,6 +7,14 @@ import './style.css';
 type DiffPayload = {
   diffText: string;
   viewType?: 'unified' | 'split';
+  comments?: DiffCommentPayload[];
+};
+
+type DiffCommentPayload = {
+  id: string;
+  lineNumber: number;
+  quote: string;
+  note: string;
 };
 
 type PendingCommentTarget = {
@@ -36,12 +44,13 @@ declare global {
   }
 }
 
-function DiffFile({ diffText, viewType = 'unified' }: DiffPayload) {
+function DiffFile({ diffText, viewType = 'unified', comments = [] }: DiffPayload) {
   const shellRef = useRef<HTMLDivElement>(null);
   const [commentTarget, setCommentTarget] = useState<PendingCommentTarget | null>(null);
   const [draftTarget, setDraftTarget] = useState<PendingCommentTarget | null>(null);
   const [draftNote, setDraftNote] = useState('');
   const [inlineComments, setInlineComments] = useState<InlineComment[]>([]);
+  const [activeCommentId, setActiveCommentId] = useState<string | null>(null);
   const files = useMemo(() => {
     try {
       return parseDiff(diffText || '', { nearbySequences: 'zip' });
@@ -56,7 +65,34 @@ function DiffFile({ diffText, viewType = 'unified' }: DiffPayload) {
     setDraftTarget(null);
     setDraftNote('');
     setInlineComments([]);
+    setActiveCommentId(null);
   }, [diffText]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const shell = shellRef.current;
+      if (!shell) return;
+      setInlineComments(
+        comments
+          .map((comment) => {
+            const row = rowForLineNumber(shell, comment.lineNumber);
+            if (!row) return null;
+            const rowRect = row.getBoundingClientRect();
+            const shellRect = shell.getBoundingClientRect();
+            return {
+              id: comment.id,
+              lineNumber: comment.lineNumber,
+              lineNumbers: [comment.lineNumber],
+              quote: comment.quote,
+              note: comment.note,
+              top: rowRect.top - shellRect.top + shell.scrollTop,
+            } satisfies InlineComment;
+          })
+          .filter((comment): comment is InlineComment => comment !== null),
+      );
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [comments, files]);
 
   if (!diffText.trim()) {
     return <div className="empty">No textual diff available for this file.</div>;
@@ -67,7 +103,7 @@ function DiffFile({ diffText, viewType = 'unified' }: DiffPayload) {
   }
 
   const markCommentTarget = (event: React.MouseEvent<HTMLElement>) => {
-    if ((event.target as HTMLElement).closest('.comment-button, .inline-comment-editor')) {
+    if ((event.target as HTMLElement).closest('.comment-button, .inline-comment-editor, .inline-comment-marker, .inline-comment-popover')) {
       return;
     }
     const shell = shellRef.current;
@@ -123,12 +159,6 @@ function DiffFile({ diffText, viewType = 'unified' }: DiffPayload) {
     if (!draftTarget) return;
     const note = draftNote.trim();
     if (!note) return;
-    const nextComment: InlineComment = {
-      ...draftTarget,
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      note,
-    };
-    setInlineComments((comments) => [...comments, nextComment]);
     window.webkit?.messageHandlers?.pikiclawDiffComment?.postMessage({
       lineNumber: draftTarget.lineNumber,
       lineNumbers: draftTarget.lineNumbers,
@@ -137,6 +167,7 @@ function DiffFile({ diffText, viewType = 'unified' }: DiffPayload) {
     });
     setDraftTarget(null);
     setDraftNote('');
+    setActiveCommentId(null);
     window.getSelection()?.removeAllRanges();
   };
 
@@ -146,19 +177,36 @@ function DiffFile({ diffText, viewType = 'unified' }: DiffPayload) {
   const editorStyle: CSSProperties | undefined = draftTarget
     ? { top: Math.max(4, draftTarget.top + 26) }
     : undefined;
+  const activeComment = inlineComments.find((comment) => comment.id === activeCommentId) ?? null;
+  const popoverStyle: CSSProperties | undefined = activeComment
+    ? { top: Math.max(4, activeComment.top + 24) }
+    : undefined;
 
   return (
     <div ref={shellRef} className="diff-shell" onMouseUp={markCommentTarget} onClick={markCommentTarget}>
       {inlineComments.map((comment) => (
-        <span
+        <button
           key={comment.id}
           className="inline-comment-marker"
           style={{ top: Math.max(4, comment.top + 1) }}
           title={comment.note}
+          onClick={(event) => {
+            event.stopPropagation();
+            setCommentTarget(null);
+            setDraftTarget(null);
+            setActiveCommentId(activeCommentId === comment.id ? null : comment.id);
+          }}
         >
           ◔
-        </span>
+        </button>
       ))}
+      {activeComment && (
+        <div className="inline-comment-popover" style={popoverStyle} onClick={(event) => event.stopPropagation()}>
+          <div className="inline-comment-popover-title">Review comment</div>
+          <div className="inline-comment-popover-note">{activeComment.note || 'No comment text.'}</div>
+          <div className="inline-comment-popover-quote">{activeComment.quote}</div>
+        </div>
+      )}
       {commentTarget && (
         <button className="comment-button" style={commentButtonStyle} onClick={openCommentEditor} title="Add review comment">
           +
@@ -224,6 +272,13 @@ function lineNumberFromRow(row: Element): number | null {
     .pop();
   const parsed = gutterText ? Number.parseInt(gutterText, 10) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function rowForLineNumber(shell: HTMLElement, lineNumber: number): HTMLElement | null {
+  if (!lineNumber) return null;
+  return (
+    Array.from(shell.querySelectorAll<HTMLElement>('.diff-line')).find((row) => lineNumberFromRow(row) === lineNumber) ?? null
+  );
 }
 
 function App() {

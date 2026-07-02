@@ -1,4 +1,6 @@
 import AppKit
+import Markdown
+import Splash
 import SwiftUI
 import WebKit
 
@@ -12,6 +14,65 @@ struct ChatOutputReviewComment: Identifiable, Equatable {
         self.quote = quote
         self.note = note
     }
+}
+
+enum MarkdownReviewLinkDestination: Equatable {
+    case localFile(URL)
+    case external(URL)
+}
+
+func markdownReviewLinkDestination(_ link: Any) -> MarkdownReviewLinkDestination? {
+    if let url = link as? URL {
+        if url.isFileURL {
+            return .localFile(markdownReviewExistingLocalFileURL(url))
+        }
+        return .external(url)
+    }
+
+    let raw = String(describing: link).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !raw.isEmpty else { return nil }
+
+    if let fileURL = markdownReviewLocalFileURL(from: raw) {
+        return .localFile(fileURL)
+    }
+    if let url = URL(string: raw), url.scheme != nil {
+        return .external(url)
+    }
+    return nil
+}
+
+func markdownReviewLocalFileURL(from raw: String) -> URL? {
+    var trimCharacters = CharacterSet.whitespacesAndNewlines
+    trimCharacters.insert(charactersIn: "<>")
+    let cleaned = raw.trimmingCharacters(in: trimCharacters)
+    guard !cleaned.isEmpty else { return nil }
+
+    if let url = URL(string: cleaned), url.isFileURL {
+        let strippedPath = markdownReviewPathByStrippingLineSuffix(url.path) ?? url.path
+        return URL(fileURLWithPath: strippedPath)
+    }
+    guard cleaned.hasPrefix("/") || cleaned.hasPrefix("~") else { return nil }
+
+    let withoutLineSuffix = markdownReviewPathByStrippingLineSuffix(cleaned) ?? cleaned
+    let decodedPath = withoutLineSuffix.removingPercentEncoding ?? withoutLineSuffix
+    return URL(fileURLWithPath: (decodedPath as NSString).expandingTildeInPath)
+}
+
+private func markdownReviewExistingLocalFileURL(_ url: URL) -> URL {
+    let path = url.path
+    guard !FileManager.default.fileExists(atPath: path),
+          let strippedPath = markdownReviewPathByStrippingLineSuffix(path),
+          FileManager.default.fileExists(atPath: strippedPath) else {
+        return url
+    }
+    return URL(fileURLWithPath: strippedPath)
+}
+
+private func markdownReviewPathByStrippingLineSuffix(_ path: String) -> String? {
+    guard let range = path.range(of: #":[0-9]+$"#, options: .regularExpression) else {
+        return nil
+    }
+    return String(path[..<range.lowerBound])
 }
 
 func chatOutputReviewPrompt(outputTitle: String, comments: [ChatOutputReviewComment]) -> String {
@@ -50,8 +111,9 @@ struct MarkdownOutputReviewTextView: NSViewRepresentable {
     let markdown: String
     @Binding var selectedText: String
     var selectedAnchor: Binding<CGRect?>? = nil
-    var fontSize: CGFloat = 13
+    var fontSize: CGFloat = 13.5
     var onAddComment: ((String) -> Void)?
+    var onOpenLink: ((MarkdownReviewLinkDestination) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -80,9 +142,10 @@ struct MarkdownOutputReviewTextView: NSViewRepresentable {
         textView.onAddComment = { quote in
             onAddComment?(quote)
         }
-        if textView.renderedMarkdown != markdown {
-            textView.renderedMarkdown = markdown
-            textView.textStorage?.setAttributedString(nativeMarkdownReviewAttributedString(markdown, fontSize: fontSize))
+        let displayMarkdown = nativeReviewDisplayMarkdown(markdown)
+        if textView.renderedMarkdown != displayMarkdown {
+            textView.renderedMarkdown = displayMarkdown
+            textView.textStorage?.setAttributedString(nativeMarkdownReviewAttributedString(displayMarkdown, fontSize: fontSize))
             textView.invalidateIntrinsicContentSize()
         }
     }
@@ -98,6 +161,15 @@ struct MarkdownOutputReviewTextView: NSViewRepresentable {
             guard let textView = notification.object as? MarkdownReviewNSTextView else { return }
             parent.selectedText = textView.reviewSelectedText()
             parent.selectedAnchor?.wrappedValue = textView.reviewSelectionRect()
+        }
+
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            guard let destination = markdownReviewLinkDestination(link),
+                  let onOpenLink = parent.onOpenLink else {
+                return false
+            }
+            onOpenLink(destination)
+            return true
         }
     }
 }
@@ -440,114 +512,275 @@ func nativeMarkdownReviewAttributedString(_ markdown: String, fontSize: CGFloat 
     return renderer.render(markdown)
 }
 
+func nativeReviewDisplayMarkdown(_ markdown: String) -> String {
+    let lines = markdown.components(separatedBy: .newlines)
+    var output: [String] = []
+
+    func appendBlankBeforeHeadingIfNeeded() {
+        guard let last = output.last, !last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        output.append("")
+    }
+
+    func appendHeading(_ heading: String, body: String? = nil) {
+        appendBlankBeforeHeadingIfNeeded()
+        output.append("### \(heading)")
+        if let body = body?.trimmingCharacters(in: .whitespacesAndNewlines), !body.isEmpty {
+            output.append(body)
+        }
+    }
+
+    for rawLine in lines {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = line.lowercased()
+        if let rest = reviewDisplayRest(after: "Risk:", in: line) {
+            appendHeading("Risk", body: rest)
+            continue
+        }
+        if let rest = reviewDisplayRest(after: "Why it matters:", in: line) {
+            appendHeading("Why It Matters", body: rest)
+            continue
+        }
+        if let rest = reviewDisplayRest(after: "Suggested fix", in: line) {
+            appendHeading("Suggested Fix", body: rest)
+            continue
+        }
+        if lower == "suggested comments mr" || lower == "suggested comments" {
+            appendHeading("Suggested Comments")
+            continue
+        }
+        if lower == "open questions" {
+            appendHeading("Open Questions")
+            continue
+        }
+        if lower == "residual risk" || lower == "residual risks" {
+            appendHeading("Residual Risk")
+            continue
+        }
+        output.append(rawLine)
+    }
+
+    return output.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func reviewDisplayRest(after prefix: String, in line: String) -> String? {
+    guard line.range(of: prefix, options: [.anchored, .caseInsensitive], locale: .current) != nil else {
+        return nil
+    }
+    return String(line.dropFirst(prefix.count))
+        .trimmingCharacters(in: CharacterSet(charactersIn: " :\t"))
+}
+
 private struct NativeMarkdownReviewRenderer {
     let fontSize: CGFloat
 
     private var bodyFont: NSFont {
-        .systemFont(ofSize: fontSize)
+        .systemFont(ofSize: fontSize, weight: .regular)
     }
 
     private var boldFont: NSFont {
-        .boldSystemFont(ofSize: fontSize)
+        .systemFont(ofSize: fontSize, weight: .semibold)
     }
 
     private var codeFont: NSFont {
-        .monospacedSystemFont(ofSize: fontSize - 0.5, weight: .regular)
+        .monospacedSystemFont(ofSize: fontSize - 0.75, weight: .regular)
     }
 
     private var textColor: NSColor {
-        NSColor(calibratedWhite: 0.84, alpha: 1)
+        NSColor(calibratedWhite: 0.88, alpha: 1)
     }
 
     private var subtleColor: NSColor {
-        NSColor(calibratedWhite: 0.68, alpha: 1)
+        NSColor(calibratedWhite: 0.72, alpha: 1)
+    }
+
+    private var headingColor: NSColor {
+        NSColor(calibratedRed: 0.88, green: 0.95, blue: 0.94, alpha: 1)
+    }
+
+    private var accentColor: NSColor {
+        NSColor(calibratedRed: 0.50, green: 0.83, blue: 0.76, alpha: 1)
     }
 
     private var codeBackground: NSColor {
-        NSColor(calibratedWhite: 1, alpha: 0.07)
+        NSColor(calibratedWhite: 1, alpha: 0.055)
+    }
+
+    private var quoteBackground: NSColor {
+        NSColor(calibratedRed: 0.50, green: 0.83, blue: 0.76, alpha: 0.075)
     }
 
     func render(_ markdown: String) -> NSAttributedString {
+        let document = Document(parsing: markdownPromotingBareShellBlocks(markdown))
         let output = NSMutableAttributedString()
-        var isInCodeBlock = false
-        let lines = markdown.components(separatedBy: .newlines)
-        var index = lines.startIndex
+        for child in document.children {
+            appendBlock(child, to: output)
+        }
+        return output.trimmedTrailingWhitespaceAndNewlines()
+    }
 
-        while index < lines.endIndex {
-            let rawLine = lines[index]
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.hasPrefix("```") {
-                isInCodeBlock.toggle()
-                index = lines.index(after: index)
-                continue
+    private func appendBlock(_ markup: Markup, to output: NSMutableAttributedString) {
+        switch markup {
+        case let heading as Heading:
+            appendChildren(of: heading, to: output, attributes: headingAttributes(level: heading.level))
+            output.append(NSAttributedString(string: "\n", attributes: headingAttributes(level: heading.level)))
+        case let paragraph as Paragraph:
+            appendChildren(of: paragraph, to: output, attributes: bodyAttributes)
+            output.append(NSAttributedString(string: "\n", attributes: bodyAttributes))
+        case let unorderedList as UnorderedList:
+            appendUnorderedList(unorderedList, to: output)
+        case let orderedList as OrderedList:
+            appendOrderedList(orderedList, to: output)
+        case let codeBlock as CodeBlock:
+            appendCodeBlock(codeBlock, to: output)
+        case let blockQuote as BlockQuote:
+            output.append(NSAttributedString(string: "▌ ", attributes: quoteMarkerAttributes))
+            let content = NSMutableAttributedString()
+            appendChildren(of: blockQuote, to: content, attributes: quoteAttributes)
+            output.append(content.trimmedTrailingWhitespaceAndNewlines())
+            output.append(NSAttributedString(string: "\n", attributes: quoteAttributes))
+        case _ as ThematicBreak:
+            output.append(NSAttributedString(string: "────────\n", attributes: quoteMarkerAttributes))
+        default:
+            appendChildren(of: markup, to: output, attributes: bodyAttributes)
+            if output.length > 0, !output.string.hasSuffix("\n") {
+                output.append(NSAttributedString(string: "\n", attributes: bodyAttributes))
             }
+        }
+    }
 
-            if isInCodeBlock {
-                appendLine(rawLine.isEmpty ? " " : rawLine, to: output, attributes: codeBlockAttributes)
-                index = lines.index(after: index)
-                continue
+    private func appendChildren(
+        of markup: Markup,
+        to output: NSMutableAttributedString,
+        attributes: [NSAttributedString.Key: Any]
+    ) {
+        for child in markup.children {
+            appendInlineOrBlock(child, to: output, attributes: attributes)
+        }
+    }
+
+    private func appendInlineOrBlock(
+        _ markup: Markup,
+        to output: NSMutableAttributedString,
+        attributes: [NSAttributedString.Key: Any]
+    ) {
+        switch markup {
+        case let text as Markdown.Text:
+            output.append(NSAttributedString(string: text.string, attributes: attributes))
+        case let inlineCode as InlineCode:
+            output.append(NSAttributedString(
+                string: inlineCode.code,
+                attributes: codeAttributes.merging(attributes) { current, _ in current }
+            ))
+        case let strong as Strong:
+            var attrs = attributes
+            attrs[.font] = boldFont
+            appendChildren(of: strong, to: output, attributes: attrs)
+        case let emphasis as Emphasis:
+            var attrs = attributes
+            attrs[.font] = NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)
+            appendChildren(of: emphasis, to: output, attributes: attrs)
+        case let link as Markdown.Link:
+            var attrs = attributes
+            attrs[.foregroundColor] = NSColor.systemTeal
+            attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            if let destination = link.destination {
+                attrs[.link] = destination
             }
+            appendChildren(of: link, to: output, attributes: attrs)
+        case _ as SoftBreak:
+            output.append(NSAttributedString(string: "\n", attributes: attributes))
+        case _ as LineBreak:
+            output.append(NSAttributedString(string: "\n", attributes: attributes))
+        case let paragraph as Paragraph:
+            appendChildren(of: paragraph, to: output, attributes: attributes)
+        case let codeBlock as CodeBlock:
+            appendCodeBlock(codeBlock, to: output)
+        default:
+            appendChildren(of: markup, to: output, attributes: attributes)
+        }
+    }
 
-            if line.isEmpty {
-                output.append(NSAttributedString(string: "\n"))
-                index = lines.index(after: index)
-                continue
-            }
+    private func appendUnorderedList(_ list: UnorderedList, to output: NSMutableAttributedString) {
+        for item in list.children {
+            output.append(NSAttributedString(string: "• ", attributes: listMarkerAttributes))
+            appendListItem(item, to: output, markerWidth: 18)
+        }
+    }
 
-            if let heading = markdownHeading(line) {
-                appendLine(heading.text, to: output, attributes: headingAttributes(level: heading.level))
-                index = lines.index(after: index)
-                continue
-            }
+    private func appendOrderedList(_ list: OrderedList, to output: NSMutableAttributedString) {
+        var number = Int(list.startIndex)
+        for item in list.children {
+            output.append(NSAttributedString(string: "\(number). ", attributes: listMarkerAttributes))
+            appendListItem(item, to: output, markerWidth: 24)
+            number += 1
+        }
+    }
 
-            if let listText = markdownUnorderedListText(line) {
-                output.append(NSAttributedString(string: "• ", attributes: bodyAttributes))
-                appendInline(listText, to: output, baseAttributes: bodyAttributes)
-                output.append(NSAttributedString(string: "\n"))
-                index = lines.index(after: index)
-                continue
-            }
+    private func appendListItem(_ item: Markup, to output: NSMutableAttributedString, markerWidth: CGFloat) {
+        var attrs = listAttributes
+        attrs[.paragraphStyle] = paragraphStyle(
+            spacing: 4,
+            paragraphSpacing: 5,
+            firstLineHeadIndent: 0,
+            headIndent: markerWidth
+        )
 
-            if let ordered = markdownOrderedListText(line) {
-                output.append(NSAttributedString(string: "\(ordered.number). ", attributes: bodyAttributes))
-                appendInline(ordered.text, to: output, baseAttributes: bodyAttributes)
-                output.append(NSAttributedString(string: "\n"))
-                index = lines.index(after: index)
-                continue
-            }
+        let content = NSMutableAttributedString()
+        appendChildren(of: item, to: content, attributes: attrs)
+        output.append(content.trimmedTrailingWhitespaceAndNewlines())
+        output.append(NSAttributedString(string: "\n", attributes: attrs))
+    }
 
-            if markdownShellCommandLine(line) {
-                var blockEnd = lines.index(after: index)
-                var previousContinues = line.hasSuffix("\\")
-                while blockEnd < lines.endIndex {
-                    let nextLine = lines[blockEnd].trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !nextLine.isEmpty,
-                          previousContinues || markdownShellCommandLine(nextLine) || markdownShellContinuationLine(nextLine) else {
-                        break
-                    }
-                    previousContinues = nextLine.hasSuffix("\\")
-                    blockEnd = lines.index(after: blockEnd)
-                }
-                for codeIndex in index..<blockEnd {
-                    appendLine(lines[codeIndex].isEmpty ? " " : lines[codeIndex], to: output, attributes: codeBlockAttributes)
-                }
-                index = blockEnd
-                continue
-            }
+    private func appendCodeBlock(_ codeBlock: CodeBlock, to output: NSMutableAttributedString) {
+        let highlighted = highlightedCode(codeBlock.code.isEmpty ? " " : codeBlock.code, language: codeBlock.language)
+        output.append(highlighted)
+        if !output.string.hasSuffix("\n") {
+            output.append(NSAttributedString(string: "\n", attributes: codeBlockAttributes))
+        }
+    }
 
-            appendInline(line, to: output, baseAttributes: bodyAttributes)
-            output.append(NSAttributedString(string: "\n"))
-            index = lines.index(after: index)
+    private func highlightedCode(_ code: String, language: String?) -> NSAttributedString {
+        let highlighted: NSMutableAttributedString
+        if shouldUseSplash(for: language) {
+            let format = AttributedStringOutputFormat(theme: .wwdc17(withFont: Splash.Font(size: Double(fontSize - 0.75))))
+            highlighted = NSMutableAttributedString(attributedString: SyntaxHighlighter(format: format).highlight(code))
+        } else {
+            highlighted = NSMutableAttributedString(string: code, attributes: codeBlockAttributes)
         }
 
-        return output.trimmedTrailingWhitespaceAndNewlines()
+        highlighted.addAttributes(
+            codeBlockAttributesForExistingText,
+            range: NSRange(location: 0, length: highlighted.length)
+        )
+        return highlighted
+    }
+
+    private func shouldUseSplash(for language: String?) -> Bool {
+        guard let language = language?.lowercased() else { return true }
+        return ["swift", "kt", "kotlin", "java", "scala", "js", "javascript", "ts", "typescript"].contains(language)
     }
 
     private var bodyAttributes: [NSAttributedString.Key: Any] {
         [
             .font: bodyFont,
             .foregroundColor: textColor,
-            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 6)
+            .paragraphStyle: paragraphStyle(spacing: 5, paragraphSpacing: 8)
+        ]
+    }
+
+    private var listAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: bodyFont,
+            .foregroundColor: textColor,
+            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 5, firstLineHeadIndent: 0, headIndent: 18)
+        ]
+    }
+
+    private var listMarkerAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: boldFont,
+            .foregroundColor: accentColor,
+            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 5)
         ]
     }
 
@@ -564,102 +797,103 @@ private struct NativeMarkdownReviewRenderer {
             .font: codeFont,
             .foregroundColor: textColor,
             .backgroundColor: codeBackground,
-            .paragraphStyle: paragraphStyle(spacing: 3, paragraphSpacing: 3)
+            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 8, firstLineHeadIndent: 10, headIndent: 10)
+        ]
+    }
+
+    private var codeBlockAttributesForExistingText: [NSAttributedString.Key: Any] {
+        [
+            .backgroundColor: codeBackground,
+            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 8, firstLineHeadIndent: 10, headIndent: 10)
+        ]
+    }
+
+    private var quoteAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: bodyFont,
+            .foregroundColor: subtleColor,
+            .backgroundColor: quoteBackground,
+            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 6, firstLineHeadIndent: 0, headIndent: 16)
+        ]
+    }
+
+    private var quoteMarkerAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: boldFont,
+            .foregroundColor: accentColor,
+            .backgroundColor: quoteBackground,
+            .paragraphStyle: paragraphStyle(spacing: 4, paragraphSpacing: 6)
         ]
     }
 
     private func headingAttributes(level: Int) -> [NSAttributedString.Key: Any] {
-        let size = max(fontSize + 1, fontSize + CGFloat(7 - min(level, 6)))
+        let size = max(fontSize + 1, fontSize + CGFloat(6 - min(level, 6)))
         return [
-            .font: NSFont.boldSystemFont(ofSize: size),
-            .foregroundColor: textColor,
-            .paragraphStyle: paragraphStyle(spacing: 3, paragraphSpacing: 9)
+            .font: NSFont.systemFont(ofSize: size, weight: .semibold),
+            .foregroundColor: headingColor,
+            .paragraphStyle: paragraphStyle(spacing: 3, paragraphSpacing: 11, paragraphSpacingBefore: level <= 2 ? 4 : 2)
         ]
     }
 
-    private func paragraphStyle(spacing: CGFloat, paragraphSpacing: CGFloat) -> NSParagraphStyle {
+    private func paragraphStyle(
+        spacing: CGFloat,
+        paragraphSpacing: CGFloat,
+        paragraphSpacingBefore: CGFloat = 0,
+        firstLineHeadIndent: CGFloat = 0,
+        headIndent: CGFloat = 0
+    ) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineSpacing = spacing
         style.paragraphSpacing = paragraphSpacing
+        style.paragraphSpacingBefore = paragraphSpacingBefore
+        style.firstLineHeadIndent = firstLineHeadIndent
+        style.headIndent = headIndent
         return style
     }
 
-    private func appendLine(_ text: String, to output: NSMutableAttributedString, attributes: [NSAttributedString.Key: Any]) {
-        output.append(NSAttributedString(string: text, attributes: attributes))
-        output.append(NSAttributedString(string: "\n"))
-    }
+    private func markdownPromotingBareShellBlocks(_ markdown: String) -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        var output: [String] = []
+        var index = lines.startIndex
+        var isInCodeFence = false
 
-    private func appendInline(_ source: String, to output: NSMutableAttributedString, baseAttributes: [NSAttributedString.Key: Any]) {
-        var index = source.startIndex
-        while index < source.endIndex {
-            if source[index] == "`",
-               let closing = source[source.index(after: index)...].firstIndex(of: "`") {
-                let contentStart = source.index(after: index)
-                output.append(NSAttributedString(
-                    string: String(source[contentStart..<closing]),
-                    attributes: codeAttributes.merging(baseAttributes) { current, _ in current }
-                ))
-                index = source.index(after: closing)
+        while index < lines.endIndex {
+            let rawLine = lines[index]
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("```") {
+                isInCodeFence.toggle()
+                output.append(rawLine)
+                index = lines.index(after: index)
                 continue
             }
 
-            if source[index...].hasPrefix("**"),
-               let closing = source[source.index(index, offsetBy: 2)...].range(of: "**")?.lowerBound {
-                let contentStart = source.index(index, offsetBy: 2)
-                var attrs = baseAttributes
-                attrs[.font] = boldFont
-                output.append(NSAttributedString(string: String(source[contentStart..<closing]), attributes: attrs))
-                index = source.index(closing, offsetBy: 2)
+            guard !isInCodeFence, markdownShellCommandLine(line) else {
+                output.append(rawLine)
+                index = lines.index(after: index)
                 continue
             }
 
-            if source[index] == "[",
-               let labelEnd = source[index...].firstIndex(of: "]"),
-               source.index(after: labelEnd) < source.endIndex,
-               source[source.index(after: labelEnd)] == "(",
-               let urlEnd = source[source.index(after: labelEnd)..<source.endIndex].firstIndex(of: ")") {
-                let labelStart = source.index(after: index)
-                let urlStart = source.index(labelEnd, offsetBy: 2)
-                let label = String(source[labelStart..<labelEnd])
-                let url = String(source[urlStart..<urlEnd])
-                var attrs = baseAttributes
-                attrs[.foregroundColor] = NSColor.systemTeal
-                attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                attrs[.link] = url
-                output.append(NSAttributedString(string: label, attributes: attrs))
-                index = source.index(after: urlEnd)
-                continue
+            var blockEnd = lines.index(after: index)
+            var previousContinues = line.hasSuffix("\\")
+            while blockEnd < lines.endIndex {
+                let nextLine = lines[blockEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !nextLine.isEmpty,
+                      previousContinues || markdownShellCommandLine(nextLine) || markdownShellContinuationLine(nextLine) else {
+                    break
+                }
+                previousContinues = nextLine.hasSuffix("\\")
+                blockEnd = lines.index(after: blockEnd)
             }
 
-            let nextSpecial = ["`", "**", "["]
-                .compactMap { marker in source[index...].range(of: marker)?.lowerBound }
-                .min()
-            let end = nextSpecial.map { $0 == index ? source.index(after: index) : $0 } ?? source.endIndex
-            output.append(NSAttributedString(string: String(source[index..<end]), attributes: baseAttributes))
-            index = end
+            output.append("```bash")
+            for codeIndex in index..<blockEnd {
+                output.append(lines[codeIndex])
+            }
+            output.append("```")
+            index = blockEnd
         }
-    }
 
-    private func markdownHeading(_ line: String) -> (level: Int, text: String)? {
-        let hashes = line.prefix { $0 == "#" }
-        guard !hashes.isEmpty, hashes.count <= 6 else { return nil }
-        let rest = line.dropFirst(hashes.count)
-        guard rest.first == " " else { return nil }
-        return (hashes.count, String(rest.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private func markdownUnorderedListText(_ line: String) -> String? {
-        guard line.hasPrefix("- ") || line.hasPrefix("* ") else { return nil }
-        return String(line.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func markdownOrderedListText(_ line: String) -> (number: String, text: String)? {
-        guard let dot = line.firstIndex(of: ".") else { return nil }
-        let number = String(line[..<dot])
-        guard !number.isEmpty, number.allSatisfy(\.isNumber) else { return nil }
-        let textStart = line.index(after: dot)
-        guard textStart < line.endIndex, line[textStart] == " " else { return nil }
-        return (number, String(line[line.index(after: textStart)...]))
+        return output.joined(separator: "\n")
     }
 
     private func markdownShellCommandLine(_ line: String) -> Bool {

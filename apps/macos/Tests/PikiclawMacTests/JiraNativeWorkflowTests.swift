@@ -49,8 +49,10 @@ import Testing
         userInput: "Prior clue: startup fails after Jira sync."
     ) == selected)
     let workspace = model.snapshot.workspaces.first
-    #expect(model.selectedPermissionMode == .askBeforeEdit)
+    #expect(model.selectedPermissionMode == .readOnly)
     #expect(model.draftPrompt.contains("Jira: IVAS-1234"))
+    #expect(model.draftPrompt.contains("Selected phase: Solution."))
+    #expect(model.draftPrompt.contains("You may save or update local solution/evidence notes when useful"))
     #expect(model.draftPrompt.contains("User-provided context:\nPrior clue: startup fails after Jira sync."))
     #expect(model.draftPrompt.contains("Workspace: \(workspace?.name ?? "")"))
     #expect(model.draftPrompt.contains("Path: \(workspace?.pathDisplay ?? "")"))
@@ -66,6 +68,10 @@ import Testing
     #expect(model.stageJiraTicketForChat(workItemId: selected, userInput: firstJiraPrompt) == selected)
     #expect(model.draftPrompt.contains("User-provided context:\nPrior clue: startup fails after Jira sync."))
     #expect(!model.draftPrompt.contains("User-provided context:\nJira: IVAS-1234"))
+    model.selectedPermissionMode = .askBeforeEdit
+    #expect(model.stageJiraTicketForChat(workItemId: selected, phase: .coding) == selected)
+    #expect(model.selectedPermissionMode == .askBeforeEdit)
+    #expect(model.draftPrompt.contains("Selected phase: Coding."))
 }
 
 @Test func jiraFetcherUsesRCJiraReadTokenForMCP() throws {
@@ -481,11 +487,13 @@ import Testing
     let run = try #require(updatedSnapshot.runs.first(where: { $0.id == runId }))
     let updatedItem = try #require(updatedSnapshot.workItems.first(where: { $0.id == item.id }))
 
-    #expect(model.selectedPermissionMode == .askBeforeEdit)
-    #expect(run.permissionMode == .askBeforeEdit)
+    #expect(model.selectedPermissionMode == .readOnly)
+    #expect(run.permissionMode == .readOnly)
     #expect(run.workspaceId == launchWorkspace.id)
     #expect(updatedItem.workspaceId == launchWorkspace.id)
     #expect(run.promptSnapshot.contains("Jira: IVAS-7777"))
+    #expect(run.promptSnapshot.contains("Selected phase: Solution."))
+    #expect(run.promptSnapshot.contains("You may save or update local solution/evidence notes when useful"))
     #expect(run.promptSnapshot.contains("User-provided context:\nUser note: start from the native Jira menu state."))
     #expect(run.promptSnapshot.contains("Path: \(launchDirectory.path)"))
     #expect(run.promptSnapshot.contains("Source References:"))

@@ -142,6 +142,29 @@ struct NativeActionLink: Hashable, Sendable {
     }
 }
 
+private struct NativeRunnableSkill: Hashable {
+    var name: String
+    var filePath: String
+    var mcpRequires: [String]
+}
+
+private struct NativeResolvedSkillPrompt: Hashable {
+    var prompt: String
+    var skillName: String
+    var mcpRequires: [String]
+}
+
+private struct NativePersistedRunRecovery: Sendable {
+    var run: AgentRun
+    var profile: AgentProfile
+    var workspace: Workspace
+}
+
+private struct NativePersistedRunRecoveryPlan: Sendable {
+    var recoveries: [NativePersistedRunRecovery]
+    var changed: Bool
+}
+
 struct NativeNotificationActionPayload: Hashable, Sendable {
     var automationId: EntityID
     var automationName: String
@@ -411,11 +434,65 @@ private final class NativeAppBuildOutputCollector: @unchecked Sendable {
     }
 }
 
+enum JiraTicketChatPhase: String, CaseIterable, Identifiable {
+    case solution
+    case coding
+    case review
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .solution: "Solution"
+        case .coding: "Coding"
+        case .review: "Review"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .solution: "lightbulb"
+        case .coding: "hammer"
+        case .review: "checkmark.seal"
+        }
+    }
+
+    var statusLabel: String {
+        switch self {
+        case .solution: "Solution chat"
+        case .coding: "Coding chat"
+        case .review: "Review chat"
+        }
+    }
+}
+
+private enum NativePermissionDefaults {
+    static let key = "pikiclaw.native.defaultPermissionMode.v2"
+
+    static func load() -> PermissionMode {
+        guard let rawValue = UserDefaults.standard.string(forKey: key),
+              let mode = PermissionMode(rawValue: rawValue) else {
+            return isRunningTests ? .askBeforeEdit : .autopilot
+        }
+        return mode
+    }
+
+    static func save(_ mode: PermissionMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: key)
+    }
+
+    private static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+}
+
 @MainActor
 final class NativeAppModel: ObservableObject {
     @Published var snapshot = NativeStoreSnapshot(seed: .preview())
     @Published var draftPrompt = ""
-    @Published var selectedPermissionMode: PermissionMode = .askBeforeEdit
+    @Published var defaultPermissionMode: PermissionMode = NativePermissionDefaults.load()
+    @Published var selectedPermissionMode: PermissionMode = NativePermissionDefaults.load()
     @Published var selectedAgentKind: NativeAgentKind = .codex
     @Published var statusLine = "Ready"
     @Published var isRunning = false
@@ -436,13 +513,17 @@ final class NativeAppModel: ObservableObject {
     private let agentAdapterFactory: @Sendable (AgentDescriptor) -> any AgentAdapter
     private let agentConnectionPool: AgentConnectionPool
     private let nativeNotificationCenter: any NativeNotificationCenterClient
+    private let recoversPersistedRunsOnLaunch: Bool
     private var didRecoverPersistedActiveRuns = false
     private var lastStagedAssistantPrompt: String?
     private var lastStagedAssistantUserInput: String?
     private var lastStagedJiraPrompt: String?
     private var lastStagedJiraUserInput: String?
+    private var deletedRunIds: Set<EntityID> = []
+    private var staleRunIds: Set<EntityID> = []
     @MainActor private static var restartInFlight = false
     nonisolated static let runOutputFlushInterval: TimeInterval = 0.20
+    nonisolated static let activeRunIdleStaleInterval: TimeInterval = 4 * 60
 
     init(
         store: JSONNativeStore? = nil,
@@ -453,14 +534,18 @@ final class NativeAppModel: ObservableObject {
             return ProcessAgentAdapter(descriptor: descriptor)
         },
         agentConnectionPool: AgentConnectionPool = .shared,
-        nativeNotificationCenter: any NativeNotificationCenterClient = SystemNativeNotificationCenterClient()
+        nativeNotificationCenter: any NativeNotificationCenterClient = SystemNativeNotificationCenterClient(),
+        recoversPersistedRunsOnLaunch: Bool = false
     ) {
         self.store = store ?? JSONNativeStore()
         self.agentAdapterFactory = agentAdapterFactory
         self.agentConnectionPool = agentConnectionPool
         self.nativeNotificationCenter = nativeNotificationCenter
+        self.recoversPersistedRunsOnLaunch = recoversPersistedRunsOnLaunch
         Task {
-            await recoverPersistedActiveRunsOnLaunch()
+            if recoversPersistedRunsOnLaunch {
+                await recoverPersistedActiveRunsOnLaunch()
+            }
             await reload()
         }
     }
@@ -473,12 +558,31 @@ final class NativeAppModel: ObservableObject {
 
     func reload() async {
         do {
-            if !didRecoverPersistedActiveRuns {
+            if recoversPersistedRunsOnLaunch && !didRecoverPersistedActiveRuns {
                 await recoverPersistedActiveRunsOnLaunch()
             }
             var next = try await store.loadSnapshot()
+            let removedDeletedRuns = removeDeletedRunsFromSnapshot(&next)
+            let stalledRunIds = Self.markStalledActiveRuns(
+                in: &next,
+                now: Date(),
+                idleTimeout: Self.activeRunIdleStaleInterval
+            )
             if Self.syncProjectSkillCapabilities(into: &next) {
                 try await store.replaceSnapshot(next)
+            } else if !stalledRunIds.isEmpty || removedDeletedRuns {
+                try await store.replaceSnapshot(next)
+            }
+            if !stalledRunIds.isEmpty {
+                for runId in stalledRunIds {
+                    runningRunIds.remove(runId)
+                    staleRunIds.insert(runId)
+                    if let staleRun = next.runs.first(where: { $0.id == runId }),
+                       let connectionKey = agentConnectionKey(for: staleRun, in: next) {
+                        await agentConnectionPool.close(for: connectionKey)
+                    }
+                }
+                isRunning = !runningRunIds.isEmpty
             }
             snapshot = next
             ensureSelectedAgentIsEnabled()
@@ -488,28 +592,46 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    func setDefaultPermissionMode(_ mode: PermissionMode) {
+        defaultPermissionMode = mode
+        selectedPermissionMode = mode
+        NativePermissionDefaults.save(mode)
+        statusLine = "Default permission set to \(Self.permissionStatusTitle(mode))"
+    }
+
+    nonisolated private static func permissionStatusTitle(_ mode: PermissionMode) -> String {
+        switch mode {
+        case .readOnly: "Read only"
+        case .askBeforeEdit: "Need approval"
+        case .autopilot: "Full access"
+        }
+    }
+
     func recoverPersistedActiveRunsOnLaunch() async {
         guard !didRecoverPersistedActiveRuns else { return }
         didRecoverPersistedActiveRuns = true
         do {
             var next = try await store.loadSnapshot()
-            var recoveredRunIds: [EntityID] = []
-            for index in next.runs.indices where Self.isActiveExecutionState(next.runs[index].state) {
-                guard !runningRunIds.contains(next.runs[index].id) else { continue }
-                next.runs[index].state = .stale
-                next.runs[index].endedAt = Date()
-                let staleLine = "[system] Marked stale because Pikiclaw restarted before this run reported completion."
-                let transcript = next.runs[index].transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                next.runs[index].transcript = transcript.isEmpty ? staleLine : "\(transcript)\n\(staleLine)"
-                recoveredRunIds.append(next.runs[index].id)
-            }
-            guard !recoveredRunIds.isEmpty else { return }
+            let plan = Self.preparePersistedRunRecoveries(in: &next, now: Date())
+            guard plan.changed else { return }
             try await store.replaceSnapshot(next)
-            for runId in recoveredRunIds {
-                runningRunIds.remove(runId)
+            snapshot = next
+            for recovery in plan.recoveries {
+                runningRunIds.insert(recovery.run.id)
             }
             isRunning = !runningRunIds.isEmpty
-            statusLine = "Recovered \(recoveredRunIds.count) stale run(s)"
+            if !plan.recoveries.isEmpty {
+                statusLine = "Recovering \(plan.recoveries.count) interrupted run(s)"
+            }
+            for recovery in plan.recoveries {
+                Task { @MainActor [self, recovery] in
+                    _ = await launchAgentRun(
+                        recovery.run,
+                        profile: recovery.profile,
+                        workspace: recovery.workspace
+                    )
+                }
+            }
         } catch {
             statusLine = "Run recovery failed: \(error.localizedDescription)"
         }
@@ -1164,7 +1286,6 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Sync or select a Jira ticket first"
             return nil
         }
-        prepareJiraExecutionPermission()
         return await run(workItemId: item.id, workspaceId: workspaceId)
     }
 
@@ -1172,7 +1293,8 @@ final class NativeAppModel: ObservableObject {
     func stageJiraTicketForChat(
         workItemId: EntityID?,
         userInput: String? = nil,
-        workspaceId: EntityID? = nil
+        workspaceId: EntityID? = nil,
+        phase: JiraTicketChatPhase = .solution
     ) -> EntityID? {
         let explicit = workItemId.flatMap { id in snapshot.workItems.first(where: { $0.id == id && $0.sourceType == .jira }) }
         let fallback = jiraTicketCardCandidates(from: snapshot.workItems, selectedWorkItemId: workItemId, limit: 1).first
@@ -1180,14 +1302,13 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Sync or select a Jira ticket first"
             return nil
         }
-        prepareJiraExecutionPermission()
         let requestedWorkspace = workspaceId.flatMap { id in snapshot.workspaces.first { $0.id == id } }
         let workspace = requestedWorkspace ?? snapshot.workspaces.first { $0.id == item.workspaceId }
         let normalizedUserInput = normalizedJiraUserInput(userInput)
-        draftPrompt = jiraTicketLaunchPrompt(for: item, workspace: workspace, userInput: normalizedUserInput)
+        draftPrompt = jiraTicketLaunchPrompt(for: item, workspace: workspace, userInput: normalizedUserInput, phase: phase)
         lastStagedJiraPrompt = draftPrompt
         lastStagedJiraUserInput = normalizedUserInput?.gitTrimmed.nilIfEmpty
-        statusLine = "\(item.jira?.key ?? "Jira ticket") attached to chat"
+        statusLine = "\(item.jira?.key ?? "Jira ticket") \(phase.statusLabel.lowercased()) attached"
         return item.id
     }
 
@@ -1345,24 +1466,34 @@ final class NativeAppModel: ObservableObject {
         workItemId: EntityID?,
         parentRunId: EntityID? = nil,
         userInput: String? = nil,
-        workspaceId: EntityID? = nil
+        workspaceId: EntityID? = nil,
+        phase: JiraTicketChatPhase = .solution
     ) async -> EntityID? {
-        guard let stagedId = stageJiraTicketForChat(workItemId: workItemId, userInput: userInput, workspaceId: workspaceId) else { return nil }
-        return await run(workItemId: stagedId, sideChatOfRunId: parentRunId, promptOverride: draftPrompt, workspaceId: workspaceId)
-    }
-
-    private func prepareJiraExecutionPermission() {
-        guard selectedPermissionMode == .readOnly else { return }
-        selectedPermissionMode = .askBeforeEdit
+        guard let stagedId = stageJiraTicketForChat(
+            workItemId: workItemId,
+            userInput: userInput,
+            workspaceId: workspaceId,
+            phase: phase
+        ) else { return nil }
+        return await run(
+            workItemId: stagedId,
+            sideChatOfRunId: parentRunId,
+            promptOverride: draftPrompt,
+            workspaceId: workspaceId
+        )
     }
 
     func deleteChat(runId: EntityID) async {
         do {
             var next = try await store.loadSnapshot()
-            guard next.runs.contains(where: { $0.id == runId }) else {
+            guard let deletingRun = next.runs.first(where: { $0.id == runId }) else {
                 statusLine = "Chat not found"
                 return
             }
+            deletedRunIds.insert(runId)
+            runningRunIds.remove(runId)
+            isRunning = !runningRunIds.isEmpty
+            let deletingConnectionKey = agentConnectionKey(for: deletingRun, in: next)
             next.runs = next.runs.map { run in
                 var updated = run
                 updated.sideChatRunIds.removeAll { $0 == runId }
@@ -1380,6 +1511,9 @@ final class NativeAppModel: ObservableObject {
                 return updated
             }
             try await store.replaceSnapshot(next)
+            if let deletingConnectionKey {
+                await agentConnectionPool.close(for: deletingConnectionKey)
+            }
             if activeRunId == runId {
                 activeRunId = nil
             }
@@ -2328,13 +2462,14 @@ final class NativeAppModel: ObservableObject {
     }
 
     @discardableResult
-    func createWorkItem(title: String? = nil, workspaceId: EntityID? = nil) async -> EntityID? {
+    func createWorkItem(title: String? = nil, description: String? = nil, workspaceId: EntityID? = nil) async -> EntityID? {
         let workspace = selectedWorkspace(id: workspaceId) ?? snapshot.workspaces.first
         guard let workspace else {
             statusLine = "Add a workspace first"
             return nil
         }
-        let prompt = draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = description?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let item = WorkItem(
             workspaceId: workspace.id,
             projectId: snapshot.projects.first(where: { $0.workspaceIds.contains(workspace.id) })?.id,
@@ -2370,6 +2505,7 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Type a message first"
             return nil
         }
+        draftPrompt = ""
 
         let target = snapshot.workItems.first(where: { $0.id == targetWorkItemId })
         let shouldReuseTarget = target.map { item in
@@ -2377,16 +2513,28 @@ final class NativeAppModel: ObservableObject {
         } ?? false
 
         if shouldReuseTarget, let target {
-            return await run(workItemId: target.id)
+            return await run(
+                workItemId: target.id,
+                promptOverride: prompt,
+                workspaceId: workspaceId,
+                launchDetached: true
+            )
         }
 
         guard let created = await createWorkItem(
             title: prompt.firstLineFallback("New Chat"),
+            description: prompt,
             workspaceId: workspaceId
         ) else {
+            draftPrompt = prompt
             return nil
         }
-        return await run(workItemId: created)
+        return await run(
+            workItemId: created,
+            promptOverride: prompt,
+            workspaceId: workspaceId,
+            launchDetached: true
+        )
     }
 
     @discardableResult
@@ -2400,6 +2548,7 @@ final class NativeAppModel: ObservableObject {
             statusLine = "Type a message first"
             return nil
         }
+        await reconcileStalledActiveRuns()
 
         do {
             let latest = try await store.loadSnapshot()
@@ -2509,6 +2658,43 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    func steerQueuedMessage(in runId: EntityID, messageId: EntityID) async {
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }),
+                  let sourceIndex = run.queuedMessages.firstIndex(where: { $0.id == messageId }) else {
+                statusLine = "Queued message not found"
+                return
+            }
+
+            var message = run.queuedMessages.remove(at: sourceIndex)
+            message.content = Self.queuedSteerPrompt(message.content)
+            message.updatedAt = Date()
+            run.queuedMessages.insert(message, at: 0)
+
+            try await store.saveRun(run)
+            try await store.appendAuditEvent(AuditEvent(
+                kind: .runStateChange,
+                actor: "runner",
+                summary: "Queued steer message",
+                runId: run.id,
+                workItemId: run.workItemId,
+                workspaceId: run.workspaceId
+            ))
+            publishRunLocally(run, preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id)
+            statusLine = "Steer queued next"
+
+            if !Self.isActiveExecutionState(run.state) {
+                _ = await launchNextQueuedMessageIfAvailable(
+                    runId: run.id,
+                    preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id
+                )
+            }
+        } catch {
+            statusLine = "Queue steer failed: \(error.localizedDescription)"
+        }
+    }
+
     func deleteQueuedMessage(in runId: EntityID, messageId: EntityID) async {
         do {
             let latest = try await store.loadSnapshot()
@@ -2527,6 +2713,37 @@ final class NativeAppModel: ObservableObject {
             statusLine = run.queuedMessages.isEmpty ? "Queue cleared" : "\(run.queuedMessages.count) message(s) queued"
         } catch {
             statusLine = "Delete queued message failed: \(error.localizedDescription)"
+        }
+    }
+
+    func moveQueuedMessage(in runId: EntityID, messageId: EntityID, near targetMessageId: EntityID) async {
+        guard messageId != targetMessageId else { return }
+
+        do {
+            let latest = try await store.loadSnapshot()
+            guard var run = latest.runs.first(where: { $0.id == runId }),
+                  let sourceIndex = run.queuedMessages.firstIndex(where: { $0.id == messageId }),
+                  let originalTargetIndex = run.queuedMessages.firstIndex(where: { $0.id == targetMessageId }) else {
+                statusLine = "Queued message not found"
+                return
+            }
+
+            let message = run.queuedMessages.remove(at: sourceIndex)
+            guard let targetIndex = run.queuedMessages.firstIndex(where: { $0.id == targetMessageId }) else {
+                run.queuedMessages.append(message)
+                try await store.saveRun(run)
+                publishRunLocally(run, preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id)
+                statusLine = "Queued message reordered"
+                return
+            }
+            let insertionIndex = sourceIndex < originalTargetIndex ? targetIndex + 1 : targetIndex
+            run.queuedMessages.insert(message, at: min(insertionIndex, run.queuedMessages.count))
+
+            try await store.saveRun(run)
+            publishRunLocally(run, preserveActiveRunId: activeRunId ?? run.sideChatOfRunId ?? run.id)
+            statusLine = "Queued message reordered"
+        } catch {
+            statusLine = "Reorder queued message failed: \(error.localizedDescription)"
         }
     }
 
@@ -2560,13 +2777,24 @@ final class NativeAppModel: ObservableObject {
 
             let preservedActiveRunId = activeRunId ?? run.sideChatOfRunId ?? run.id
             let launchWorkspace = workspace
-            run.messages = Self.appendingCurrentChatTurnMessages(
-                to: run.messages,
-                prompt: run.promptSnapshot,
-                transcript: run.transcript,
-                state: run.state,
-                createdAt: run.endedAt ?? Date()
-            )
+            let shouldArchiveCurrentTurn: Bool
+            switch run.state {
+            case .completed:
+                shouldArchiveCurrentTurn = true
+            case .failed, .cancelled, .stale, .waitingForUser, .draft:
+                shouldArchiveCurrentTurn = false
+            case .queued, .starting, .running, .cancelling:
+                shouldArchiveCurrentTurn = false
+            }
+            if shouldArchiveCurrentTurn {
+                run.messages = Self.appendingCurrentChatTurnMessages(
+                    to: run.messages,
+                    prompt: run.promptSnapshot,
+                    transcript: run.transcript,
+                    state: run.state,
+                    createdAt: run.endedAt ?? Date()
+                )
+            }
             run.transcript = ""
             run.nativeSessionRef = nil
             run.state = .queued
@@ -2839,7 +3067,9 @@ final class NativeAppModel: ObservableObject {
         workItemId: EntityID?,
         sideChatOfRunId: EntityID? = nil,
         promptOverride: String? = nil,
-        workspaceId: EntityID? = nil
+        workspaceId: EntityID? = nil,
+        permissionMode: PermissionMode? = nil,
+        launchDetached: Bool = false
     ) async -> EntityID? {
         guard let item = snapshot.workItems.first(where: { $0.id == workItemId }) ?? snapshot.workItems.first else {
             guard let created = await createWorkItem(workspaceId: workspaceId) else { return nil }
@@ -2870,7 +3100,7 @@ final class NativeAppModel: ObservableObject {
             workItemId: item.id,
             workspaceId: launchWorkspace.id,
             agentProfileId: profile.id,
-            permissionMode: selectedPermissionMode,
+            permissionMode: permissionMode ?? selectedPermissionMode,
             state: .queued,
             sideChatOfRunId: sideChatOfRunId,
             promptSnapshot: promptOverride?.gitTrimmed.nilIfEmpty ?? runPrompt(for: item, workspace: launchWorkspace)
@@ -2912,6 +3142,13 @@ final class NativeAppModel: ObservableObject {
             }
             publishWorkItemLocally(runningItem)
             publishRunLocally(run)
+            if launchDetached {
+                Task { [weak self] in
+                    guard let self else { return }
+                    _ = await self.launchAgentRun(run, profile: profile, workspace: launchWorkspace)
+                }
+                return run.id
+            }
             return await launchAgentRun(run, profile: profile, workspace: launchWorkspace)
         } catch {
             statusLine = "Run failed: \(error.localizedDescription)"
@@ -2929,14 +3166,48 @@ final class NativeAppModel: ObservableObject {
     private func jiraTicketLaunchPrompt(
         for item: WorkItem,
         workspace: Workspace?,
-        userInput: String? = nil
+        userInput: String? = nil,
+        phase: JiraTicketChatPhase = .solution
     ) -> String {
         let brief = jiraTicketAgentBrief(for: item, workspace: workspace)
+        let phaseBlock = jiraTicketPhaseBlock(phase, item: item, workspace: workspace)
         let userBlock = Self.userProvidedContextBlock(userInput)
         let context = launchContextBlock(workspace: workspace, workItem: item)
-        return [brief, userBlock, context]
+        return [brief, phaseBlock, userBlock, context]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
+    }
+
+    private func jiraTicketPhaseBlock(
+        _ phase: JiraTicketChatPhase,
+        item: WorkItem,
+        workspace: Workspace?
+    ) -> String {
+        let ticket = item.jira?.key.gitTrimmed.nilIfEmpty ?? item.id.rawValue
+        switch phase {
+        case .solution:
+            return """
+            Selected phase: Solution.
+            - Open a fresh ticket chat to confirm the requirement and produce a Solution Output checkpoint.
+            - You may save or update local solution/evidence notes when useful, but do not edit implementation code, create branches, commit, push, or update Jira in this phase.
+            - End with the next action: Start coding when the solution is ready, or the one missing input if it is not ready.
+            """
+        case .coding:
+            return """
+            Selected phase: Coding.
+            - The user explicitly chose Start > Coding for \(ticket); treat this as approval to enter the coding phase.
+            - Use the latest Solution Output checkpoint in this ticket history when available. If no checkpoint exists, derive the smallest safe coding plan from the Jira brief and call out that no prior checkpoint was found.
+            - Work in workspace \(workspace?.name ?? "the selected workspace"), verify branch/base branch before editing, then implement the smallest focused change.
+            - End with changed files, rationale, validation evidence, and Review as the next action.
+            """
+        case .review:
+            return """
+            Selected phase: Review.
+            - Open a fresh read-only review chat for \(ticket).
+            - Explain the current coding result or local changes for this ticket: changed files, what changed, why, validation, risks, and missing tests.
+            - Do not edit files, create branches, commit, push, or update Jira in this phase.
+            """
+        }
     }
 
     private func launchAgentRun(
@@ -2949,6 +3220,7 @@ final class NativeAppModel: ObservableObject {
         markRunStarted(run.id)
         do {
             run.state = .starting
+            run.lastActivityAt = Date()
             if run.startedAt == nil {
                 run.startedAt = Date()
             }
@@ -2961,13 +3233,20 @@ final class NativeAppModel: ObservableObject {
             let adapter = agentAdapterFactory(descriptor)
             let resumesNativeSession = profile.kind == .codex
                 && run.nativeSessionRef?.gitTrimmed.nilIfEmpty != nil
+            let resolvedSkillPrompt = resolveSkillPromptIfNeeded(run.promptSnapshot, workspace: workspace)
+            var promptRun = run
+            if let resolvedSkillPrompt {
+                promptRun.promptSnapshot = resolvedSkillPrompt.prompt
+            }
             let launchPrompt = resumesNativeSession
-                ? run.promptSnapshot.trimmingCharacters(in: .whitespacesAndNewlines)
-                : Self.agentPrompt(for: run)
+                ? promptRun.promptSnapshot.trimmingCharacters(in: .whitespacesAndNewlines)
+                : Self.agentPrompt(for: promptRun)
             var request = AgentLaunchRequest(
                 workspacePath: workspace.pathDisplay,
                 prompt: launchPrompt,
-                run: run
+                run: promptRun,
+                mcpRequirements: resolvedSkillPrompt?.mcpRequires ?? [],
+                skillName: resolvedSkillPrompt?.skillName
             )
             if profile.kind == .codex {
                 request.stdinText = launchPrompt
@@ -2990,7 +3269,15 @@ final class NativeAppModel: ObservableObject {
             var hasDeferredRunFlush = false
             var hasDeferredOutputFlush = false
             for try await event in eventStream {
+                if deletedRunIds.contains(run.id) || staleRunIds.contains(run.id) {
+                    await agentConnectionPool.close(for: connectionKey)
+                    break
+                }
                 apply(event, to: &run)
+                if deletedRunIds.contains(run.id) || staleRunIds.contains(run.id) {
+                    await agentConnectionPool.close(for: connectionKey)
+                    break
+                }
                 let now = Date()
                 if Self.shouldFlushRunEventForUI(
                     event,
@@ -3010,12 +3297,16 @@ final class NativeAppModel: ObservableObject {
                     hasDeferredOutputFlush = hasDeferredOutputFlush || event.isOutput
                 }
             }
-            if hasDeferredRunFlush {
+            if hasDeferredRunFlush && !deletedRunIds.contains(run.id) && !staleRunIds.contains(run.id) {
                 let visibleRun = await runWithLatestQueuedMessages(run)
                 try await store.saveRun(visibleRun)
                 publishRunLocally(visibleRun, preserveActiveRunId: preserveActiveRunId)
             }
         } catch {
+            guard !deletedRunIds.contains(run.id), !staleRunIds.contains(run.id) else {
+                markRunFinished(run.id)
+                return run.id
+            }
             run.state = .failed
             run.endedAt = Date()
             run.transcript += "\n[runner failed] \(error.localizedDescription)\n"
@@ -3027,6 +3318,20 @@ final class NativeAppModel: ObservableObject {
 
         let terminalStatusLine = statusLine
         markRunFinished(run.id)
+        if deletedRunIds.contains(run.id) {
+            await reload()
+            if let preserveActiveRunId {
+                activeRunId = preserveActiveRunId
+            }
+            return run.id
+        }
+        if staleRunIds.contains(run.id) {
+            await reload()
+            if let preserveActiveRunId {
+                activeRunId = preserveActiveRunId
+            }
+            return run.id
+        }
         await reload()
         if statusLine.hasPrefix("Loaded ") {
             statusLine = terminalStatusLine
@@ -3252,31 +3557,41 @@ final class NativeAppModel: ObservableObject {
     }
 
     private func apply(_ event: RunnerEvent, to run: inout AgentRun) {
+        let eventDate = Date()
         switch event {
         case .stateChanged(let state):
             run.state = state
+            run.lastActivityAt = eventDate
             if state == .running && run.startedAt == nil {
-                run.startedAt = Date()
+                run.startedAt = eventDate
             }
             statusLine = "Run \(state.rawValue)"
+        case .activity(let date):
+            run.lastActivityAt = date
+            statusLine = "Agent activity"
         case .output(let text):
             if let nativeSessionRef = Self.codexNativeSessionRef(from: text) {
                 run.nativeSessionRef = nativeSessionRef
             }
+            run.lastActivityAt = eventDate
             run.transcript += text
             statusLine = "Streaming output"
         case .toolCallStarted(let name):
+            run.lastActivityAt = eventDate
             run.transcript += "\n[tool] \(name)\n"
         case .artifactCreated(let id):
+            run.lastActivityAt = eventDate
             run.transcript += "\n[artifact] \(id.rawValue)\n"
         case .completed(let exitCode):
-            run.endedAt = Date()
+            run.endedAt = eventDate
+            run.lastActivityAt = eventDate
             run.state = exitCode == 0 ? .completed : .failed
             run.readAt = activeRunId == run.id || run.state != .completed ? Date() : nil
             run.transcript += "\n[completed with exit code \(exitCode)]\n"
             statusLine = run.state == .completed ? "Run completed" : "Run failed"
         case .failed(let message):
-            run.endedAt = Date()
+            run.endedAt = eventDate
+            run.lastActivityAt = eventDate
             run.state = .failed
             run.transcript += "\n[failed] \(message)\n"
             statusLine = "Run failed"
@@ -3321,12 +3636,33 @@ final class NativeAppModel: ObservableObject {
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   object["type"] as? String == "thread.started",
                   let threadId = object["thread_id"] as? String,
-                  !threadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                  let sanitizedThreadId = sanitizedCodexNativeSessionRef(threadId) else {
                 continue
             }
-            return threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+            return sanitizedThreadId
         }
         return nil
+    }
+
+    nonisolated private static func sanitizedCodexNativeSessionRef(_ value: String) -> String? {
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        for _ in 0..<3 {
+            if text.hasPrefix("\\\""), text.hasSuffix("\\\""), text.count >= 4 {
+                text = String(text.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+            guard text.hasPrefix("\""), text.hasSuffix("\"") else {
+                break
+            }
+            if let data = text.data(using: .utf8),
+               let decoded = try? JSONSerialization.jsonObject(with: data) as? String {
+                text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                text = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return text.isEmpty ? nil : text
     }
 
     nonisolated private static func canCaptureEvidence(from run: AgentRun) -> Bool {
@@ -4028,13 +4364,28 @@ final class NativeAppModel: ObservableObject {
     }
 
     nonisolated private static func assistantPermissionGuard(for mode: PermissionMode?) -> String? {
-        guard mode == .readOnly else { return nil }
-        return """
-        Permission guard:
-        - Read-only task: inspect, analyze, and report only.
-        - Do not edit files, stage or commit changes, install tools, change credentials, update external systems, or run destructive commands.
-        - If a fix is needed, describe the smallest proposed change and ask before editing.
-        """
+        guard let mode else { return nil }
+        switch mode {
+        case .readOnly:
+            return """
+            Permission guard:
+            - Read-only task: inspect, analyze, and report only.
+            - Do not edit files, stage or commit changes, install tools, change credentials, update external systems, or run destructive commands.
+            - If a fix is needed, describe the smallest proposed change and ask before editing.
+            """
+        case .askBeforeEdit:
+            return """
+            Permission guard:
+            - Need-approval task: ask before editing files, installing tools, changing credentials, committing, pushing, writing externally, or running destructive commands.
+            - Read-only inspection and non-mutating local commands are allowed.
+            """
+        case .autopilot:
+            return """
+            Permission guard:
+            - Full-access task: local reads, edits, and normal validation commands are allowed.
+            - Ask again before delete, revert, reset, clean, force-push, credential changes, external write-back, or any action that discards user work.
+            """
+        }
     }
 
     private func launchContextBlock(workspace: Workspace?, workItem: WorkItem?) -> String {
@@ -4268,6 +4619,102 @@ final class NativeAppModel: ObservableObject {
         }
         let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
         return trimmed.isEmpty ? "skill" : trimmed
+    }
+
+    private func resolveSkillPromptIfNeeded(_ prompt: String, workspace: Workspace) -> NativeResolvedSkillPrompt? {
+        guard let invocation = Self.parseSkillInvocation(prompt) else { return nil }
+        let skills = Self.discoverRunnableSkills(workdir: workspace.pathDisplay)
+        guard let skill = skills.first(where: { candidate in
+            if invocation.usesSkillPrefix {
+                return Self.skillInventorySlug(candidate.name) == invocation.name
+            }
+            return candidate.name.lowercased() == invocation.name
+                || Self.skillInventorySlug(candidate.name) == invocation.name
+        }) else {
+            return nil
+        }
+
+        let suffix = invocation.arguments.isEmpty ? "" : " Additional context: \(invocation.arguments)"
+        let prompt = """
+        [Project directory: \(workspace.pathDisplay)]
+
+        Read the skill definition at `\(skill.filePath)` and execute the instructions defined there.\(suffix)
+        """
+        return NativeResolvedSkillPrompt(prompt: prompt, skillName: skill.name, mcpRequires: skill.mcpRequires)
+    }
+
+    nonisolated private static func parseSkillInvocation(_ prompt: String) -> (name: String, arguments: String, usesSkillPrefix: Bool)? {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return nil }
+
+        let pieces = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace || $0.isNewline })
+        guard let commandPart = pieces.first else { return nil }
+        let command = String(commandPart.dropFirst()).gitTrimmed
+        guard !command.isEmpty else { return nil }
+
+        let lower = command.lowercased()
+        let arguments = pieces.count > 1 ? String(pieces[1]).gitTrimmed : ""
+        if lower.hasPrefix("sk_") {
+            let name = String(lower.dropFirst(3)).gitTrimmed
+            guard !name.isEmpty else { return nil }
+            return (name: name, arguments: arguments, usesSkillPrefix: true)
+        }
+
+        guard lower.contains("-") || lower.contains("_") else {
+            return nil
+        }
+        return (name: lower, arguments: arguments, usesSkillPrefix: false)
+    }
+
+    nonisolated private static func discoverRunnableSkills(workdir: String) -> [NativeRunnableSkill] {
+        var seen = Set<String>()
+        let workspaceRoot = URL(fileURLWithPath: workdir, isDirectory: true)
+        let projectRoot = workspaceRoot
+            .appendingPathComponent(".pikiclaw", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+        let claudeRoot = workspaceRoot
+            .appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+        let agentsRoot = workspaceRoot
+            .appendingPathComponent(".agents", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+        let globalRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".pikiclaw", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+
+        return runnableSkills(in: projectRoot, seen: &seen)
+            + runnableSkills(in: claudeRoot, seen: &seen)
+            + runnableSkills(in: agentsRoot, seen: &seen)
+            + runnableSkills(in: globalRoot, seen: &seen)
+            + bundledSkillRootURLs().flatMap { runnableSkills(in: $0, seen: &seen) }
+    }
+
+    nonisolated private static func runnableSkills(in root: URL, seen: inout Set<String>) -> [NativeRunnableSkill] {
+        let directories = (try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        return directories
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            .compactMap { directory in
+                let name = directory.lastPathComponent
+                let normalized = name.lowercased()
+                guard !name.isEmpty, !seen.contains(normalized) else { return nil }
+                let values = try? directory.resourceValues(forKeys: [.isDirectoryKey])
+                guard values?.isDirectory == true else { return nil }
+                let skillFile = directory.appendingPathComponent("SKILL.md", isDirectory: false)
+                guard FileManager.default.fileExists(atPath: skillFile.path) else { return nil }
+                seen.insert(normalized)
+                let metadata = readSkillMetadata(at: skillFile)
+                return NativeRunnableSkill(name: name, filePath: skillFile.path, mcpRequires: metadata.mcpRequires)
+            }
+    }
+
+    nonisolated private static func bundledSkillRootURLs() -> [URL] {
+        [Bundle.module.resourceURL?.appendingPathComponent("Skills", isDirectory: true)]
+            .compactMap { $0 }
     }
 
     private func evidenceContextLines(workspace: Workspace?, workItem: WorkItem?) -> [String] {
@@ -6340,7 +6787,162 @@ final class NativeAppModel: ObservableObject {
         }
     }
 
+    nonisolated static func shouldAutoRecoverPersistedRun(_ state: RunState) -> Bool {
+        switch state {
+        case .queued, .starting, .running:
+            return true
+        case .waitingForUser, .cancelling, .draft, .completed, .failed, .cancelled, .stale:
+            return false
+        }
+    }
+
+    nonisolated private static func preparePersistedRunRecoveries(
+        in snapshot: inout NativeStoreSnapshot,
+        now: Date
+    ) -> NativePersistedRunRecoveryPlan {
+        var recoveries: [NativePersistedRunRecovery] = []
+        var changed = false
+        for index in snapshot.runs.indices {
+            guard shouldAutoRecoverPersistedRun(snapshot.runs[index].state) else { continue }
+            guard let workspace = snapshot.workspaces.first(where: { $0.id == snapshot.runs[index].workspaceId }),
+                  let profile = snapshot.agentProfiles.first(where: { $0.id == snapshot.runs[index].agentProfileId }) else {
+                markPersistedRunRecoveryFailed(&snapshot.runs[index], now: now)
+                changed = true
+                continue
+            }
+            snapshot.runs[index].state = .queued
+            snapshot.runs[index].endedAt = nil
+            snapshot.runs[index].lastActivityAt = now
+            appendSystemTranscriptLine(
+                "[system] Recovering after Pikiclaw restarted before this run reported completion.",
+                to: &snapshot.runs[index]
+            )
+            recoveries.append(NativePersistedRunRecovery(
+                run: snapshot.runs[index],
+                profile: profile,
+                workspace: workspace
+            ))
+            changed = true
+        }
+        return NativePersistedRunRecoveryPlan(recoveries: recoveries, changed: changed)
+    }
+
+    nonisolated private static func markPersistedRunRecoveryFailed(_ run: inout AgentRun, now: Date) {
+        run.state = .stale
+        run.endedAt = now
+        run.lastActivityAt = now
+        appendSystemTranscriptLine(
+            "[system] Marked stale because Pikiclaw restarted and could not recover this run's workspace or agent profile.",
+            to: &run
+        )
+    }
+
+    nonisolated private static func appendSystemTranscriptLine(_ line: String, to run: inout AgentRun) {
+        let transcript = run.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.contains(line) else { return }
+        run.transcript = transcript.isEmpty ? line : "\(transcript)\n\(line)"
+    }
+
+    nonisolated static let queuedSteerPrefix = "Steer current run:"
+
+    nonisolated static func queuedSteerPrompt(_ content: String) -> String {
+        let trimmed = content.gitTrimmed
+        guard !trimmed.hasPrefix(queuedSteerPrefix) else { return trimmed }
+        return "\(queuedSteerPrefix)\n\(trimmed)"
+    }
+
+    nonisolated static func isQueuedSteerPrompt(_ content: String) -> Bool {
+        content.gitTrimmed.hasPrefix(queuedSteerPrefix)
+    }
+
+    nonisolated static func queuedSteerVisibleContent(_ content: String) -> String {
+        let trimmed = content.gitTrimmed
+        guard trimmed.hasPrefix(queuedSteerPrefix) else { return trimmed }
+        return trimmed
+            .replacingOccurrences(of: queuedSteerPrefix, with: "", options: .anchored)
+            .gitTrimmed
+    }
+
+    @discardableResult
+    func reconcileStalledActiveRuns(
+        now: Date = Date(),
+        idleTimeout: TimeInterval = NativeAppModel.activeRunIdleStaleInterval
+    ) async -> [EntityID] {
+        do {
+            var next = try await store.loadSnapshot()
+            let stalledRunIds = Self.markStalledActiveRuns(
+                in: &next,
+                now: now,
+                idleTimeout: idleTimeout
+            )
+            guard !stalledRunIds.isEmpty else { return [] }
+            try await store.replaceSnapshot(next)
+            for runId in stalledRunIds {
+                runningRunIds.remove(runId)
+                staleRunIds.insert(runId)
+                if let staleRun = next.runs.first(where: { $0.id == runId }),
+                   let connectionKey = agentConnectionKey(for: staleRun, in: next) {
+                    await agentConnectionPool.close(for: connectionKey)
+                }
+            }
+            isRunning = !runningRunIds.isEmpty
+            snapshot = next
+            statusLine = "Marked \(stalledRunIds.count) stalled chat(s) stale"
+            return stalledRunIds
+        } catch {
+            statusLine = "Stalled chat recovery failed: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    @discardableResult
+    nonisolated static func markStalledActiveRuns(
+        in snapshot: inout NativeStoreSnapshot,
+        now: Date,
+        idleTimeout: TimeInterval
+    ) -> [EntityID] {
+        var stalledRunIds: [EntityID] = []
+        for index in snapshot.runs.indices {
+            guard runCanBecomeStaleFromIdle(snapshot.runs[index]) else { continue }
+            guard let lastActivity = snapshot.runs[index].lastActivityAt ?? snapshot.runs[index].startedAt else { continue }
+            guard now.timeIntervalSince(lastActivity) >= idleTimeout else { continue }
+            snapshot.runs[index].state = .stale
+            snapshot.runs[index].endedAt = now
+            snapshot.runs[index].lastActivityAt = now
+            let staleLine = "[system] Marked stale because this run had no agent events for \(Self.idleTimeoutDisplayText(idleTimeout))."
+            let transcript = snapshot.runs[index].transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !transcript.contains(staleLine) {
+                snapshot.runs[index].transcript = transcript.isEmpty ? staleLine : "\(transcript)\n\(staleLine)"
+            }
+            stalledRunIds.append(snapshot.runs[index].id)
+        }
+        return stalledRunIds
+    }
+
+    nonisolated private static func runCanBecomeStaleFromIdle(_ run: AgentRun) -> Bool {
+        switch run.state {
+        case .queued, .starting, .running, .cancelling:
+            return true
+        case .waitingForUser, .draft, .completed, .failed, .cancelled, .stale:
+            return false
+        }
+    }
+
+    nonisolated static func idleTimeoutDisplayText(_ timeout: TimeInterval) -> String {
+        let seconds = max(1, Int(timeout.rounded(.toNearestOrAwayFromZero)))
+        if seconds < 60 {
+            return "\(seconds) seconds"
+        }
+        let minutes = seconds / 60
+        let remainingSeconds = seconds % 60
+        if remainingSeconds == 0 {
+            return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+        }
+        return "\(minutes)m \(remainingSeconds)s"
+    }
+
     private func markRunStarted(_ runId: EntityID) {
+        staleRunIds.remove(runId)
         runningRunIds.insert(runId)
         isRunning = !runningRunIds.isEmpty
     }
@@ -6350,13 +6952,12 @@ final class NativeAppModel: ObservableObject {
         isRunning = !runningRunIds.isEmpty
     }
 
-    private func publishRunLocally(_ run: AgentRun, preserveActiveRunId: EntityID? = nil) {
+    private func publishRunLocally(_ run: AgentRun, preserveActiveRunId _: EntityID? = nil) {
+        guard !deletedRunIds.contains(run.id) else { return }
+        guard !staleRunIds.contains(run.id) || run.state == .stale else { return }
         var next = snapshot
         Self.upsertRun(run, into: &next.runs)
         snapshot = next
-        if let preserveActiveRunId {
-            activeRunId = preserveActiveRunId
-        }
     }
 
     private func publishWorkItemLocally(_ item: WorkItem) {
@@ -6372,6 +6973,43 @@ final class NativeAppModel: ObservableObject {
         next.runs[parentIndex].sideChatRunIds.append(childRunId)
         next.runs[parentIndex].sideChatRunIds = Self.dedupedRunIds(next.runs[parentIndex].sideChatRunIds)
         snapshot = next
+    }
+
+    private func removeDeletedRunsFromSnapshot(_ snapshot: inout NativeStoreSnapshot) -> Bool {
+        guard !deletedRunIds.isEmpty else { return false }
+        let originalRunCount = snapshot.runs.count
+        snapshot.runs.removeAll { deletedRunIds.contains($0.id) }
+        snapshot.runs = snapshot.runs.map { run in
+            var updated = run
+            updated.sideChatRunIds.removeAll { deletedRunIds.contains($0) }
+            if let parentId = updated.sideChatOfRunId, deletedRunIds.contains(parentId) {
+                updated.sideChatOfRunId = nil
+            }
+            return updated
+        }
+        snapshot.workItems = snapshot.workItems.map { item in
+            var updated = item
+            if let currentRunId = updated.currentRunId, deletedRunIds.contains(currentRunId) {
+                updated.currentRunId = nil
+            }
+            return updated
+        }
+        return snapshot.runs.count != originalRunCount
+    }
+
+    private func agentConnectionKey(for run: AgentRun, in snapshot: NativeStoreSnapshot) -> AgentConnectionKey? {
+        guard let profile = snapshot.agentProfiles.first(where: { $0.id == run.agentProfileId }),
+              let workspace = snapshot.workspaces.first(where: { $0.id == run.workspaceId }) else {
+            return nil
+        }
+        let descriptor = Self.agentDescriptor(for: profile)
+        return AgentConnectionKey(
+            agentId: descriptor.id,
+            agentKind: descriptor.kind,
+            executableName: descriptor.executableName,
+            workspacePath: workspace.pathDisplay,
+            runId: run.id
+        )
     }
 
     nonisolated private static func upsertRun(_ run: AgentRun, into runs: inout [AgentRun]) {
@@ -6760,8 +7398,22 @@ final class NativeAppModel: ObservableObject {
         return path
     }
 
+    nonisolated private static let hiddenComposerSkillNames: Set<String> = [
+        "requesting-code-review"
+    ]
+
+    nonisolated private static func isHiddenComposerSkillName(_ name: String) -> Bool {
+        hiddenComposerSkillNames.contains(name.skillSlug)
+    }
+
     nonisolated private static func syncProjectSkillCapabilities(into snapshot: inout NativeStoreSnapshot) -> Bool {
         var changed = false
+        let initialCapabilityCount = snapshot.capabilities.count
+        snapshot.capabilities.removeAll { capability in
+            capability.kind == .skill && isHiddenComposerSkillName(capability.name)
+        }
+        changed = snapshot.capabilities.count != initialCapabilityCount
+
         for workspace in snapshot.workspaces {
             let skillsRoot = URL(fileURLWithPath: workspace.pathDisplay, isDirectory: true)
                 .appendingPathComponent(".pikiclaw", isDirectory: true)
@@ -6776,6 +7428,7 @@ final class NativeAppModel: ObservableObject {
                 let values = try? skillDirectory.resourceValues(forKeys: [.isDirectoryKey])
                 guard values?.isDirectory == true else { continue }
                 let skillName = skillDirectory.lastPathComponent
+                guard !isHiddenComposerSkillName(skillName) else { continue }
                 let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
                 guard FileManager.default.fileExists(atPath: skillFile.path) else { continue }
 
@@ -6788,6 +7441,73 @@ final class NativeAppModel: ObservableObject {
                     name: label?.isEmpty == false ? label! : skillName,
                     scope: .workspace,
                     installState: "installed",
+                    configState: requires.isEmpty ? "ready" : "requires \(requires.joined(separator: ", ")) MCP",
+                    trustLevel: .trusted,
+                    healthState: requires.isEmpty ? .healthy : .needsConfiguration
+                )
+                changed = upsertCapability(capability, into: &snapshot.capabilities) || changed
+            }
+        }
+        let globalSkillsRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".pikiclaw", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+        let globalSkillDirectories = (try? FileManager.default.contentsOfDirectory(
+            at: globalSkillsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        var globalSkillNames = Set<String>()
+        for skillDirectory in globalSkillDirectories {
+            let values = try? skillDirectory.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory == true else { continue }
+            let skillName = skillDirectory.lastPathComponent
+            if isHiddenComposerSkillName(skillName) {
+                globalSkillNames.insert(skillName.lowercased())
+                continue
+            }
+            let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
+            guard FileManager.default.fileExists(atPath: skillFile.path) else { continue }
+            globalSkillNames.insert(skillName.lowercased())
+
+            let metadata = readSkillMetadata(at: skillFile)
+            let label = metadata.label?.gitTrimmed
+            let requires = metadata.mcpRequires
+            let capability = Capability(
+                id: EntityID("capability-skill-global-\(skillName.skillSlug)"),
+                kind: .skill,
+                name: label?.isEmpty == false ? label! : skillName,
+                scope: .global,
+                installState: "installed",
+                configState: requires.isEmpty ? "ready" : "requires \(requires.joined(separator: ", ")) MCP",
+                trustLevel: .trusted,
+                healthState: requires.isEmpty ? .healthy : .needsConfiguration
+            )
+            changed = upsertCapability(capability, into: &snapshot.capabilities) || changed
+        }
+        for bundledRoot in bundledSkillRootURLs() {
+            let bundledSkillDirectories = (try? FileManager.default.contentsOfDirectory(
+                at: bundledRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            for skillDirectory in bundledSkillDirectories {
+                let values = try? skillDirectory.resourceValues(forKeys: [.isDirectoryKey])
+                guard values?.isDirectory == true else { continue }
+                let skillName = skillDirectory.lastPathComponent
+                guard !isHiddenComposerSkillName(skillName) else { continue }
+                guard !globalSkillNames.contains(skillName.lowercased()) else { continue }
+                let skillFile = skillDirectory.appendingPathComponent("SKILL.md", isDirectory: false)
+                guard FileManager.default.fileExists(atPath: skillFile.path) else { continue }
+
+                let metadata = readSkillMetadata(at: skillFile)
+                let label = metadata.label?.gitTrimmed
+                let requires = metadata.mcpRequires
+                let capability = Capability(
+                    id: EntityID("capability-skill-global-\(skillName.skillSlug)"),
+                    kind: .skill,
+                    name: label?.isEmpty == false ? label! : skillName,
+                    scope: .global,
+                    installState: "bundled",
                     configState: requires.isEmpty ? "ready" : "requires \(requires.joined(separator: ", ")) MCP",
                     trustLevel: .trusted,
                     healthState: requires.isEmpty ? .healthy : .needsConfiguration
